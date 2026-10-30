@@ -818,6 +818,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         return this;
     }
 
+    /// <summary>The set a refresh expects <see cref="Execute"/> to return, for its capacity: a pull view's last size. Advisory.</summary>
+    internal int ResultSizeHint;
+
     /// <summary>Skip the first <paramref name="count"/> results. Requires OrderBy.</summary>
     public EcsQuery<TArchetype> Skip(int count)
     {
@@ -1143,7 +1146,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var scope = TyphonEvent.BeginEcsQueryExecute(0);
         try
         {
-            var result = new HashSet<EntityId>(_take > 0 ? _take : 64);
+            var result = new HashSet<EntityId>(_take > 0 ? _take : Math.Max(64, ResultSizeHint));
             if (MaskIsEmpty)
             {
                 scope.ScanMode = EcsQueryScanMode.Empty;
@@ -1247,6 +1250,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 break;
             }
 
+            // A Transient home has no stream: ArchetypeSortedStream reads a BTreeBase<PersistentStore>. The fallback sorts what a full SoA scan found
+            // (QORD-01).
+            FindClusterIndexSlot(clusterState, meta, out var transientHome);
+            if (transientHome)
+            {
+                allArchetypesIndexOnArchetype = false;
+                break;
+            }
         }
 
         return allArchetypesIndexOnArchetype ? ExecuteOrderedClustered(plan, evaluators) : ExecuteOrderedViaSortFallback(evaluators, plan);
@@ -1414,9 +1425,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     continue;
                 }
 
-                // A Transient home is skipped: ArchetypeSortedStream streams a BTreeBase<PersistentStore>. Skipping falls through to the generic sort, which
-                // is correct but not index-accelerated — ordered streaming over the Transient home is a #655 follow-up, tracked in #665.
                 var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
+                Debug.Assert(!transientHome, "ExecuteOrdered sends a Transient home to the sort fallback");
                 if (ixSlotIdx < 0 || transientHome)
                 {
                     continue;
@@ -2019,8 +2029,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         Debug.Assert(_orderBy != null, nameof(_orderBy) + " != null");
         var orderByFieldIdx = _orderBy.Value.FieldIndex;
         var dbe = _tx.DBE;
-        List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)>
-            hiddenKeySources = null;
+        List<OrderKeySource> hiddenKeySources = null;
 
         foreach (var meta in _tx.DBE.OwnArchetypes())
         {
@@ -2036,15 +2045,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            // Persistent home only — see the note in ExecuteOrderedClustered. A Transient home leaves this archetype's entities without a source, so they
-            // sort by EntityKey rather than by the ordered field (#655 follow-up, tracked in #665).
             var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
-            if (ixSlotIdx < 0 || transientHome || orderByFieldIdx < 0 || orderByFieldIdx >= clusterState.IndexSlots[ixSlotIdx].Fields.Length)
+            if (ixSlotIdx < 0 || !TryOrderField(clusterState, ixSlotIdx, transientHome, orderByFieldIdx, out var compSlot, out var fieldOffset))
             {
                 continue;
             }
-
-            ref var field = ref clusterState.IndexSlots[ixSlotIdx].Fields[orderByFieldIdx];
 
             // The ordered field's own key type (QORD-01). It came from plan.PrimaryKeyType and evaluators[0].KeyType — two other fields — until #675, then
             // from a predicate naming the field, so a query ordered by a field none of its predicates named sorted by EntityKey (#591's remaining half), until
@@ -2055,7 +2060,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 continue;
             }
 
-            (hiddenKeySources ??= []).Add((meta, engineState, clusterState, ixSlotIdx, field.FieldOffset, orderKeyType));
+            (hiddenKeySources ??= []).Add(new OrderKeySource(meta, engineState, clusterState, compSlot, fieldOffset, orderKeyType, transientHome));
         }
 
         // Each row's key as the reader sees it: its point read at the snapshot, the transaction's own pending spawns included; past that, the bytes its hidden
@@ -2104,10 +2109,47 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         return result;
     }
 
+    /// <summary>Where an archetype keeps the ordered field: the sort fallback's source of each row's key.</summary>
+    private readonly record struct OrderKeySource(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int CompSlot,
+        int FieldOffset, KeyType KeyType, bool Transient);
+
+    /// <summary>The ordered field's slot and offset in the index home <paramref name="ixSlotIdx"/> names; false when the home has no such field.</summary>
+    private static bool TryOrderField(ArchetypeClusterState clusterState, int ixSlotIdx, bool transientHome, int fieldIdx, out int compSlot,
+        out int fieldOffset)
+    {
+        compSlot = 0;
+        fieldOffset = 0;
+        if (fieldIdx < 0)
+        {
+            return false;
+        }
+
+        if (transientHome)
+        {
+            ref var slot = ref clusterState.TransientIndexSlots[ixSlotIdx];
+            if (fieldIdx >= slot.Fields.Length)
+            {
+                return false;
+            }
+
+            compSlot = slot.Slot;
+            fieldOffset = slot.Fields[fieldIdx].FieldOffset;
+            return true;
+        }
+
+        ref var persistent = ref clusterState.IndexSlots[ixSlotIdx];
+        if (fieldIdx >= persistent.Fields.Length)
+        {
+            return false;
+        }
+
+        compSlot = persistent.Slot;
+        fieldOffset = persistent.Fields[fieldIdx].FieldOffset;
+        return true;
+    }
+
     /// <summary>The ordered field's key of <paramref name="id"/> as the reader's point read sees it; false when its archetype is not a source.</summary>
-    private bool TryReadOrderKeyAtSnapshot(EntityId id,
-        List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)> sources,
-        out long orderedKey)
+    private bool TryReadOrderKeyAtSnapshot(EntityId id, List<OrderKeySource> sources, out long orderedKey)
     {
         orderedKey = 0;
         if (sources == null)
@@ -2120,7 +2162,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             if (ReferenceEquals(s.Meta, meta))
             {
-                return TryReadOwnSpawnOrderKey(id, s.Cluster.IndexSlots[s.IxSlot].Slot, s.FieldOffset, s.KeyType, out orderedKey);
+                return TryReadOwnSpawnOrderKey(id, s.CompSlot, s.FieldOffset, s.KeyType, out orderedKey);
             }
         }
 
@@ -2401,9 +2443,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// slot kept (VIS-09) through its record, or one of this transaction's own pending spawns, read as its point read sees it. False when its archetype is
     /// not a source.
     /// </summary>
-    private bool TryReadHiddenOrderKey(EntityId id,
-        List<(ArchetypeMetadata Meta, ArchetypeEngineState State, ArchetypeClusterState Cluster, int IxSlot, int FieldOffset, KeyType KeyType)> sources,
-        out long orderedKey)
+    private bool TryReadHiddenOrderKey(EntityId id, List<OrderKeySource> sources, out long orderedKey)
     {
         orderedKey = 0;
         if (sources == null)
@@ -2421,31 +2461,57 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             }
 
             var mapAccessor = s.State.EntityMap.Segment.CreateScanAccessor();
-            var clusterAccessor = s.Cluster.ClusterSegment.CreateScanAccessor();
             try
             {
-                var compSlot = s.Cluster.IndexSlots[s.IxSlot].Slot;
                 if (!s.State.EntityMap.TryGet(id.EntityKey, record, ref mapAccessor))
                 {
                     // No record: one of this transaction's own pending spawns, whose value its point read holds.
-                    return TryReadOwnSpawnOrderKey(id, compSlot, s.FieldOffset, s.KeyType, out orderedKey);
+                    return TryReadOwnSpawnOrderKey(id, s.CompSlot, s.FieldOffset, s.KeyType, out orderedKey);
                 }
-
-                var layout = s.Cluster.Layout;
-                var clusterBase = clusterAccessor.GetChunkAddress(ClusterEntityRecordAccessor.GetClusterChunkId(record));
-                var entityComp = clusterBase + layout.ComponentOffset(compSlot)
-                                 + ClusterEntityRecordAccessor.GetSlotIndex(record) * layout.ComponentSize(compSlot);
-                orderedKey = OrderedKeyEncoding.EncodeAt(entityComp + s.FieldOffset, s.KeyType);
-                return true;
             }
             finally
             {
-                clusterAccessor.Dispose();
                 mapAccessor.Dispose();
             }
+
+            if (s.Transient)
+            {
+                var transientAccessor = s.Cluster.TransientSegment.CreateScanAccessor();
+                try
+                {
+                    orderedKey = ReadSlotOrderKey(ref transientAccessor, s, record);
+                }
+                finally
+                {
+                    transientAccessor.Dispose();
+                }
+            }
+            else
+            {
+                var clusterAccessor = s.Cluster.ClusterSegment.CreateScanAccessor();
+                try
+                {
+                    orderedKey = ReadSlotOrderKey(ref clusterAccessor, s, record);
+                }
+                finally
+                {
+                    clusterAccessor.Dispose();
+                }
+            }
+
+            return true;
         }
 
         return false;
+    }
+
+    /// <summary>The ordered field's key out of the slot <paramref name="record"/> names, on the segment of the field's home.</summary>
+    private static long ReadSlotOrderKey<TStore>(ref ChunkAccessor<TStore> accessor, in OrderKeySource s, byte* record) where TStore : struct, IPageStore
+    {
+        var layout = s.Cluster.Layout;
+        var clusterBase = accessor.GetChunkAddress(ClusterEntityRecordAccessor.GetClusterChunkId(record));
+        var entityComp = clusterBase + layout.ComponentOffset(s.CompSlot) + ClusterEntityRecordAccessor.GetSlotIndex(record) * layout.ComponentSize(s.CompSlot);
+        return OrderedKeyEncoding.EncodeAt(entityComp + s.FieldOffset, s.KeyType);
     }
 
     /// <summary>Execute targeted scan via PipelineExecutor with archetype mask post-filter.</summary>
@@ -2458,7 +2524,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             1, (uint)EcsQueryId, SourceFile, SourceLine, SourceMethod, callerFile, callerLine, callerMethod);
 
         // Scan for matching entities across all matching archetypes.
-        var result = new HashSet<EntityId>(_take > 0 ? _take : 64);
+        var result = new HashSet<EntityId>(_take > 0 ? _take : Math.Max(64, ResultSizeHint));
         var sink = new EntityIdSetSink(result);
         ScanAllArchetypes(plan, evaluators, ct, ref sink);
 
@@ -3573,7 +3639,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private HashSet<EntityId> ExecuteSpatial()
     {
         var state = _spatialTable.SpatialIndex;
-        var result = new HashSet<EntityId>(_take > 0 ? _take : 64);
+        var result = new HashSet<EntityId>(_take > 0 ? _take : Math.Max(64, ResultSizeHint));
         var tx = _tx;
 
         // Fan out to the per-archetype cluster spatial index — the only index home there is. Before #872 step 13 an entity-level R-Tree was traversed first

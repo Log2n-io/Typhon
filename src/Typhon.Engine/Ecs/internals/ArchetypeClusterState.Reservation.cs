@@ -41,13 +41,14 @@ internal sealed unsafe partial class ArchetypeClusterState
 {
     private const int ClaimBlockShift = 10;
     private const int ClaimBlockSize = 1 << ClaimBlockShift;
-    private const int ClusterWords = 6;   // six words a cluster
+    private const int ClusterWords = 7;   // seven words a cluster
     private const int ClaimWordIndex = 0;
     private const int PendingDeathWordIndex = 1;
     private const int MaxBornWordIndex = 2;
     private const int MaxDiedWordIndex = 3;
     private const int MaxUpdatedWordIndex = 4;
     private const int SlotIndexLockWordIndex = 5;
+    private const int SpatialWriteWordIndex = 6;
     private long[][] _slotWordBlocks = [];
     private readonly Lock _claimGrowLock = new();
 
@@ -362,7 +363,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Takes <paramref name="slotIndex"/>'s index lock (VIS-08): the right to maintain its entity's B+Tree entries and element-id tails, and the keys its
     /// slot holds. A spawn holds it from its placement in PREPARE — before the card makes the entity visible — to the end of its PUBLISH; a commit that
     /// moves an indexed component's entries, publishes a staged write of one, or removes a destroyed entity's entries holds it for that step, and decides
-    /// under it whether the slot still holds the entity alive (<see cref="HoldsLive"/>). Spins, unbounded, for a holder: none waits for anything a waiter
+    /// under it whether the slot still holds the entity alive (<see cref="HoldsLive"/>); a capture of SingleVersion keys holds it to read them and set the
+    /// mark (<see cref="CaptureFirstWrite"/>). Spins, unbounded, for a holder: none waits for anything a waiter
     /// can hold — the order is chain lock, then slot lock, then the trees' latches, and a commit that takes an entity's chain lock first waits, holding
     /// none, for a spawn still publishing it (<see cref="WaitSlotIndexesUnlocked(int, int)"/>): the spawner's component publish, which runs before its spawns',
     /// takes chain locks. A spawn that fails its publish releases its locks too (the engine stops committing then).
@@ -395,6 +397,39 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Releases <see cref="LockSlotIndexes"/>. A full barrier: the next holder reads every write this one made.</summary>
     internal void UnlockSlotIndexes(int clusterChunkId, int slotIndex) =>
         Interlocked.And(ref BlockWord(clusterChunkId, SlotIndexLockWordIndex), ~(1L << slotIndex));
+
+    /// <summary>
+    /// <see cref="LockSlotIndexes"/> for every slot of <paramref name="slots"/> in one cluster: all taken by one compare-and-swap, so a run holds
+    /// none while it waits and two overlapping runs cannot deadlock.
+    /// </summary>
+    internal void LockSlotRunIndexes(int clusterChunkId, ulong slots)
+    {
+        ref var word = ref BlockWord(clusterChunkId, SlotIndexLockWordIndex);
+        var bits = (long)slots;
+        var current = Volatile.Read(ref word);
+        if ((current & bits) == 0 && Interlocked.CompareExchange(ref word, current | bits, current) == current)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref SlotIndexLockWaits);
+        SlotIndexLockWaitProbe?.Invoke();
+        var waiter = new AdaptiveWaiter();
+        while (true)
+        {
+            current = Volatile.Read(ref word);
+            if ((current & bits) == 0 && Interlocked.CompareExchange(ref word, current | bits, current) == current)
+            {
+                return;
+            }
+
+            waiter.Wait();
+        }
+    }
+
+    /// <summary>Releases <see cref="LockSlotRunIndexes"/>.</summary>
+    internal void UnlockSlotRunIndexes(int clusterChunkId, ulong slots) =>
+        Interlocked.And(ref BlockWord(clusterChunkId, SlotIndexLockWordIndex), ~(long)slots);
 
     /// <summary>
     /// Whether <paramref name="slotIndex"/>'s index lock is held (<see cref="LockSlotIndexes"/>) — a spawn still publishing, among others — by acquire.
@@ -523,6 +558,103 @@ internal sealed unsafe partial class ArchetypeClusterState
         FinishVacatedSlot(clusterBase, clusterChunkId, slotIndex, grid);
     }
 
+    /// <summary>
+    /// A crash open's half of a hidden destroy (VIS-09, RB-08): a slot hidden when the process died reached the file free with its entity id in place, and
+    /// the claim and the cleanup that would have released it died with the process. Occupancy is authoritative, so every free slot of a populated cluster
+    /// has its metadata cleared. Its collection buffers are the sweep's (REAP-02): a free slot names nothing. Returns the slots cleared.
+    /// </summary>
+    /// <param name="changeSet">Change set of the cleared clusters' pages.</param>
+    /// <param name="batchPoint">The recovery's batch point, called between clusters (CK-08).</param>
+    internal int ClearFreeSlotsAfterCrash(ChangeSet changeSet, Action batchPoint)
+    {
+        var cleared = 0;
+        var sinceBatchPoint = 0;
+        var accessor = ClusterSegment.CreateChunkAccessor(changeSet);
+        try
+        {
+            for (var c = 0; c < ActiveClusterCount; c++)
+            {
+                if (sinceBatchPoint >= DatabaseEngine.RecoveryBatchSize)
+                {
+                    accessor.CommitChanges();
+                    batchPoint();
+                    sinceBatchPoint = 0;
+                }
+
+                var chunkId = ActiveClusterIds[c];
+                var clusterBase = accessor.GetChunkAddress(chunkId);
+                var free = ~*(ulong*)clusterBase & Layout.FullMask;
+                sinceBatchPoint += Layout.ClusterSize;
+                while (free != 0)
+                {
+                    var slotIndex = BitOperations.TrailingZeroCount(free);
+                    free &= free - 1;
+                    if (*(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8) != 0)
+                    {
+                        // Dirtying does not move the chunk: the address above stays good.
+                        accessor.GetChunkAddress(chunkId, true);
+                        ClearSlotMetadata(clusterBase, slotIndex);
+                        cleared++;
+                    }
+                }
+            }
+
+            accessor.CommitChanges();
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        return cleared;
+    }
+
+    /// <summary>
+    /// A <c>WriteSpatial</c> reached this cluster (DM-01, DM-05): it raises no dirty bit, and the process bitmap says only that a box changed, so a move
+    /// inside the
+    /// cluster's box would read as quiet. One field read while dormancy is off. A plain flag rather than a bitmap: a slot word's address is stable, and every
+    /// writer stores the same value.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteSpatialWrite(int clusterChunkId)
+    {
+        if (SleepThresholdTicks <= 0)
+        {
+            return;
+        }
+
+        ref var word = ref BlockWord(clusterChunkId, SpatialWriteWordIndex);
+        if (Volatile.Read(ref word) == 0)
+        {
+            Volatile.Write(ref word, 1);
+        }
+
+        if (SleepingClusterCount > 0 && clusterChunkId < SleepStates.Length && SleepStates[clusterChunkId] == ClusterSleepState.Sleeping)
+        {
+            PendingWakeRequests.Enqueue(clusterChunkId);
+        }
+    }
+
+    /// <summary>Whether a <c>WriteSpatial</c> reached this cluster since the last call, which clears it. Single-threaded: the fence's sweep, past the
+    /// write window.</summary>
+    private bool TakeSpatialWrite(int clusterChunkId)
+    {
+        ref var words = ref SlotWords(SlotWordTable, clusterChunkId);
+        if (Unsafe.IsNullRef(ref words))
+        {
+            return false;
+        }
+
+        ref var word = ref Unsafe.Add(ref words, SpatialWriteWordIndex - ClaimWordIndex);
+        if (Volatile.Read(ref word) == 0)
+        {
+            return false;
+        }
+
+        Volatile.Write(ref word, 0);
+        return true;
+    }
+
     /// <summary>Whether <paramref name="slotIndex"/> is hidden: claimed and not occupied, its occupancy word at <paramref name="clusterBase"/>.</summary>
     internal bool IsHidden(byte* clusterBase, int clusterChunkId, int slotIndex) =>
         (PendingBits(Volatile.Read(ref *(ulong*)clusterBase), clusterChunkId) & (1UL << slotIndex)) != 0;
@@ -559,5 +691,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             Volatile.Write(ref PendingDeathWord(clusterChunkId), 0);
         }
+
+        TakeSpatialWrite(clusterChunkId);
     }
 }

@@ -107,6 +107,9 @@ scoped.
             (a Commit capture can only reach one with no indexed SingleVersion slot). Once a TickFence writer has recorded an entity's
             SingleVersion keys, the tree holds those, not HEAD's: a Commit-discipline publish leaves that entity's move to the fence
             (`Transaction.PublishStagedEntry`, `ArchetypeClusterState.SvKeysRecorded`), and the write shares the TickFence window (QFENCE)
+  invariant a capture of SingleVersion keys reads them and sets the mark under the slot's index lock (VIS-08), which a Commit-discipline publish holds to
+            read the mark, move the tree and copy HEAD: the publish finds the mark, or the capture reads what it published. Otherwise the fence departs a
+            key the publish moved the entry off (#1357): a unique key misses and the entity collides with itself
   never deciding the deferral from a per-ENTITY signal when the thing deferred is per-SLOT. `ClusterShadowBitmap` is set per entity, by a
         write that changes a key of a fence-indexed component (`EntityRefMut.Set`, `ClusterRef.Set`, a key-changing `WriteSpatial`; a write through
         a returned ref captures unconditionally) and records every fence-maintained indexed slot of the entity; the shadow BUFFERS hold only
@@ -121,7 +124,7 @@ scoped.
           `ClaimFirstFree` and `ClaimExact`); the fence clears the bitmap after its drain and before Migrate claims, so the hold lasts one tick at most
   scope: ArchetypeClusterState.FenceRecordedSlots (what the fence holds a record of), ArchetypeClusterState.CaptureFirstWrite,
          ArchetypeClusterState.CaptureFirstWrites (the captures), ArchetypeClusterState.SvShadowBitmap, ArchetypeClusterState.SvKeysRecorded,
-         EntityRefMut.ShadowClusterIndexedFields, Transaction.FlushPendingDestroys (the destroy hand-off; removes its complement via
+         EntityRefMut.ShadowClusterIndexedFields, ArchetypeClusterState.LockSlotRunIndexes, Transaction.FlushPendingDestroys (the destroy hand-off; removes its complement via
          RemoveClusterIndexEntries' slot mask), Transaction.PublishStagedEntry (an entity whose SingleVersion keys are recorded is the fence's),
          Transaction.ReconcileClusterIndexAndViews (commit-scoped maintenance must not run
          for an entity the same transaction destroys), ArchetypeClusterState.FenceOwedBits, ArchetypeClusterState.TakenBits (the slot hold)
@@ -140,6 +143,8 @@ scoped.
   verified: ClusterIndexMatrixTests.MixedPublicationTimings_MutateAndDestroy_LeaveTheIndexAgreeing,
             DestroyAfterWritingOnlyAnUnindexedSibling_LeavesTheIndexAgreeing (the sharper half - no key move anywhere),
             DestroyAfterWritingOnlyTheIndexedComponent_LeavesTheIndexAgreeing (the control, green before the fix) [VerifiesRule];
+            MixedDisciplineIndexTests.ACaptureRacingACommitPublish_TheFenceMovesOffTheKeyTheTreeHolds and ..._OneMark_... (each capture path, a publish staged
+            between the key's read and the mark; red with the slot lock out) [VerifiesRule];
             QueryBetweenWriteAndFenceTests.ADestroyedSlotOwingTheFence_IsNotReusedBeforeIt [VerifiesRule] — a key move (unique, or multi-value), a
             destroy, a spawn into a full archetype, a write to the newcomer, the fence: the newcomer is returned once before the fence and the
             index agrees with the data after it; both cases red with the hold removed. ADestroyAfterAWriteToAnotherComponent_LeavesNoStaleRow_… and

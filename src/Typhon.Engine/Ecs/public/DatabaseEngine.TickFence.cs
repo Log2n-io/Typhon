@@ -2348,12 +2348,11 @@ public partial class DatabaseEngine
         // The membership signal, from the same window: after the finalization drain, so a slot released and a cluster retired this tick are both in it.
         clusterState.PublishStructureChanges(tickNumber);
 
-        // Clean-spatial-refresh branch (path 1): nothing was written through the dirty bitmap, but WriteSpatial may have moved clusters — the barrier's
-        // process bitmap says which, and they are not quiet. Swept HERE, before the bookkeeping below clears that bitmap (Realms §9.3-3; review #4: an
-        // archetype moved only by WriteSpatial must not fall asleep while it moves). Every other active cluster is one tick quieter.
+        // Clean-spatial-refresh branch (path 1): nothing was written through the dirty bitmap. A cluster WriteSpatial moved says so itself (DM-05); every other
+        // active cluster is one tick quieter (Realms §9.3-3).
         if (clusterState.FenceBranchPath == 1)
         {
-            clusterState.DormancySweep(Array.Empty<long>(), tickNumber, clusterState.ClusterProcessBitmap);
+            clusterState.DormancySweep(Array.Empty<long>(), tickNumber);
         }
 
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)

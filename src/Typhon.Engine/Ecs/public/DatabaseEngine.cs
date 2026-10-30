@@ -1541,12 +1541,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// honours it.
     /// </para>
     /// <para>
-    /// <b>The precondition, and it is sharp.</b> Sleep is decided from the per-entity dirty bitmap, and
-    /// <see cref="ClusterRef{TArch}.WriteSpatial{T}(Comp{T}, int, in T)"/> deliberately raises no dirty bit — so an archetype whose entities only MOVE
-    /// looks clean, is put to sleep while still in motion, stops being dispatched, and freezes. An application that combines the two must mark the
-    /// column itself (<see cref="ClusterRef{TArch}.MarkDirty{T}"/>) on a cluster it moved. That is a contract of <c>WriteSpatial</c>, not of dormancy.
-    /// </para>
-    /// <para>
     /// <b>Cost when unused: nothing measurable.</b> Every consumer gates on <c>SleepingClusterCount &gt; 0</c>, which stays zero while the threshold is
     /// zero, so the check folds to one predictable-not-taken branch.
     /// </para>
@@ -2143,6 +2137,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         "Open: data-file write tracking is switched off (change map {MapEnabled}, write gate {GateEnabled}): every backup point will be full, and with the "
         + "gate off online backup is refused (TYPHON_DATAFILE_TRACKING / TYPHON_DATAFILE_GATE)")]
     private partial void LogDataFileTrackingSwitchedOff(bool mapEnabled, bool gateEnabled);
+
+    [LoggerMessage(LogLevel.Error, "A first write of {component} could not give back the revision it built: chunk {chunkId} or its references are leaked")]
+    internal partial void LogPreparedRevisionLeaked(Exception exception, string component, int chunkId);
 
     [LoggerMessage(LogLevel.Warning, "Close: the backup-state could not be written ({path}); the next backup will be full")]
     private partial void LogBackupStateWriteFailed(Exception exception, string path);
@@ -5854,6 +5851,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // checkpoint had not written, one a swept orphan named — is freed. After the scrub, which releases what dropped revisions named.
         SweepCollectionOrphans();
 
+        // Phase 4c — the slots hidden when the process died (VIS-09, RB-08): free on disk with their entity ids in place, their claims and cleanups lost.
+        // Before
+        // the seal, so the same checkpoint writes them.
+        ClearFreeSlotsAfterCrash();
+
         // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every archetype's secondary indexes from the now-final chain HEADs. The indexes were emptied
         // at open on the crash path; this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so the same checkpoint consolidates the
         // rebuilt index pages.
@@ -6162,6 +6164,33 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             changeSet.SaveChanges();
         }
     }
+
+    /// <summary>
+    /// Phase 4c of a crash open (VIS-09, RB-08): the slots a hidden destroy left free with their entity ids in place have those ids cleared, in every
+    /// archetype's persisted clusters.
+    /// </summary>
+    private void ClearFreeSlotsAfterCrash()
+    {
+        using var guard = EpochGuard.Enter(EpochManager);
+        var changeSet = MMF.CreateChangeSet();
+        try
+        {
+            foreach (var meta in OwnArchetypes())
+            {
+                if (meta.ArchetypeId < _archetypeStates.Length && _archetypeStates[meta.ArchetypeId]?.ClusterState is { ClusterSegment: not null } clusterState)
+                {
+                    LastOpenFreeSlotsCleared += clusterState.ClearFreeSlotsAfterCrash(changeSet, () => RecoveryBatchPoint(changeSet, RecoveryPass.Scrub));
+                }
+            }
+        }
+        finally
+        {
+            changeSet.SaveChanges();
+        }
+    }
+
+    /// <summary>The slots <see cref="ClearFreeSlotsAfterCrash"/> cleared on the last crash open. Test seam.</summary>
+    internal int LastOpenFreeSlotsCleared { get; private set; }
 
     /// <summary>
     /// Phase 6 — SEAL (03-recovery.md §9). After the recovery window has been applied (its pages are dirty in the cache), run one
@@ -7234,6 +7263,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// so the rule's mutant can show the verifier rejects it. Per engine. Never set in production.
     /// </summary>
     internal bool FirstWriteClaimsBeforeAppendForTest { get; set; }
+
+    /// <summary>Called while a first write builds its revision (CHAIN-02): with 0 before the copy, then with the collection fields done. Test seam.</summary>
+    internal Action<int> FirstWriteBuildProbe { get; set; }
 
     /// <summary>
     /// Test-only mutant switch (AP-03): when set, a commit's publish gives up on page-cache back-pressure after the ordinary allocation timeout, as any

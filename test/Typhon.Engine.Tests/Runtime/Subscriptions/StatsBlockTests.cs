@@ -186,6 +186,10 @@ class StatsBlockTests : TestBase<StatsBlockTests>
         var client = world.Connect(Capabilities.Stats);
         Assert.That(client.AwaitBlock(), Is.True, "no frame carrying a STATS block reached the client");
 
+        // One pump per session, one loop on one thread: it sends the second frame only after it has counted the first, and a client can hold a frame
+        // before that.
+        Assert.That(client.AwaitBlock(), Is.True, "no second frame carrying a STATS block reached the client");
+
         var stats = world.Runtime.ReadStats();
         var wireSessions = Scalar(client, "typhon.sessions");
         var wireArchetypes = Row(client, BuiltInMetrics.ArchetypeEntities);

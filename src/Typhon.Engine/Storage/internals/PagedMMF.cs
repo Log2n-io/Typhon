@@ -4310,12 +4310,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </param>
     /// <param name="filter">Which pages this call may write; the others are left at the back, as skipped, and counted in
     /// <see cref="CheckpointPagesDeferredForOrder"/>. The checkpoint's waves write protected and plain pages apart (CK-16).</param>
+    /// <param name="beforeWrite">
+    /// Called with a run of copies captured and none of them written yet: this is where the caller makes the WAL durable through what the copies can reflect
+    /// (CK-02). False leaves the run unwritten, at the back, as skipped. Null for a caller that has no WAL to order against.
+    /// </param>
     unsafe internal void WritePagesForCheckpoint(
         Span<int> memPageIndices,
         StagingBufferPool stagingPool,
         out int writtenCount,
         Span<long> capturedGen = default,
-        CheckpointWriteFilter filter = CheckpointWriteFilter.All)
+        CheckpointWriteFilter filter = CheckpointWriteFilter.All,
+        Func<bool> beforeWrite = null)
     {
         writtenCount = 0;
 
@@ -4327,14 +4332,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         var memPageBaseAddr = _memPagesAddr;
 
         // CK-02 ordering (#585). A protected segment-directory page (CK-05) persists itself inside TryPersistProtectedPage as write → fsync → slot flip, and that
-        // fsync is FILE-WIDE, not page-scoped. Reached at an arbitrary position in this array it therefore makes every PLAIN data page written earlier in the same
-        // pass durable — while the cycle's flush2 barrier has not run yet, because CheckpointManager issues RequestFlush + WaitForDurable only after this method
-        // returns. Any commit that appended and published between the step-1 barrier and that page's capture would then be sitting in the data file with its WAL
-        // record still in the ring buffer: "captured ⊆ durable" inverted, i.e. a phantom partial write of a never-durable transaction, and Typhon has no undo.
-        //
-        // Hoisting protected pages to the front makes their fsync always PRECEDE the plain writes of this pass instead of following them, so it can only ever
-        // flush bytes that a previous pass already barriered and fsynced. SavePages reaches the same guarantee by persisting protected pages in a dedicated
-        // pre-pass; expressing it here as an ordering keeps this method's in-place written-front/skipped-back partition (CK-03 retry contract) intact.
+        // fsync is FILE-WIDE, not page-scoped. Reached at an arbitrary position in this array it would make every PLAIN page written earlier in the same
+        // pass durable
+        // at once. Hoisting protected pages to the front makes their fsync always PRECEDE the plain writes of this pass instead of following them, and
+        // CheckpointProtectedAfterPlainWriteCount watches for an escape. SavePages reaches the same guarantee by persisting protected pages in a dedicated
+        // pre-pass.
         //
         // Cheap in the common case: one FilePageIndex probe per page and zero swaps when the batch holds no directory page, which is the usual shape — they only
         // go dirty on segment create/grow.
@@ -4350,82 +4352,248 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
         }
 
-        for (int i = 0; i < memPageIndices.Length; i++)
-        {
-            var memPageIndex = memPageIndices[i];
-            var pi = Slot(memPageIndex);
+        // Written pages go to the front of the array and skipped ones to the back (the CK-03 retry contract), rebuilt from these once the order of the run
+        // is settled.
+        var written = ArrayPool<int>.Shared.Rent(memPageIndices.Length);
+        var writtenGen = ArrayPool<long>.Shared.Rent(memPageIndices.Length);
+        var skipped = ArrayPool<int>.Shared.Rent(memPageIndices.Length);
+        var skippedCount = 0;
 
-            // A wave writes one kind of page (CK-16). A page of the other kind stays at the back, owed, for the next pass to order again.
-            if (filter != CheckpointWriteFilter.All)
+        // The run in hand: copies taken and not written. A staging buffer is a ref struct and cannot sit in an array, so its slot and address do.
+        var run = stackalloc CapturedPage[CheckpointCaptureRunPages];
+        var runPages = CaptureRunPages(stagingPool.PoolCapacity);
+        var runCount = 0;
+        try
+        {
+            for (int i = 0; i < memPageIndices.Length; i++)
             {
-                var fp = pi.FilePageIndex;
-                if (fp > 0 && IsProtectedPage(fp) != (filter == CheckpointWriteFilter.ProtectedOnly))
+                var memPageIndex = memPageIndices[i];
+                var pi = Slot(memPageIndex);
+
+                // A wave writes one kind of page (CK-16). A page of the other kind stays at the back, owed, for the next pass to order again.
+                if (filter != CheckpointWriteFilter.All)
                 {
-                    Interlocked.Increment(ref CheckpointPagesDeferredForOrder);
+                    var fp = pi.FilePageIndex;
+                    if (fp > 0 && IsProtectedPage(fp) != (filter == CheckpointWriteFilter.ProtectedOnly))
+                    {
+                        Interlocked.Increment(ref CheckpointPagesDeferredForOrder);
+                        skipped[skippedCount++] = memPageIndex;
+                        continue;
+                    }
+                }
+
+                // Wait for any pending I/O read to complete
+                WaitForPendingRead(memPageIndex, pi);
+
+                var livePageAddr = memPageBaseAddr + (memPageIndex * (long)PageSize);
+
+                // Atomically claim the page for snapshot: CAS(ACW, -1, 0).
+                // ACW = -1 is a sentinel that blocks new writers (they spin in IncrementActiveChunkWriters).
+                // If ACW != 0, a writer is active — skip this page for the next checkpoint cycle.
+                // This eliminates the TOCTOU race where a writer starts and completes (ACW 0→1→0) during the ~250ns memcpy, which CopyPageWithSeqlock can't
+                // detect because OLC writes don't update ModificationCounter.
+                if (Interlocked.CompareExchange(ref pi.ActiveChunkWriters, -1, 0) != 0)
+                {
+                    Interlocked.Increment(ref CheckpointSkipAcw);   // #817 diagnostic: cause A — a live chunk writer held the page
+                    skipped[skippedCount++] = memPageIndex;
                     continue;
+                }
+
+                // Rent a staging buffer and snapshot the live page via seqlock.
+                // No concurrent OLC writers can start while ACW = -1 (they spin-wait).
+                // Page-level latches (TryLatchPageExclusive) are still detected by the seqlock.
+                // Read under the ACW sentinel (ACW == -1 blocks new writers), so this is the generation the copy below
+                // actually covers — not a racing sample.
+                var genAtCapture = Volatile.Read(ref pi.WritebackGen);
+
+                var staging = stagingPool.Rent();
+                run[runCount] = new CapturedPage
+                {
+                    MemPageIndex = memPageIndex,
+                    FilePageIndex = pi.FilePageIndex,
+                    Generation = genAtCapture,
+                    SettledGeneration = Volatile.Read(ref pi.CapturedGen),
+                    StagingSlot = staging.SlotIndex,
+                    Copy = staging.Pointer,
+                };
+
+                // The copy is the page's image: a lock held while it reads the page goes to disk in it, and its holder learns of it at release (PS-20).
+                BeginCapture(memPageIndex);
+                bool copied;
+                try
+                {
+                    copied = CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex);
+                }
+                catch
+                {
+                    stagingPool.Return(staging.SlotIndex);
+                    throw;
+                }
+                finally
+                {
+                    EndCapture(memPageIndex);
+                }
+
+                // Release the sentinel — writers can resume.
+                Interlocked.Exchange(ref pi.ActiveChunkWriters, 0);
+
+                if (!copied)
+                {
+                    // Page has an active writer (via TryLatchPageExclusive) — skip it. The page stays dirty and will be picked up in the next checkpoint cycle.
+                    // This prevents deadlock when the writer is blocked on backpressure waiting for THIS checkpoint to free pages.
+                    stagingPool.Return(staging.SlotIndex);
+                    skipped[skippedCount++] = memPageIndex;
+                    continue;
+                }
+
+                if (++runCount == runPages)
+                {
+                    WriteCapturedRun(run, ref runCount, stagingPool, beforeWrite, written, writtenGen, ref writtenCount, skipped, ref skippedCount,
+                        ref plainWrittenThisPass);
                 }
             }
 
-            // Wait for any pending I/O read to complete
-            WaitForPendingRead(memPageIndex, pi);
+            WriteCapturedRun(run, ref runCount, stagingPool, beforeWrite, written, writtenGen, ref writtenCount, skipped, ref skippedCount,
+                ref plainWrittenThisPass);
 
-            var livePageAddr = memPageBaseAddr + (memPageIndex * (long)PageSize);
-
-            // Atomically claim the page for snapshot: CAS(ACW, -1, 0).
-            // ACW = -1 is a sentinel that blocks new writers (they spin in IncrementActiveChunkWriters).
-            // If ACW != 0, a writer is active — skip this page for the next checkpoint cycle.
-            // This eliminates the TOCTOU race where a writer starts and completes (ACW 0→1→0) during the ~250ns memcpy, which CopyPageWithSeqlock can't
-            // detect because OLC writes don't update ModificationCounter.
-            if (Interlocked.CompareExchange(ref pi.ActiveChunkWriters, -1, 0) != 0)
+            written.AsSpan(0, writtenCount).CopyTo(memPageIndices);
+            skipped.AsSpan(0, skippedCount).CopyTo(memPageIndices[writtenCount..]);
+            writtenGen.AsSpan(0, Math.Min(writtenCount, capturedGen.Length)).CopyTo(capturedGen);
+        }
+        finally
+        {
+            // Copies a failed barrier or write left unwritten.
+            for (var i = 0; i < runCount; i++)
             {
-                Interlocked.Increment(ref CheckpointSkipAcw);   // #817 diagnostic: cause A — a live chunk writer held the page
+                stagingPool.Return(run[i].StagingSlot);
+            }
+
+            ArrayPool<int>.Shared.Return(written);
+            ArrayPool<long>.Shared.Return(writtenGen);
+            ArrayPool<int>.Shared.Return(skipped);
+        }
+
+        // Atomic, and once per call: a checkpoint wave's sub-batches are written by several threads at once.
+        Interlocked.Add(ref _metrics.PageWrittenToDiskCount, writtenCount);
+        Interlocked.Add(ref _metrics.WrittenOperationCount, writtenCount);
+    }
+
+    /// <summary>One page copied for a checkpoint and not written yet.</summary>
+    private unsafe struct CapturedPage
+    {
+        public int MemPageIndex;
+        public int FilePageIndex;
+        public int StagingSlot;
+        public long Generation;
+
+        /// <summary>The page's <see cref="PageInfo.CapturedGen"/> at the copy: moved by the write, a direct save settled the page while the copy
+        /// waited.</summary>
+        public long SettledGeneration;
+        public byte* Copy;
+    }
+
+    /// <summary>
+    /// Copies a writer holds before it writes them. The pool holds 512 by default and is shared by up to four such writers, and a writer blocked renting
+    /// the next
+    /// buffer while holding its run would wait for buffers only its own write can return, so a run stays under a quarter of the pool.
+    /// </summary>
+    internal const int CheckpointCaptureRunPages = 64;
+
+    /// <summary>A run on a pool of <paramref name="poolCapacity"/>: a quarter of it, at most <see cref="CheckpointCaptureRunPages"/>, at least one.</summary>
+    internal static int CaptureRunPages(int poolCapacity) => Math.Clamp(poolCapacity / 4, 1, CheckpointCaptureRunPages);
+
+    /// <summary>
+    /// Writes a run of captured copies, after <paramref name="beforeWrite"/>. The WAL is flushed HERE, between the copies and their writes, and not at the
+    /// fsync: a write
+    /// reaches the file the moment it returns as far as anything but a power cut can tell, and the OS may write it back at any time. A process killed
+    /// after the write and
+    /// before a later flush leaves in the file a page whose records were still in its ring: half a transaction, with nothing to undo it (#1516, #1422).
+    /// </summary>
+    private unsafe void WriteCapturedRun(CapturedPage* run, ref int runCount, StagingBufferPool stagingPool, Func<bool> beforeWrite, int[] written,
+        long[] writtenGen, ref int writtenCount, int[] skipped, ref int skippedCount, ref bool plainWrittenThisPass)
+    {
+        if (runCount == 0)
+        {
+            return;
+        }
+
+        if (beforeWrite != null && !beforeWrite())
+        {
+            for (var i = 0; i < runCount; i++)
+            {
+                skipped[skippedCount++] = run[i].MemPageIndex;
+                stagingPool.Return(run[i].StagingSlot);
+            }
+
+            runCount = 0;
+            return;
+        }
+
+        // The copies are as old as the wait above. A direct save starting from here waits for this run (EnterDirectSave); one already in flight may be
+        // writing newer
+        // bytes of these pages, so the run stands aside and stays owed. One that finished before is the stale check below.
+        Interlocked.Increment(ref _checkpointRunsWriting);
+        try
+        {
+            if (Volatile.Read(ref _directSavesInFlight) != 0)
+            {
+                Interlocked.Increment(ref CheckpointSkipDirectSave);
+                for (var i = 0; i < runCount; i++)
+                {
+                    skipped[skippedCount++] = run[i].MemPageIndex;
+                    stagingPool.Return(run[i].StagingSlot);
+                }
+
+                runCount = 0;
+                return;
+            }
+
+            WriteCapturedCopies(run, runCount, written, writtenGen, ref writtenCount, skipped, ref skippedCount, ref plainWrittenThisPass);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _checkpointRunsWriting);
+        }
+
+        for (var i = 0; i < runCount; i++)
+        {
+            stagingPool.Return(run[i].StagingSlot);
+        }
+
+        runCount = 0;
+    }
+
+    /// <summary>The run's writes. A copy whose page a direct save settled while it waited, or whose slot holds another page since, is stale and stays
+    /// unwritten:
+    /// the file already holds the same bytes or newer ones, and written over them it would lose a write the page no longer owes.</summary>
+    private unsafe void WriteCapturedCopies(CapturedPage* run, int count, int[] written, long[] writtenGen, ref int writtenCount, int[] skipped,
+        ref int skippedCount, ref bool plainWrittenThisPass)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            var page = run[i];
+            var pi = Slot(page.MemPageIndex);
+            if (pi.FilePageIndex != page.FilePageIndex || Volatile.Read(ref pi.CapturedGen) != page.SettledGeneration)
+            {
+                Interlocked.Increment(ref CheckpointSkipStaleCopy);
+                skipped[skippedCount++] = page.MemPageIndex;
                 continue;
             }
 
-            // Rent a staging buffer and snapshot the live page via seqlock.
-            // No concurrent OLC writers can start while ACW = -1 (they spin-wait).
-            // Page-level latches (TryLatchPageExclusive) are still detected by the seqlock.
-            // Read under the ACW sentinel (ACW == -1 blocks new writers), so this is the generation the copy below
-            // actually covers — not a racing sample.
-            var genAtCapture = Volatile.Read(ref pi.WritebackGen);
-
-            using var staging = stagingPool.Rent();
-
-            // The copy is the page's image: a lock held while it reads the page goes to disk in it, and its holder learns of it at release (PS-20).
-            BeginCapture(memPageIndex);
-            bool copied;
-            try
-            {
-                copied = CopyPageWithSeqlock(livePageAddr, staging.Pointer, memPageIndex);
-            }
-            finally
-            {
-                EndCapture(memPageIndex);
-            }
-
-            if (!copied)
-            {
-                // Page has an active writer (via TryLatchPageExclusive) — skip it. The page stays dirty and will be picked up in the next checkpoint cycle.
-                // This prevents deadlock when the writer is blocked on backpressure waiting for THIS checkpoint to free pages.
-                Interlocked.Exchange(ref pi.ActiveChunkWriters, 0); // Release sentinel
-                continue;
-            }
-
-            // Release the sentinel — writers can resume.
-            Interlocked.Exchange(ref pi.ActiveChunkWriters, 0);
+            var staging = new Span<byte>(page.Copy, PageSize);
 
             // Increment ChangeRevision and compute CRC on the staging copy (not the live page).
-            var filePageIndex = pi.FilePageIndex;
+            var filePageIndex = page.FilePageIndex;
             var redirected = false;
             if (filePageIndex > 0)
             {
-                var stagingHeader = (PageBaseHeader*)staging.Pointer;
+                var stagingHeader = (PageBaseHeader*)page.Copy;
                 ++stagingHeader->ChangeRevision;
 
                 // CK-05 (C2): a dirty segment-directory page is redirected to its alternate slot (PairGeneration + CRC stamped
                 // on this staging copy, write, fsync, flip — all inside TryPersistProtectedPage). Non-directory pages fall
                 // through to the normal in-place CRC + write below.
-                redirected = TryPersistProtectedPage(filePageIndex, staging.Pointer);
+                redirected = TryPersistProtectedPage(filePageIndex, page.Copy);
                 if (redirected)
                 {
                     CheckpointProtectedPagePersistCount++;
@@ -4436,7 +4604,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 }
                 else
                 {
-                    StampPageForWrite(staging.Span, filePageIndex);
+                    StampPageForWrite(staging, filePageIndex);
                 }
             }
 
@@ -4445,24 +4613,50 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (!redirected)
             {
                 plainWrittenThisPass = true;
-                IssueDataFileWrite(filePageIndex, 1, staging.Span);   // its interceptor may throw to abort the checkpoint mid-cycle
+                IssueDataFileWrite(filePageIndex, 1, staging);   // its interceptor may throw to abort the checkpoint mid-cycle
             }
 
-            // Partition in place: written pages to the front [0, writtenCount), skipped pages to the back [writtenCount, length). Swap (never overwrite) so the
-            // caller can retry exactly the skipped tail in a later pass (coverage gate, CK-03) instead of losing track of which pages still need writing.
-            memPageIndices[i] = memPageIndices[writtenCount];
-            memPageIndices[writtenCount] = memPageIndex;
-            if (writtenCount < capturedGen.Length)
-            {
-                capturedGen[writtenCount] = genAtCapture;
-            }
+            written[writtenCount] = page.MemPageIndex;
+            writtenGen[writtenCount] = page.Generation;
             writtenCount++;
         }
-
-        // Atomic, and once per call: a checkpoint wave's sub-batches are written by several threads at once.
-        Interlocked.Add(ref _metrics.PageWrittenToDiskCount, writtenCount);
-        Interlocked.Add(ref _metrics.WrittenOperationCount, writtenCount);
     }
+
+    private int _checkpointRunsWriting;
+    private int _directSavesInFlight;
+
+    /// <summary>Runs of checkpoint copies that stood aside for a direct save in flight. Diagnostic.</summary>
+    internal long CheckpointSkipDirectSave;
+
+    /// <summary>Checkpoint copies a direct save overtook while they waited for the WAL. Diagnostic.</summary>
+    internal long CheckpointSkipStaleCopy;
+
+    /// <summary>
+    /// Called before a direct save (<see cref="SavePages"/>) touches the file: makes the WAL durable through what the pages can reflect (CK-02). False
+    /// leaves the
+    /// pages unwritten and owed, for a checkpoint to write. Null for a store with no WAL to order against.
+    /// </summary>
+    internal Func<bool> DirectSaveBarrier { get; set; }
+
+    /// <summary>
+    /// A direct save begins: it waits for the checkpoint runs writing now, and the runs after it stand aside until it ends. A page has one writer of the
+    /// file at a
+    /// time, which is what lets a run hold its copies across a WAL flush: a save that wrote newer bytes before the run's writes began is seen by its stale
+    /// check,
+    /// and none can write during them.
+    /// </summary>
+    internal void EnterDirectSave()
+    {
+        Interlocked.Increment(ref _directSavesInFlight);
+        var waiter = new AdaptiveWaiter();
+        while (Volatile.Read(ref _checkpointRunsWriting) != 0)
+        {
+            waiter.Wait();
+        }
+    }
+
+    /// <summary>Ends <see cref="EnterDirectSave"/>, once the save's pages are settled.</summary>
+    internal void ExitDirectSave() => Interlocked.Decrement(ref _directSavesInFlight);
 
     /// <summary>
     /// Orders <paramref name="memPageIndices"/> for a checkpoint pass: protected segment-directory pages first, then every other page by file position.
@@ -4497,7 +4691,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
     }
 
-    unsafe internal Task SavePages(int[] memPageIndices)
+    internal Task SavePages(int[] memPageIndices)
     {
         // A suspect page (its checksum failed at a crash open's load) is left owed until the suspect resolution judges it (RB-04): written, its torn
         // bytes were checksummed again, and the next open served them (#1304).
@@ -4510,6 +4704,26 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             }
         }
 
+        var barrier = DirectSaveBarrier;
+        if (barrier != null && !barrier())
+        {
+            return Task.CompletedTask;   // the pages stay owed
+        }
+
+        EnterDirectSave();
+        try
+        {
+            return SavePagesEntered(memPageIndices);   // ExitDirectSave is its own from the moment it has writes in flight
+        }
+        catch
+        {
+            ExitDirectSave();
+            throw;
+        }
+    }
+
+    private unsafe Task SavePagesEntered(int[] memPageIndices)
+    {
         // Synchronous span brackets the setup+kickoff work. The async fsync+decrement completion in the ContinueWith is NOT captured under
         // this span because SpanScope is a ref struct — instead, we emit a separate PageCacheFlushCompleted record from inside the continuation,
         // correlated to this span by SpanId. PageCache.Flush is gated by Storage:PageCache:Enabled in JSON (post-2026-04-30 re-tier — only
@@ -4610,6 +4824,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 TyphonEvent.EmitPageCacheFlushCompleted(flushSpanId, flushBeginTs, flushPageCount, Stopwatch.GetTimestamp());
             }
 
+            ExitDirectSave();
             return Task.CompletedTask;
         }
 
@@ -4696,41 +4911,48 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         var saveTask = Task.WhenAll(tasks).ContinueWith(t =>
         {
-            // Every write of the batch has completed, faulted or not: the data file no longer changes under a freeze.
-            if (gated)
+            try
             {
-                _writeGate.ExitShared(batchToken);
+                // Every write of the batch has completed, faulted or not: the data file no longer changes under a freeze.
+                if (gated)
+                {
+                    _writeGate.ExitShared(batchToken);
+                }
+
+                EndCaptures(normalPages);
+
+                // A faulted write never landed: neither the watermark nor the debt may move for it, or the page could be evicted over bytes the file never
+                // got. The fault fails the save; the pages keep their debt, so the next checkpoint writes them again.
+                if (t.IsFaulted)
+                {
+                    t.GetAwaiter().GetResult();
+                }
+
+                // CP-03: fsync data file before decrementing DirtyCounter.
+                // Without this, pages become evictable (DC=0) while data is only in OS buffer cache,
+                // risking stale reload after eviction if the OS hasn't flushed to stable media.
+                FlushToDisk();
+
+                // Now the batch's bytes are durable — advance the file-size watermark BEFORE any page becomes evictable (the debt discharge below). This keeps
+                // _fileSize honest: the read gate never authorizes a disk read of a not-yet-written page (fixes the short-read race).
+                TrackFileGrowth(batchEndOffset);
+
+                for (int i = 0; i < memPageIndices.Length; i++)
+                {
+                    MarkCaptured(memPageIndices[i], gensAtEntry[i]);
+                }
+
+                // Completion event: captures the full "kickoff → writes done → fsync done" duration. No-op when either Flush or FlushCompleted
+                // is suppressed — the internal helper checks both. flushSpanId == 0 means the kickoff span itself was suppressed, so nothing to
+                // correlate with either.
+                if (flushSpanId != 0)
+                {
+                    TyphonEvent.EmitPageCacheFlushCompleted(flushSpanId, flushBeginTs, flushPageCount, Stopwatch.GetTimestamp());
+                }
             }
-
-            EndCaptures(normalPages);
-
-            // A faulted write never landed: neither the watermark nor the debt may move for it, or the page could be evicted over bytes the file never
-            // got. The fault fails the save; the pages keep their debt, so the next checkpoint writes them again.
-            if (t.IsFaulted)
+            finally
             {
-                t.GetAwaiter().GetResult();
-            }
-
-            // CP-03: fsync data file before decrementing DirtyCounter.
-            // Without this, pages become evictable (DC=0) while data is only in OS buffer cache,
-            // risking stale reload after eviction if the OS hasn't flushed to stable media.
-            FlushToDisk();
-
-            // Now the batch's bytes are durable — advance the file-size watermark BEFORE any page becomes evictable (the debt discharge below). This keeps
-            // _fileSize honest: the read gate never authorizes a disk read of a not-yet-written page (fixes the short-read race).
-            TrackFileGrowth(batchEndOffset);
-
-            for (int i = 0; i < memPageIndices.Length; i++)
-            {
-                MarkCaptured(memPageIndices[i], gensAtEntry[i]);
-            }
-
-            // Completion event: captures the full "kickoff → writes done → fsync done" duration. No-op when either Flush or FlushCompleted
-            // is suppressed — the internal helper checks both. flushSpanId == 0 means the kickoff span itself was suppressed, so nothing to
-            // correlate with either.
-            if (flushSpanId != 0)
-            {
-                TyphonEvent.EmitPageCacheFlushCompleted(flushSpanId, flushBeginTs, flushPageCount, Stopwatch.GetTimestamp());
+                ExitDirectSave();
             }
         });
         return saveTask;

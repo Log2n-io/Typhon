@@ -1099,12 +1099,13 @@ An incremental view (`WhereField`, a navigation view) keeps its entity set curre
         before its value reaches the cluster slot the re-scan reads (Phase B). Discarded, the change is in neither. (The ring's Reset did that, and
         re-anchored its base TSN under live producers; it is gone)
   scope: EcsView.ProcessEntry, EcsView.ProcessEntryOr, EcsView.RefreshFull, EcsView.RefreshFullOr, EcsView.FoldEntriesAfterRefreshFull,
+         NavigationView.ProcessTargetFieldChange,
          NavigationView.ProcessEntry, NavigationView.RefreshFull, ViewBase.BeginRefreshFull, ViewBase.EndRefreshFull, ViewBase.OweRefreshFull,
          ViewBase.ApplyMembership, ViewBase.FoldsHead, ViewDeltaRingBuffer.Advance, ViewDeltaRingBuffer.HeadPrecedesDrop
   status: **RESIDUAL:**
           - an entry drained mid-publish — after its commit's Phase A, before the commit is visible — makes a multi-field, OR or navigation
             view read the other fields' old values (#1266);
-          - a navigation view's target-side change still compares the target's BeforeKey and AfterKey before fanning out;
+          - a navigation view's target-side change decides out-to-out from BeforeKey, which is the newest published value (#1263);
           - a passes→passes change of an entity outside a multi-field or navigation view now reads the entity's other fields (unmeasured; the
             single-field drain measures at parity);
           - the owed re-scan covers a dropped commit, or one whose entry came before a drop, only once its value is published: one still between
@@ -1170,7 +1171,7 @@ both fast and exact inside the window; this rule fixes what it does promise.
              the fence. Measured over 1 000 000 rows: no measurable cost on point and range lookups, +5–9 % on an
              `AllowMultiple` lookup returning 1 000 rows, +3–5 µs on an ordered page of 1 000
   note: known exceptions, outside this rule's mechanism and tracked: an ordered query ignores a `!=` predicate, with or
-        without a write (#1185); an ordered query on a `Transient`-only archetype returns nothing (#1186). An ordered query whose snapshot is
+        without a write (#1185). An ordered query whose snapshot is
         older than a destroy reads whole the clusters newer deaths touched (VIS-09) and places their rows by their current value: a written
         entity there sits by its new value rather than its fence key. Writable cluster
         memory over a SingleVersion or Transient indexed component is refused, so every write reaches this rule's
@@ -1198,12 +1199,14 @@ both fast and exact inside the window; this rule fixes what it does promise.
             rows sorted by F, ascending or descending, and Skip / Take page that order — whether or not a predicate of P names F, a not-equal included
   invariant the ordered field's key type is the field's own, resolved when OrderByField resolves the field (OrderByField.KeyType); a field no ordered
             tree key encodes (a string, a bool) is refused there, never sorted by entity key
-  invariant the merge streams F's tree only when F's key range enforces every predicate exactly (KeyRange.AdmitsOnlyMatches); a predicate on another
-            field, a not-equal or a bound the range widens goes to the scan-then-sort fallback, which verifies every predicate and reads each row's F
-            at the reader's snapshot — its point read, the transaction's own spawns included, then the bytes a hidden slot kept (VIS-09)
+  invariant the merge streams F's tree only when F's home is persistent and F's key range enforces every predicate exactly (KeyRange.AdmitsOnlyMatches); a
+            Transient home, a predicate on another field, a not-equal or a bound the range widens goes to the scan-then-sort fallback, which verifies every
+            predicate and reads each row's F at the reader's snapshot — its point read, the transaction's own spawns included, then the bytes a hidden slot
+            kept (VIS-09). The fallback sorts a written row by its current value, not its fence key
   scope: OrderByField.KeyType, OrderByField.KeyTypeKnown, QueryResolverHelper.TryMapFieldTypeToKeyType, EcsQuery.ResolveOrderBy,
-         EcsQuery.MergeOrderedClustered, EcsQuery.ExecuteOrderedViaSortFallback, EcsQuery.TryReadOrderKeyAtSnapshot
-  on_violation: the sort fallback took F's key type from a predicate naming F; with none — filtered on one field, ordered by another — it sorted by
+         EcsQuery.MergeOrderedClustered, EcsQuery.ExecuteOrderedViaSortFallback, EcsQuery.TryReadOrderKeyAtSnapshot, EcsQuery.TryReadHiddenOrderKey
+  on_violation: a Transient F had no stream and no fallback source: the merge answered nothing, and with a predicate on another field the fallback sorted by
+                EntityKey (#1186). The sort fallback took F's key type from a predicate naming F; with none — filtered on one field, ordered by another — it sorted by
                 EntityKey: silently unordered rows (found by MarketHardeningTests' query auditor, which orders a player's items by their last trade).
                 A not-equal on another field let the merge through untyped, and it answered nothing; one on F was re-checked only on rows written since
                 the last fence, so the excluded rows came back. The fallback read F's whole tree — every entry, whatever the result — at the HEAD's keys

@@ -1976,13 +1976,14 @@
 
 ### DM-01: Wake guarantee — max one-tick latency `[fatal]`
   invariant ∀ cluster C in Sleeping state:
-    SetDirty(C.chunkId, _) → C's own archetype state enqueues C.chunkId on its PendingWakeRequests
+    SetDirty(C.chunkId, _) ∨ WriteSpatial(C.chunkId, _) → C's own archetype state enqueues C.chunkId on its PendingWakeRequests
   invariant each engine drains ONLY its own archetypes' queues (DatabaseEngine.DrainDormancyWakeRequests, over its
     routing table), single-threaded at its tick fence (WriteClusterTickFence, RunParallelFence's serial prep),
     calling ProcessWakeRequest per entry
   never a process-wide wake queue: the DormancyReporter this replaced (2026-09-12) drained every engine's thread-static
     lists into whichever engine fenced first, routed by archetype id into ITS states — waking its own cluster of that
     id, losing the other engine's wake — while other engines' workers were still appending to the lists it read
+  invariant the wake of a `WriteSpatial` is `ArchetypeClusterState.NoteSpatialWrite`'s
   invariant ProcessWakeRequest: Sleeping → WakePending (no-op if already WakePending)
   invariant TransitionWakePendingToActive: WakePending → Active at next tick start
     (BuildTierIndexesAtTickStart, before tier index rebuild)
@@ -2013,6 +2014,16 @@
   scope: ArchetypeClusterState.SleepThresholdTicks (property), DormancySweep
   on_violation: counter wraps to 0 → cluster oscillates between Active and Sleeping every 65536 ticks
     instead of staying asleep
+
+### DM-05: A cluster written this tick does not advance its sleep counter, on any fence branch `[fatal][silent]`
+  invariant a cluster written by any path this tick — a dirty bit, or every `WriteSpatial`, which notes it in the cluster's slot word — has its sleep counter
+    reset, on every fence branch: the sweep takes the word on each of them
+  never decide quiet from the dirty bitmap, or from `ClusterProcessBitmap`: that bitmap names a cluster whose box changed or which flagged a migration, so a
+    move inside the box reads as quiet, and a clear before the sweep hid it from the serial fence altogether. A cluster moved only by `WriteSpatial` slept
+    while moving and froze (#896)
+  scope: ArchetypeClusterState.DormancySweep, ArchetypeClusterState.NoteSpatialWrite, ClusterRef.WriteSpatial
+  verified: DormancyTests.AClusterMovedOnlyByWriteSpatial_DoesNotSleep_OnTheCleanBranch, DormancyTests.AClusterMovedOnlyByWriteSpatial_DoesNotSleep_OnTheDirtyBranch,
+    DormancyTests.AMoveInsideTheClusterBox_DoesNotSleep [VerifiesRule]; DormancyTests.WriteSpatial_WakesASleepingCluster for DM-01
 
 ### DM-04: Every fence sweeps; dormancy — of a cluster or of a realm — freezes elective work only, never mandatory work `[fatal][silent]`
   invariant every fence of an archetype with dormancy enabled runs DormancySweep, on every branch — the clean-spatial branch (path 1, nothing

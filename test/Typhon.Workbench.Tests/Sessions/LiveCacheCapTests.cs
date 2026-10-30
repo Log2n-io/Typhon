@@ -224,7 +224,8 @@ public sealed class LiveCacheCapTests
             IReadOnlyList<ChunkManifestEntry> chunkManifest, IReadOnlyDictionary<int, string> spanNames, ReadOnlySpan<byte> sourceMetadataBytes,
             in CacheHeader headerTemplate, IReadOnlyList<SystemTickSummary> systemTickSummaries, IReadOnlyList<QueueTickSummary> queueTickSummaries,
             IReadOnlyList<PostTickSummary> postTickSummaries, IReadOnlyDictionary<ushort, string> queueIdToName,
-            IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches, IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns) =>
+            IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches, IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns,
+            IReadOnlyList<ThreadTableEntry> threads) =>
             throw new NotSupportedException("a live sink has no trailer");
 
         public void Dispose() { }

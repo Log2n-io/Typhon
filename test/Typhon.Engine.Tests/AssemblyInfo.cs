@@ -13,3 +13,6 @@ using NUnit.Framework;
 // [NonParallelizable]; 4 workers stay robust and capture ~17% of the wall-clock 8 would give without the tick-timing fragility. The JIT warmup fixture
 // (AssemblyWarmup.cs) pre-compiles hot code paths before parallel execution begins.
 [assembly: LevelOfParallelism(4)]
+
+// A latch left held follows its worker thread into the next test, and fails that one for a reason it cannot show (#1510).
+[assembly: Typhon.Engine.Tests.NoLatchLeftHeld]

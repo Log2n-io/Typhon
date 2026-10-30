@@ -2485,7 +2485,8 @@ public unsafe partial class Transaction : EntityAccessor
         var firstChunkId = compRevInfo.CompRevTableFirstChunkId;
 
         var compRev = new ComponentRevision(info, ref compRevInfo, firstChunkId, ref compRevTableAccessor, UowId);
-        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex);
+        var wcWalk = ComposeWaitContext(ref context.Ctx, TimeoutOptions.Current.RevisionChainLockTimeout);
+        var elementHandle = compRev.GetRevisionElement(compRevInfo.CurRevisionIndex, ref wcWalk);
 
         // Validate CurRevisionIndex — chain compaction may have shifted entry positions since our read
         if (elementHandle.Element.ComponentChunkId != compRevInfo.CurCompContentChunkId)
@@ -2494,7 +2495,7 @@ public unsafe partial class Transaction : EntityAccessor
             if (fixedIndex >= 0)
             {
                 compRevInfo.CurRevisionIndex = fixedIndex;
-                elementHandle = compRev.GetRevisionElement(fixedIndex);
+                elementHandle = compRev.GetRevisionElement(fixedIndex, ref wcWalk);
             }
         }
 
