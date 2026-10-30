@@ -40,12 +40,8 @@ namespace Typhon.Engine.Internals
     {
         private Accessor _cached;
 
-        [AllowCopy]
         public Accessor Create() => default;
 
-        public Accessor Getter() => default;
-
-        [AllowCopy]
         public ref Accessor Rent() => ref _cached;
 
         public Accessor Field;
@@ -104,16 +100,62 @@ internal static class Caller
         Assert.That(d.Select(x => x.Id), Is.EqualTo(new[] { NoCopyAnalyzer.CopyDiagnosticId }));
     }
 
+    /// <summary>
+    /// A getter's copy is reported where it is made — at its own return — and not again at the call: a call site cannot tell a getter from a factory,
+    /// and need not, since every by-value copy of live state is a return that TYPHON003 sees. This replaced <c>[AllowCopy]</c> on every factory.
+    /// </summary>
     [Test]
-    public async Task GetterWithoutAllowCopy_Fires()
+    public async Task AGetterCopyingAField_IsReportedAtItsReturn_NotAtItsCall()
     {
-        var d = await RunAnalyzerAsync(Wrap("public static int M(Segment s) { var a = s.Getter(); return a.State; }"));
+        var d = await RunAnalyzerAsync(Wrap(@"
+private static Accessor _live;
+public static Accessor Getter() => _live;
+public static int M() { var a = Getter(); return a.State; }"));
+        Assert.Multiple(() =>
+        {
+            Assert.That(d.Select(x => x.Id), Is.EqualTo(new[] { NoCopyAnalyzer.CopyDiagnosticId }));
+            Assert.That(d[0].GetMessage(), Does.Contain("'_live'"), "the copy is the getter's return of the field");
+        });
+    }
+
+    /// <summary>
+    /// A member declared to return a type parameter — <c>Nullable&lt;T&gt;.Value</c>, a generic <c>T Get&lt;T&gt;()</c> — is still reported at the call: its
+    /// body returns a <c>T</c>, which no rule can tell is a no-copy type, so the call is the only place its copy can be seen.
+    /// </summary>
+    [TestCase("var a = n.Value;", TestName = "NullableValue_Fires")]
+    [TestCase("var a = Pick<Accessor>(k);", TestName = "GenericReturn_Fires")]
+    public async Task AMemberDeclaredToReturnATypeParameter_IsReportedAtTheCall(string statement)
+    {
+        var d = await RunAnalyzerAsync(Wrap($@"
+private static T Pick<T>(int k) => default;
+public static int M(System.Nullable<Accessor> n, int k) {{ {statement} return a.State; }}"));
         Assert.That(d.Select(x => x.Id), Is.EqualTo(new[] { NoCopyAnalyzer.CopyDiagnosticId }));
     }
 
-    /// <summary>A factory marked <c>[AllowCopy]</c> produces a fresh value, through <c>?.</c> and <c>??</c> as directly.</summary>
+    /// <summary>
+    /// <c>GetEnumerator() =&gt; this</c> is a real copy of a live value, safe only because <c>foreach</c> consumes it: what <c>[AllowCopy]</c> is for now.
+    /// </summary>
+    [TestCase("", ExpectedResult = 1, TestName = "SelfCopy_Unmarked_Fires")]
+    [TestCase("[AllowCopy]", ExpectedResult = 0, TestName = "SelfCopy_MarkedAllowCopy_DoesNotFire")]
+    public async Task<int> ASelfCopy_NeedsAllowCopy(string marker)
+    {
+        var d = await RunAnalyzerAsync(@"
+using Typhon.Engine.Internals;
+
+[NoCopy]
+internal struct Walker
+{
+    public int Position;
+    " + marker + @"
+    public Walker GetEnumerator() => this;
+}
+");
+        return d.Count(x => x.Id == NoCopyAnalyzer.CopyDiagnosticId);
+    }
+
+    /// <summary>A by-value factory produces a fresh value, through <c>?.</c> and <c>??</c> as directly — no attribute needed.</summary>
     [Test]
-    public async Task AllowCopyFactory_DirectConditionalAndCoalesced_DoesNotFire()
+    public async Task AFactory_DirectConditionalAndCoalesced_DoesNotFire()
     {
         var d = await RunAnalyzerAsync(Wrap(@"
 public static int M(Segment s)
@@ -126,10 +168,9 @@ public static int M(Segment s)
         Assert.That(d, Is.Empty);
     }
 
-    [TestCase("var a = s?.Getter() ?? default;", TestName = "CoalesceOverAGetter_Fires")]
     [TestCase("var a = s?.Field ?? default;", TestName = "ConditionalFieldRead_Fires")]
     [TestCase("var a = s?.Create() ?? l;", TestName = "CoalesceOntoALocal_Fires")]
-    [TestCase("var a = s.Rent();", TestName = "RefReturningAllowCopyIntoAValueLocal_Fires")]
+    [TestCase("var a = s.Rent();", TestName = "RefReturningIntoAValueLocal_Fires")]
     [TestCase("var a = k switch { 0 => s.Create(), _ => l };", TestName = "SwitchWithALocalArm_Fires")]
     public async Task CopyShape_Fires(string statement)
     {
@@ -137,7 +178,7 @@ public static int M(Segment s)
         Assert.That(d.Select(x => x.Id), Is.EqualTo(new[] { NoCopyAnalyzer.CopyDiagnosticId }));
     }
 
-    [TestCase("ref var a = ref s.Rent();", TestName = "RefReturningAllowCopyIntoARefLocal_DoesNotFire")]
+    [TestCase("ref var a = ref s.Rent();", TestName = "RefReturningIntoARefLocal_DoesNotFire")]
     [TestCase("var a = k switch { 0 => s.Create(), _ => default };", TestName = "SwitchOfFactories_DoesNotFire")]
     public async Task FreshOrRefShape_DoesNotFire(string statement)
     {

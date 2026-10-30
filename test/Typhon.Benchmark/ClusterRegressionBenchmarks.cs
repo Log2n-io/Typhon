@@ -188,7 +188,6 @@ public class ClusterRegressionBenchmarks : IDisposable
                 sum += (int)positions[idx].X;
             }
         }
-        accessor.Dispose();
         return sum;
     }
 
@@ -214,7 +213,6 @@ public class ClusterRegressionBenchmarks : IDisposable
                 sum += (int)positions[idx].X + healths[idx].Current;
             }
         }
-        accessor.Dispose();
         return sum;
     }
 
@@ -233,7 +231,6 @@ public class ClusterRegressionBenchmarks : IDisposable
             var entity = accessor.Open(_randomAccessIds[i]);
             sum += entity.Read(AaBenchMixedCluster.Health).Current;
         }
-        accessor.Dispose();
         return sum;
     }
 
@@ -302,7 +299,6 @@ public class ClusterRegressionBenchmarks : IDisposable
             h.Current -= 1;
             entity.Set(AaBenchMixedCluster.Health, h);
         }
-        accessor.Dispose();
         tx.Commit();
         return _randomAccessIds.Length;
     }
@@ -328,7 +324,6 @@ public class ClusterRegressionBenchmarks : IDisposable
             r.Score++;
             entity.Set(AaBenchIdxVersionedCluster.Ranked, r);
         }
-        accessor.Dispose();
         tx.Commit();
         return _idxVersionedIds.Length;
     }
@@ -345,7 +340,6 @@ public class ClusterRegressionBenchmarks : IDisposable
             r.Score++;
             entity.Set(AaBenchIdxVersionedCluster.Ranked, r);                   // Tier untouched — the guard must make this free of index work
         }
-        accessor.Dispose();
         tx.Commit();
         return _idxVersionedIds.Length;
     }

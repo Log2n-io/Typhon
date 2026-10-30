@@ -69,6 +69,11 @@ internal sealed class PlayerThinkSystem : QuerySystem
 
         // Whether a player is down, so a downed body is left lying.
         .Reads<PlayerVitals>()
+
+        // A fighter's objective: the lairs standing at a point of interest (lair-objectives.md).
+        .Reads<Lair>()
+        .Reads<LairPlacement>()
+        .Reads<LairVitals>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
 
@@ -119,6 +124,11 @@ internal sealed class LairLifeSystem : CallbackSystem
 
         // Read, not consumed: a consumer is skipped on a tick with no corpse, and the pass must run on those too (TatooineSim.BuildSchedule).
         .ReadsEvents(_bridge.CorpseQueue)
+
+        // The census counts the players near each point of interest (lair-objectives.md L-1), and who drives them, where (GET /swg/stats).
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerControl>()
+        .Reads<PlayerLook>()
         .Writes<Lair>()
         .Writes<LairPlacement>()
         .Writes<LairVitals>()
@@ -376,6 +386,12 @@ internal sealed class PlayerCombatSystem : QuerySystem
         .Reads<LairPlacement>()
         .Reads<LairVitals>()
         .Reads<Lair>()
+
+        // The shooter's level, carried on its blow for the drain's level factor (character-level.md § 6).
+        .Reads<PlayerLook>()
+        // A creature's level, which a scripted body must not fight above (content-levels.md § 5): its lair's, through its home — not its brain's, which
+        // CreatureCombat writes in this phase.
+        .Reads<CreatureHome>()
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.PlayerCombatTick(ctx);
@@ -414,6 +430,14 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Writes<LairVitals>()
         .Writes<Lair>()
         .Reads<CreatureHome>()
+        // A death's KillEvent carries where and in which realm it happened (character-level.md § 2).
+        .Reads<CreaturePlacement>()
+        .Reads<CreatureRealm>()
+        .Reads<LairPlacement>()
+        .Reads<LairRealm>()
+
+        // The level a blow lands on, for the level factor (character-level.md § 6).
+        .Reads<PlayerLook>()
 
         // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
         .Writes<PlayerVitals>()
@@ -421,13 +445,12 @@ internal sealed class CombatResolveSystem : CallbackSystem
         .Writes<PlayerMotion>()
         .Writes<PlayerSession>()
         .Writes<PlayerPlacement>()
+
+        // A fight-back ends the lair objective the body had (lair-objectives.md).
+        .Writes<PlayerRoute>()
         .Reads<PlayerRealm>()
 
-        // A possessed player is never sent on a mission by the server (SWG-01): two deciders on one entity is the bug that field exists to prevent.
-        .Reads<PlayerControl>()
-
-        // The world's one Versioned component, and the reason this tick has anything to flush.
-        .Writes<Inventory>();
+        .Reads<PlayerControl>();
 
     protected override void Execute(TickContext ctx) => _bridge.CombatResolveTick(ctx);
 }
@@ -436,11 +459,12 @@ internal sealed class CombatResolveSystem : CallbackSystem
 /// The mission desk (<c>SimBridge.Missions.cs</c>; missions.md § 3): terminals' offers, takes and cancels, held missions and the lairs drawn for them.
 /// </summary>
 /// <remarks>
-/// <para><b>Serial</b>, because the race between two takers is settled by its order, and because it spawns and destroys — offers, held missions, lairs and
-/// their creatures — through a side transaction, as the lair director does. <b>After the lair director</b>, in the same phase: both write lairs, and a
+/// <para><b>Serial</b>, because the race between two takers is settled by its order, and because it spawns and destroys offers and held missions, and
+/// reserves wild lairs, through a side transaction, as the lair director does. <b>After the lair director</b>, in the same phase: both write lairs, and a
 /// mission's lair broken this tick (<c>CombatResolve</c>, Apply) is then seen by the desk the same tick.</para>
-/// <para><b>Its writes to a body go through the tick's transaction</b>: the reward into the Versioned <see cref="Inventory"/> that <c>CombatResolve</c> has
-/// already written this tick, the journal's revision, and a scripted body sent to its lair.</para>
+/// <para><b>Its writes to a body go through the tick's transaction</b>: the journal's revision, the completed count and the wallet's revision. <b>A reward is
+/// paid in its own transaction</b>, the one that ends the mission (<c>SimBridge.Economy.cs</c>, <c>Reward</c>), so it writes wallets and the ledger too —
+/// before the <see cref="LedgerSystem"/>, by an edge.</para>
 /// </remarks>
 internal sealed class MissionDeskSystem : CallbackSystem
 {
@@ -453,15 +477,13 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Phase(SimPhases.Economy)
         .After("LairLife")
 
-        // Read, not consumed, for the lair director's reason: the takes and the pass run on a tick the crowd asked for nothing.
-        .ReadsEvents(_bridge.MissionAskQueue)
         .Writes<MissionOfferPlacement>()
         .Writes<MissionOfferInfo>()
         .Writes<MissionOfferRegion>()
         .Writes<MissionOfferRealm>()
         .Writes<HeldMission>()
 
-        // A mission's lair and its occupants, spawned and destroyed like the lair director's.
+        // A wild lair reserved and released (Lair.Mission); a mission lair of a world from before is destroyed at load, its occupants with it.
         .Writes<Lair>()
         .Writes<LairPlacement>()
         .Writes<LairVitals>()
@@ -474,19 +496,188 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Writes<CreatureRealm>()
         .Writes<CreatureHome>()
 
-        // The body: whether it is down, where it stands, who drives it; its reward, its journal, and the crowd's walk to its lair.
+        // A completed mission's reward, paid with its end, and its lair's cache minted with it (inventory-loot.md § 3.4).
+        .Writes<Wallet>()
+        .Writes<LedgerEntry>()
+        .Writes<LedgerHead>()
+        .Writes<ItemStack>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+
+        // The body: whether it is down, where it stands; its journal and its completed count. A mission's XP reaches it through Progression.
         .Reads<PlayerPlacement>()
         .Reads<PlayerVitals>()
         .Reads<PlayerRealm>()
-        .Reads<PlayerControl>()
         .Writes<PlayerState>()
-        .Writes<PlayerMotion>()
-        .Writes<Inventory>()
+        .Reads<PlayerLook>()
 
-        // Whether an offline holder's character still exists.
-        .Reads<Character>();
+        // Whether an offline holder's character still exists; a completed mission's XP, granted with its reward (character-level.md § 5).
+        .Reads<Character>()
+        .Writes<CharacterProgress>();
 
     protected override void Execute(TickContext ctx) => _bridge.MissionDeskTick(ctx);
+}
+
+/// <summary>
+/// Character level and XP (<c>SimBridge.Progression.cs</c>; character-level.md § 4): every kill the combat drain pushed, paid to its killer's character; the
+/// bodies of those who gained brought up to their level.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, in <see cref="SimPhases.Report"/></b>, after the whole Economy phase: the lair director reads <see cref="PlayerLook"/> there, and a writer of
+/// it in that phase would have to run before it; here the order is the phases'. The XP goes through a side transaction, the bodies through the tick's.</para>
+/// <para><b>A consumer of two queues</b> (<c>TatooineSim.BuildSchedule</c>): the kills, and the bodies the mission desk paid XP to, which it refreshes for
+/// the desk. Skipped on a tick both are empty (ReactiveSkip): it has no other work.</para>
+/// </remarks>
+internal sealed class ProgressionSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public ProgressionSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Progression")
+        .Phase(SimPhases.Report)
+        .Writes<CharacterProgress>()
+        .Reads<Character>()
+
+        // Who holds a mission whose lair was broken: a stranger's break is a lair kill (IsStranger).
+        .Reads<HeldMission>()
+        .Writes<PlayerLook>()
+        .Writes<PlayerVitals>();
+
+    protected override void Execute(TickContext ctx) => _bridge.ProgressionTick(ctx);
+}
+
+/// <summary>
+/// The economy (<c>SimBridge.Economy.cs</c>; economy-foundation.md): every movement of credits, applied in order, each with its ledger row.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, and one of the two writers of <see cref="Wallet"/>, <see cref="LedgerEntry"/> and <see cref="LedgerHead"/></b>, the mission desk being the
+/// other: conservation comes from order — one code path, two serial systems ordered by an edge — never from concurrent transactions (economy-build § 1).
+/// <b>After the mission desk</b>, whose rewards are committed by then.</para>
+/// <para>The balances, the head and the rows go through a side transaction, committed once per tick; the wallet revision of each body whose wallet moved
+/// through the tick's own, after that commit.</para>
+/// </remarks>
+internal sealed class LedgerSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public LedgerSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Ledger")
+        .Phase(SimPhases.Economy)
+        .After("Missions")
+        .Writes<Wallet>()
+        .Writes<LedgerEntry>()
+        .Writes<LedgerHead>()
+
+        // A tip is given between two bodies standing together, and lands as a revision on each.
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+        .Writes<PlayerState>()
+
+        // A wallet is opened only for a character committed already.
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.LedgerTick(ctx);
+}
+
+/// <summary>
+/// Loot (<c>SimBridge.Loot.cs</c>; inventory-loot.md § 3.4): every kill this tick drops into its killer's inventory, through <c>ItemTransfer</c>.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, and one of the two writers of <see cref="ItemStack"/>, <see cref="ItemLedgerEntry"/> and <see cref="ItemLedgerHead"/></b>, the mission
+/// desk being the other: conservation comes from order. <b>After the <c>Ledger</c></b>, which is after the desk: a wallet it opened this tick is visible, and
+/// both write <see cref="PlayerState"/>.</para>
+/// <para><b>The only reader of <c>KillLootQueue</c>, by <c>ReadsEvents</c> rather than a declared consumer</b>: a consumer is skipped on every tick its queue
+/// is empty, and the checks' <c>StageKill</c> must reach it on a tick without a fight. An empty tick costs it one early return.</para>
+/// </remarks>
+internal sealed class LootSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public LootSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Loot")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Missions", "Ledger")
+        .ReadsEvents(_bridge.KillLootQueue)
+        .Writes<ItemStack>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+
+        // Whether the killer stands within reach and in the victim's realm, and has a wallet; its items revision.
+        .ReadsFresh<Wallet>()
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+        .Writes<PlayerState>()
+        .Reads<Character>()
+
+        // Who holds a mission whose lair was broken (IsStranger): after the desk, which writes them in this phase.
+        .ReadsFresh<HeldMission>();
+
+    protected override void Execute(TickContext ctx) => _bridge.LootTick(ctx);
+}
+
+/// <summary>
+/// The market desk (<c>SimBridge.Market.cs</c>; bazaar.md § 3): every list, cancel, buy, collect and vendor sale, in arrival order, and the listings' expiry.
+/// </summary>
+/// <remarks>
+/// <para><b>Serial, and the third writer of credits and items</b>: one chain <c>Missions → Ledger → Loot → Market</c> orders every pair of writers, and the
+/// one buyer of a listing comes from that order, never from optimistic commits (economy-build § 1, rule 1). <b>The only writer of <see cref="Listing"/></b>.
+/// </para>
+/// <para>Its writes go through a side transaction, committed once per tick with work; the items and wallet revisions of the bodies it moved through the
+/// tick's own, after that commit. It reads no <see cref="CharacterProgress"/>: a price never depends on the buyer (B12).</para>
+/// </remarks>
+internal sealed class MarketSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public MarketSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Market")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Missions", "Ledger", "Loot")
+        .Writes<Listing>()
+
+        // Through its side transaction, as the desk's and the Ledger's — but declared a side write, which does not order: Loot reads wallets fresh (after
+        // every same-phase writer of them) and runs before this, so a Writes here would close a cycle. The order is the explicit chain above.
+        .SideWrites<Wallet>()
+        .Writes<LedgerEntry>()
+        .Writes<LedgerHead>()
+        .Writes<ItemStack>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+
+        // Where the trader stands, and its items and wallet revisions; the seller's name, read once at listing.
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+        .Writes<PlayerState>()
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.MarketTick(ctx);
+}
+
+/// <summary>
+/// The notices of the tick's moves of credits and items, told to the players they concern (<c>SimBridge.Notices.cs</c>, <see cref="PlayerNotice"/>).
+/// </summary>
+/// <remarks>Serial, after every system that writes a ledger row; it reads the other side's name and writes nothing.</remarks>
+internal sealed class NoticesSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public NoticesSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Notices")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Missions", "Ledger", "Loot", "Market")
+        .Reads<Character>();
+
+    protected override void Execute(TickContext ctx) => _bridge.NoticesTick(ctx);
 }
 
 /// <summary>
@@ -717,12 +908,12 @@ internal sealed class PlayerSessionSystem : CallbackSystem
         .Writes<PlayerVitals>()
         .Writes<PlayerSession>()
         .Writes<PlayerRealm>()
-        .Writes<Inventory>()
         .Writes<PlayerLook>()
 
         // A6 saves the avatar's position onto its character, and a first login creates the character, both on this tick — dressed in the outfit its
         // account chose at sign-up.
         .Writes<Character>()
+        .Writes<CharacterProgress>()
         .Reads<Account>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
@@ -752,8 +943,7 @@ internal sealed class StagedWriteSystem : CallbackSystem
         .Writes<PlayerVitals>()
         .Writes<PlayerSession>()
         .Writes<PlayerRealm>()
-        .Writes<PlayerProximity>()
-        .Writes<Inventory>();
+        .Writes<PlayerProximity>();
 
     protected override void Execute(TickContext ctx) => _staged.Drain(ctx);
 }

@@ -69,20 +69,57 @@ public sealed class BotBrainChecks
         Assert.Multiple(() =>
         {
             Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "a creature in view did not become a hunt");
-            Assert.That(approach.Kind, Is.EqualTo(IntentKind.Move), "a creature 50 m away was attacked rather than approached");
+            Assert.That(approach.Kind, Is.EqualTo(IntentKind.Attack), "a creature 50 m away was not named while closing in");
+            Assert.That(approach.SpeedClass, Is.EqualTo(Routing.SpeedClassOf(TravelMode.Run)), "a creature 50 m away was not run at");
 
             // The server's convention: 0 along +X, measured toward +Z, so the arguments to Atan2 are (dz, dx).
             Assert.That(approach.Heading, Is.EqualTo(MathF.Atan2(40f, 30f)).Within(0.001f), "the heading does not point at the creature");
             Assert.That(approach.Heading, Is.EqualTo(0.9273f).Within(0.001f), "the heading is not the angle a 3-4-5 triangle makes");
         });
 
-        var close = Empty(0f, 90f) with { NearestCreature = 99u, NearestCreatureX = 0f, NearestCreatureZ = 100f, NearestCreatureM = 10f };
+        var close = Empty(0f, 85f) with { NearestCreature = 99u, NearestCreatureX = 0f, NearestCreatureZ = 100f, NearestCreatureM = 15f };
         var attack = brain.Decide(in close, 2);
 
         Assert.Multiple(() =>
         {
             Assert.That(attack.Kind, Is.EqualTo(IntentKind.Attack), "a creature within reach was not attacked");
             Assert.That(attack.NetId, Is.EqualTo(99u), "the wrong entity was named");
+            Assert.That(attack.SpeedClass, Is.EqualTo((byte)0), "a bot in reach of a creature did not stand to shoot");
+        });
+    }
+
+    /// <summary>
+    /// A bot fights at range (Loïc, 2026-10-26: "they should kite"): it closes in past <see cref="BotBrain.StrikeM"/>, stands and shoots between that
+    /// and <see cref="BotBrain.KiteM"/>, and runs from a creature that comes nearer, still shooting; a lair, which neither moves nor bites, it stands at.
+    /// </summary>
+    [Test]
+    public void ABotKitesACreature_AndStandsAtALair()
+    {
+        var run = Routing.SpeedClassOf(TravelMode.Run);
+
+        // A 3-4-5 triangle again, so a mirrored or negated heading cannot pass: the target 3 east and 4 north of the bot, scaled.
+        var toward = BotBrain.Engage(0f, 0f, 7u, 18f, 24f, 30f, mobile: true);
+        var stand = BotBrain.Engage(0f, 0f, 7u, 9f, 12f, 15f, mobile: true);
+        var away = BotBrain.Engage(0f, 0f, 7u, 3f, 4f, 5f, mobile: true);
+        var lairNear = BotBrain.Engage(0f, 0f, 8u, 3f, 4f, 5f, mobile: false);
+        var lairFar = BotBrain.Engage(0f, 0f, 8u, 18f, 24f, 30f, mobile: false);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(toward.Kind, Is.EqualTo(IntentKind.Attack));
+            Assert.That(toward.NetId, Is.EqualTo(7u), "closing in did not name the target");
+            Assert.That(toward.SpeedClass, Is.EqualTo(run), "a target past strike range was not run at");
+            Assert.That(toward.Heading, Is.EqualTo(MathF.Atan2(4f, 3f)).Within(0.001f), "closing in did not head for the target");
+
+            Assert.That(stand.SpeedClass, Is.EqualTo((byte)0), "a creature between kite and strike range was not stood and shot at");
+            Assert.That(stand.NetId, Is.EqualTo(7u));
+
+            Assert.That(away.SpeedClass, Is.EqualTo(run), "a creature inside kite range was not run from");
+            Assert.That(away.Heading, Is.EqualTo(MathF.Atan2(-4f, -3f)).Within(0.001f), "kiting did not head straight away from the creature");
+            Assert.That(away.NetId, Is.EqualTo(7u), "kiting let go of the target");
+
+            Assert.That(lairNear.SpeedClass, Is.EqualTo((byte)0), "a bot ran from a lair, which does not bite");
+            Assert.That(lairFar.SpeedClass, Is.EqualTo(run), "a lair past strike range was not closed on");
         });
     }
 
@@ -434,6 +471,216 @@ public sealed class BotBrainChecks
     [Test]
     public void ABrainWithNoCitiesIsRefused()
         => Assert.That(() => new BotBrain([], 7u), Throws.TypeOf<ArgumentException>(), "an empty map was accepted and would divide by zero on the first roll");
+
+    // ── Missions (lair-objectives.md B-3, B-4) ──────────────────────────────────────────────────────────────────────
+
+    private static Perceived Holding(float x, float z, float lairX, float lairZ) => Empty(x, z) with
+    {
+        MissionsHeld = 1,
+        HasMissionLair = true,
+        MissionLairX = lairX,
+        MissionLairZ = lairZ,
+    };
+
+    /// <summary>
+    /// Content levels (review 1, CL-13): a mission's defenders are fought whatever their level — a CL-1 bot at a lair of level 30 attacks the defender in
+    /// reach, where it would not HUNT that creature met in the open. Filtering them out of sight left a bot idle at its shielded lair for ten minutes.
+    /// </summary>
+    [Test]
+    public void AMissionsDefenders_AreFought_AboveTheBotsLevel()
+    {
+        var brain = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 1 };
+        var shielded = Holding(580f, 790f, 600f, 800f) with
+        {
+            MissionLair = 77u,
+            MissionLairGuards = 2,
+            NearestCreature = 31u,
+            NearestCreatureX = 584f,
+            NearestCreatureZ = 793f,
+            NearestCreatureM = 5f,
+            NearestCreatureLevel = 30,
+        };
+        var atDefender = brain.Decide(in shielded, 10);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Questing));
+            Assert.That(atDefender.Kind, Is.EqualTo(IntentKind.Attack), "a defender above the bot's level was not attacked");
+            Assert.That(atDefender.NetId, Is.EqualTo(31u));
+        });
+
+        // The same creature met with no mission held is not hunted.
+        var wild = new BotBrain(BotMap.Cities, 7u) { CombatLevel = 1 };
+        var open = Empty(580f, 790f) with
+        {
+            NearestCreature = 31u,
+            NearestCreatureX = 584f,
+            NearestCreatureZ = 793f,
+            NearestCreatureM = 5f,
+            NearestCreatureLevel = 30,
+        };
+        wild.Decide(in open, 10);
+        Assert.That(wild.Goal, Is.Not.EqualTo(Goal.Hunting), "a CL-1 bot hunts a level-30 creature");
+    }
+
+    /// <summary>B-3: a mission held is ridden out to — on the swoop, straight at its lair — then fought: its defenders first, the lair once they are down.</summary>
+    [Test]
+    public void AMissionsLairIsRiddenTo_ItsDefendersKilled_ThenTheLairAttacked()
+    {
+        var brain = Brain();
+
+        // 600 m east and 800 m north: a 3-4-5 triangle, so the heading is one angle only.
+        var far = Holding(0f, 0f, 600f, 800f);
+        var first = brain.Decide(in far, 1);
+        var mount = brain.Decide(in far, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Questing), "a mission held with its lair placed did not become the goal");
+            Assert.That(first.Kind, Is.EqualTo(IntentKind.Move));
+            Assert.That(first.Heading, Is.EqualTo(MathF.Atan2(800f, 600f)).Within(0.001f), "it does not head for the lair");
+            Assert.That(mount.Kind, Is.EqualTo(IntentKind.Mount), "a kilometre's ride was not ridden on the swoop");
+            Assert.That(mount.On, Is.True);
+        });
+
+        // There — still on the swoop it rode in on, which it leaves on the next tick — a defender 15 m away and 20 m from the lair: it is shot, the lair is
+        // not yet (its guards stand).
+        var shielded = Holding(580f, 790f, 600f, 800f) with
+        {
+            Mounted = true,
+            MissionLair = 77u,
+            MissionLairGuards = 2,
+            NearestCreature = 31u,
+            NearestCreatureX = 590f,
+            NearestCreatureZ = 801f,
+            NearestCreatureM = 15f,
+        };
+        var atDefender = brain.Decide(in shielded, 10);
+
+        // The guards down: the lair.
+        var open = Holding(590f, 795f, 600f, 800f) with { MissionLair = 77u, MissionLairGuards = 0 };
+        var atLair = brain.Decide(in open, 11);
+        Assert.Multiple(() =>
+        {
+            Assert.That(atDefender.Kind, Is.EqualTo(IntentKind.Attack), "a defender in reach was not attacked");
+            Assert.That(atDefender.NetId, Is.EqualTo(31u), "it fired at the shielded lair, not its defender");
+            Assert.That(atLair.Kind, Is.EqualTo(IntentKind.Attack));
+            Assert.That(atLair.NetId, Is.EqualTo(77u), "the lair, open now, was not attacked");
+        });
+
+        // Paid: the journal lists nothing, and the mission is over.
+        brain.Decide(Empty(590f, 795f), 12);
+        Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Questing), "a mission the journal no longer lists is still being done");
+    }
+
+    /// <summary>B-4: a mission not done in <see cref="BotBrain.QuestSeconds"/> is cancelled, once.</summary>
+    [Test]
+    public void AMissionNotDoneInTenMinutesIsCancelled()
+    {
+        var brain = Brain();
+        var stuck = Holding(0f, 0f, 30f, 0f) with { MissionLair = 5u, MissionLairGuards = 3 };
+        var limit = (long)(BotBrain.QuestSeconds * 4) + 2;
+        var cancels = 0;
+        for (var tick = 1L; tick <= limit + 8; tick++)
+        {
+            cancels += brain.Decide(in stuck, tick).Kind == IntentKind.AbandonMission ? 1 : 0;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(cancels, Is.EqualTo(1), "a mission past its time was not cancelled exactly once");
+            Assert.That(brain.MissionsGivenUp, Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// B-2: the journal's answer read — the first mission and its lair (null while drawn), its id for a cancel — and the first read only learns what was
+    /// already there, so a run's counts are its own.
+    /// </summary>
+    [Test]
+    public void TheJournal_IsRead_AndItsFirstReadCountsNothing()
+    {
+        var seen = new HashSet<string>();
+        var done = new HashSet<string>();
+        const string First = "{\"missions\":[{\"id\":\"9007199254740993\",\"lair\":{\"x\":12.5,\"z\":-40}}],\"completed\":[{\"id\":\"5\"}]}";
+        var first = SwgTatooine.Bots.MissionView.Parse(First, seen, done, count: false, out var taken0, out var completed0);
+        const string Second = "{\"missions\":[{\"id\":\"9007199254740993\",\"lair\":null},{\"id\":\"8\",\"lair\":null}],"
+            + "\"completed\":[{\"id\":\"5\"},{\"id\":\"6\"}]}";
+        var second = SwgTatooine.Bots.MissionView.Parse(Second, seen, done, count: true, out var taken1, out var completed1);
+        var none = SwgTatooine.Bots.MissionView.Parse("{\"missions\":[],\"completed\":[]}", seen, done, count: true, out _, out _);
+        Assert.Multiple(() =>
+        {
+            Assert.That(first, Is.EqualTo(new SwgTatooine.Bots.MissionView(1, true, 12.5f, -40f, 9007199254740993UL)), "a 64-bit id lost precision, or the lair");
+            Assert.That((taken0, completed0), Is.EqualTo((0, 0)), "the first read counted what was already there");
+            Assert.That(second.Held, Is.EqualTo(2));
+            Assert.That(second.LairKnown, Is.False, "a lair being drawn was given a position");
+            Assert.That((taken1, completed1), Is.EqualTo((1, 1)), "only the new mission and the new completion count");
+            Assert.That(none, Is.EqualTo(SwgTatooine.Bots.MissionView.None));
+        });
+    }
+
+    /// <summary>A bot that lives in a city and stands outside it goes back to it.</summary>
+    [Test]
+    public void AHomeBotAwayFromHome_GoesHome()
+    {
+        var home = BotMap.Cities[0];
+        var away = BotMap.Cities[1];
+        var brain = new BotBrain(BotMap.Cities, 7u, 4d, null, homeRegion: 1);
+        brain.Decide(Empty(away.X, away.Z), 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Travelling), "a bot away from home did not set off");
+            Assert.That(brain.TargetRegion, Is.EqualTo(1), $"it set off for region {brain.TargetRegion}, not {home.Name}");
+        });
+    }
+
+    /// <summary>A bot at home stays: over thousands of decisions it never sets off for another city, by any mode.</summary>
+    [Test]
+    public void AHomeBotAtHome_NeverLeavesForAnotherCity()
+    {
+        var home = BotMap.Cities[0];
+        foreach (var seed in new[] { 1u, 7u, 99u, 12345u })
+        {
+            var brain = new BotBrain(BotMap.Cities, seed, 4d, null, homeRegion: 1);
+            for (var tick = 1L; tick < 20_000; tick++)
+            {
+                brain.Decide(Empty(home.X + 20f, home.Z - 30f), tick);
+                Assert.That(brain.TargetRegion is 0 or 1, Is.True, $"seed {seed}, tick {tick}: it set off for region {brain.TargetRegion}");
+                Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Waiting), $"seed {seed}: it queued for a shuttle");
+            }
+        }
+    }
+
+    /// <summary>Half the bots live in the home city, never more than its cap; none when the city is unknown.</summary>
+    [TestCase(500, 250)]
+    [TestCase(8000, 500)]
+    [TestCase(30, 15)]
+    [TestCase(1, 0)]
+    public void HalfTheBots_LiveInPortSable_UpToFiveHundred(int count, int expected)
+    {
+        var options = new SwgTatooine.Bots.BotSwarmOptions { Count = count };
+        Assert.Multiple(() =>
+        {
+            Assert.That(options.HomeRegion, Is.EqualTo(1), "Port Sable is not the default home");
+            Assert.That(options.HomeBots, Is.EqualTo(expected));
+            Assert.That(new SwgTatooine.Bots.BotSwarmOptions { Count = count, HomeCity = "none" }.HomeBots, Is.Zero);
+        });
+    }
+
+    /// <summary>A lair being drawn or moved — held, no position yet — is waited for, not ridden at a stale point.</summary>
+    [Test]
+    public void ALairBeingMovedIsWaitedFor()
+    {
+        var brain = Brain();
+        brain.Decide(Holding(0f, 0f, 500f, 0f), 1);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Questing), "the premise");
+        var moving = Empty(0f, 0f) with { MissionsHeld = 1, HasMissionLair = false, Mounted = true };
+        var wait = brain.Decide(in moving, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(wait.Kind, Is.EqualTo(IntentKind.Move));
+            Assert.That(wait.SpeedClass, Is.Zero, "it rode on toward where the lair used to be");
+        });
+    }
+
 }
 
 /// <summary>
@@ -590,5 +837,58 @@ public sealed class RoutingChecks
 
         Assert.That(map.TryFind(2, Port, out var port), Is.True);
         Assert.That(port, Is.EqualTo((10f, 20f)), "a second sighting of the same facility replaced the first");
+    }
+
+    /// <summary>
+    /// BM-1: given the server's list, the nearest mission terminal is the nearest that EXISTS — not the port's, which a bot landing there saw first — and
+    /// a bot that has seen nothing knows one. Seeded, a sighting files nothing.
+    /// </summary>
+    /// <remarks>Loïc, 2026-10-26: 2 000 bots crowded the terminal at the city's centre, the only one they had seen, past the ones at its edge.</remarks>
+    [Test]
+    public void ASeededMap_FindsTheNearestTerminalThatExists_NotTheFirstSeen()
+    {
+        const int terminal = Routing.MissionTerminalKind;
+        var listed = new List<ListedFacility>
+        {
+            new(1, terminal, new Facility(0f, 0f, 3, 0)),        // the port's, mid-city
+            new(1, terminal, new Facility(300f, 10f, 3, 1)),     // at the street's end
+            new(2, terminal, new Facility(5000f, 0f, 3, 0)),
+            new(1, Routing.BazaarKind, new Facility(299f, 0f, 4, 0)),
+        };
+
+        var learned = new FacilityMap();
+        learned.Observe(1, terminal, 0f, 0f, 3, 0);
+        var seeded = new FacilityMap();
+        seeded.Observe(1, terminal, 0f, 0f, 3, 0);
+        seeded.Seed(listed);
+        var blind = new FacilityMap();
+        blind.Seed(listed);
+        blind.Observe(3, terminal, 290f, 0f);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(learned.TryNearest(terminal, 280f, 0f, out var first, out _), Is.True, "the premise: looking, it knows the one it saw");
+            Assert.That((first.X, first.Z), Is.EqualTo((0f, 0f)));
+            Assert.That(seeded.TryNearest(terminal, 280f, 0f, out var near, out var region), Is.True);
+            Assert.That((near.X, near.Z, near.Asset, near.Yaw, region), Is.EqualTo((300f, 10f, 2, 1, 1)), "not the nearest terminal that exists");
+            Assert.That(blind.TryNearest(terminal, 280f, 0f, out var unseen, out _), Is.True, "a bot that has seen nothing knows no terminal");
+            Assert.That((unseen.X, unseen.Z), Is.EqualTo((300f, 10f)), "a sighting was filed over the list");
+            Assert.That(blind.Count, Is.EqualTo(listed.Count));
+            Assert.That(new FacilityMap().TryNearest(terminal, 0f, 0f, out _, out _), Is.False, "an empty map answered");
+        });
+    }
+
+    /// <summary>The list as <c>/swg/facilities</c> writes it: planet 0's only, the asset as a slot (absent is 0, never -1).</summary>
+    [Test]
+    public void TheFacilityList_IsReadAsTheServerWritesIt()
+    {
+        var listed = FacilityMap.Parse(
+            "{\"facilities\":[{\"kind\":10,\"region\":2,\"realm\":0,\"x\":1.5,\"z\":-2,\"yaw\":3,\"asset\":4},"
+            + "{\"kind\":2,\"region\":2,\"realm\":0,\"x\":7,\"z\":8,\"yaw\":0},{\"kind\":9,\"region\":1,\"realm\":1,\"x\":0,\"z\":0,\"yaw\":0}]}");
+        Assert.That(listed, Is.EqualTo(new[]
+        {
+            new ListedFacility(2, Routing.MissionTerminalKind, Facility.Of(1.5f, -2f, 4, 3)),
+            new ListedFacility(2, Routing.ShuttleportKind, new Facility(7f, 8f, 0, 0)),
+        }));
     }
 }

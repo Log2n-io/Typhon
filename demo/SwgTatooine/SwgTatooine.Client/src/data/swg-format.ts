@@ -46,6 +46,8 @@ export function formatField(archetype: string, name: string, raw: number): strin
       return STRUCTURE_KIND_NAMES[raw] ?? String(raw);
     case 'target':
       return raw === 0 ? '—' : `#${raw}`;
+    case 'level':
+      return `${raw}`;
     case 'missionId':
       return archetype === 'CreatureLair' && raw > 0 ? `mission, difficulty ${raw}` : 'dormant';
     default:

@@ -755,34 +755,27 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
     {
         const float step = 60f;
         var accessor = tx.For<ClCohUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — the write below goes through WriteSpatial, which is
-                // what keeps ClusterProcessBitmap and ClusterAabbs correct, and therefore what makes the fence see a migration at all.
+            // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — the write below goes through WriteSpatial, which is
+            // what keeps ClusterProcessBitmap and ClusterAabbs correct, and therefore what makes the fence see a migration at all.
 #pragma warning disable TYPHON009
-                var positions = cluster.GetSpan(ClCohUnit.Pos);
+            var positions = cluster.GetSpan(ClCohUnit.Pos);
 #pragma warning restore TYPHON009
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    ref readonly var b = ref positions[slotIndex].Bounds;
-                    float x = b.MinX + step;
-                    if (x >= WorldExtent - 1f)
-                    {
-                        x = 1f;
-                    }
-                    cluster.WriteSpatial(ClCohUnit.Pos, slotIndex, PointAt(x, b.MinY));
+                ref readonly var b = ref positions[slotIndex].Bounds;
+                float x = b.MinX + step;
+                if (x >= WorldExtent - 1f)
+                {
+                    x = 1f;
                 }
+                cluster.WriteSpatial(ClCohUnit.Pos, slotIndex, PointAt(x, b.MinY));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
     }
 
@@ -843,25 +836,18 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClCohUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
-                {
 #pragma warning disable TYPHON009 // Read-only: this is the oracle, it must not mutate anything.
-                    var positions = cluster.GetSpan(ClCohUnit.Pos);
+                var positions = cluster.GetSpan(ClCohUnit.Pos);
 #pragma warning restore TYPHON009
-                    ulong bits = cluster.OccupancyBits;
-                    while (bits != 0)
-                    {
-                        int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        expected.Add(SlotKey(cluster.ChunkId, slotIndex));
-                    }
+                ulong bits = cluster.OccupancyBits;
+                while (bits != 0)
+                {
+                    int slotIndex = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    expected.Add(SlotKey(cluster.ChunkId, slotIndex));
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
         }
 

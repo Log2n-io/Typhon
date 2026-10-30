@@ -1,3 +1,4 @@
+import type { PlayerNotice } from './notices';
 import {
   archetypeOf,
   Capabilities,
@@ -28,7 +29,10 @@ import {
 import { hullInRadiusM } from './replication-stats';
 import { realmViewOf, type RealmView } from './realm-view';
 import { REASON_NOT_SENT } from '../app/travel';
+import { MARKET_ANSWER_MS, marketWire, type MarketCommand } from './market';
 import { MISSION_ANSWER_MS } from './missions';
+import { PendingSeqs } from './pending-seqs';
+import { TIP_ANSWER_MS } from './wallet';
 
 /**
  * Where the client's world comes from. The renderer and the UI only ever see the SDK's store, clock and aggregate grid;
@@ -91,6 +95,11 @@ export interface EventSink {
    * in its own realm. So a quiet view is the routing working, not the feature missing.
    */
   onChat(tick: number, speakerNetId: number, text: string): void;
+  /**
+   * A move of credits or items that concerns this player, told by the server on the tick it is written (`PlayerNotice`). The
+   * client never reads the ledger: this is the only way it hears of a drop, a tip or a sale.
+   */
+  onNotice?(notice: PlayerNotice): void;
 }
 
 /** A simulated network link: the mock has one, a real connection does not. */
@@ -330,6 +339,26 @@ export interface DataSource {
    */
   abandonMission(id: string): boolean;
   /**
+   * Gives another player some of this character's credits (`GiveCredits`, economy-foundation.md E0-7): `/tip` in chat.
+   *
+   * <b>Accepted silently, refused out loud</b>, as a take is: an accepted tip moves both wallets' `wallet` revisions, and a
+   * refusal — not enough credits, too far, not a player — comes back through {@link TyphonSourceOptions.onTipRefused}.
+   *
+   * @param target The recipient's body, as this session holds it.
+   * @param amount Credits, 1 to `MAX_TIP`.
+   * @returns Whether it was sent.
+   */
+  giveCredits(target: number, amount: number): boolean;
+  /**
+   * Sends one of the bazaar's five commands (bazaar.md § 3.1): list, cancel, buy, collect, sell to the vendor.
+   *
+   * <b>Accepted silently, refused out loud</b> (B11): an accepted one moves the `items` and `wallet` revisions; a refusal comes
+   * back through {@link TyphonSourceOptions.onMarketRefused} with the command it refused.
+   *
+   * @returns Whether it was sent: false from a session whose catalog has no such command, and when its rate is spent.
+   */
+  market(command: MarketCommand): boolean;
+  /**
    * Asks for the god camera's view of the planet (`Overview`), or to come back to the player's own, keeping the avatar.
    *
    * <b>Idempotent, so it can be called every frame</b> with the state the UI wants: only a change is sent, and a new
@@ -365,6 +394,10 @@ export interface TyphonSourceOptions {
    * cancel, the mission it named — `null` for a take.
    */
   readonly onMissionRefused?: (reason: number, cancelled: string | null) => void;
+  /** A tip the server refused, with its `ACKS` reason (`data/wallet.ts` names them). */
+  readonly onTipRefused?: (reason: number) => void;
+  /** A bazaar command the server refused, with its `ACKS` reason (`data/market.ts` names them) and the command. */
+  readonly onMarketRefused?: (reason: number, command: MarketCommand) => void;
   /** The server refused the god camera, or the local rate limit did. The session is still served the player's own view. */
   readonly onOverviewRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
@@ -411,6 +444,7 @@ export class TyphonSource implements DataSource {
   private region: RegionSender | null = null;
   private attack: MessagePlan | null = null;
   private chat: MessagePlan | null = null;
+  private notice: MessagePlan | null = null;
   private pauseCommand: MessagePlan | null = null;
   private viewRealmCommand: MessagePlan | null = null;
   private spectateCommand: MessagePlan | null = null;
@@ -429,15 +463,17 @@ export class TyphonSource implements DataSource {
   private sayCommand: MessagePlan | null = null;
   private takeMissionCommand: MessagePlan | null = null;
   private abandonMissionCommand: MessagePlan | null = null;
+  private giveCreditsCommand: MessagePlan | null = null;
   private overviewCommand: MessagePlan | null = null;
+  /** The bazaar's commands by catalog name (`MarketList` …), those the catalog holds. */
+  private marketCommands = new Map<string, MessagePlan>();
 
-  /**
-   * The takes and cancels sent and not refused yet, by seq: the mission a cancel named (`null` for a take) and when it went.
-   * An accepted one is never acked, so an entry is dropped {@link MISSION_ANSWER_MS} after it was sent — kept, a seq the
-   * queue reused (a reconnect restarts it at 1, a wrap after half an hour of driving) read a later command's refusal as a
-   * mission's.
-   */
-  private readonly pendingMissionSeqs = new Map<number, { readonly cancelled: string | null; readonly atMs: number }>();
+  /** The takes and cancels sent and not refused yet, by seq: the mission a cancel named, `null` for a take. */
+  private readonly pendingMissionSeqs = new PendingSeqs<string | null>(MISSION_ANSWER_MS);
+  /** The tips sent and not refused yet, by seq, with their amount. */
+  private readonly pendingTipSeqs = new PendingSeqs<number>(TIP_ANSWER_MS);
+  /** The bazaar commands sent and not refused yet, by seq. */
+  private readonly pendingMarketSeqs = new PendingSeqs<MarketCommand>(MARKET_ANSWER_MS);
 
   /** The sphere radius last asked for, metres; 0 for none asked. See {@link effectiveRadiusM}. */
   private askedViewRadiusM = 0;
@@ -837,6 +873,45 @@ export class TyphonSource implements DataSource {
     return this.sendMission(this.abandonMissionCommand, { mission }, id);
   }
 
+  giveCredits(target: number, amount: number): boolean {
+    if (this.giveCreditsCommand === null || this.ticks === 0 || target === 0 || amount < 1) {
+      return false;
+    }
+
+    const seq = this.commands?.enqueue(this.giveCreditsCommand, { target, amount }) ?? CommandRefused.RateLimited;
+    if (seq < 0) {
+      return false;
+    }
+
+    this.pendingTipSeqs.add(seq, amount, performance.now());
+    this.sendPending();
+    return true;
+  }
+
+  market(command: MarketCommand): boolean {
+    const wire = marketWire(command);
+    const plan = wire === null ? undefined : this.marketCommands.get(wire.name);
+    if (wire === null || plan === undefined || this.ticks === 0) {
+      return false;
+    }
+
+    let seq: number;
+    try {
+      seq = this.commands?.enqueue(plan, wire.values) ?? CommandRefused.RateLimited;
+    } catch {
+      // A field this catalog's command does not declare: a server older or newer than this client. Nothing was sent.
+      return false;
+    }
+
+    if (seq < 0) {
+      return false;
+    }
+
+    this.pendingMarketSeqs.add(seq, command, performance.now());
+    this.sendPending();
+    return true;
+  }
+
   private sendMission(command: MessagePlan | null, values: FieldValues, cancelled: string | null): boolean {
     if (command === null || this.ticks === 0) {
       return false;
@@ -847,19 +922,9 @@ export class TyphonSource implements DataSource {
       return false;
     }
 
-    this.prunePendingMissions(performance.now());
-    this.pendingMissionSeqs.set(seq, { cancelled, atMs: performance.now() });
+    this.pendingMissionSeqs.add(seq, cancelled, performance.now());
     this.sendPending();
     return true;
-  }
-
-  /** Forgets the takes and cancels past {@link MISSION_ANSWER_MS}: accepted, since a refusal would have come by now. */
-  private prunePendingMissions(nowMs: number): void {
-    for (const [seq, ask] of this.pendingMissionSeqs) {
-      if (nowMs - ask.atMs > MISSION_ANSWER_MS) {
-        this.pendingMissionSeqs.delete(seq);
-      }
-    }
   }
 
   say(text: string): boolean {
@@ -1015,6 +1080,7 @@ export class TyphonSource implements DataSource {
 
     this.attack = plan.eventByName('Attack');
     this.chat = plan.eventByName('Chat');
+    this.notice = plan.eventByName('PlayerNotice');
 
     // A demo control: the server stops simulating for everyone. Absent from a catalog that does not declare it, in which
     // case pausing does what it did before — nothing but hold the region.
@@ -1034,7 +1100,16 @@ export class TyphonSource implements DataSource {
     this.sayCommand = plan.commandByName('Say');
     this.takeMissionCommand = plan.commandByName('TakeMission');
     this.abandonMissionCommand = plan.commandByName('AbandonMission');
+    this.giveCreditsCommand = plan.commandByName('GiveCredits');
     this.overviewCommand = plan.commandByName('Overview');
+    this.marketCommands = new Map();
+    for (const name of ['MarketList', 'MarketCancel', 'MarketBuy', 'MarketCollect', 'SellToVendor']) {
+      const command = plan.commandByName(name);
+      if (command !== null) {
+        this.marketCommands.set(name, command);
+      }
+    }
+
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -1104,6 +1179,8 @@ export class TyphonSource implements DataSource {
     this.pendingSpectateSeq = -1;
     this.pendingRealmSeq = -1;
     this.pendingMissionSeqs.clear();
+    this.pendingTipSeqs.clear();
+    this.pendingMarketSeqs.clear();
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
     // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
     // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
@@ -1158,10 +1235,21 @@ export class TyphonSource implements DataSource {
       }
 
       // A refused take or cancel: the only thing that will say so, since an accepted one is not answered at all.
-      const mission = this.pendingMissionSeqs.get(seq);
-      if (mission !== undefined) {
-        this.pendingMissionSeqs.delete(seq);
-        this.options.onMissionRefused?.(applier.acks.reason[i], mission.cancelled);
+      const nowMs = performance.now();
+      const cancelled = this.pendingMissionSeqs.take(seq, nowMs);
+      if (cancelled !== undefined) {
+        this.options.onMissionRefused?.(applier.acks.reason[i], cancelled);
+      }
+
+      // A refused tip, likewise: an accepted one moves the wallets and is not answered.
+      if (this.pendingTipSeqs.take(seq, nowMs) !== undefined) {
+        this.options.onTipRefused?.(applier.acks.reason[i]);
+      }
+
+      // A refused bazaar command, likewise (B11): the panel shows the reason on the row it was about.
+      const market = this.pendingMarketSeqs.take(seq, nowMs);
+      if (market !== undefined) {
+        this.options.onMarketRefused?.(applier.acks.reason[i], market);
       }
 
       // A refused god camera: the session is still served the player's own view, so the belief goes back to off.
@@ -1180,6 +1268,24 @@ export class TyphonSource implements DataSource {
   private onEvent(event: EventRecord): void {
     if (this.chat !== null && event.type === this.chat) {
       this.options.events.onChat(event.tick, event.number('speaker'), event.text('text'));
+      return;
+    }
+
+    if (this.notice !== null && event.type === this.notice) {
+      const other = event.text('other');
+      this.options.events.onNotice?.({
+        tick: event.tick,
+        items: event.number('ledger') === 2,
+        incoming: event.number('incoming') !== 0,
+        template: event.number('template'),
+        mk: event.number('mk'),
+        count: event.number('count'),
+        amount: Number(event.integer64('amount') ?? 0n),
+        ref: String(event.integer64('ref') ?? 0n),
+        kind: event.text('kind'),
+        other: other === '' ? null : other,
+        name: event.text('name'),
+      });
       return;
     }
 

@@ -180,7 +180,6 @@ static class ArchetypeAccessorBenchmark
                 var entity = ants.Open(ids[i]);
                 sum += entity.Read(AaBenchAnt.Movement).VX;
             }
-            ants.Dispose();
             tx.Commit();
         }
         ReadSink = sum;
@@ -255,7 +254,6 @@ static class ArchetypeAccessorBenchmark
                         else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
                         entity.Set(AaBenchAnt.Position, pos);
                     }
-                    ants.Dispose();
                 }
                 else
                 {
@@ -364,7 +362,6 @@ static class ArchetypeAccessorBenchmark
                     else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
                     entity.Set(AaBenchAnt.Position, pos);
                 }
-                ants.Dispose();
             }, input: () => view, parallel: true);
         }, new RuntimeOptions { BaseTickRate = 60, WorkerCount = 4 });
 
@@ -416,7 +413,6 @@ static class ArchetypeAccessorBenchmark
                 else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
                 entity.Set(AaBenchAnt.Position, pos);
             }
-            ants.Dispose();
             tx.Commit();
         }
     }
@@ -589,7 +585,6 @@ static class ArchetypeAccessorBenchmark
                     else if (pos.Y >= WorldSize) pos.Y -= WorldSize;
                 }
             }
-            ants.Dispose();
             tx.Commit();
         }
     }
@@ -1072,7 +1067,6 @@ static class ArchetypeAccessorBenchmark
                     var h = healths[idx];
                 }
             }
-            accessor.Dispose();
         }
     }
 
@@ -1088,7 +1082,6 @@ static class ArchetypeAccessorBenchmark
                 var p = entity.Read(AaBenchMixedCluster.Position);
                 var h = entity.Read(AaBenchMixedCluster.Health);
             }
-            accessor.Dispose();
         }
     }
 
@@ -1105,7 +1098,6 @@ static class ArchetypeAccessorBenchmark
                 h.Current -= 1;
                 entity.Set(AaBenchMixedCluster.Health, h);
             }
-            accessor.Dispose();
             tx.Commit();
         }
     }

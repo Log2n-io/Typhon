@@ -6,8 +6,8 @@ namespace SwgTatooine.Server;
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Missions (claude/design/SwgTatooine/design/missions.md)
 //
-// An OFFER is listed at a mission terminal, a HELD MISSION belongs to a character, and the lair is spawned for the held
-// mission when it is taken. Nothing is pooled.
+// An OFFER is listed at a mission terminal and names a standing wild lair; a HELD MISSION belongs to a character and
+// reserves that lair when it is taken (missions.md § 8). Nothing is pooled, and nothing is spawned for a mission.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 /// <summary>Where an offer is listed: at its terminal's centre. Its position is what a client finds the terminal's offers by.</summary>
@@ -31,14 +31,14 @@ public struct MissionOfferPlacement
 /// <summary>What an offer says, as a terminal lists it: what you will fight, how hard, what it pays, and roughly where.</summary>
 /// <remarks>
 /// <para>
-/// <b>Approximate on the wire, exact on the server.</b> A client is told a direction and a distance rounded to 100 m; the anchor stays here, and the lair is
-/// drawn round it only when the offer is taken (missions.md, R2).
+/// <b>Approximate on the wire, exact on the server.</b> A client is told a direction and a distance rounded to 100 m; the anchor — the position of the
+/// standing wild lair the offer names, which a take reserves (missions.md § 8) — stays here.
 /// </para>
 /// <para>
 /// <b>Immutable.</b> An offer is listed, then taken or aged out — both destroy it — so every field is sent on enter and the archetype is static.
 /// </para>
 /// </remarks>
-[Component("Swg.MissionOfferInfo", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.MissionOfferInfo", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct MissionOfferInfo
 {
@@ -57,6 +57,9 @@ public struct MissionOfferInfo
     /// <summary>1 for now (missions.md, R7).</summary>
     [Field, OnEnter(CodecKind.U8, Name = "difficulty", Saturate = true)] public byte Difficulty;
 
+    /// <summary>The level of the lair it sends the taker to: for now the content level at its anchor (content-levels.md § 4), until B5 picks it.</summary>
+    [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
+
     /// <summary>Which way the anchor lies from the terminal: 0 north, then clockwise to 7, north-west.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "octant", Saturate = true)] public byte Octant;
 
@@ -66,7 +69,7 @@ public struct MissionOfferInfo
     /// <summary>How far the anchor is from the terminal, metres, rounded to 100.</summary>
     [Field, OnEnter(CodecKind.Varu, Name = "distanceM", Saturate = true)] public int DistanceM;
 
-    /// <summary>The point the lair is drawn round. Not on the wire.</summary>
+    /// <summary>The position of the lair the offer names: how the desk finds that lair after a reopen, a wild lair never moving. Not on the wire.</summary>
     [Field] public float AnchorX;
 
     [Field] public float AnchorZ;
@@ -101,16 +104,6 @@ public struct MissionOfferRealm
     public MissionOfferRealm(ushort value) => Value = value;
 }
 
-/// <summary>Who holds a mission: a person's character, or a scripted body of the crowd.</summary>
-public static class MissionHolderKind
-{
-    /// <summary><see cref="HeldMission.Holder"/> is a <see cref="CharacterArch"/> entity; its body is whichever avatar that character has online.</summary>
-    public const byte Character = 1;
-
-    /// <summary><see cref="HeldMission.Holder"/> is a scripted <see cref="Player"/>: the body itself, which never logs out.</summary>
-    public const byte Scripted = 2;
-}
-
 /// <summary>
 /// A mission somebody took: what the offer said, where its lair is drawn round, and the lair standing for it now.
 /// </summary>
@@ -121,32 +114,33 @@ public static class MissionHolderKind
 /// thread while the tick runs (<c>EW-02</c>).
 /// </para>
 /// <para>
-/// <b>The holder is a plain id, not a link</b>, because it names a character for a person and a body for the crowd. A character deleted with its account
-/// leaves its missions behind; the desk retires a mission whose character it cannot find.
+/// <b>The holder is a plain id, not a link</b>: a character deleted with its account leaves its missions behind, and the desk retires a mission whose
+/// character it cannot find. Only characters hold missions — the scripted crowd stopped taking them on 2026-10-26 (economy-foundation.md § 1); revision 2
+/// dropped the holder's kind and the crowd's expiry with it.
 /// </para>
 /// </remarks>
-[Component("Swg.HeldMission", 1, StorageMode = StorageMode.Versioned)]
+[Component("Swg.HeldMission", 3, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct HeldMission
 {
-    /// <summary>The character (or scripted body) holding it. Indexed: the journal is "every mission of this character".</summary>
+    /// <summary>The character holding it. Indexed: the journal is "every mission of this character".</summary>
     [Field, Index(AllowMultiple = true)] public EntityId Holder;
 
-    /// <summary>See <see cref="MissionHolderKind"/>.</summary>
-    [Field] public byte HolderKind;
-
-    /// <summary>The offer's lair kind, difficulty, direction, and distance as it was listed — what the journal shows.</summary>
+    /// <summary>Its lair's kind (the new one's after a re-target); the offer's difficulty, direction and distance as listed: what the journal shows.</summary>
     [Field] public byte Kind;
 
     [Field] public byte Difficulty;
 
     [Field] public byte Octant;
 
+    /// <summary>The offer's level, its lair's: a re-target (a stranger's break) moves the mission only to a lair of this level (missions.md § 8).</summary>
+    [Field] public byte Level;
+
     [Field] public int DistanceM;
 
     [Field] public int Reward;
 
-    /// <summary>The point every lair of this mission is drawn round.</summary>
+    /// <summary>Where the offer's lair stood: the first lair this mission reserved.</summary>
     [Field] public float AnchorX;
 
     [Field] public float AnchorZ;
@@ -156,14 +150,11 @@ public struct HeldMission
 
     [Field] public float LairZ;
 
-    /// <summary>The lair standing for it now, or <c>EntityId.Null</c>: its holder is offline, or a new one is still to be drawn.</summary>
+    /// <summary>The wild lair this mission reserves (<see cref="Lair.Mission"/>), offline holder or not; re-targeted when a stranger breaks it.</summary>
     [Field] public EntityId Lair;
 
     /// <summary>The tick it was taken.</summary>
     [Field] public long TakenTick;
-
-    /// <summary>The tick the crowd gives up on it; 0 for a person, who keeps a mission until it is done or cancelled.</summary>
-    [Field] public long ExpireTick;
 
     /// <summary>The planet it is on.</summary>
     [Field] public ushort Realm;

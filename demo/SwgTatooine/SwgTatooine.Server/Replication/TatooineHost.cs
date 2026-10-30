@@ -14,6 +14,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using Typhon.Profiler.AspNetCore;
 using Typhon.Subscriptions.AspNetCore;
 
 namespace SwgTatooine.Server;
@@ -322,6 +323,9 @@ public static class TatooineHost
         || path.StartsWithSegments(ClientChunksPath, StringComparison.Ordinal)
         || (path.Value ?? string.Empty).StartsWith(VendorPrefix, StringComparison.Ordinal);
 
+    /// <summary>The demo dashboard's port on this host, announced in <c>/typhon/demo.json</c>; 0 for none.</summary>
+    public static int DashboardPort { get; set; }
+
     /// <summary>
     /// Serves a running Tatooine over WebSocket until the process is asked to stop.
     /// </summary>
@@ -352,7 +356,8 @@ public static class TatooineHost
     public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
         Func<string> realmInventory = null, string bindAddress = null, int authBurst = 0, int authRefillMs = 0, string originSecret = null,
         bool authInsideVpcOnly = false, string tlsChainPath = null, string tlsKeyPath = null, int tlsPort = 443, int redirectPort = 0,
-        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0)
+        AssetOrigin assets = null, AssetColliders assetShapes = null, double worldHalfM = 0, Func<MarketSnapshot> marketBoard = null,
+        ServerGuard guard = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -433,6 +438,10 @@ public static class TatooineHost
             }
         });
 
+        // Each request becomes a root in the Workbench and the engine spans it causes carry its trace id (#1517). Off unless TYPHON__PROFILER__ENABLED and
+        // TYPHON__PROFILER__CORRELATION__ENABLED are set, and then it registers nothing: a request pays nothing.
+        builder.Services.AddTyphonRequestCorrelation();
+
         var app = builder.Build();
 
         // ── The front door's shared secret (I3). FIRST in the pipeline, before the WebSocket upgrade, the static files
@@ -502,6 +511,17 @@ public static class TatooineHost
             Console.WriteLine("  /auth: answered only for callers inside the VPC; the internet gets 404");
         }
 
+        // The guard (#1532): before the WebSocket upgrade and every route, so shedding, the gate, the breaker and a stopping server's refusals see every
+        // request. See ServerGuard.
+        if (guard != null)
+        {
+            guard.Attach(app.Lifetime.StopApplication);
+            app.Use(guard.Handle);
+            Console.WriteLine($"  guard: {guard.Width} database requests at once, 503 after {guard.MaxWait.TotalSeconds:0} s; breaker {guard.TripCount} "
+                + $"engine failures in {guard.TripWindow.TotalSeconds:0} s; stop deadline {guard.StopDeadline.TotalSeconds:0} s, "
+                + (guard.WedgeTimeout > TimeSpan.Zero ? $"a tick still for {guard.WedgeTimeout.TotalSeconds:0} s stops the server" : "no tick watchdog"));
+        }
+
         app.UseWebSockets();
 
         // The asset set before the client's own files, and on its own file provider: /assets is a deployment of its own,
@@ -542,6 +562,12 @@ public static class TatooineHost
 
         // The missions a character holds (missions.md § 4): its own, by its bearer token, read off the tick.
         app.MapMissionJournal(runtime.Engine);
+        app.MapEconomy(runtime.Engine);
+        app.MapItems(runtime.Engine);
+        // The bazaar's board is the simulation's, published by its desk: asked at each request. Required — MapMarket refuses to start without it.
+        app.MapMarket(runtime.Engine, marketBoard);
+        app.MapProgress(runtime.Engine);
+        app.MapFacilities();
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
@@ -616,9 +642,11 @@ public static class TatooineHost
                 : FormattableString.Invariant(
                     $",\"shuttle\":{{\"intervalTicks\":{boarding.IntervalTicks},\"windowTicks\":{boarding.WindowTicks},")
                   + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)}}}");
+            // The demo's dashboard, on this host: the client links to it. Absent when there is none.
+            var dashboard = DashboardPort > 0 ? FormattableString.Invariant($",\"dashboardPort\":{DashboardPort}") : string.Empty;
             return Results.Text(
                 FormattableString.Invariant(
-                    $"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{assetSet}{realms}{shuttle}}}"),
+                    $"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{player}{assetSet}{realms}{shuttle}{dashboard}}}"),
                 "application/json");
         });
 
@@ -645,6 +673,13 @@ public static class TatooineHost
         // Tell every client the server is going, before Kestrel drops their sockets (SWG-07). ApplicationStopping runs before the listeners are closed and
         // blocks shutdown until it returns, which is exactly the window in which the runtime is still ticking and a KICK can still be staged and sent.
         app.Lifetime.ApplicationStopping.Register(KickEveryone);
+
+        // Registered after the kick so it runs BEFORE it (a token runs its callbacks in reverse order): the deadline is armed before anything that can hang.
+        // A stop the guard asked for already armed it; this is the stop asked from outside.
+        if (guard != null)
+        {
+            app.Lifetime.ApplicationStopping.Register(() => guard.Stop("asked to stop"));
+        }
 
         Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json, stats /typhon/stats.json)");
 

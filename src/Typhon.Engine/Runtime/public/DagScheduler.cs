@@ -2317,66 +2317,82 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     TyphonEvent.EmitSchedulerDependencyReady((ushort)sysIdx, (ushort)succIdx, (ushort)successors.Length, 0);
                     var succ = Systems[succIdx];
 
-                    // Strict tick-abort (#567) — checked BEFORE the failed-predecessor branch and before EvaluateShouldRunAndPrepare, so no user
-                    // ShouldRun / Prepare body runs once the tick is cancelled.
-                    // Reported as TickAborted rather than DependencyFailed: this system has no failed predecessor, the tick was cancelled out from under it.
-                    // Engine tracks are exempt (rule D3).
-                    if (IsTickAborted && !_systemIsEngine[succIdx])
+                    // One child span per dispatched successor: the gates, the parallel-query prepare and an inline run are otherwise unspanned, which left a
+                    // slow fan-out with nothing inside it to blame. Outcome: 0 = skipped, 1 = ran inline, 2 = parallel query, 3 = pipeline.
+                    var dispatchSpan = TyphonEvent.BeginSchedulerSuccessorDispatch((ushort)sysIdx, (ushort)succIdx);
+                    byte dispatchOutcome = 0;
+                    try
                     {
-                        _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.TickAborted;
-                        InspectorSystemSkipped(succIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
-                        fanOutSkipped++;
-                        OnSystemComplete(succIdx, workerId, trackUtilization);
-                    }
-                    // Check if any predecessor failed — skip this system entirely
-                    else if (_systemFailed[succIdx])
-                    {
-                        _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.DependencyFailed;
-                        InspectorSystemSkipped(succIdx, SkipReason.DependencyFailed, Stopwatch.GetTimestamp());
-                        fanOutSkipped++;
-                        OnSystemComplete(succIdx, workerId, trackUtilization);
-                    }
-                    // Unified ShouldRun + Prepare gate. Single-threaded by construction: only the thread that decremented _remainingDeps to zero reaches this
-                    // branch. The typed OnShouldRun/OnPrepare path serves ChunkedCallbackSystem<TContext>; non-chunked systems use the untyped delegate.
-                    else if (!EvaluateShouldRunAndPrepare(succIdx, workerId, trackUtilization, ref fanOutSkipped))
-                    {
-                        // Skip/dispatch already handled inside EvaluateShouldRunAndPrepare.
-                    }
-                    else if (succ.ReactiveSkip != null && succ.ReactiveSkip())
-                    {
-                        _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.EmptyInput;
-                        InspectorSystemSkipped(succIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
-                        fanOutSkipped++;
-                        OnSystemComplete(succIdx, workerId, trackUtilization);
-                    }
-                    else
-                    {
-                        var overloadSkip = CheckOverloadSkip(succIdx);
-                        if (overloadSkip != SkipReason.NotSkipped)
+                        // Strict tick-abort (#567) — checked BEFORE the failed-predecessor branch and before EvaluateShouldRunAndPrepare, so no user
+                        // ShouldRun / Prepare body runs once the tick is cancelled.
+                        // Reported as TickAborted rather than DependencyFailed: this system has no failed predecessor, the tick was cancelled out from
+                        // under it.
+                        // Engine tracks are exempt (rule D3).
+                        if (IsTickAborted && !_systemIsEngine[succIdx])
                         {
-                            _currentTickSystemMetrics[succIdx].SkipReason = overloadSkip;
-                            InspectorSystemSkipped(succIdx, overloadSkip, Stopwatch.GetTimestamp());
+                            _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.TickAborted;
+                            InspectorSystemSkipped(succIdx, SkipReason.TickAborted, Stopwatch.GetTimestamp());
                             fanOutSkipped++;
                             OnSystemComplete(succIdx, workerId, trackUtilization);
                         }
-                        else if (succ.IsParallelQuery)
+                        // Check if any predecessor failed — skip this system entirely
+                        else if (_systemFailed[succIdx])
                         {
-                            // Parallel QuerySystem: prepare entity set, then mark ready for multi-worker chunk grab
-                            DispatchParallelQuery(succIdx, workerId, trackUtilization);
+                            _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.DependencyFailed;
+                            InspectorSystemSkipped(succIdx, SkipReason.DependencyFailed, Stopwatch.GetTimestamp());
+                            fanOutSkipped++;
+                            OnSystemComplete(succIdx, workerId, trackUtilization);
                         }
-                        else if (succ.Type == SystemType.CallbackSystem || succ.Type == SystemType.QuerySystem)
+                        // Unified ShouldRun + Prepare gate. Single-threaded by construction: only the thread that decremented _remainingDeps to zero reaches
+                        // this branch. The typed OnShouldRun/OnPrepare path serves ChunkedCallbackSystem<TContext>; non-chunked systems use the untyped delegate.
+                        else if (!EvaluateShouldRunAndPrepare(succIdx, workerId, trackUtilization, ref fanOutSkipped))
                         {
-                            // D3: inline continuation for single-invocation successors
-                            ExecuteInline(succIdx, workerId, trackUtilization);
+                            // Skip/dispatch already handled inside EvaluateShouldRunAndPrepare.
+                        }
+                        else if (succ.ReactiveSkip != null && succ.ReactiveSkip())
+                        {
+                            _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.EmptyInput;
+                            InspectorSystemSkipped(succIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
+                            fanOutSkipped++;
+                            OnSystemComplete(succIdx, workerId, trackUtilization);
                         }
                         else
                         {
-                            // A pipeline: TotalChunks is fixed and _remainingChunks was seeded at tick reset, so opening its claims is all the
-                            // publish there is.
-                            OpenChunkClaims(succIdx, Systems[succIdx].TotalChunks);
-                            MarkSystemReady(succIdx);
-                            WakeForChunks(Systems[succIdx].TotalChunks);
+                            var overloadSkip = CheckOverloadSkip(succIdx);
+                            if (overloadSkip != SkipReason.NotSkipped)
+                            {
+                                _currentTickSystemMetrics[succIdx].SkipReason = overloadSkip;
+                                InspectorSystemSkipped(succIdx, overloadSkip, Stopwatch.GetTimestamp());
+                                fanOutSkipped++;
+                                OnSystemComplete(succIdx, workerId, trackUtilization);
+                            }
+                            else if (succ.IsParallelQuery)
+                            {
+                                // Parallel QuerySystem: prepare entity set, then mark ready for multi-worker chunk grab
+                                dispatchOutcome = 2;
+                                DispatchParallelQuery(succIdx, workerId, trackUtilization);
+                            }
+                            else if (succ.Type == SystemType.CallbackSystem || succ.Type == SystemType.QuerySystem)
+                            {
+                                // D3: inline continuation for single-invocation successors
+                                dispatchOutcome = 1;
+                                ExecuteInline(succIdx, workerId, trackUtilization);
+                            }
+                            else
+                            {
+                                // A pipeline: TotalChunks is fixed and _remainingChunks was seeded at tick reset, so opening its claims is all the
+                                // publish there is.
+                                dispatchOutcome = 3;
+                                OpenChunkClaims(succIdx, Systems[succIdx].TotalChunks);
+                                MarkSystemReady(succIdx);
+                                WakeForChunks(Systems[succIdx].TotalChunks);
+                            }
                         }
+                    }
+                    finally
+                    {
+                        dispatchSpan.Outcome = dispatchOutcome;
+                        dispatchSpan.Dispose();
                     }
                 }
             }

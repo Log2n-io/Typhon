@@ -43,7 +43,7 @@ public static class MissionJournal
     internal const string Empty = "{\"missions\":[],\"completed\":[]}";
 
     /// <summary>One completed mission, as the journal states it.</summary>
-    private readonly record struct Completion(ulong Mission, byte Kind, int Reward);
+    private readonly record struct Completion(ulong Mission, byte Kind, byte Level, int Reward);
 
     // Character raw id to its last completions, oldest first. Written by the mission desk on the tick, read by HTTP threads: an array replaced whole, never
     // written in place, so a reader sees one or the other. In memory only — a restart forgets them, and a client reconnecting has no journal to compare with.
@@ -53,9 +53,9 @@ public static class MissionJournal
     private static DatabaseEngine _holderIndexOf;
 
     /// <summary>Records a completed mission for its character's next read. Called by the mission desk.</summary>
-    internal static void NoteCompleted(EntityId character, EntityId mission, byte kind, int reward)
+    internal static void NoteCompleted(EntityId character, EntityId mission, byte kind, byte level, int reward)
     {
-        var entry = new Completion(mission.RawValue, kind, reward);
+        var entry = new Completion(mission.RawValue, kind, level, reward);
         var before = Completed.TryGetValue(character.RawValue, out var list) ? list : [];
         var keep = Math.Min(before.Length, CompletionsKept - 1);
         var next = new Completion[keep + 1];
@@ -99,7 +99,7 @@ public static class MissionJournal
     internal static IResult GetForChecks(DatabaseEngine dbe, HttpContext context) => Get(dbe, context);
 
     /// <summary>
-    /// The character's journal as JSON: <c>{"missions":[…held…],"completed":[{"id","kind","name","reward"}…]}</c>.
+    /// The character's journal as JSON: <c>{"missions":[…held…],"completed":[{"id","kind","name","level","reward"}…]}</c>.
     /// </summary>
     /// <remarks>
     /// <c>id</c> is a string: a raw entity id is a 64-bit integer, past what a JavaScript number holds exactly, and it comes back verbatim in
@@ -117,17 +117,13 @@ public static class MissionJournal
         while (found.MoveNext())
         {
             var m = found.CurrentComponent;
-            if (m.HolderKind != MissionHolderKind.Character)
-            {
-                continue;
-            }
-
             json.Append(first ? "{" : ",{");
             first = false;
             json.Append("\"id\":\"").Append(((ulong)found.CurrentEntityPK).ToString(CultureInfo.InvariantCulture)).Append('"')
                 .Append(",\"kind\":").Append(m.Kind)
                 .Append(",\"name\":\"").Append(CreatureTemplates.Name(m.Kind)).Append('"')
                 .Append(",\"difficulty\":").Append(m.Difficulty)
+                .Append(",\"level\":").Append(m.Level)
                 .Append(",\"reward\":").Append(m.Reward)
                 .Append(",\"octant\":").Append(m.Octant)
                 .Append(",\"distanceM\":").Append(m.DistanceM)
@@ -155,6 +151,7 @@ public static class MissionJournal
                     .Append("\"id\":\"").Append(done[i].Mission.ToString(CultureInfo.InvariantCulture)).Append('"')
                     .Append(",\"kind\":").Append(done[i].Kind)
                     .Append(",\"name\":\"").Append(CreatureTemplates.Name(done[i].Kind)).Append('"')
+                    .Append(",\"level\":").Append(done[i].Level)
                     .Append(",\"reward\":").Append(done[i].Reward)
                     .Append('}');
             }

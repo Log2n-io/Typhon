@@ -129,13 +129,14 @@ export function buildLayout(inputs: BuildLayoutInputs): LayoutResult {
     return expandedBody + TRACK_GAP;
   };
 
-  // Root lanes (#1517) above the slot lanes: what caused the work sits above the work. Collapsible like a fixed track.
+  // Root lanes (#1517) above the slot lanes: what caused the work sits above the work. Three states like a gauge: collapsed to a density strip
+  // inside the label row, expanded, or extended (`double`), where the caller packs them under a higher row cap.
   const pushRootLane = (id: string, label: string, rows: number): void => {
     if (rows <= 0) return;
-    const state = nonGaugeState(id);
+    const state = collapseState[id] ?? 'expanded';
     const expandedBody = rows * SPAN_ROW_HEIGHT;
     tracks.push({ id, label, y, height: expandedBody, state, collapsible: true });
-    y += nonGaugeHeight(state, expandedBody);
+    y += nonGaugeHeight(state, expandedBody, /* stripInsideLabel */ true);
   };
   pushRootLane(ROOT_HTTP_TRACK_ID, 'HTTP Requests', inputs.rootRows?.http ?? 0);
   pushRootLane(ROOT_COMMANDS_TRACK_ID, 'Commands', inputs.rootRows?.commands ?? 0);

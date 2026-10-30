@@ -103,21 +103,14 @@ class CleanBranchChangeListTests : TestBase<CleanBranchChangeListTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<CblUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            if (cluster.ChunkId != chunkId)
             {
-                if (cluster.ChunkId != chunkId)
-                {
-                    continue;
-                }
-
-                cluster.WriteSpatial(CblUnit.Pos, slot, PointAt(x, y));
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            cluster.WriteSpatial(CblUnit.Pos, slot, PointAt(x, y));
         }
 
         tx.Commit();

@@ -192,6 +192,21 @@ public static class TyphonSubscriptionsEndpoints
             // Beside realmPassSteps although it is the realm table's and not replication's: the two are read as a ratio — serial passes against registry
             // walks — and a client computing it should not have to reach into two objects for the pair.
             writer.WriteNumber("realmPolicyEvaluations"u8, stats.RealmPolicyEvaluations);
+            // <b>Why the engine sent a RESET nobody asked for</b>, cumulative: an owed set past its cap, an owed entity lost, a gap the push log no longer
+            // covers. A client sees only that its store was cleared; these say whether the frame budget, the identity, or the session's own lag did it. And
+            // beside them the largest backlog a session carries, a gauge, and the frames denied by cause, cumulative.
+            writer.WriteNumber("owedOverflows"u8, stats.OwedOverflows);
+            writer.WriteNumber("owedLosts"u8, stats.OwedLosts);
+            writer.WriteNumber("logResets"u8, stats.LogResets);
+            writer.WriteNumber("owedLargest"u8, stats.OwedLargest);
+            writer.WriteStartObject("skipped"u8);
+            writer.WriteNumber("gated"u8, stats.FramesSkipped.Gated);
+            writer.WriteNumber("lagging"u8, stats.FramesSkipped.Lagging);
+            writer.WriteNumber("inFlightFull"u8, stats.FramesSkipped.InFlightFull);
+            writer.WriteNumber("oversize"u8, stats.FramesSkipped.Oversize);
+            writer.WriteNumber("poolRefused"u8, stats.FramesSkipped.PoolRefused);
+            writer.WriteNumber("owedReset"u8, stats.FramesSkipped.OwedReset);
+            writer.WriteEndObject();
             writer.WriteEndObject();
 
             writer.WriteStartArray("systems"u8);

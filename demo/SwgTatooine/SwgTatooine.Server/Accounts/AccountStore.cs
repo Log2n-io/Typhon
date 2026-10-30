@@ -15,9 +15,8 @@ namespace SwgTatooine.Server.Accounts;
 /// file becomes a race.
 /// </para>
 /// <para>
-/// <b>The PBKDF2 cost is paid here on purpose.</b> 600 000 iterations is a few hundred microseconds of one core; on a
-/// Kestrel thread that is a slow HTTP request, and on the tick thread it would be a visible frame. Nothing in this class may
-/// move into a system.
+/// <b>The PBKDF2 cost is paid here on purpose.</b> It is under a millisecond at the demo's work factor, but on the tick thread
+/// every login would still be a visible stall. Nothing in this class may move into a system.
 /// </para>
 /// <para>
 /// <b>A duplicate name is the index's refusal, surfaced — never a pre-check.</b> <see cref="TrySignup"/> does not look the
@@ -72,7 +71,8 @@ public static class AccountStore
     /// <param name="outfit">The outfit chosen, one-based into <see cref="TatooineData.PlayerOutfits"/>; 0 for none, which leaves it to
     /// <see cref="TatooineData.OutfitFor(EntityId)"/> when the character is created.</param>
     /// <returns>What happened.</returns>
-    public static SignupOutcome TrySignup(DatabaseEngine dbe, string offeredName, string password, out EntityId account, int outfit = 0)
+    /// <param name="bot">Whether the bot fleet signed it up: shown to viewers, never acted on (<see cref="Account.Bot"/>).</param>
+    public static SignupOutcome TrySignup(DatabaseEngine dbe, string offeredName, string password, out EntityId account, int outfit = 0, bool bot = false)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         account = default;
@@ -98,6 +98,7 @@ public static class AccountStore
             CreatedUtcTicks = DateTime.UtcNow.Ticks,
             LastSeenUtcTicks = 0,
             Outfit = (byte)outfit,
+            Bot = bot ? (byte)1 : (byte)0,
         };
 
         var secret = default(AccountSecret);
@@ -167,7 +168,8 @@ public static class AccountStore
             return LoginOutcome.WrongPassword;
         }
 
-        Stamp(dbe, account);
+        // An account hashed at another work factor is re-hashed at the current one, so changing it reaches existing accounts too.
+        Stamp(dbe, account, secret.Iterations != PasswordHash.Iterations && PasswordHash.IsAcceptable(password) ? password : null);
         return LoginOutcome.Ok;
     }
 
@@ -224,7 +226,7 @@ public static class AccountStore
     private static bool TryReadSecret(DatabaseEngine dbe, EntityId account, out AccountSecret secret)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         if (!accounts.TryOpen(account, out var entity))
         {
             secret = default;
@@ -238,20 +240,28 @@ public static class AccountStore
     /// <summary>Writes the last-seen stamp. Its own transaction, so a failed stamp cannot fail a correct login.</summary>
     /// <param name="dbe">The engine.</param>
     /// <param name="account">The account that just logged in.</param>
-    private static void Stamp(DatabaseEngine dbe, EntityId account)
+    /// <param name="rehash">The verified password, to re-hash at the current work factor; <see langword="null"/> keeps the stored hash.</param>
+    private static void Stamp(DatabaseEngine dbe, EntityId account, string rehash)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         if (!accounts.TryOpenMut(account, out var entity))
         {
             return;
         }
 
         // Read-modify-write of the whole component. The name is rewritten with the same value, which the commit path's unchanged-field guard recognises (#665,
-        // comparing all 64 bytes), so the name's B+Tree is not touched by a login. AccountSecret is not opened at all.
+        // comparing all 64 bytes), so the name's B+Tree is not touched by a login. AccountSecret is written only on a re-hash.
         var updated = entity.Read(AccountArch.Identity);
         updated.LastSeenUtcTicks = DateTime.UtcNow.Ticks;
         entity.Set(AccountArch.Identity, updated);
+        if (rehash != null)
+        {
+            var secret = default(AccountSecret);
+            PasswordHash.Create(rehash, secret.DigestSpan(), secret.SaltSpan(), out var iterations);
+            secret.Iterations = iterations;
+            entity.Set(AccountArch.Secret, secret);
+        }
         tx.Commit();
     }
 
@@ -260,7 +270,7 @@ public static class AccountStore
     /// </summary>
     /// <param name="password">The offered plaintext, so the cost tracks the real input rather than a constant.</param>
     /// <remarks>
-    /// A zero salt and <see cref="PasswordHash.DefaultIterations"/>: the result is discarded, only the time is wanted. It is
+    /// A zero salt and the current <see cref="PasswordHash.Iterations"/>: the result is discarded, only the time is wanted. It is
     /// not a perfect equaliser — an account hashed at an older, lower work factor still verifies faster — and that is
     /// recorded rather than hidden, because the leak it closes is the one that matters: "does this name exist at all".
     /// </remarks>
@@ -273,6 +283,6 @@ public static class AccountStore
 
         Span<byte> salt = stackalloc byte[PasswordHash.SaltBytes];
         Span<byte> sink = stackalloc byte[PasswordHash.HashBytes];
-        PasswordHash.Verify(password, sink, salt, PasswordHash.DefaultIterations);
+        PasswordHash.Verify(password, sink, salt, PasswordHash.Iterations);
     }
 }

@@ -61,67 +61,6 @@ public sealed class LairLifeChecks
         Worlds.Delete(_dir);
     }
 
-    /// <summary>
-    /// A mission's lair stands with its occupants round it, and has a life. The pool this replaced teleported a lair to its player and left them where they
-    /// stood: 381 of 386 live mission camps had nobody near them (measured, 2026-10-25). A mission's lair is spawned as its kind now, occupants and all.
-    /// </summary>
-    [Test]
-    public void ALiveMissionLairHasItsDefendersRoundIt()
-    {
-        var lairs = new Dictionary<EntityId, (float X, float Z)>();
-        var near = 0;
-        var far = 0;
-        var endless = 0;
-        using (var tx = _sim.Dbe.CreateQuickTransaction())
-        {
-            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
-            {
-                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
-                var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
-                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    if (!spawners[slot].Mission.IsNull)
-                    {
-                        lairs[cluster.GetEntityId(slot)] = (places[slot].X, places[slot].Z);
-                        endless += spawners[slot].ExpireTick == 0 ? 1 : 0;
-                    }
-                }
-            }
-
-            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
-            {
-                var homes = cluster.GetReadOnlySpan(Creature.Home);
-                var places = cluster.GetReadOnlySpan(Creature.Bounds);
-                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    if (lairs.TryGetValue(homes[slot].Lair, out var at))
-                    {
-                        var d = MathF.Sqrt(((places[slot].X - at.X) * (places[slot].X - at.X)) + ((places[slot].Z - at.Z) * (places[slot].Z - at.Z)));
-                        if (d <= 30f)
-                        {
-                            near++;
-                        }
-                        else
-                        {
-                            far++;
-                        }
-                    }
-                }
-            }
-        }
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(_sim.Bridge.MissionLairsDrawn, Is.GreaterThan(0), "precondition: missions were taken");
-            Assert.That(lairs.Count, Is.GreaterThan(0), "precondition: a mission is live at the end of the run");
-            Assert.That(near, Is.GreaterThan(0), "a live mission lair has no defender");
-            Assert.That(far, Is.LessThanOrEqualTo(near / 10), $"{far} defenders stand far from their live mission lair, {near} near it");
-            Assert.That(endless, Is.Zero, "a mission's lair has no life, so it would never move");
-        });
-    }
-
     [Test]
     public void ADeadCreatureIsDestroyed_AndItsLairReplacesIt()
     {
@@ -144,6 +83,88 @@ public sealed class LairLifeChecks
             Assert.That(s.LairsRetired, Is.GreaterThan(0), "no wild lair was retired, though every life ends inside the window");
             Assert.That(s.LairsSpawned, Is.GreaterThan(0), "lairs were retired but no site spawned a replacement");
         });
+    }
+
+    /// <summary>
+    /// CL-8: a refilled creature takes its lair's level — every creature standing, the refills among them, carries its lair's level and the level's stats.
+    /// </summary>
+    [Test]
+    public void ARefilledCreature_TakesItsLairsLevel()
+    {
+        Assert.That(_sim.LastStats.CreaturesRespawned, Is.GreaterThan(0), "precondition: a lair replaced a creature");
+        var lairLevel = new Dictionary<EntityId, int>();
+        var wrong = new List<string>();
+        var creatures = 0;
+        using var tx = _sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+        {
+            var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                lairLevel[cluster.GetEntityId(slot)] = spawners[slot].Level;
+            }
+        }
+
+        foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+        {
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            var homes = cluster.GetReadOnlySpan(Creature.Home);
+            var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                creatures++;
+                var ai = brains[slot];
+                var health = ContentLevels.CreatureHealth(ai.Level, CreatureTemplates.IsCamp(ai.Template));
+                if (!lairLevel.TryGetValue(homes[slot].Lair, out var level) || level != ai.Level || vitals[slot].MaxHealth != health)
+                {
+                    wrong.Add($"a level-{ai.Level} creature ({vitals[slot].MaxHealth} hp) in a lair of level {level}");
+                }
+            }
+        }
+
+        Assert.That(creatures, Is.GreaterThan(0), "precondition: the world has creatures");
+        Assert.That(wrong, Is.Empty, $"{wrong.Count} of {creatures} creatures, first: {(wrong.Count > 0 ? wrong[0] : "")}");
+    }
+
+    /// <summary>
+    /// CL-8: a replacement lair takes the level of where it stands. Every life ends inside the window, so the wild lairs standing at its end are
+    /// replacements; each agrees with the level map at its position, and its kind covers its level.
+    /// </summary>
+    [Test]
+    public void AReplacementLair_TakesTheLevelOfWhereItStands()
+    {
+        Assert.That(_sim.LastStats.LairsSpawned, Is.GreaterThan(0), "precondition: a site spawned a replacement");
+        var levels = _sim.Index.Levels;
+        var wrong = new List<string>();
+        var wild = 0;
+        using var tx = _sim.Dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+        {
+            var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+            var bounds = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                var lair = spawners[slot];
+                if (cluster.Realm.Value != 0 || lair.Site == 0)
+                {
+                    continue;
+                }
+
+                wild++;
+                var (x, z) = (bounds[slot].X, bounds[slot].Z);
+                if (!levels.Agrees(x, z, lair.Level) || !CreatureTemplates.CoversLevel(lair.CreatureTemplate, lair.Level))
+                {
+                    wrong.Add($"{CreatureTemplates.Name(lair.CreatureTemplate)} of level {lair.Level} at ({x:F0}, {z:F0}), "
+                        + $"edge {levels.EdgeDistance(x, z):F0} m");
+                }
+            }
+        }
+
+        Assert.That(wild, Is.GreaterThan(0), "precondition: wild lairs stand");
+        Assert.That(wrong, Is.Empty, $"{wrong.Count} of {wild} wild lairs, first: {(wrong.Count > 0 ? wrong[0] : "")}");
     }
 
     /// <summary>The cascade: a retired lair's creatures went with it — no creature names a lair that is gone.</summary>

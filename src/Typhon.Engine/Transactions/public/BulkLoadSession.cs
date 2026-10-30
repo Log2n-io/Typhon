@@ -25,6 +25,7 @@ namespace Typhon.Engine;
 /// dirty-marked, so <see cref="CompleteBulkLoad"/>'s forced checkpoint flushes them.
 /// </para>
 /// </remarks>
+[MustDispose(Reason = "leaves its transaction open")]
 [PublicAPI]
 public sealed class BulkLoadSession : IDisposable
 {

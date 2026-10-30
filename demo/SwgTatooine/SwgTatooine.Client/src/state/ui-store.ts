@@ -1,5 +1,7 @@
 import { create } from 'zustand';
+import { useChat } from './chat-store';
 import { useMissions } from './mission-store';
+import { useMarket } from './market-store';
 
 /** One row of the navigation pane. */
 export interface NavRow {
@@ -27,10 +29,12 @@ export interface CameraRequest {
   readonly seq: number;
 }
 
+import type { BazaarTab } from '../data/market';
 import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
 import { NOT_TRAVELLING, type TravelState } from '../app/travel';
 import { ACTION_SLOTS, NO_STANCE, stanceAfter } from '../app/action-bar';
+import { beginWatch, type WatchState, type WatchTarget } from '../app/watch-link';
 
 /** A pending ask to look at another realm. The sequence makes a repeat of the same realm a new ask. */
 export interface RealmRequest {
@@ -90,14 +94,18 @@ export interface ShuttleportPrompt {
  */
 export interface PartRef {
   readonly owner: number;
-  readonly kind: 'ticket' | 'mission';
+  readonly kind: 'ticket' | 'mission' | 'bazaar';
 }
 
 /** What a context menu entry does: plain data, carried out by the store. */
 export type ContextAction =
   | { readonly kind: 'board'; readonly city: number }
   | { readonly kind: 'missions'; readonly terminal: number }
-  | { readonly kind: 'journal' };
+  | { readonly kind: 'journal' }
+  /** The bazaar panel on a tab (bazaar.md § 6); Browse of this terminal's city or of every city. */
+  | { readonly kind: 'bazaar'; readonly tab: BazaarTab; readonly scope?: 'here' | 'all' }
+  /** Tip another player: the chat opens on `/tip `, the player selected. */
+  | { readonly kind: 'tip'; readonly target: number };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -116,7 +124,7 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket' | 'mission';
+  readonly source: 'ticket' | 'mission' | 'bazaar' | 'player';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -211,6 +219,19 @@ export interface UiState {
   readonly jitterMs: number;
   /** netId of the selected entity, 0 for none. */
   readonly selectedNetId: number;
+  /** The demo dashboard's port on the server's host, from `/typhon/demo.json`; `null` for none. */
+  readonly dashboardPort: number | null;
+  readonly setDashboardPort: (port: number | null) => void;
+  /**
+   * The bot the dashboard asked this god camera to watch (`watch-link.ts`), or `null`. Stepped by the app's frame and
+   * written back only when its phase moves, so subscribers re-render a handful of times per watch.
+   */
+  readonly watch: WatchState | null;
+  /** Starts watching a bot: replaces any watch in progress. */
+  readonly watchBot: (target: WatchTarget) => void;
+  readonly setWatch: (watch: WatchState | null) => void;
+  /** Selects the watched body and follows it in the god camera, in one update. */
+  readonly followWatched: (netId: number) => void;
   /** The selected part of a structure, or `null`; never set together with {@link selectedNetId}. */
   readonly selectedPart: PartRef | null;
   readonly follow: boolean;
@@ -375,6 +396,21 @@ export const useUi = create<UiState>()((set, get) => ({
   latencyMs: 40,
   jitterMs: 25,
   selectedNetId: 0,
+  dashboardPort: null,
+  setDashboardPort: (dashboardPort) => {
+    set({ dashboardPort });
+  },
+  watch: null,
+  watchBot: (target) => {
+    set({ watch: beginWatch(target, performance.now()) });
+  },
+  setWatch: (watch) => {
+    set({ watch });
+  },
+  followWatched: (netId) => {
+    // The god camera, not the eye: the dashboard asked to see the bot from above and keep it in frame.
+    set({ selectedNetId: netId, selectedPart: null, follow: true, cameraMode: 'god' });
+  },
   selectedPart: null,
   follow: false,
   cameraRequest: null,
@@ -608,6 +644,16 @@ export const useUi = create<UiState>()((set, get) => ({
         break;
       case 'journal':
         useMissions.getState().openJournal();
+        break;
+      case 'bazaar':
+        useMarket.getState().openPanel(action.tab, action.scope);
+        break;
+      case 'tip':
+        if (get().selectedNetId !== action.target) {
+          get().select(action.target);
+        }
+
+        useChat.getState().compose('/tip ');
         break;
     }
   },

@@ -28,6 +28,8 @@ import { extractDetail } from '@/shell/dialogs/connectErrors';
 export default function ReconnectBanner() {
   const sessionKind = useSessionStore((s) => s.kind);
   const sessionId = useSessionStore((s) => s.sessionId);
+  // A capture attaches its replay to this session as the active profile (#621), so a non-null id means it was already done.
+  const alreadyCaptured = useSessionStore((s) => s.activeProfileId !== null);
   const endpoint = useSessionStore((s) => s.filePath);
   const setSession = useSessionStore((s) => s.setSession);
   const connectionStatus = useProfilerSessionStore((s) => s.connectionStatus);
@@ -134,7 +136,7 @@ export default function ReconnectBanner() {
           size="sm"
           className="h-6 text-fs-sm"
           onClick={onCapture}
-          disabled={!sessionId || isCapturing}
+          disabled={!sessionId || isCapturing || alreadyCaptured}
           data-testid="engine-reconnect-banner-capture"
           title="Save the frozen buffer as a replay and open it as a Trace"
         >

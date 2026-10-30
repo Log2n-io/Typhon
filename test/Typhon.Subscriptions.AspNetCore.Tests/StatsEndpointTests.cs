@@ -118,6 +118,20 @@ public class StatsEndpointTests
                 Assert.That(replication.GetProperty("realmPassSteps").GetInt64(), Is.EqualTo(expected.RealmPassSteps));
                 Assert.That(replication.GetProperty("realmPolicyEvaluations").GetInt64(), Is.EqualTo(expected.RealmPolicyEvaluations));
 
+                // The engine's own reasons for a RESET, the largest owed backlog, and the frames denied by cause: zero on a runtime with no session, so
+                // these pin the names and the nesting, which is what an operator's dashboard reads.
+                Assert.That(replication.GetProperty("owedOverflows").GetInt64(), Is.EqualTo(expected.OwedOverflows));
+                Assert.That(replication.GetProperty("owedLosts").GetInt64(), Is.EqualTo(expected.OwedLosts));
+                Assert.That(replication.GetProperty("logResets").GetInt64(), Is.EqualTo(expected.LogResets));
+                Assert.That(replication.GetProperty("owedLargest").GetInt32(), Is.EqualTo(expected.OwedLargest));
+                var skipped = replication.GetProperty("skipped");
+                Assert.That(skipped.GetProperty("gated").GetInt64(), Is.EqualTo(expected.FramesSkipped.Gated));
+                Assert.That(skipped.GetProperty("lagging").GetInt64(), Is.EqualTo(expected.FramesSkipped.Lagging));
+                Assert.That(skipped.GetProperty("inFlightFull").GetInt64(), Is.EqualTo(expected.FramesSkipped.InFlightFull));
+                Assert.That(skipped.GetProperty("oversize").GetInt64(), Is.EqualTo(expected.FramesSkipped.Oversize));
+                Assert.That(skipped.GetProperty("poolRefused").GetInt64(), Is.EqualTo(expected.FramesSkipped.PoolRefused));
+                Assert.That(skipped.GetProperty("owedReset").GetInt64(), Is.EqualTo(expected.FramesSkipped.OwedReset));
+
                 Assert.That(replication.TryGetProperty("running", out _), Is.False,
                     "a `running` flag would be true on every started engine, replicating or not — the count replaced it deliberately");
             });

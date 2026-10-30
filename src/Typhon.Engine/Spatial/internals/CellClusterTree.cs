@@ -421,7 +421,6 @@ internal sealed class CellClusterTree
         _tree.QueryFrustum(planes, planeCount, null, 0);
 
     /// <summary>Create an accessor over this cell tree's segment, for a caller that will run several queries against it.</summary>
-    [AllowCopy]
     [return: TransfersOwnership]
     internal ChunkAccessor<TransientStore> CreateAccessor() => _segment.CreateChunkAccessor();
 
@@ -446,6 +445,8 @@ internal sealed class CellClusterTree
         public Enumerator GetEnumerator() => new(_owner);
 
         /// <summary>Drains a full-extent query, yielding each payload as an <see cref="int"/> cluster chunk id.</summary>
+        [MustDispose(Reason = "owns a AABBQueryEnumerator ('_inner'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+        [NoCopy(Reason = "holds a AABBQueryEnumerator by value ('_inner'): a copy duplicates its slots and pins")]
         internal ref struct Enumerator
         {
             private SpatialRTree<TransientStore>.AABBQueryEnumerator _inner;

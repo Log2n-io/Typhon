@@ -390,7 +390,8 @@ export default function DockHost() {
     const needLogs = !event.api.getPanel('logs');
     const needTopSpans =
       hasProfiler && isViewActive('TopSpans') && !event.api.getPanel('top-spans');
-    if ((needLogs || needTopSpans) && !event.api.getEdgeGroup('bottom')) {
+    const needRequests = hasProfiler && isViewActive('Requests') && !event.api.getPanel('requests');
+    if ((needLogs || needTopSpans || needRequests) && !event.api.getEdgeGroup('bottom')) {
       event.api.addEdgeGroup('bottom', { id: EDGE_BOTTOM_ID, initialSize: 200, minimumSize: 100 });
     }
     if (needLogs) {
@@ -409,6 +410,16 @@ export default function DockHost() {
         title: 'Top spans',
         tabComponent: 'locked',
         position: { referenceGroup: EDGE_BOTTOM_ID },
+      });
+    }
+    if (needRequests) {
+      event.api.addPanel({
+        id: 'requests',
+        component: 'Requests',
+        title: 'Requests',
+        tabComponent: 'locked',
+        position: { referenceGroup: EDGE_BOTTOM_ID },
+        inactive: true,
       });
     }
 

@@ -1,5 +1,6 @@
 import type { CSSProperties } from 'react';
 import { ACTION_SLOTS } from '../app/action-bar';
+import { levelTitle, xpPercent } from '../data/progress';
 import { SpeedClass } from '../data/source';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
@@ -19,14 +20,26 @@ export function HamBar() {
     return null;
   }
 
+  // The combat level left of the bar, and the way to the next one under it (character-level.md § 8).
+  const level = vitals?.level ?? Number.NaN;
+  const xpByte = (vitals?.xpFraction ?? Number.NaN) * 255;
+  const xp = xpPercent(xpByte);
   return (
     <div className="gamebar ham" title="Health">
+      <span className="ham-level" title={levelTitle(level, xpByte)}>
+        {Number.isFinite(level) && level > 0 ? `CL ${level}` : 'CL —'}
+      </span>
       <span className="ham-label">H</span>
-      <div className="ham-bar health">
-        <div className="ham-fill" style={{ width: `${fill(vitals?.fraction ?? Number.NaN)}%` }} />
-        <span className="ham-text">
-          {vitals === null || !Number.isFinite(vitals.health) ? '—' : vitals.health.toLocaleString()}
-        </span>
+      <div className="ham-pools">
+        <div className="ham-bar health">
+          <div className="ham-fill" style={{ width: `${fill(vitals?.fraction ?? Number.NaN)}%` }} />
+          <span className="ham-text">
+            {vitals === null || !Number.isFinite(vitals.health) ? '—' : vitals.health.toLocaleString()}
+          </span>
+        </div>
+        <div className="ham-xp" title={levelTitle(level, xpByte)}>
+          <div className="ham-xp-fill" style={{ width: `${Number.isFinite(xp) ? xp : 0}%` }} />
+        </div>
       </div>
     </div>
   );

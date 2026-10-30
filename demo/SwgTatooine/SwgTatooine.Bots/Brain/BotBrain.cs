@@ -27,6 +27,9 @@ public enum Goal
 
     /// <summary>Going into a building, standing about inside, and coming back out.</summary>
     Indoors,
+
+    /// <summary>Doing the mission it holds: out to its lair, its defenders, then the lair (lair-objectives.md B-3).</summary>
+    Questing,
 }
 
 /// <summary>
@@ -50,12 +53,45 @@ public enum Goal
 /// scripted bot does badly.
 /// </para>
 /// <para>
+/// <b>Missions are the day's loop (Loïc, 2026-10-27)</b>, in this order:
+/// </para>
+/// <list type="number">
+/// <item>Holding a mission whose lair is known: the quest — out to the lair, its defenders, the lair.</item>
+/// <item>
+/// Holding none, and its run takes missions (<see cref="TakesMissions"/>): a mission terminal of ITS desk, within <see cref="ErrandReachM"/>, before
+/// anything else — a hunt included. Its desk is its home's for a bot with a home, the city it stands in otherwise, and out in the desert the city of the
+/// nearest terminal that exists (<see cref="FacilityMap"/>): never a terminal of another city, which two cities' terminals ping-ponged a bot between
+/// for good (review 6). Of the desk's untried terminals it picks one of the <see cref="DeskSpread"/> nearest within <see cref="DeskSpreadM"/> of the
+/// nearest, so a crowd landed at one spot spreads. At it, the take: the offer nearest its lair at or below <see cref="MaxLevel"/>, which the swarm names.
+/// </item>
+/// <item>
+/// A terminal that had nothing — the bot still holds none when done there — or that it could not reach is TRIED for <see cref="DeskRetrySeconds"/>:
+/// not picked again. <see cref="EmptyDesksToLeave"/> tried in one desk, or none untried left, close that desk to the bot until they are forgotten. Then
+/// a creature in view is hunted, and otherwise a roaming bot in a city leaves it (<c>GoalWhy.DeskEmpty</c>); a bot with a home keeps to its town's
+/// errands, doors and idling until the desk opens again. A take forgets every terminal tried.
+/// </item>
+/// <item>No terminal known within reach, or no content to walk to one: the mix this brain always had — a hunt, an errand, a door, idling, travel.</item>
+/// </list>
+/// <para>
+/// <b>The bazaar is an interlude in that loop, not a loop of its own (bazaar.md § 8).</b> A bot that trades (<see cref="Trades"/>), not on a quest,
+/// with <see cref="MarketStacks"/> stacks or more, or goods reserved for it, goes to a bazaar of its desk's city before the desk — a quest with a full
+/// inventory loses its drops — and not again for <see cref="MarketRetrySeconds"/>, whatever came of it. A questing bot is not turned back: its quest's
+/// end is the next choice, and the bazaar is that choice's first, as soon as one is within errand reach. At any bazaar it reaches, errand or not, it
+/// trades: the swarm sends the plan. A rush bot (<see cref="RushRegion"/>) does nothing else: to the rush city, to one of its bazaars, and a round of
+/// trade every <see cref="RushRoundSeconds"/> for good.
+/// </para>
+/// <para>
+/// So travel between cities is the exception: a roaming bot leaves a city only after two of its terminals in a row had nothing for it — or, with no
+/// terminal in reach at all, by the old roll. Every city has terminals and the desk lists most offers within a bot's band, so a fleet spends its day on
+/// missions and the rides out to them, which is the load this demo exists to produce.
+/// </para>
+/// <para>
 /// <b>Inside a city it walks the way a person clicking would</b> — round the buildings, on the browser's own grid search (<see cref="CityPath"/>) —
 /// and through a door on the path the building publishes for it. Both need the public content (<see cref="BotAssets"/>); a brain built without it
 /// keeps the behaviour it always had: straight lines, and no doors.
 /// </para>
 /// </remarks>
-public sealed class BotBrain
+public sealed partial class BotBrain
 {
     /// <summary>How close counts as arrived, in metres.</summary>
     /// <remarks>
@@ -83,8 +119,14 @@ public sealed class BotBrain
     /// </remarks>
     public const float NoticeM = 120f;
 
-    /// <summary>How close a bot gets before attacking, in metres — inside the server's own weapon reach.</summary>
+    /// <summary>How close a bot gets before attacking, in metres — inside the server's own weapon reach (the pistol's 30 m, edge to edge).</summary>
     public const float StrikeM = 20f;
+
+    /// <summary>
+    /// How near a creature may come before the bot backs off, in metres: its bite reaches 6 m and it closes at 2-4 m/s, so this leaves two seconds of
+    /// shooting before it could strike. A bot runs at 10 m/s, so it always opens the gap again: it kites (Loïc, 2026-10-26).
+    /// </summary>
+    public const float KiteM = 12f;
 
     /// <summary>How long an idle lasts, in SECONDS, before the bot decides again.</summary>
     /// <remarks>
@@ -114,22 +156,107 @@ public sealed class BotBrain
     /// </remarks>
     public const double UseReachM = 1d;
 
+    /// <summary>
+    /// A terminal whose stand point a walk stuck short of is used from here if the body is within this of the terminal, metres: inside the server's own
+    /// reach for a take (<c>TatooineData.MissionTerminalReachM</c>, 6 m) with room to spare.
+    /// </summary>
+    /// <remarks>
+    /// A terminal is a queue. Ringed by other bodies the stand point is out of reach for good, and the walk stuck "0 m to go", failed the errand, and
+    /// tried the same terminal again — the live telemetry's oscillating bots, and a third of all errands failed (2026-10-27). A person in that crowd
+    /// reads the list over the shoulders in front.
+    /// </remarks>
+    public const float TerminalUseFromM = 4f;
+
+    /// <summary>
+    /// A walk's first point within this of the body, and behind it on the way to the next, is passed at once, metres: the open cell a search starts
+    /// from when the body stands in a wall's margin, which can lie behind it.
+    /// </summary>
+    /// <remarks>Walked to, every walk planned from against a wall began by stepping back, and every re-plan from there again (live, 2026-10-27).</remarks>
+    public const double StepOutM = 1.5d;
+
     /// <summary>A searched path's point counts as reached this close, metres.</summary>
     /// <remarks>
     /// A path's points are its corners, and every leg between two of them is clear only from corner to corner: called reached from 2.5 m, the walk
     /// cut each corner by that much and the third live test's rider steered across a house's corner into its wall. <c>MoveTo</c> puts the body on a
-    /// point, so the reach only has to absorb the server's last step.
+    /// point, so the reach only has to absorb the server's last step. On foot a corner is passed earlier, but only by sight: see <see cref="Follow"/>.
     /// </remarks>
     public const double CornerReachM = 0.75d;
 
-    /// <summary>A leg that has not closed on its next point by half a metre in this long is stuck, in seconds.</summary>
+    /// <summary>A walk's exact part — a door's, a terminal's published points — that has not closed by half a metre in this long is stuck, seconds.</summary>
+    /// <remarks>Long, because a stand point is in a crowd: bodies at a terminal shove each other, and a bot that gave up on being shoved used none.</remarks>
     public const double StuckSeconds = 4d;
+
+    /// <summary>
+    /// A walk's open part, or a straight line, that has not closed by half a metre in this long is stuck, in seconds — then searched again from where the
+    /// body stands.
+    /// </summary>
+    /// <remarks>
+    /// Five decisions at the 4 Hz driver: a body running at 10 m/s covers 12 m in it, so half a metre is no progress at all. It was four seconds, and a bot
+    /// leaving town pushed against a house's wall for all four, sliding along it, before it looked for a way round (Loïc, 2026-10-26).
+    /// </remarks>
+    public const double OpenStuckSeconds = 1.25d;
+
+    /// <summary>
+    /// What a step cut across a corner keeps clear of the corner's wall beyond the body's own half, metres: a heading is renewed a few times a second, not
+    /// continuously, and the server's step does not land on the line to the hundredth.
+    /// </summary>
+    public const float CutClearanceM = CityPath.AirM;
 
     /// <summary>A building further than this is not one a bot in the street decides to walk into, metres.</summary>
     public const float DoorReachM = 120f;
 
     /// <summary>A facility further than this is not an errand, it is a journey, metres.</summary>
     public const float ErrandReachM = 1500f;
+
+    /// <summary>How many terminals of one desk may have nothing for a bot, or be out of its reach, before it stops trying the desk for a while.</summary>
+    public const int EmptyDesksToLeave = 2;
+
+    /// <summary>How long a terminal that had nothing for a bot, or that it could not reach, is not tried again, in seconds: offers are drawn again.</summary>
+    public const double DeskRetrySeconds = 90d;
+
+    /// <summary>A desk visit picks one of this many nearest untried terminals — drawn from the bot's own stream, as a door is from the five nearest.</summary>
+    public const int DeskSpread = 3;
+
+    /// <summary>... of those within this of the nearest, metres: a crowd spreads over a street's terminals, not across the town.</summary>
+    public const double DeskSpreadM = 150d;
+
+    /// <summary>
+    /// After its quick asks, how long a refused or undone mount waits before it is asked for again, in seconds: a wish that outlives a refusal is asked
+    /// for again, now and then, for as long as it lasts.
+    /// </summary>
+    public const double MountRetrySeconds = 10d;
+
+    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): ten of its 30 slots left, a quest's worth of drops.</summary>
+    /// <remarks>
+    /// 24 left six, and a bot that set out on a quest with 23 stacks came back full: live, 2 000 bots, two thirds of them questing at any time, the
+    /// market cut the drops lost to a full inventory by a tenth only (2026-10-27). With 20 and the vendor's floor at 8 (<c>MarketPlan.KeepStacks</c>),
+    /// a quest starts with twelve slots free at least.
+    /// </remarks>
+    public const int MarketStacks = 20;
+
+    /// <summary>A bot this full is losing drops: the errand says so (<see cref="GoalWhy.MarketFull"/>) — the measure of headroom too small.</summary>
+    public const int MarketFullStacks = 29;
+
+    /// <summary>A bazaar errand, made or failed, is not chosen again for this long, in seconds: a vendor that refuses cannot hold a bot at the bazaar.</summary>
+    public const double MarketRetrySeconds = 120d;
+
+    /// <summary>Added to the stay at a bazaar it trades at, in seconds: the plan goes out at two commands a second (the commands' rate).</summary>
+    public const double TradeSeconds = 10d;
+
+    /// <summary>
+    /// The longest a bot stands at a bazaar past its trade's stay while its plan is still going out (<see cref="Perceived.Trading"/>), in seconds: market
+    /// reads slow under load, and a plan sent after the bot walked off is refused <c>MarketNotAtBazaar</c> command by command.
+    /// </summary>
+    public const double MaxTradeHoldSeconds = 30d;
+
+    /// <summary>A rush bot's round of trade comes this often, in seconds (bazaar.md § 8, the load test).</summary>
+    public const double RushRoundSeconds = 2d;
+
+    /// <summary>A mission not done this long after the bot set out on it is cancelled (lair-objectives.md B-4).</summary>
+    public const double QuestSeconds = 600d;
+
+    /// <summary>How far round its lair a creature is taken for one of its defenders.</summary>
+    public const float DefenderM = 60f;
 
     /// <summary>A walk is searched on the grid only within this of its goal; further, it is ridden or run straight to there first, metres.</summary>
     /// <remarks>
@@ -144,10 +271,21 @@ public sealed class BotBrain
     /// <summary>A search that has expanded this many cells without reaching its goal gives up: a walled-off goal must not cost the whole grid.</summary>
     public const int MaxExpansions = 120_000;
 
+    /// <summary>A walk across a city is searched this far ahead at a time, metres, and so is a stuck traveller's longest detour.</summary>
+    /// <remarks>
+    /// Short enough that the search's rectangle (its 30 m margin each side included) stays on half-metre cells. Metre cells pull a walk straight across a
+    /// wall's corner: searched 200 m out of a shuttleport's plaza, 5 % of the walks clipped a wall the server stops a body at (measured 2026-10-26, the real
+    /// port's walls, 1 152 starts and headings).
+    /// </remarks>
+    public const float CityLegM = 150f;
+
+    /// <summary>How often a bot in a city checks whether it stands inside a shuttleport's walls, in seconds.</summary>
+    public const double PortCheckSeconds = 1d;
+
     /// <summary>Where a stuck traveller searches a way to, in order: how far along its course, and how far off it (radians).</summary>
     private static readonly (float Metres, float Turn)[] Detours =
     [
-        (SearchReachM, 0f), (SearchReachM * 0.6f, 0f), (SearchReachM * 0.3f, 0f),
+        (CityLegM, 0f), (SearchReachM * 0.6f, 0f), (SearchReachM * 0.3f, 0f),
         (SearchReachM * 0.3f, MathF.PI / 3f), (SearchReachM * 0.3f, -MathF.PI / 3f),
         (SearchReachM * 0.15f, MathF.PI / 2f), (SearchReachM * 0.15f, -MathF.PI / 2f),
     ];
@@ -158,6 +296,7 @@ public sealed class BotBrain
     private readonly long _patienceTicks;
     private readonly double _rate;
     private readonly long _stuckTicks;
+    private readonly long _openStuckTicks;
     private readonly List<SeenStructure> _seen = [];
     private readonly Leg _leg = new();
     private uint _rng;
@@ -167,7 +306,11 @@ public sealed class BotBrain
     /// <param name="seed">Its own seed; two bots with the same seed behave identically.</param>
     /// <param name="ticksPerSecond">How often this bot is driven, which is what its timed goals are measured in.</param>
     /// <param name="assets">The public content (walls, doors, stand points), or null for a brain that only travels and hunts.</param>
-    public BotBrain(City[] cities, uint seed, double ticksPerSecond = 4d, BotAssets assets = null)
+    /// <param name="homeRegion">
+    /// The city this bot lives in, as a region (a city plus one), or 0 for none. A bot with a home goes back to it, and stays: its errands, doors, hunts
+    /// and missions start and end there, and it never travels to another city.
+    /// </param>
+    public BotBrain(City[] cities, uint seed, double ticksPerSecond = 4d, BotAssets assets = null, int homeRegion = 0)
     {
         ArgumentNullException.ThrowIfNull(cities);
         if (cities.Length == 0)
@@ -184,14 +327,74 @@ public sealed class BotBrain
         _idleTicks = Ticks(IdleSeconds);
         _patienceTicks = Ticks(ShuttlePatienceSeconds);
         _stuckTicks = Ticks(StuckSeconds);
+        _openStuckTicks = Ticks(OpenStuckSeconds);
         Facilities = new FacilityMap();
+        HomeRegion = homeRegion > 0 && homeRegion <= cities.Length ? homeRegion : 0;
     }
+
+    /// <summary>The city this bot lives in, as a region (a city plus one); 0 for a bot that roams the planet.</summary>
+    public int HomeRegion { get; }
+
+    /// <summary>
+    /// Whether this bot can take a mission at all — its run takes them and it can read its journal. A bot that cannot skips the desk entirely: the day's
+    /// loop starts at the mix it always had.
+    /// </summary>
+    public bool TakesMissions { get; set; } = true;
+
+    /// <summary>
+    /// Whether this bot trades at the bazaar (bazaar.md § 8): its run trades and it can read its market. Off, a bazaar is an errand that ends in
+    /// standing there, as it always was.
+    /// </summary>
+    public bool Trades { get; set; }
+
+    /// <summary>The load test's city, as a region (<c>--market-rush</c>, bazaar.md § 8), or 0: a rush bot goes there, stands at a bazaar and trades.</summary>
+    public int RushRegion { get; set; }
+
+    /// <summary>Whether it stands at a bazaar's terminal using it: the only time a market command can be taken (the server's 6 m).</summary>
+    /// <remarks>
+    /// <b>And within <see cref="MarketReachM"/> of it, by where the body was last seen.</b> Using a terminal is a goal's state; where the body stands is the
+    /// server's, and a body that slid off its stand point kept going (live, 2026-10-27: 90 % of the bots' market commands refused NotAtBazaar).
+    /// </remarks>
+    public bool AtBazaar => Goal == Goal.Visiting && _using && _visitKind == Routing.BazaarKind
+        && Routing.Distance(_seenX, _seenZ, _visitAt.X, _visitAt.Z) <= MarketReachM;
+
+    /// <summary>
+    /// A market command is sent from within this of the terminal, metres: inside the server's 6 m (<c>TatooineData.BazaarReachM</c>) by the distance a body
+    /// runs in a decision and a half, since the position read is a frame old.
+    /// </summary>
+    public const double MarketReachM = 5d;
+
+
+    /// <summary>Errands set out on, counted: a trade's plan belongs to the visit it was asked at, and is dropped when that visit is over.</summary>
+    public long VisitSerial { get; private set; }
+
+    /// <summary>Bazaar visits it traded at: each one a <see cref="IntentKind.Trade"/>.</summary>
+    public long TradesAsked { get; private set; }
 
     /// <summary>What this bot has learned about the cities.</summary>
     public FacilityMap Facilities { get; }
 
     /// <summary>What it is doing.</summary>
     public Goal Goal { get; private set; } = Goal.Choosing;
+
+    /// <summary>How far above its own combat level a bot hunts (content-levels.md § 7): a creature past it is left alone, and an offer past it is never
+    /// taken — the desk would refuse it (missions.md § 8).</summary>
+    public const int LevelReach = 3;
+
+    /// <summary>
+    /// The bot's own combat level: 1 — where a new character belongs, the city fringes — until the character's CL is replicated and set here
+    /// (character-level.md).
+    /// </summary>
+    public int CombatLevel { get; set; } = 1;
+
+    /// <summary>The highest level this bot hunts, and prefers an offer at: its <see cref="CombatLevel"/> plus <see cref="LevelReach"/>.</summary>
+    public int MaxLevel => CombatLevel + LevelReach;
+
+    /// <summary>
+    /// Whether the nearest creature is one to HUNT: at or below <see cref="MaxLevel"/>, or of no stated level. A level-45 viper in view does not pull a
+    /// CL-1 bot into a fight it cannot win. A mission's defenders are not asked: they are fought at any level, since the lair cannot be broken past them.
+    /// </summary>
+    private bool Huntable(in Perceived world) => world.NearestCreatureLevel <= MaxLevel;
 
     /// <summary>The REGION it is going to — a city plus one — or 0 when it is not travelling.</summary>
     /// <remarks>
@@ -215,10 +418,24 @@ public sealed class BotBrain
     /// <summary>How many walks it searched round the buildings.</summary>
     public long PathsPlanned { get; private set; }
 
+    /// <summary>Missions it asked to take at a terminal, and missions it gave up on.</summary>
+    public long MissionsAsked { get; private set; }
+
+    public long MissionsGivenUp { get; private set; }
+
+    /// <summary>How many times it found itself inside a shuttleport's walls with somewhere else to be, and walked out by the gate.</summary>
+    public long PortsLeft { get; private set; }
+
+    /// <summary>Whether its last check found it inside a shuttleport's walls with no flight to take there: what a trapped bot looks like.</summary>
+    public bool InPort { get; private set; }
+
     /// <summary>The walk in progress, for a trace line: next point, count, where the exact part starts, ridden, how it ended.</summary>
     public string LegState =>
         $"leg {_leg.Next}/{_leg.Points.Count} exact {_leg.Precise} ride {(_leg.Ride ? 1 : 0)}{(_leg.Dismounted ? "-off" : string.Empty)} end {_leg.Ended}"
         + (_leg.Active ? $" next ({_leg.Points[_leg.Next].X:F1}, {_leg.Points[_leg.Next].Z:F1})" : string.Empty);
+
+    /// <summary>Where the errand under way goes — the facility, not its stand point — for a trace line and a check.</summary>
+    public (float X, float Z) VisitTarget => _visitAt;
 
     /// <summary>The route's first leg when it is flying: the port to walk to.</summary>
     private float _portX;
@@ -266,6 +483,58 @@ public sealed class BotBrain
     /// <summary>After a visit, the shuttle is the next thing it does.</summary>
     private bool _flyNext;
 
+    /// <summary>The kind of facility the errand under way goes to, and where it stands.</summary>
+    private int _visitKind;
+
+    private (float X, float Z) _visitAt;
+
+    /// <summary>The desk the errand under way goes to, as a region.</summary>
+    private int _visitRegion;
+
+    /// <summary>The terminals tried since its last take — empty, or out of reach — with their desk and when; forgotten after DeskRetrySeconds.</summary>
+    private readonly List<(float X, float Z, int Region, long At)> _tried = [];
+
+    /// <summary>Straight-line stuck verdicts since the travel last made progress: the first comes quickly, the next ones slower.</summary>
+    private int _travelStucks;
+
+    /// <summary>When it set out on the mission it holds, or -1 while it holds none it has set out on.</summary>
+    private long _questSince = -1;
+
+    /// <summary>Whether it has reached its mission's lair, so a lair drawn again far away starts a new ride.</summary>
+    private bool _questNear;
+
+    /// <summary>Walking out of a shuttleport's plaza by its gate; the goal is chosen again once out.</summary>
+    private bool _leavingPort;
+
+    /// <summary>When it next checks whether it stands inside a shuttleport's walls.</summary>
+    private long _portCheckAt;
+
+
+    /// <summary>When a walk across the city may be searched again, after one found no way or stuck.</summary>
+    private long _cityWalkAt;
+
+    /// <summary>Where the body was seen at the last decision, east and north.</summary>
+    private float _seenX;
+
+    private float _seenZ;
+
+    /// <summary>The terminal's stand point: the errand's walk ends on it, and a body found off the terminal while using it walks back toward it.</summary>
+    private (float X, float Z) _standAt;
+
+    /// <summary>Whether the body using a terminal was told to stand; and when a body found off its stand point may be walked back again.</summary>
+    private bool _standing;
+
+    private long _restandAt;
+
+    /// <summary>The latest it stands at a bazaar for a plan still going out.</summary>
+    private long _tradeCap;
+
+    /// <summary>When the bazaar errand may be chosen again: set whenever it is tried, made or not.</summary>
+    private long _marketAt;
+
+    /// <summary>The errand under way is the bazaar errand (<see cref="GoalWhy.MarketChosen"/>), not an errand that happens to end at a bazaar.</summary>
+    private bool _marketErrand;
+
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
     /// <param name="tick">The fleet's tick, which is what the timed goals count in.</param>
@@ -277,6 +546,7 @@ public sealed class BotBrain
             return Intent.None;   // a camera has nothing to decide, and no body to decide for
         }
 
+        (_seenX, _seenZ) = (world.X, world.Z);
         var arrived = !_realmKnown || world.Realm != _lastRealm;
         if (arrived)
         {
@@ -296,7 +566,7 @@ public sealed class BotBrain
             // Every arrival starts its stay now — the walk in left whatever timer the street had, and a stale one turned the bot round in the doorway.
             if (Goal != Goal.Indoors || arrived)
             {
-                Goal = Goal.Indoors;
+                Become(Goal.Indoors, GoalWhy.EnteredBuilding, tick, (uint)world.Realm);
                 _leaving = false;
                 _until = tick + Ticks(4 + (Next() % 8u));
             }
@@ -307,14 +577,24 @@ public sealed class BotBrain
         if (Goal == Goal.Indoors && _leaving)
         {
             // Out: the crossing has put it back on the planet. Stand a moment where the door left it, as anyone does.
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.LeftBuilding, tick);
             _until = tick + Ticks(2);
         }
 
         // The swoop, before the goal: getting on or off is a command of its own, and the goal's movement waits a tick for it.
         if (MountIntent(in world, tick) is { } mount)
         {
+            // Getting on or off stands the body still for a tick or two, which is not being stuck.
+            _travelBestAt = tick;
+            _leg.BestAt = tick;
             return mount;
+        }
+
+        // Inside a shuttleport's walls with somewhere else to be: out by the gate first, whatever the goal. Nothing stops a body walking in through
+        // the gate, and a straight line on from there ends against the far wall (Loïc, 2026-10-26: bots stood trapped in Port Sable's).
+        if (LeavePort(in world, tick) is { } leave)
+        {
+            return leave;
         }
 
         switch (Goal)
@@ -329,6 +609,8 @@ public sealed class BotBrain
                 return Visit(in world, tick);
             case Goal.Indoors:
                 return Enter(in world, tick);
+            case Goal.Questing:
+                return Quest(in world, tick);
             case Goal.Idling:
                 if (tick < _until)
                 {
@@ -352,16 +634,92 @@ public sealed class BotBrain
     /// </remarks>
     private Intent Choose(in Perceived world, long tick)
     {
+        ChoosingFromHere();
         _wantMounted = false;
         _leg.Clear();
-        if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn)
+
+        // The load test: nothing but the rush city's bazaar.
+        if (RushRegion != 0 && _assets != null)
         {
-            Goal = Goal.Hunting;
+            return Rush(in world, tick, RegionAt(world.X, world.Z));
+        }
+
+        // A mission held, its lair placed: that is what it is doing until it is done or given up (lair-objectives.md B-3).
+        if (world.MissionsHeld > 0 && world.HasMissionLair)
+        {
+            Become(Goal.Questing, GoalWhy.QuestHeld, tick);
+            return Quest(in world, tick);
+        }
+
+        if (world.MissionsHeld == 0)
+        {
+            _questSince = -1;
+        }
+
+        var here = RegionAt(world.X, world.Z);
+
+        // Nearly full, or goods waiting for it: its city's bazaar, before the desk — a quest taken now would lose its drops (the remarks).
+        // A bazaar out of errand reach — the bot is back from a quest's lair, kilometres out — is no try: it goes when back in reach, not 120 s later.
+        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0)
+            && Bazaar(in world, here) is { } bazaar && Routing.Distance(world.X, world.Z, bazaar.At.X, bazaar.At.Z) <= ErrandReachM)
+        {
+            _marketAt = tick + Ticks(MarketRetrySeconds);
+            var why = world.InventoryStacks >= MarketFullStacks ? GoalWhy.MarketFull : GoalWhy.MarketChosen;
+            if (StartVisitAt(in world, tick, Routing.BazaarKind, why, bazaar))
+            {
+                return Visit(in world, tick);
+            }
+        }
+
+        // Holding none: a terminal of its desk for one, before anything else (the day's loop, in the remarks).
+        var deskClosed = false;
+        if (world.MissionsHeld == 0 && TakesMissions && _assets != null)
+        {
+            if (Desk(in world, tick, here, out deskClosed) is { } desk && StartVisitAt(in world, tick, Routing.MissionTerminalKind, GoalWhy.DeskChosen, desk))
+            {
+                return Visit(in world, tick);
+            }
+        }
+
+        if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn && Huntable(in world))
+        {
+            Become(Goal.Hunting, GoalWhy.CreatureNoticed, tick, world.NearestCreature, world.NearestCreatureM);
             _huntUntil = tick + Ticks(HuntSeconds);
             return Hunt(in world, tick);
         }
 
-        var here = RegionAt(world.X, world.Z);
+        // Its city's desk had nothing for it, twice: a roaming bot goes elsewhere.
+        if (deskClosed && HomeRegion == 0 && here != 0)
+        {
+            _flyNext = false;
+            return GoTo(in world, tick, OtherCity(here), here, GoalWhy.DeskEmpty);
+        }
+
+        // A bot with a home that is not there — it was spawned elsewhere, or a hunt or a mission took it out — goes back.
+        if (HomeRegion != 0 && here != HomeRegion)
+        {
+            return GoTo(in world, tick, HomeRegion - 1, here);
+        }
+
+        // At home: its town's errands and doors, and standing about — never a trip to another city.
+        if (HomeRegion != 0)
+        {
+            _flyNext = false;
+            var pick = Next() % 100u;
+            if (_assets != null && pick < 45u && StartVisit(in world, tick, deskClosed ? Routing.BazaarKind : 0, GoalWhy.ErrandStarted))
+            {
+                return Visit(in world, tick);
+            }
+
+            if (_assets != null && pick < 75u && StartEntering(in world, tick))
+            {
+                return Enter(in world, tick);
+            }
+
+            Become(Goal.Idling, GoalWhy.IdleChosen, tick);
+            _until = tick + _idleTicks;
+            return Intent.Move(0f, 0);
+        }
 
         // In a city, with the content to walk it: an errand, a door, or — after an errand — the shuttle. Rolled from the same stream, after the
         // decision above and only when the content exists, so a brain without it draws exactly the sequence it always drew.
@@ -370,7 +728,7 @@ public sealed class BotBrain
             var errand = Next() % 100u;
             if (_flyNext || errand < 25u)
             {
-                if (!_flyNext && StartVisit(in world, tick))
+                if (!_flyNext && StartVisit(in world, tick, deskClosed ? Routing.BazaarKind : 0, GoalWhy.ErrandStarted))
                 {
                     return Visit(in world, tick);
                 }
@@ -390,7 +748,7 @@ public sealed class BotBrain
         var roll = Next() % 100u;
         if (roll < 20u)
         {
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.IdleChosen, tick);
             _until = tick + _idleTicks;
             return Intent.Move(0f, 0);   // stop where it is: speed class 0 is the server's own "stand still"
         }
@@ -398,7 +756,12 @@ public sealed class BotBrain
         // The city it is standing in is excluded by rolling over the OTHERS, not by nudging a self-selection to the
         // next index: that nudge made one neighbour twice as likely as every other city, and a fleet that visits one
         // place twice as often is a load distribution reported as uniform.
-        var destination = OtherCity(here);
+        return GoTo(in world, tick, OtherCity(here), here);
+    }
+
+    /// <summary>Sets off for a city — by the mode its route chose — and takes the first step.</summary>
+    private Intent GoTo(in Perceived world, long tick, int destination, int here, GoalWhy because = GoalWhy.None)
+    {
         TargetRegion = destination + 1;
         var city = _cities[destination];
         var route = Routing.Plan(new Journey(world.X, world.Z, city.X, city.Z, here, TargetRegion, Facilities));
@@ -408,7 +771,8 @@ public sealed class BotBrain
         _asked = false;
         _travelBest = double.MaxValue;
         _travelBestAt = tick;
-        Goal = Goal.Travelling;
+        var why = because != GoalWhy.None ? because : TargetRegion == HomeRegion ? GoalWhy.GoingHome : GoalWhy.TravelChosen;
+        Become(Goal.Travelling, why, tick, (uint)TargetRegion, (float)Routing.Distance(world.X, world.Z, city.X, city.Z));
         return Travel(in world, tick);
     }
 
@@ -435,14 +799,17 @@ public sealed class BotBrain
         if (world.NearestCreature != 0 && tick >= _huntUntil)
         {
             _givenUpOn = world.NearestCreature;
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.HuntTimeout, tick);
             return Choose(in world, tick);
         }
 
-        if (world.NearestCreature == 0 || world.NearestCreature == _givenUpOn)
+        if (world.NearestCreature == 0 || world.NearestCreature == _givenUpOn || !Huntable(in world))
         {
-            // Killed, or it wandered out of view. Nothing to hunt, so decide again.
-            Goal = Goal.Choosing;
+            // Killed, or it wandered out of view, or what is nearest now is past this bot's level. Nothing to hunt, so decide again.
+            var why = world.NearestCreature == 0 ? GoalWhy.HuntTargetGone
+                : world.NearestCreature == _givenUpOn ? GoalWhy.HuntGivenUpTarget
+                : GoalWhy.HuntNotHuntable;
+            Become(Goal.Choosing, why, tick);
             return Choose(in world, tick);
         }
 
@@ -451,20 +818,41 @@ public sealed class BotBrain
         // travelled anywhere — the goal had no end, which is not the same as a goal that takes a long time.
         if (world.NearestCreatureM > NoticeM)
         {
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.HuntOutOfRange, tick);
             return Choose(in world, tick);
         }
 
-        if (world.NearestCreatureM > StrikeM)
+        // Attacking is naming a target and letting the server's combat path resolve it, which is exactly what a browser
+        // does — there is no attack command, and that is the point. Where to stand while it does is Engage's.
+        return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true);
+    }
+
+    /// <summary>
+    /// How a bot fights a target at <paramref name="distanceM"/>: closes in past <see cref="StrikeM"/>, stands and shoots between the two, and — a
+    /// creature, which bites — runs from it inside <see cref="KiteM"/>, still shooting. A lair does not move or bite: the bot stands at its range.
+    /// </summary>
+    /// <param name="x">The bot, east.</param>
+    /// <param name="z">The bot, north.</param>
+    /// <param name="target">The target's netId.</param>
+    /// <param name="tx">The target, east.</param>
+    /// <param name="tz">The target, north.</param>
+    /// <param name="distanceM">Between the two.</param>
+    /// <param name="mobile">Whether the target chases and bites (a creature), rather than stands (a lair).</param>
+    /// <returns>An attack carrying its motion: towards, none, or away.</returns>
+    public static Intent Engage(float x, float z, uint target, float tx, float tz, float distanceM, bool mobile)
+    {
+        var run = Routing.SpeedClassOf(TravelMode.Run);
+        if (distanceM > StrikeM)
         {
-            return Intent.Move(
-                Routing.HeadingTo(world.X, world.Z, world.NearestCreatureX, world.NearestCreatureZ),
-                Routing.SpeedClassOf(TravelMode.Run));
+            return Intent.Attack(target, Routing.HeadingTo(x, z, tx, tz), run);
         }
 
-        // In range. Attacking is naming a target and letting the server's combat path resolve it, which is exactly what
-        // a browser does — there is no attack command, and that is the point.
-        return Intent.Attack(world.NearestCreature);
+        if (mobile && distanceM < KiteM)
+        {
+            return Intent.Attack(target, Routing.HeadingTo(tx, tz, x, z), run);
+        }
+
+        return Intent.Attack(target);
     }
 
     /// <summary>Goes to the target city by the mode the route chose.</summary>
@@ -475,7 +863,7 @@ public sealed class BotBrain
     {
         if (TargetRegion <= 0 || TargetRegion > _cities.Length)
         {
-            Goal = Goal.Choosing;
+            Become(Goal.Choosing, GoalWhy.NoDestination, tick);
             return Choose(in world, tick);
         }
 
@@ -485,7 +873,7 @@ public sealed class BotBrain
         {
             // Arrived. Idle a while rather than choosing again at once: a fleet that re-decided on arrival would travel
             // without pause, and a city nobody stands in is a city whose group set is never held.
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.Arrived, tick);
             _until = tick + _idleTicks;
             TargetRegion = 0;
             _wantMounted = false;
@@ -498,7 +886,28 @@ public sealed class BotBrain
             return ToTheShuttle(in world, tick);
         }
 
-        _wantMounted = Mode == TravelMode.Swoop && toCentre > 2 * ArrivedM;
+        return GoToward(in world, tick, city.X, city.Z, toCentre, Mode == TravelMode.Swoop);
+    }
+
+    /// <summary>
+    /// Toward a point: on the swoop when <paramref name="ride"/> and still far, the straight line, and round whatever stops it — a travel to a city's
+    /// centre, or a ride out to a mission's lair.
+    /// </summary>
+    private Intent GoToward(in Perceived world, long tick, float tx, float tz, double distance, bool ride)
+    {
+        _wantMounted = ride && distance > 2 * ArrivedM;
+        var inCity = TownAt(world.X, world.Z, CityPath.CityMarginM) != 0;
+
+        // Out of the city on its walk out — past its disc and the buildings round it, as the server's crowd leaves it (CityPath.CityLeaveM): the rest is
+        // open desert, ridden straight from there. Walked on to the stretch's end, the last of the stretch was a hundred metres on foot past the edge;
+        // dropped at the bare disc, a house straddling it stopped the rider, and coming back into the disc got it off and on again (review 6).
+        if (_leg.Active && _leg.CityWalk && TownAt(world.X, world.Z, CityPath.CityLeaveM) == 0)
+        {
+            NoteLeg(LegWhy.CityEdge, tick);
+            _leg.Clear();
+            _travelBest = double.MaxValue;
+            _travelBestAt = tick;
+        }
 
         // A walk round a building that stood in the straight line, once the watchdog found it; then the straight line again.
         if (_leg.Active)
@@ -509,40 +918,153 @@ public sealed class BotBrain
                 return step;
             }
 
+            if (end == LegEnd.Stuck)
+            {
+                // A searched walk that stuck after its own replans: straight on, and the watchdog's detours, for a while before searching again.
+                _cityWalkAt = tick + (2 * _stuckTicks);
+            }
+
             _leg.Clear();
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
         }
 
-        if (toCentre < _travelBest - 1d)
+        // In a city, on foot: searched round its buildings before it is walked, a stretch at a time, as a person clicking would. A straight line until
+        // stuck walked bots in through a shuttleport's gate and against its far wall.
+        if (_assets != null && world.Structures != null && tick >= _cityWalkAt && inCity)
         {
-            _travelBest = toCentre;
+            var reach = (float)Math.Min(distance, CityLegM);
+            var heading = Routing.HeadingTo(world.X, world.Z, tx, tz);
+            var goal = (world.X + (MathF.Cos(heading) * reach), world.Z + (MathF.Sin(heading) * reach));
+            // A walk that ends where the body already stands — its goal walled in, snapped back to here — is no walk: searched again every tick, it
+            // would be a search a tick that never moves the bot.
+            if (PlanWalk(in world, goal, [], tick, exactGoal: false)
+                && Routing.Distance(world.X, world.Z, _leg.Points[^1].X, _leg.Points[^1].Z) > 2d * CornerReachM)
+            {
+                // Walked, all of it: the ride starts where the walk is dropped.
+                _leg.Ride = false;
+                _leg.KeepRiding = true;
+                _leg.CityWalk = true;
+                return Follow(in world, tick, out _);
+            }
+
+            _leg.Clear();
+            _cityWalkAt = tick + (2 * _stuckTicks);
+        }
+
+        if (distance < _travelBest - 1d)
+        {
+            _travelStucks = _travelBest == double.MaxValue ? _travelStucks : 0;   // closing on the goal again, not merely measured afresh
+            _travelBest = distance;
             _travelBestAt = tick;
         }
-        else if (tick - _travelBestAt > _stuckTicks && _assets != null && world.Structures != null)
+        else if (tick - _travelBestAt > (_travelStucks == 0 ? _openStuckTicks : _stuckTicks) && _assets != null && world.Structures != null)
         {
+            // The first verdict quickly, the next ones at the old pace: each searches up to seven detours of four lengths (review 6, M3).
+            _travelStucks++;
             // Stuck against something: search a way round it toward the city — as far as a search reaches, then nearer, then off to either side. A
             // single goal straight ahead can stand inside the next building, and a search that cannot reach its goal finds nothing at all: the
             // second live run's bot pushed against one wall in Dry Wells for four minutes with every search failing.
+            NoteStuck(_travelBestAt, tick);
+            NoteLeg(LegWhy.TravelStuck, tick);
             _travelBest = double.MaxValue;
             _travelBestAt = tick;
-            var heading = Routing.HeadingTo(world.X, world.Z, city.X, city.Z);
+            var heading = Routing.HeadingTo(world.X, world.Z, tx, tz);
             foreach (var (metres, turn) in Detours)
             {
-                var reach = (float)Math.Min(toCentre, metres);
+                var reach = (float)Math.Min(distance, metres);
                 var goal = (world.X + (MathF.Cos(heading + turn) * reach), world.Z + (MathF.Sin(heading + turn) * reach));
                 if (PlanWalk(in world, goal, [], tick, exactGoal: false))
                 {
                     // Round the obstacle on whatever it was travelling on: a rider does not get off to go round a house.
-                    _leg.Ride = Mode == TravelMode.Swoop;
+                    _leg.Ride = ride;
                     _leg.KeepRiding = true;
+                    NoteLeg(LegWhy.Detour, tick);
                     return Follow(in world, tick, out _);
                 }
             }
         }
 
         var speed = world.Mounted ? Routing.SwoopClass : Routing.SpeedClassOf(TravelMode.Run);
-        return Intent.Move(Routing.HeadingTo(world.X, world.Z, city.X, city.Z), speed);
+        return Intent.Move(Routing.HeadingTo(world.X, world.Z, tx, tz), speed);
+    }
+
+    /// <summary>
+    /// The mission held (lair-objectives.md B-3, B-4): ride out to its lair, kill the defenders round it, then break the lair — with a browser's commands
+    /// only. Done when the journal no longer lists it; cancelled after <see cref="QuestSeconds"/>.
+    /// </summary>
+    private Intent Quest(in Perceived world, long tick)
+    {
+        if (world.MissionsHeld == 0)
+        {
+            // Done — paid, the journal says it no longer holds it — or cancelled by somebody else's hand: decide again.
+            _questSince = -1;
+            _wantMounted = false;
+            Become(Goal.Choosing, GoalWhy.QuestDone, tick);
+            return Choose(in world, tick);
+        }
+
+        if (_questSince < 0)
+        {
+            _questSince = tick;
+            _questNear = false;
+            _flyNext = false;
+            _travelBest = double.MaxValue;
+            _travelBestAt = tick;
+            _leg.Clear();
+        }
+
+        if (tick - _questSince > Ticks(QuestSeconds))
+        {
+            // Not done in ten minutes: something it cannot reach or cannot kill. Give it back and get on with the day.
+            MissionsGivenUp++;
+            _questSince = -1;
+            _wantMounted = false;
+            Become(Goal.Idling, GoalWhy.QuestTimeout, tick);
+            _until = tick + Ticks(2);
+            return Intent.AbandonMission;
+        }
+
+        if (!world.HasMissionLair)
+        {
+            // Being drawn, or moved after somebody else broke it: wait where it is for the journal to say where.
+            _wantMounted = false;
+            return Intent.Move(0f, 0);
+        }
+
+        var toLair = Routing.Distance(world.X, world.Z, world.MissionLairX, world.MissionLairZ);
+        if (toLair > NoticeM)
+        {
+            if (_questNear)
+            {
+                // Its lair was drawn again somewhere else: a new ride, whose progress is measured from here, not from the fight.
+                _questNear = false;
+                _travelBest = double.MaxValue;
+                _travelBestAt = tick;
+            }
+
+            return GoToward(in world, tick, world.MissionLairX, world.MissionLairZ, toLair, ride: true);
+        }
+
+        // There: on foot, and the fight. Its defenders first — the lair cannot be hurt while any stands — then the lair.
+        _questNear = true;
+        _wantMounted = false;
+        _leg.Clear();
+        if (world.MissionLair != 0 && world.MissionLairGuards == 0)
+        {
+            return Engage(world.X, world.Z, world.MissionLair, world.MissionLairX, world.MissionLairZ, (float)toLair, mobile: false);
+        }
+
+        if (world.NearestCreature != 0
+            && Routing.Distance(world.NearestCreatureX, world.NearestCreatureZ, world.MissionLairX, world.MissionLairZ) <= DefenderM)
+        {
+            return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true);
+        }
+
+        // Nothing to shoot in view yet: close on the lair.
+        return toLair > StrikeM
+            ? Intent.Move(Routing.HeadingTo(world.X, world.Z, world.MissionLairX, world.MissionLairZ), Routing.SpeedClassOf(TravelMode.Run))
+            : Intent.Move(0f, 0);
     }
 
     /// <summary>Flying: to this city's ticket terminal, then the ask.</summary>
@@ -563,6 +1085,7 @@ public sealed class BotBrain
                     // Abandoned, not cleared: a cleared leg reads as "not yet planned", and the search ran again on every tick until the port was in
                     // range — a whole-grid A* per tick per bot (review 1).
                     _leg.Abandon();
+                    NoteLeg(LegWhy.Abandoned, tick);
                 }
                 else
                 {
@@ -585,6 +1108,7 @@ public sealed class BotBrain
 
                 // Stuck on the way to the terminal, or at it and out of range: ask where it stands if that is at the port, else walk there plainly.
                 _leg.Abandon();
+                NoteLeg(LegWhy.Abandoned, tick);
             }
         }
 
@@ -600,7 +1124,7 @@ public sealed class BotBrain
     {
         _asked = true;
         _leg.Clear();
-        Goal = Goal.Waiting;
+        Become(Goal.Waiting, GoalWhy.BoardAsked, tick, (uint)TargetRegion);
         _until = tick + _patienceTicks;
         return Intent.Board(TargetRegion);
     }
@@ -634,7 +1158,7 @@ public sealed class BotBrain
         // an ordinary arrival, and the two questions are deliberately different ones.
         if (TargetRegion > 0 && RegionAt(world.X, world.Z) == TargetRegion)
         {
-            Goal = Goal.Idling;
+            Become(Goal.Idling, GoalWhy.Landed, tick);
             _until = tick + _idleTicks;
             TargetRegion = 0;
             return Intent.Move(0f, 0);
@@ -645,7 +1169,7 @@ public sealed class BotBrain
         if (world.BoardRefused)
         {
             Mode = TravelMode.Swoop;
-            Goal = Goal.Travelling;
+            Become(Goal.Travelling, GoalWhy.BoardRefused, tick);
             return Travel(in world, tick);
         }
 
@@ -656,32 +1180,148 @@ public sealed class BotBrain
 
         // Patience spent. Ride instead, and do not ask again on this trip.
         Mode = TravelMode.Swoop;
-        Goal = Goal.Travelling;
+        Become(Goal.Travelling, GoalWhy.ShuttlePatienceOut, tick);
         return Travel(in world, tick);
     }
 
     /// <summary>Starts an errand to the nearest mission terminal or bazaar it knows, if there is one within reach.</summary>
-    private bool StartVisit(in Perceived world, long tick)
+    /// <param name="world">What the bot was sent.</param>
+    /// <param name="tick">The fleet's tick.</param>
+    /// <param name="kind">The kind to go to, or 0 to roll it: a mission terminal 60 times in 100, a bazaar otherwise.</param>
+    /// <param name="why">What the goal is told it began for.</param>
+    private bool StartVisit(in Perceived world, long tick, int kind, GoalWhy why)
     {
-        var kind = Next() % 100u < 60u ? Routing.MissionTerminalKind : Routing.BazaarKind;
-        if (!Facilities.TryNearest(kind, world.X, world.Z, out var found, out _)
-            || Routing.Distance(world.X, world.Z, found.X, found.Z) > ErrandReachM
-            || _assets.At(found.Asset) is not { } plan)
+        kind = kind != 0 ? kind : Next() % 100u < 60u ? Routing.MissionTerminalKind : Routing.BazaarKind;
+        return Facilities.TryNearest(kind, world.X, world.Z, out var found, out var region)
+            && StartVisitAt(in world, tick, kind, why, (found, region));
+    }
+
+    /// <summary>Starts an errand to one facility, if it is within reach and a walk there is found; a desk's terminal it cannot walk to is tried.</summary>
+    private bool StartVisitAt(in Perceived world, long tick, int kind, GoalWhy why, (Facility At, int Region) to)
+    {
+        var found = to.At;
+        _visitKind = kind;
+        if (Routing.Distance(world.X, world.Z, found.X, found.Z) > ErrandReachM || _assets.At(found.Asset) is not { } plan)
         {
             return false;
         }
 
         var use = plan.UsePath.Length > 0 ? Placed(found, plan.UsePath) : [(found.X, found.Z)];
+        _standAt = use[^1];
         if (!PlanWalk(in world, use[0], use[1..], tick))
         {
+            if (kind == Routing.MissionTerminalKind)
+            {
+                Tried(found.X, found.Z, to.Region, tick);   // no way to it: not searched again for every choice
+            }
+
             return false;
         }
 
         _leg.FinalReach = UseReachM;
+        _visitAt = (found.X, found.Z);
+        _visitRegion = to.Region;
+        _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull;
+        VisitSerial++;
 
-        Goal = Goal.Visiting;
+        Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
         _using = false;
+        _standing = false;
         return true;
+    }
+
+    /// <summary>
+    /// The terminal to try for a mission: one of the few nearest untried in the bot's desk, or null. <paramref name="closed"/> says the desk has nothing
+    /// left to try — <see cref="EmptyDesksToLeave"/> tried, or every one of them — rather than that it has no terminal at all.
+    /// </summary>
+    private (Facility At, int Region)? Desk(in Perceived world, long tick, int here, out bool closed)
+    {
+        closed = false;
+        var forget = tick - Ticks(DeskRetrySeconds);
+        _tried.RemoveAll(t => t.At <= forget);
+
+        // Its home's desk, the city it stands in, or out in the desert the city of the nearest terminal: never another city's (review 6, M1 and H2).
+        var region = HomeRegion != 0 ? HomeRegion
+            : here != 0 ? here
+            : Facilities.TryNearest(Routing.MissionTerminalKind, world.X, world.Z, out _, out var nearest) ? nearest : 0;
+        if (region == 0)
+        {
+            return null;
+        }
+
+        Span<(float X, float Z)> skip = stackalloc (float X, float Z)[_tried.Count];
+        var tried = 0;
+        foreach (var t in _tried)
+        {
+            skip[tried] = (t.X, t.Z);
+            tried += t.Region == region ? 1 : 0;
+        }
+
+        Span<Facility> near = stackalloc Facility[DeskSpread];
+        var n = tried >= EmptyDesksToLeave ? 0 : Facilities.NearestIn(region, Routing.MissionTerminalKind, world.X, world.Z, skip[.._tried.Count], near);
+        if (n == 0)
+        {
+            closed = tried > 0;
+            return null;
+        }
+
+        // One of the nearest few, as a door is one of the five nearest: a crowd landed together spreads over a street's terminals (review 6, H1).
+        var nearestM = Routing.Distance(world.X, world.Z, near[0].X, near[0].Z);
+        var spread = 1;
+        while (spread < n && Routing.Distance(world.X, world.Z, near[spread].X, near[spread].Z) - nearestM <= DeskSpreadM)
+        {
+            spread++;
+        }
+
+        // The draw's high bits: xorshift's first draws from small seeds share their low ones.
+        return (near[(int)((Next() >> 16) % (uint)spread)], region);
+    }
+
+    /// <summary>
+    /// The bazaar to trade at: the nearest of its desk's city — its home's, the city it stands in, or out in the desert the nearest bazaar's — or null.
+    /// </summary>
+    private (Facility At, int Region)? Bazaar(in Perceived world, int here)
+    {
+        var region = HomeRegion != 0 ? HomeRegion
+            : here != 0 ? here
+            : Facilities.TryNearest(Routing.BazaarKind, world.X, world.Z, out _, out var nearest) ? nearest : 0;
+        Span<Facility> near = stackalloc Facility[1];
+        return region != 0 && Facilities.NearestIn(region, Routing.BazaarKind, world.X, world.Z, [], near) > 0 ? (near[0], region) : null;
+    }
+
+    /// <summary>
+    /// The load test's goal (bazaar.md § 8): to the rush city, then to one of its few nearest bazaars — a crowd spreads over them, as over a desk's
+    /// terminals — where <see cref="Visit"/> keeps it trading for good. A bazaar it cannot walk to is tried again after a pause.
+    /// </summary>
+    private Intent Rush(in Perceived world, long tick, int here)
+    {
+        if (here != RushRegion)
+        {
+            _flyNext = false;
+            return GoTo(in world, tick, RushRegion - 1, here, GoalWhy.MarketChosen);
+        }
+
+        Span<Facility> near = stackalloc Facility[DeskSpread];
+        var n = Facilities.NearestIn(RushRegion, Routing.BazaarKind, world.X, world.Z, [], near);
+        if (n > 0 && StartVisitAt(in world, tick, Routing.BazaarKind, GoalWhy.MarketChosen, (near[(int)((Next() >> 16) % (uint)n)], RushRegion)))
+        {
+            return Visit(in world, tick);
+        }
+
+        Become(Goal.Idling, GoalWhy.IdleChosen, tick);
+        _until = tick + Ticks(2);
+        return Intent.Move(0f, 0);
+    }
+
+    /// <summary>A terminal of a desk tried: empty, or out of reach. A bot keeps a handful; the oldest goes first.</summary>
+    private void Tried(float x, float z, int region, long tick)
+    {
+        if (_tried.Count >= 16)
+        {
+            _tried.RemoveAt(0);
+        }
+
+        _tried.Add((x, z, region, tick));
     }
 
     /// <summary>The errand: walk (or ride) there, use it for a while, then usually fly on.</summary>
@@ -689,18 +1329,73 @@ public sealed class BotBrain
     {
         if (_using)
         {
-            if (tick < _until)
+            // Standing at it. The walk's last step was a MoveTo, and the server does not always end one on its point: a body slid along the terminal's
+            // collider toward its stand point ran on past it, for good (BotMarketLiveChecks). So it is told to stand, once, and walked back toward the
+            // point — a step, then told to stand again — whenever it is found farther from the terminal than it may be used from.
+            if (!_standing)
             {
-                return Intent.None;   // at the terminal: what using one looks like on the wire
+                _standing = true;
+                return Intent.Move(0f, 0);
             }
 
-            // Loïc's errand: a mission terminal, then the shuttleport to go somewhere else. Most of the time, not every time.
-            _flyNext = Next() % 100u < 60u;
-            Goal = Goal.Choosing;
+            if (Routing.Distance(world.X, world.Z, _visitAt.X, _visitAt.Z) > TerminalUseFromM && tick >= _restandAt)
+            {
+                _restandAt = tick + Ticks(2);
+                _standing = false;
+                return Intent.MoveTo(_standAt.X, _standAt.Z);
+            }
+
+            var desk = _visitKind == Routing.MissionTerminalKind;
+            if (tick < _until && !(desk && world.MissionsHeld > 0 && world.HasMissionLair))
+            {
+                return Intent.None;   // at the terminal: what using one looks like on the wire — until the take comes back as a mission held
+            }
+
+            if (world.Trading && _visitKind == Routing.BazaarKind && RushRegion == 0 && tick < _tradeCap)
+            {
+                // The plan still going out: every command needs the body at the terminal (the server's 6 m), so the bot stands until the last is sent.
+                return Intent.None;
+            }
+
+            if (RushRegion != 0 && _visitKind == Routing.BazaarKind)
+            {
+                // The load test stands at its bazaar for good: the next round.
+                _until = tick + Ticks(RushRoundSeconds);
+                TradesAsked++;
+                return Intent.Trade(_visitRegion);
+            }
+
+            if (_marketErrand)
+            {
+                // Traded: back to the day's loop — the desk, a quest — and not off on a flight the way an errand to look at a bazaar often is.
+                _marketErrand = false;
+                _flyNext = false;
+                Become(Goal.Choosing, GoalWhy.MarketDone, tick);
+                return Choose(in world, tick);
+            }
+
+            if (desk && world.MissionsHeld > 0)
+            {
+                _tried.Clear();   // a take: every desk is worth a look again
+            }
+            else if (desk)
+            {
+                Tried(_visitAt.X, _visitAt.Z, _visitRegion, tick);   // still holding none: this terminal had nothing for it
+            }
+
+            // An errand to a bazaar: then, most of the time, the shuttleport to go somewhere else. A mission terminal's next step is the mission.
+            _flyNext = !desk && Next() % 100u < 60u;
+            Become(Goal.Choosing, GoalWhy.VisitDone, tick);
             return Choose(in world, tick);
         }
 
         var step = Follow(in world, tick, out var end);
+        if (end == LegEnd.Stuck && Routing.Distance(world.X, world.Z, _visitAt.X, _visitAt.Z) <= TerminalUseFromM)
+        {
+            // Stuck short of the stand point, in the crowd round the terminal: used from here.
+            end = LegEnd.Done;
+        }
+
         switch (end)
         {
             case LegEnd.Going:
@@ -710,9 +1405,34 @@ public sealed class BotBrain
                 _using = true;
                 _wantMounted = false;
                 _until = tick + Ticks(5 + (Next() % 6u));
+
+                // At a mission terminal, holding none: take one, as a person does at the list (lair-objectives.md B-1). The swarm names the offer.
+                if (_visitKind == Routing.MissionTerminalKind && world.MissionsHeld == 0)
+                {
+                    MissionsAsked++;
+                    return Intent.TakeMission;
+                }
+
+                // At a bazaar, a trading bot trades — the errand that came for it or one that only came to look; the swarm sends the plan, at the
+                // commands' rate, so it stays the plan's time longer. A rush bot's first round comes at once and the next one a round later.
+                if (_visitKind == Routing.BazaarKind && (Trades || RushRegion != 0))
+                {
+                    _until = RushRegion != 0 ? tick + Ticks(RushRoundSeconds) : _until + Ticks(TradeSeconds);
+                    _tradeCap = _until + Ticks(MaxTradeHoldSeconds);
+                    TradesAsked++;
+                    return Intent.Trade(_visitRegion);
+                }
+
                 return Intent.None;
             default:
-                Goal = Goal.Idling;
+                // Not reached: a desk's terminal is tried, as an empty one is — or the next choice picked it again, for good (review 6, H1).
+                if (_visitKind == Routing.MissionTerminalKind)
+                {
+                    Tried(_visitAt.X, _visitAt.Z, _visitRegion, tick);
+                }
+
+                _marketErrand = false;
+                Become(Goal.Idling, GoalWhy.VisitFailed, tick);
                 _until = tick + Ticks(2);
                 return Intent.Move(0f, 0);
         }
@@ -732,7 +1452,7 @@ public sealed class BotBrain
         _portZ = port.Z;
         _asked = false;
         _leg.Clear();
-        Goal = Goal.Travelling;
+        Become(Goal.Travelling, GoalWhy.FlightChosen, tick, (uint)TargetRegion);
         return true;
     }
 
@@ -772,7 +1492,7 @@ public sealed class BotBrain
             return false;
         }
 
-        Goal = Goal.Indoors;
+        Become(Goal.Indoors, GoalWhy.DoorChosen, tick);
         _leaving = false;
         return true;
     }
@@ -786,8 +1506,10 @@ public sealed class BotBrain
             return step;
         }
 
-        // The path ran out without a crossing, or stuck short of the door: give up on this one.
-        Goal = Goal.Idling;
+        // The path ran out without a crossing, or stuck short of the door: give up on this one. Told how (the subject: 1 walked to its end, 2 stuck) and
+        // how far short of the door's last point, which is what says whether a door fails by its crowd or by its geometry.
+        var left = _leg.Points.Count > 0 ? Routing.Distance(world.X, world.Z, _leg.Points[^1].X, _leg.Points[^1].Z) : 0d;
+        Become(Goal.Idling, GoalWhy.EnterFailed, tick, (uint)end, (float)left);
         _until = tick + Ticks(2);
         return Intent.Move(0f, 0);
     }
@@ -919,34 +1641,32 @@ public sealed class BotBrain
         }
 
         var from = (X: world.X, Z: world.Z);
-        if (far > SearchReachM)
+        if (searching && far > CityLegM)
         {
-            // Searched out of the street it is standing in, straight (ridden past the thirty seconds) across the open, and searched again into the
-            // street it is going to. Both ends, because a body is as likely to start pressed against a house as to end beside one: a straight first
-            // leg from where it stood was a line through whatever it was standing against.
+            // Too far to see the way: the next stretch searched now, and the rest from where that stretch ends — with the buildings in view from there.
+            // An errand used to be searched out of its street and into its goal's, and walked straight between: across a city that line went in
+            // through a shuttleport's gate, and the errand bots stood trapped in its plaza (live, 2026-10-26).
             var heading = Routing.HeadingTo(world.X, world.Z, goal.X, goal.Z);
-            var near = SearchReachM * 0.5f;
-
-            // Never short of `near`: for a goal just past the search's reach the straight part would otherwise end behind where the first search
-            // left the body, and the walk would double back (review 2).
-            var rest = MathF.Max((float)far - (SearchReachM * 0.75f), near);
-            var mid = (X: world.X + (MathF.Cos(heading) * near), Z: world.Z + (MathF.Sin(heading) * near));
-            if (searching && Search(from, mid) is { } outOf)
+            if (SearchToward(from, heading, CityLegM) is not { } stretch)
             {
-                points.AddRange(outOf);
-            }
-            else
-            {
-                points.Add(mid);
+                return false;
             }
 
-            from = (world.X + (MathF.Cos(heading) * rest), world.Z + (MathF.Sin(heading) * rest));
-            points.Add(from);
+            _leg.Start(stretch, stretch.Count, tick);
+            _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
+            _leg.Rest = new LegRest(goal, tail.ToArray(), exactGoal);
+            Sight(from);
+            NoteLeg(LegWhy.Planned, tick);
+            return true;
         }
 
         if (searching)
         {
-            if (Search(from, goal) is not { } into)
+            // A point that is only a direction (a detour's, a stretch of a crossing) is searched short of any shuttleport's plaza it lands in.
+            var into = exactGoal
+                ? Search(from, goal)
+                : SearchToward(from, Routing.HeadingTo(from.X, from.Z, goal.X, goal.Z), (float)far);
+            if (into == null)
             {
                 return false;
             }
@@ -962,7 +1682,8 @@ public sealed class BotBrain
             points.Add(goal);
         }
 
-        var precise = points.Count - 1;
+        // A searched point that is only a direction is not an exact one: the open part runs to the end, and the end is passed rather than stood on.
+        var precise = searching && !exactGoal ? points.Count : points.Count - 1;
         foreach (var p in tail)
         {
             points.Add(p);
@@ -970,7 +1691,87 @@ public sealed class BotBrain
 
         _leg.Start(points, precise, tick);
         _leg.Ride = far / Routing.RunMps > Routing.RideOverSeconds;
+        if (searching)
+        {
+            Sight(from);
+        }
+
+        NoteLeg(LegWhy.Planned, tick);
         return true;
+    }
+
+    /// <summary>How far round a searched walk its walls are kept, metres: a body pushed off the walk, or cutting a corner, stays within this of it.</summary>
+    private const float SightMarginM = 12f;
+
+    /// <summary>Keeps the walls round the walk just planned, grown by a body and <see cref="CutClearanceM"/>: what a corner is cut against.</summary>
+    /// <param name="from">Where the body stands, which is where the walk starts.</param>
+    private void Sight((float X, float Z) from)
+    {
+        var leg = _leg;
+        var (minX, minZ, maxX, maxZ) = (from.X, from.Z, from.X, from.Z);
+        foreach (var p in leg.Points)
+        {
+            (minX, maxX) = (MathF.Min(minX, p.X), MathF.Max(maxX, p.X));
+            (minZ, maxZ) = (MathF.Min(minZ, p.Z), MathF.Max(maxZ, p.Z));
+        }
+
+        // The porch rule the search used: a body standing up on one walks off it, so its floor is not a wall to its steps (review 6, L2).
+        var floorTopM = CityPath.OnRaisedFloor(_seen, _assets, from.X, from.Z) ? CityPath.PorchTopM : CityPath.StepM;
+        CityPath.CollectWalls(
+            _seen,
+            _assets,
+            minX - SightMarginM,
+            minZ - SightMarginM,
+            maxX + SightMarginM,
+            maxZ + SightMarginM,
+            leg.Walls,
+            CityPath.BodyHalfM + CutClearanceM,
+            floorTopM);
+        leg.HasWalls = true;
+        leg.Origin = from;
+    }
+
+    /// <summary>
+    /// A searched walk toward a direction, as far as <paramref name="metres"/> along it — or nearer when the walk would end inside a shuttleport's walls
+    /// or where it started; null when no length finds one.
+    /// </summary>
+    /// <remarks>
+    /// A point ahead on a port's raised pad is walled in, and the search moves an end it cannot reach to the nearest open ground — the plaza, through
+    /// the gate. The end is what is checked, not the point asked for, because the snap is what goes wrong.
+    /// </remarks>
+    private List<(float X, float Z)> SearchToward((float X, float Z) from, float heading, float metres)
+    {
+        foreach (var share in StretchShares)
+        {
+            var reach = metres * share;
+            var to = (from.X + (MathF.Cos(heading) * reach), from.Z + (MathF.Sin(heading) * reach));
+            if (Search(from, to) is { } walk
+                && Routing.Distance(from.X, from.Z, walk[^1].X, walk[^1].Z) > 2d * CornerReachM
+                && !InAPortsWalls(walk[^1]))
+            {
+                return walk;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>How much of a stretch is tried, in order, when the whole of it ends inside a port's walls.</summary>
+    private static readonly float[] StretchShares = [1f, 0.75f, 0.5f, 0.3f];
+
+    /// <summary>Whether a point is inside one of the shuttleports in view, or in its gate.</summary>
+    private bool InAPortsWalls((float X, float Z) p)
+    {
+        foreach (var s in _seen)
+        {
+            if (s.Kind == Routing.ShuttleportKind && _assets.At(s.Asset) is { HasEnclosure: true } plan
+                && Routing.Distance(p.X, p.Z, s.X, s.Z) < 30d && BotAssets.Unplace(s.X, s.Z, s.Yaw, p) is var local && plan.Within(local.X, local.Z))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>A searched walk between two points over the structures last copied into <see cref="_seen"/>; null when walled off.</summary>
@@ -988,9 +1789,18 @@ public sealed class BotBrain
     /// <returns>The command.</returns>
     /// <remarks>
     /// <para>
-    /// <b><c>MoveTo</c> for every point, because the server walks to it and stops on it.</b> A heading renewed a few times a second overshoots a door by
-    /// a body's length at a run; a destination does not. It is a destination, so it is sent when the point changes and refreshed every two seconds in
-    /// case one was dropped — not every tick.
+    /// <b>On foot, the open part is RUN: <c>MoveDir</c> at the next point, every decision, and a corner run past rather than stood on.</b> A
+    /// <c>MoveTo</c> is "go there and stop": sent for every corner, with a corner called reached from 0.75 m and a decision every 2.5 m of running, the
+    /// server stopped the body at most corners before the next point was sent — a bot walking a city stopped and started at every one (Loïc,
+    /// 2026-10-26). A corner nearer than one decision's run is run at when the run carries the body past it in the clear — a straight step that enters
+    /// none of the walk's walls grown by a body and <see cref="CutClearanceM"/> (<see cref="CityPath.SegmentClear"/>) — and passed once the body is
+    /// beyond it; walked onto with <c>MoveTo</c>, the one stop left, only when even that step would touch a wall. A point is also passed when the one
+    /// after it is in sight (<see cref="Passes"/>).
+    /// </para>
+    /// <para>
+    /// <b><c>MoveTo</c> for the exact part, because the server walks to it and stops on it.</b> A heading renewed a few times a second overshoots a door
+    /// by a body's length at a run; a destination does not. It is a destination, so it is sent when the point changes and refreshed every two seconds in
+    /// case one was dropped — not every tick. So is every point of a walk with no walls in hand (a room's graph, a port's approach walked backwards).
     /// </para>
     /// <para>
     /// <b>Ridden in the open, walked at the end.</b> A ridden leg is <c>MoveDir</c> at the swoop's class while the point is more than fifteen metres off,
@@ -1008,6 +1818,9 @@ public sealed class BotBrain
             return Intent.None;
         }
 
+        // Run by sight: on foot, with the walk's walls in hand. A rider steers as it always did (review 8).
+        var running = leg.HasWalls && !world.Mounted;
+        var stride = Routing.RunMps / _rate;
         var p = leg.Points[leg.Next];
         var d = Routing.Distance(world.X, world.Z, p.X, p.Z);
         while (true)
@@ -1015,20 +1828,32 @@ public sealed class BotBrain
             // The last point closest of all: a door's is past its plane, and calling it reached a little short would be calling a crossing that
             // never fired. The server stops a MoveTo on its point, so a body gets there.
             var exact = leg.Next >= leg.Precise;
+            var last = leg.Next == leg.Points.Count - 1;
             // Every path point to a body's length, ridden or not: a rider who called a corner reached from eight metres off cut through the house the
-            // corner went round — the first live run's stuck bots, all of them pressed against a wall between two waypoints.
-            var reach = leg.Next == leg.Points.Count - 1 ? leg.FinalReach : exact ? 0.6d : CornerReachM;
-            if (d > reach)
+            // corner went round — the first live run's stuck bots, all of them pressed against a wall between two waypoints. Run, the end of the open
+            // part (a stretch's end, a direction's) is passed within a stride: it is where the next search starts, not a place to stand.
+            var reach = exact ? (last && leg.Rest == null ? leg.FinalReach : 0.6d)
+                : running && last ? stride
+                : last && leg.Rest == null ? leg.FinalReach : CornerReachM;
+            if (d > reach && !(running && !exact && !last && Passes(in world, d, stride)))
             {
                 break;
             }
 
             leg.Next++;
+            NoteLeg(LegWhy.Waypoint, tick);
             leg.Best = double.MaxValue;
             leg.BestAt = tick;
+            if (!leg.Active && leg.Rest != null)
+            {
+                // A stretch walked: the next one, searched from here.
+                return GoOn(in world, tick, out end, replans: 0);
+            }
+
             if (!leg.Active)
             {
                 leg.Ended = LegEnd.Done;
+                NoteLeg(LegWhy.Done, tick);
                 end = LegEnd.Done;
 
                 // Off at the end of a walk — except a detour's, which hands back to a ride still under way.
@@ -1040,31 +1865,41 @@ public sealed class BotBrain
             d = Routing.Distance(world.X, world.Z, p.X, p.Z);
         }
 
-        if (d < leg.Best - 0.5d)
+        // Progress is the walk left — to the next point and on along the rest — so a corner cut, which moves the body off the next point's bearing, counts.
+        var left = d + leg.LengthTo(leg.Next, leg.Points.Count - 1);
+        if (left < leg.Best - 0.5d)
         {
-            leg.Best = d;
+            leg.Best = left;
             leg.BestAt = tick;
         }
-        else if (tick - leg.BestAt > _stuckTicks)
+        else if (tick - leg.BestAt > (leg.Next < leg.Precise && leg.Replans == 0 ? _openStuckTicks : _stuckTicks))
         {
+            NoteStuck(leg.BestAt, tick);
             // Stuck on the open-ground part: search again from where it stands, twice, before the goal gives up. The published points are walked
             // exactly and are not searched — stuck there is a door or a terminal in the way, which a new search would not change.
-            if (leg.Next < leg.Precise && leg.Replans < 2 && leg.Precise < leg.Points.Count)
+            if (leg.Next < leg.Precise && leg.Replans < 2 && leg.Rest == null)
             {
-                var goal = leg.Points[leg.Precise];
-                var tail = leg.Points.GetRange(leg.Precise + 1, leg.Points.Count - leg.Precise - 1).ToArray();
+                // To the exact part's first point, or — a walk whose end is only a direction — to that end, as loosely as it was asked.
+                var exactGoal = leg.Precise < leg.Points.Count;
+                var goal = leg.Points[exactGoal ? leg.Precise : leg.Points.Count - 1];
+                var tail = exactGoal ? leg.Points.GetRange(leg.Precise + 1, leg.Points.Count - leg.Precise - 1).ToArray() : [];
                 var replans = leg.Replans + 1;
-                var ride = leg.Ride;
-                var finalReach = leg.FinalReach;
-                if (PlanWalk(in world, goal, tail, tick))
+                var carried = Carry();
+                if (PlanWalk(in world, goal, tail, tick, exactGoal))
                 {
+                    Restore(carried);
                     _leg.Replans = replans;
-                    _leg.Ride = ride;
-                    _leg.FinalReach = finalReach;
+                    NoteLeg(LegWhy.Replanned, tick);
                     return Follow(in world, tick, out end);
                 }
             }
+            else if (leg.Rest != null && leg.Replans < 2)
+            {
+                // Stuck on a stretch of a long walk: the rest of the way searched again from where it stands.
+                return GoOn(in world, tick, out end, replans: leg.Replans + 1);
+            }
 
+            NoteLeg(LegWhy.Stuck, tick);
             leg.Ended = LegEnd.Stuck;
             leg.Next = leg.Points.Count;
             end = LegEnd.Stuck;
@@ -1076,7 +1911,7 @@ public sealed class BotBrain
         // Off once, for good, forty metres before the exact part — by distance along the walk, not by which point is next: deciding per waypoint got on
         // and off at every corner of a street, and getting off when the next point was the exact one walked the last 150 m of a long straight at a run.
         // Not for a detour, whose end is only a direction: getting off before it and back on after cost two SetMounts a detour (review 9).
-        if (leg.Ride && !leg.KeepRiding && !leg.Dismounted && d + leg.LengthTo(leg.Next, leg.Precise) < 40d)
+        if (leg.Ride && !leg.KeepRiding && !leg.Dismounted && leg.Rest == null && d + leg.LengthTo(leg.Next, leg.Precise) < 40d)
         {
             leg.Dismounted = true;
         }
@@ -1089,6 +1924,19 @@ public sealed class BotBrain
             return Intent.Move(Routing.HeadingTo(world.X, world.Z, p.X, p.Z), Routing.SwoopClass);
         }
 
+        if (running && leg.Next < leg.Precise)
+        {
+            // Run at it — renewed every decision, as a held key is — unless it is a corner nearer than a stride that cannot be cut yet and the stride
+            // past it would touch a wall: then walked onto, and the next decision runs on from there.
+            var heading = Routing.HeadingTo(world.X, world.Z, p.X, p.Z);
+            var ahead = (X: world.X + (MathF.Cos(heading) * (float)stride), Z: world.Z + (MathF.Sin(heading) * (float)stride));
+            if (d > stride || CityPath.SegmentClear(leg.Walls, world.X, world.Z, ahead.X, ahead.Z))
+            {
+                leg.Sent = (float.NaN, float.NaN);
+                return Intent.Move(heading, Routing.SpeedClassOf(TravelMode.Run));
+            }
+        }
+
         if (leg.Sent != p || tick - leg.SentAt >= Ticks(2))
         {
             leg.Sent = p;
@@ -1099,20 +1947,92 @@ public sealed class BotBrain
         return Intent.None;
     }
 
-    /// <summary>Gets on or off the swoop when the goal's wish and the server's state disagree — a few asks, then it stops asking.</summary>
+    /// <summary>
+    /// Whether the open point the body is heading for is passed already, on foot: the body is within a stride of it and past it along the walk's line to
+    /// it, or the point after it is in sight (<see cref="CityPath.SegmentClear"/>).
+    /// </summary>
     /// <remarks>
-    /// <b>Bounded, because the server may refuse</b> (in a room, waiting for a shuttle): three asks two seconds apart, and the goal moves at a run
-    /// meanwhile. The count resets when the wish changes.
+    /// Running past is how a corner is passed: a searched walk is pulled taut, so its corners stand at the walls and the step to the point after one
+    /// clears its wall only from a few tenths of a metre off. Sight is for a body off its walk — shoved by the crowd past a corner, or a walk whose point
+    /// was only its way out of a wall's margin — which otherwise ran back to a point it no longer needed.
+    /// </remarks>
+    private bool Passes(in Perceived world, double d, double stride)
+    {
+        var leg = _leg;
+        var p = leg.Points[leg.Next];
+        var after = leg.Points[leg.Next + 1];
+        var from = leg.Next > 0 ? leg.Points[leg.Next - 1] : leg.Origin;
+        if (d <= stride && (((world.X - p.X) * (p.X - from.X)) + ((world.Z - p.Z) * (p.Z - from.Z))) > 0f)
+        {
+            return true;
+        }
+
+        // A walk's first point behind the body on the way to the next: the open cell its search started from, not somewhere to go back to (StepOutM).
+        if (leg.Next == 0 && d <= StepOutM && (((world.X - p.X) * (after.X - p.X)) + ((world.Z - p.Z) * (after.Z - p.Z))) > 0f)
+        {
+            return true;
+        }
+
+        return CityPath.SegmentClear(leg.Walls, world.X, world.Z, after.X, after.Z);
+    }
+
+    /// <summary>What a walk searched again carries over from the one it replaces: ridden, kept riding, got off, a city's, and its last reach.</summary>
+    private (bool Ride, bool KeepRiding, bool Dismounted, bool CityWalk, double FinalReach) Carry() =>
+        (_leg.Ride, _leg.KeepRiding, _leg.Dismounted, _leg.CityWalk, _leg.FinalReach);
+
+    private void Restore((bool Ride, bool KeepRiding, bool Dismounted, bool CityWalk, double FinalReach) carried) =>
+        (_leg.Ride, _leg.KeepRiding, _leg.Dismounted, _leg.CityWalk, _leg.FinalReach) = carried;
+
+    /// <summary>
+    /// The rest of a walk planned a stretch at a time, searched from where the body stands: what the walk was riding, keeping and reaching for carries
+    /// over, so the last stretch ends as the walk was asked to.
+    /// </summary>
+    private Intent GoOn(in Perceived world, long tick, out LegEnd end, int replans)
+    {
+        var rest = _leg.Rest;
+        var carried = Carry();
+        if (!PlanWalk(in world, rest.Goal, rest.Tail, tick, rest.ExactGoal))
+        {
+            _leg.Abandon();
+            NoteLeg(LegWhy.Abandoned, tick);
+            end = LegEnd.Stuck;
+            _wantMounted = carried.KeepRiding && carried.Ride;
+            return Intent.Move(0f, 0);
+        }
+
+        _leg.Replans = replans;
+        Restore(carried);
+        NoteLeg(replans > 0 ? LegWhy.Replanned : LegWhy.Stretch, tick);
+        return Follow(in world, tick, out end);
+    }
+
+    /// <summary>Gets on or off the swoop when the goal's wish and the server's state disagree — a few asks, then one now and then.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Bounded, because the server may refuse</b> (in a room, waiting for a shuttle, downed): three asks two seconds apart, then one every
+    /// <see cref="MountRetrySeconds"/>, and the goal moves at a run meanwhile. The count resets when the wish and the state agree.
+    /// </para>
+    /// <para>
+    /// <b>Never given up for good.</b> It stopped after three: a bot refused while downed, or knocked off by a fight, ran the rest of its trip — kilometres
+    /// of desert on foot between cities (Loïc, 2026-10-27, following three bots for twenty minutes).
+    /// </para>
     /// </remarks>
     private Intent? MountIntent(in Perceived world, long tick)
     {
+        // In a city, on foot — always (Loïc, 2026-10-26: a rider cannot navigate its streets). The swoop is for the open desert: a ride into a city
+        // ends at its edge, and one out of it starts there. The goals keep wishing as they did; this is the one place a wish reaches the wire.
+        if (_wantMounted && world.Realm == 0 && TownAt(world.X, world.Z, CityPath.CityMarginM) != 0)
+        {
+            _wantMounted = false;
+        }
+
         if (_wantMounted == world.Mounted)
         {
             _mountAsks = 0;
             return null;
         }
 
-        if (_mountAsks >= 3 || tick - _mountAskedAt < Ticks(2))
+        if (tick - _mountAskedAt < (_mountAsks < 3 ? Ticks(2) : Ticks(MountRetrySeconds)))
         {
             return null;
         }
@@ -1121,6 +2041,73 @@ public sealed class BotBrain
         _mountAskedAt = tick;
         MountsAsked++;
         return Intent.Mount(_wantMounted);
+    }
+
+    /// <summary>
+    /// Out of a shuttleport's plaza by its gate: a searched walk to where the port's published approach starts, outside it, then the goal is chosen again.
+    /// Null when it is not inside one, or is there to fly — walking to the ticket terminal, or queued.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own leg, then a fresh choice.</b> The goal under way had a leg of its own, which this one replaced; carrying on with that goal would read
+    /// the exit's end as its leg's, and an errand would use a terminal it never reached.
+    /// </para>
+    /// <para>
+    /// <b>Searched, with the approach walked backwards as the fallback</b> — the published way in, so a way out that exists whatever the search makes of
+    /// the plaza. A bot that sticks even so stands where it is for ten seconds before trying again, so a bot that cannot get out costs a search every
+    /// ten seconds rather than one a tick.
+    /// </para>
+    /// </remarks>
+    private Intent? LeavePort(in Perceived world, long tick)
+    {
+        if (_leavingPort)
+        {
+            var step = Follow(in world, tick, out var end);
+            if (end == LegEnd.Going)
+            {
+                return step;
+            }
+
+            // Out, or stuck on the way: the goal is chosen again from here either way, and the next check says whether it is still inside.
+            _leavingPort = false;
+            _leg.Clear();
+            Become(Goal.Choosing, GoalWhy.PortExited, tick);
+            if (end == LegEnd.Stuck)
+            {
+                _portCheckAt = tick + Ticks(10);
+            }
+
+            return null;
+        }
+
+        if (_assets == null || tick < _portCheckAt)
+        {
+            return null;
+        }
+
+        _portCheckAt = tick + Ticks(PortCheckSeconds);
+        if (Goal == Goal.Waiting || (Goal == Goal.Travelling && Mode == TravelMode.Shuttle && !_asked)
+            || !Facilities.TryNearest(Routing.ShuttleportKind, world.X, world.Z, out var port, out _)
+            || _assets.At(port.Asset) is not { HasEnclosure: true, UsePath.Length: > 0 } plan
+            || BotAssets.Unplace(port.X, port.Z, port.Yaw, (world.X, world.Z)) is var local && !plan.Encloses(local.X, local.Z))
+        {
+            InPort = false;
+            return null;
+        }
+
+        InPort = true;
+
+        var approach = Placed(port, plan.UsePath);
+        if (!PlanWalk(in world, approach[0], [], tick))
+        {
+            var back = new List<(float X, float Z)>(approach);
+            back.Reverse();
+            _leg.Start(back, 0, tick);
+        }
+
+        _leavingPort = true;
+        PortsLeft++;
+        return Follow(in world, tick, out _);
     }
 
     /// <summary>A published path placed where its structure stands.</summary>
@@ -1150,6 +2137,23 @@ public sealed class BotBrain
         for (var i = 0; i < _cities.Length; i++)
         {
             if (Routing.Distance(x, z, _cities[i].X, _cities[i].Z) <= _cities[i].Radius)
+            {
+                return i + 1;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The region whose city disc, grown by <paramref name="margin"/>, holds a point, or 0: the town with the buildings round its edge, where a body is on
+    /// foot. Got off at its margin and on again past <see cref="CityPath.CityLeaveM"/>, ten metres further, so the edge is not a place to flap.
+    /// </summary>
+    private int TownAt(float x, float z, float margin)
+    {
+        for (var i = 0; i < _cities.Length; i++)
+        {
+            if (Routing.Distance(x, z, _cities[i].X, _cities[i].Z) <= _cities[i].Radius + margin)
             {
                 return i + 1;
             }
@@ -1188,6 +2192,20 @@ public sealed class BotBrain
         /// <summary>A detour's: ridden to its end, which is only a direction, and not got off before it.</summary>
         public bool KeepRiding;
 
+        /// <summary>A walk across a city toward somewhere beyond it: dropped at the city's edge, where the open desert starts.</summary>
+        public bool CityWalk;
+
+        /// <summary>
+        /// The walls round the walk, grown by a body and <see cref="CutClearanceM"/>, when it was searched (<see cref="HasWalls"/>): what a corner is cut
+        /// against. None for a walk on a published graph — a room's, a port's approach walked backwards — which is walked point by point.
+        /// </summary>
+        public readonly List<PlanBox> Walls = [];
+
+        public bool HasWalls;
+
+        /// <summary>Where the walk started: the line to its first point starts here.</summary>
+        public (float X, float Z) Origin;
+
         /// <summary>The walk from point <paramref name="from"/> to point <paramref name="to"/> along the leg, metres.</summary>
         public double LengthTo(int from, int to)
         {
@@ -1207,6 +2225,9 @@ public sealed class BotBrain
         public int Replans;
         public double FinalReach = 0.3d;
 
+        /// <summary>Where the walk goes on to once these points are walked, when it was too long to search in one go; null for a walk searched whole.</summary>
+        public LegRest Rest;
+
         public bool Active => Next < Points.Count;
 
         public void Start(List<(float X, float Z)> points, int precise, long tick)
@@ -1218,12 +2239,16 @@ public sealed class BotBrain
             Ride = false;
             Dismounted = false;
             KeepRiding = false;
+            CityWalk = false;
+            Walls.Clear();
+            HasWalls = false;
             Best = double.MaxValue;
             BestAt = tick;
             Sent = (float.NaN, float.NaN);
             Ended = LegEnd.Going;
             Replans = 0;
             FinalReach = 0.3d;
+            Rest = null;
         }
 
         public void Clear()
@@ -1233,7 +2258,9 @@ public sealed class BotBrain
             Ride = false;
             Dismounted = false;
             KeepRiding = false;
+            CityWalk = false;
             Ended = LegEnd.Going;
+            Rest = null;
         }
 
         /// <summary>Over, for good: nothing more is followed and nothing restarts it.</summary>
@@ -1242,8 +2269,12 @@ public sealed class BotBrain
             Points.Clear();
             Next = 0;
             Ended = LegEnd.Stuck;
+            Rest = null;
         }
     }
+
+    /// <summary>The rest of a walk planned a stretch at a time: its goal, the published points after it, and whether the goal must be reached exactly.</summary>
+    private sealed record LegRest((float X, float Z) Goal, (float X, float Z)[] Tail, bool ExactGoal);
 }
 
 /// <summary>A city on the bot's own map: where it is and how big it is.</summary>

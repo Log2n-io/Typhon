@@ -570,7 +570,7 @@ public struct PlayerMotion
 /// </para>
 /// <para>108 bytes, under the 112 a spawned component may carry.</para>
 /// </remarks>
-[Component("Swg.PlayerRoute", 1, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerRoute", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerRoute
 {
@@ -594,6 +594,16 @@ public struct PlayerRoute
     /// this one — a leg that crosses a town, or ends in one.
     /// </summary>
     [Field] public byte City;
+
+    /// <summary>
+    /// 1 while <see cref="PlayerState.MissionX"/>/<see cref="PlayerState.MissionZ"/> is a lair this fighter holds as its objective (lair-objectives.md);
+    /// 0 for none — a fight-back, a clone, any other decision clears it.
+    /// </summary>
+    /// <remarks>
+    /// <b>In the byte of padding before <see cref="X0"/></b>, so a body is no wider: a field on <see cref="PlayerState"/> would have been four bytes on
+    /// every body. Here because the route is the scripted player's own steering state, written by <c>PlayerThink</c> and read nowhere outside the server.
+    /// </remarks>
+    [Field] public byte Objective;
 
     /// <summary>Waypoint 0, east.</summary>
     [Field] public float X0;
@@ -757,7 +767,7 @@ public struct LairVitals
 /// A creature's behaviour state — written every time it thinks, and worth nothing after a crash: a restarted server
 /// re-derives every field from the lair and the terrain.
 /// </summary>
-[Component("Swg.CreatureBrain", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.CreatureBrain", 3, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct CreatureBrain
 {
@@ -819,6 +829,14 @@ public struct CreatureBrain
     /// </summary>
     /// <remarks>Beside <see cref="Template"/> in the padding <see cref="AggroRadius"/> leaves before the 8-byte-aligned <see cref="Target"/>.</remarks>
     [Field, OnEnter(CodecKind.U8, Name = "skin", Saturate = true)] public byte Skin;
+
+    /// <summary>
+    /// The creature's content level, 1-50: its lair's (<see cref="Lair.Level"/>), set at spawn and never changed. Its health and its hit are
+    /// <c>ContentLevels</c>' of it; on the wire once, on enter.
+    /// </summary>
+    /// <remarks>In the brain rather than in <see cref="CreatureVitals"/>: both combat directions already read this span, and it fits the padding before
+    /// <see cref="Target"/>, where vitals would grow from 12 to 16 bytes.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
 }
 
 /// <summary>The lair a creature belongs to: written once, at spawn, and never again.</summary>
@@ -942,7 +960,7 @@ public static class AiMode
 /// A player's behaviour. Players are simulated as an activity MIX rather than one loop, because the load a planet
 /// carries is dominated by what fraction of its players are moving at all.
 /// </summary>
-[Component("Swg.PlayerState", 4, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerState", 5, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerState
 {
@@ -968,6 +986,19 @@ public struct PlayerState
     /// 2026-10-25).
     /// </remarks>
     [Field, Owner(CodecKind.Varu, Name = "journal", Group = "mission", Saturate = true)] public int JournalRev;
+
+    /// <summary>Bumped whenever this body's character's wallet moves — a grant, a reward, a tip given or received (economy-foundation.md § 2).</summary>
+    /// <remarks>
+    /// <b>A revision, the journal's pattern</b>: the client re-reads <c>GET /swg/wallet</c> — the balance and the recent rows — when it moves. The balance
+    /// itself is a <c>long</c>, which a projected field cannot carry past 2³² (EN-A); the revision can, and costs the body four bytes.
+    /// </remarks>
+    [Field, Owner(CodecKind.Varu, Name = "wallet", Group = "wallet", Saturate = true)] public int WalletRev;
+
+    /// <summary>
+    /// Bumped whenever this body's character's inventory moves — a drop, a cache, a drop lost to a full inventory (inventory-loot.md § 3.6). Revision 5.
+    /// </summary>
+    /// <remarks>The wallet's pattern: the client re-reads <c>GET /swg/inventory</c> when it moves; four bytes keep a <c>Player</c> page at 24 bodies.</remarks>
+    [Field, Owner(CodecKind.Varu, Name = "items", Group = "items", Saturate = true)] public int ItemsRev;
 
     /// <summary>Missions completed — here only to prove the mission loop closes.</summary>
     [Field] public int MissionsCompleted;
@@ -1162,7 +1193,7 @@ public struct PlayerControl
 /// whatever its netId hashed to — so two sessions never agreed on what either of them looked like.
 /// </para>
 /// <para>
-/// <b>A component of its own, for the reason <see cref="PlayerControl"/> is one.</b> It is written once, at spawn, and never again; next to state that changes
+/// <b>A component of its own, for the reason <see cref="PlayerControl"/> is one.</b> It is written at spawn and on progress (a level, the XP byte), rarely; next to state that changes
 /// it would ride every change of that state's cluster for nothing, and it would widen a column every system walks.
 /// </para>
 /// <para>Zero is "no look": the pooled crowd's scripted players are spawned without one and are dressed by netId, as before.</para>
@@ -1172,12 +1203,24 @@ public struct PlayerControl
 /// 8-byte component keeps them at 24. It is the place for the customisation that will follow the outfit, for the same reason.
 /// </para>
 /// </remarks>
-[Component("Swg.PlayerLook", 2, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.PlayerLook", 4, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerLook
 {
     /// <summary>One plus an index into <see cref="TatooineData.PlayerOutfits"/>, or 0 for none. On the wire once, on enter: it never changes.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "outfit", Saturate = true)] public byte Outfit;
+
+    /// <summary>1 for a body whose account the bot fleet signed up (<see cref="Accounts.Account"/>'s <c>Bot</c>), 0 otherwise: a viewer's to show, never a branch.</summary>
+    /// <remarks>In the padding after <see cref="Outfit"/>: the component stays eight bytes.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "bot", Saturate = true)] public byte Bot;
+
+    /// <summary>The character's combat level, 1-50 (<see cref="CharacterProgress.Level"/>); 0 for the scripted crowd, which has no character.</summary>
+    /// <remarks>A copy of the character's, written at spawn and on each level-up (character-level.md § 1), for the wire and the combat drain.</remarks>
+    [Field, Replicate(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
+
+    /// <summary>The way to the next level, in 256ths (<see cref="Progression.XpByte"/>): the owner's XP bar. Written with <see cref="Level"/>.</summary>
+    /// <remarks>Here, and with <see cref="Level"/> in the padding before <see cref="NameId"/>: the component stays eight bytes and <see cref="Player"/> grows nothing.</remarks>
+    [Field, Owner(CodecKind.U8, Name = "xp", Group = "progress", Saturate = true)] public byte Xp;
 
     /// <summary>The character's name as a <see cref="PlayerNames"/> id, 0 for none (the scripted crowd). On the wire once, on enter.</summary>
     [Field, OnEnter(CodecKind.U32, Name = "nameId")] public uint NameId;
@@ -1277,10 +1320,10 @@ public static class PlayerActivity
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>
 /// <remarks>
-/// <b>A mission's lair is a lair of its kind</b> (missions.md § 3): spawned when the mission is taken, shielded by its occupants and refilled like any other,
-/// and its life is the mission desk's rather than the lair director's — <see cref="Site"/> is 0, so the director never retires it.
+/// <b>A mission's lair is a wild lair</b> (missions.md § 8): an offer names one the world has, and taking it sets <see cref="Mission"/> — the crowd then
+/// leaves it alone and the lair director does not retire it until the desk releases it.
 /// </remarks>
-[Component("Swg.Lair", 4, StorageMode = StorageMode.SingleVersion)]
+[Component("Swg.Lair", 5, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct Lair
 {
@@ -1301,7 +1344,8 @@ public struct Lair
 
     /// <summary>
     /// 1 once a blow from <see cref="Owner"/> has landed on this mission lair, 0 otherwise. Breaking it completes the mission only then (missions.md, Q3): a
-    /// lair broken by somebody else alone is drawn again, so a passer-by cannot end a mission, and a fight shared with friends still pays.
+    /// lair broken by somebody else alone sends the mission to another lair of its level, so a passer-by cannot end a mission, and a fight shared with
+    /// friends still pays. Cleared when the reservation is released.
     /// </summary>
     [Field] public int OwnerHit;
 
@@ -1309,21 +1353,27 @@ public struct Lair
     [Field] public float SpawnRadius;
 
     /// <summary>
-    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for a mission's lair,
-    /// which belongs to no site: the mission desk retires it, not the lair director.
+    /// The wilderness site that spawned this lair, one-based into <c>SimBridge</c>'s site list (regions, then points of interest); 0 for one placed by hand
+    /// (a check), which the director never retires and an offer never names.
     /// </summary>
     /// <remarks>What the lair director refills: a retired lair is replaced by another drawn from the same site, so a region keeps its density.</remarks>
     [Field] public int Site;
 
-    /// <summary>The held mission this lair was drawn for (<see cref="HeldMissionArch"/>); <c>EntityId.Null</c> on a wild lair.</summary>
+    /// <summary>
+    /// The lair's content level, 1-50 (content-levels.md): the level map's at where it stands, or its mission's. Every creature it spawns carries it
+    /// (<see cref="CreatureBrain.Level"/>), and its health is <c>ContentLevels.LairHealth</c> of it.
+    /// </summary>
+    /// <remarks>In the 4-byte hole <see cref="Site"/> leaves before the 8-aligned <see cref="Mission"/>, so it costs nothing.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public int Level;
+
+    /// <summary>The held mission that reserved this lair (<see cref="HeldMissionArch"/>); <c>EntityId.Null</c> on an unreserved wild lair.</summary>
     [Field] public EntityId Mission;
 
     /// <summary>The body of the mission's holder, while it is online — whose blows set <see cref="OwnerHit"/>; <c>EntityId.Null</c> on a wild lair.</summary>
     [Field] public EntityLink<Player> Owner;
 
     /// <summary>
-    /// The tick this lair is retired at, whether or not anybody destroyed it: a wild lair by the lair director, a mission's by the desk, which draws its
-    /// mission a new one. 0 for never.
+    /// The tick this lair is retired at by the lair director, whether or not anybody broke it — not while a mission reserves it. 0 for never.
     /// </summary>
     [Field] public long ExpireTick;
 
@@ -1531,24 +1581,3 @@ public struct PortalDoor
     [Field] public EntityLink<WorldObject> Owner;
 }
 
-/// <summary>
-/// The one thing in this world worth a WAL record. Item ownership and the credit balance are transactional — losing
-/// thirty seconds of them would be losing a player's stuff — so this is <see cref="StorageMode.Versioned"/> and rides
-/// full MVCC and per-commit WAL, on an archetype whose other half has opted out of the WAL entirely.
-/// </summary>
-/// <remarks>
-/// It exists to make the durability split real rather than theoretical. A workload where every archetype has the same
-/// policy never exercises the per-archetype decision, and that decision is one the fence actually makes.
-/// </remarks>
-[Component("Swg.Inventory", 1, StorageMode = StorageMode.Versioned)]
-[StructLayout(LayoutKind.Sequential)]
-public struct Inventory
-{
-    [Field] public long Credits;
-
-    /// <summary>Items carried. Loot from a kill increments it inside a real transaction.</summary>
-    [Field] public int ItemCount;
-
-    /// <summary>Total value of what is carried.</summary>
-    [Field] public long ItemValue;
-}

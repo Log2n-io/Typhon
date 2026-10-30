@@ -3,6 +3,9 @@ import type { DataSource, EventSink, LatencyControl, SourceStats } from '../sour
 import { realmViewOf, type RealmView } from '../realm-view';
 import { PLANET_HALF_EXTENT_M } from '../world-data';
 import { applyTick } from './apply';
+import { MockInventory } from './inventory';
+import { MockMarket } from './market';
+import type { MarketCommand } from '../market';
 import { TickFlags, type MainToWorker, type TickMessage, type WorkerToMain } from './protocol';
 
 /**
@@ -52,6 +55,8 @@ export interface MockSourceOptions {
   /** Test seams: the worker, and the random source of the jitter. */
   readonly createWorker?: () => WorkerLike;
   readonly random?: () => number;
+  /** A bazaar command the mock's desk refused, with its reason — what `ACKS` carries from a server. */
+  readonly onMarketRefused?: (reason: number, command: MarketCommand) => void;
 }
 
 /** Frames remembered for the wire rate: enough for a second of ticks at up to 60 Hz. */
@@ -80,6 +85,12 @@ export class MockSource implements DataSource, LatencyControl {
 
   private latencyMs: number;
   private jitterMs: number;
+
+  /** One character's inventory, answering `GET /swg/inventory` for the window to be exercised without a server. */
+  readonly inventory: MockInventory;
+
+  /** The bazaar its character trades at, with a wallet of its own: the panel exercised without a server. */
+  readonly bazaar: MockMarket;
 
   /** The world it was handed: the mock does not build its own, so the app is already drawing this one. */
   get world(): WorldStore {
@@ -138,6 +149,26 @@ export class MockSource implements DataSource, LatencyControl {
 
   abandonMission(): boolean {
     return false;
+  }
+
+  /** The mock has no wallets. */
+  giveCredits(): boolean {
+    return false;
+  }
+
+  /**
+   * The mock's bazaar applies it at once, by the desk's rules ({@link MockMarket}); a refusal comes back after the simulated
+   * link's delay, as an `ACKS` reason would.
+   */
+  market(command: MarketCommand): boolean {
+    const reason = this.bazaar.apply(command);
+    if (reason !== 0) {
+      setTimeout(() => {
+        this.options.onMarketRefused?.(reason, command);
+      }, this.latencyMs * 2);
+    }
+
+    return true;
   }
 
   /** The mock serves its whole world to every camera already. */
@@ -214,6 +245,8 @@ export class MockSource implements DataSource, LatencyControl {
 
   constructor(options: MockSourceOptions) {
     this.options = options;
+    this.inventory = new MockInventory(options.seed);
+    this.bazaar = new MockMarket(options.seed, this.inventory);
     this.latencyMs = options.latencyMs;
     this.jitterMs = options.jitterMs;
     this.current = {
@@ -326,6 +359,14 @@ export class MockSource implements DataSource, LatencyControl {
     const { world, grid, clock, events } = this.options;
     const started = performance.now();
     applyTick(world, grid, message, events);
+
+    // The moves the mock's inventory and bazaar made since the last frame, told as the server tells them: with the frame.
+    if (events.onNotice !== undefined) {
+      for (const notice of [...this.inventory.takeNotices(), ...this.bazaar.takeNotices()]) {
+        events.onNotice(notice);
+      }
+    }
+
     const applied = performance.now();
     clock.onFrame(message.tick, applied);
 

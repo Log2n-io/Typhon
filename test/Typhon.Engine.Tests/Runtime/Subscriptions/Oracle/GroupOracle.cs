@@ -688,26 +688,19 @@ internal sealed unsafe class GroupOracle : IDisposable
         var seen = 0;
         using var tx = _harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<GroupCitizen>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (targets.Contains(seen++))
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (targets.Contains(seen++))
-                    {
-                        var (x, y) = NearTownPoint();
-                        cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, y));
-                    }
+                    var (x, y) = NearTownPoint();
+                    cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, y));
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

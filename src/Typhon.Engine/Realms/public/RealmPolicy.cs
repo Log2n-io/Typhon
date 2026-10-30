@@ -1,7 +1,6 @@
 using System;
 using System.Threading;
 using JetBrains.Annotations;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 

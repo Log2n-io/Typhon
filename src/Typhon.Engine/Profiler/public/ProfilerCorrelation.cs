@@ -1,5 +1,4 @@
 using JetBrains.Annotations;
-using Typhon.Engine.Internals;
 using Typhon.Profiler;
 
 namespace Typhon.Engine;

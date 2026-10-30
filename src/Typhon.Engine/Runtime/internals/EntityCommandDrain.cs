@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using Typhon.Engine.Internals;
 
-namespace Typhon.Engine;
+namespace Typhon.Engine.internals;
 
 /// <summary>
 /// Applies a tick's deferred entity commands (#1102): one pass over the buffer, grouped by archetype, through the ordinary spawn path.

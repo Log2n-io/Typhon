@@ -12,6 +12,7 @@ namespace Typhon.Engine.Internals;
 /// <c>_expectedDepth</c> that won't match the registry's current depth.</para>
 /// <para>This is a ref struct to prevent heap allocation and boxing. Always use in a <c>using</c> statement or explicit try/finally.</para>
 /// </remarks>
+[MustDispose(Reason = "keeps its thread epoch-pinned: no page touched since can be evicted")]
 [PublicAPI]
 internal ref struct EpochGuard
 {

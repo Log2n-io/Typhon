@@ -1,0 +1,20 @@
+{
+  "v": 3,
+  "prices": [
+    {
+      "item": "mat_hide",
+      "template": 8,
+      "name": "Hide",
+      "category": "material",
+      "mk": 3,
+      "value": 4.5,
+      "vendor": 900,
+      "listed": 1,
+      "lowest": 30,
+      "median": 20,
+      "min": 20,
+      "max": 20,
+      "sales": 1
+    }
+  ]
+}

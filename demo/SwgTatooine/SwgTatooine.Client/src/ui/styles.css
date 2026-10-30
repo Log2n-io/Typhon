@@ -539,6 +539,27 @@ button.active {
   margin: 2px 0 3px;
 }
 
+/*
+ * A level's con colour against the viewer's CL (data/content-level.ts; Loïc, 2026-10-26): green weaker, blue your level,
+ * yellow stronger but manageable, red too strong. The yellow is a lemon and the blue a sky blue, so neither reads as the
+ * amber --accent.
+ */
+.con-green {
+  color: #62d26f;
+}
+
+.con-blue {
+  color: #5aaeff;
+}
+
+.con-yellow {
+  color: #f5e642;
+}
+
+.con-red {
+  color: #ff5a4f;
+}
+
 .hud table,
 .inspector table {
   width: 100%;
@@ -571,6 +592,35 @@ button.active {
 
 .hud-layers td:first-child {
   text-align: left;
+}
+
+/* The Server title with the dashboard's link at its right. */
+.hud-server-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hud-dashboard {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.hud-dashboard:hover {
+  text-decoration: underline;
+}
+
+/* The players by who drives them, under the Player row: the crowd, the bots, the people. */
+.hud-layers tr.hud-sub td {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hud-layers tr.hud-sub td:first-child {
+  padding-left: 12px;
 }
 
 /* Above the navigation pane, which owns the corner: it is always there while playing, the inspector only with a pick. */
@@ -652,6 +702,134 @@ button.active {
   }
 }
 
+/* The inventory: where the journal goes, and left of it when the journal is open too. */
+.inventory {
+  right: 312px;
+  bottom: 10px;
+  width: 300px;
+  max-height: 70%;
+  overflow-y: auto;
+}
+
+.inventory.beside-journal {
+  right: 684px;
+}
+
+/* Narrower, centred near the top as the journal is (top right is the HUD's); with the journal there, above the action bar. */
+@media (max-width: 1240px) {
+  .inventory {
+    top: 70px;
+    bottom: auto;
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 20px);
+  }
+
+  .inventory.beside-journal {
+    top: auto;
+    bottom: 90px;
+    right: auto;
+    max-height: 45%;
+  }
+}
+
+.inventory-credits {
+  color: #ffd27a;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.inventory-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  border: 1px solid rgba(110, 170, 220, 0.25);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.inventory-slot.filled {
+  border-color: rgba(110, 170, 220, 0.5);
+}
+
+/* Drawn at the size the catalogue rendered it: a scaled icon is a blurred one. */
+.inventory-icon {
+  width: 32px;
+  height: 32px;
+  flex: none;
+  pointer-events: none;
+}
+
+.inventory-initials {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* The Mk badge: plain metal, green, blue, violet, gold — the item models' Mk I-V (ASSET_FORMAT.md § 5.11). */
+.inventory-mk {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 2px #000;
+}
+
+.inventory-mk.mk1 {
+  color: #c4c8cf;
+}
+
+.inventory-mk.mk2 {
+  color: #6fdc6f;
+}
+
+.inventory-mk.mk3 {
+  color: #5aa8ff;
+}
+
+.inventory-mk.mk4 {
+  color: #b77cff;
+}
+
+.inventory-mk.mk5 {
+  color: #ffcf4a;
+}
+
+.inventory-count {
+  position: absolute;
+  right: 2px;
+  bottom: 1px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-shadow: 0 0 2px #000;
+}
+
+/* In a portal on the body, placed by ItemTip: the inventory scrolls, which clips anything positioned inside it. */
+.inventory-tip {
+  position: fixed;
+  z-index: 1000;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--panel-bg);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .missions-head {
   display: flex;
   align-items: center;
@@ -714,6 +892,17 @@ button.active {
 .missions-table td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* "Show all": an offer out of the viewer's reach is listed dimmed, its level still in its con colour. */
+.missions-table tr.out-of-reach {
+  opacity: 0.55;
+}
+
+.missions-filter {
+  margin-top: 6px;
+  align-items: center;
+  gap: 8px;
 }
 
 .journal-row {
@@ -840,6 +1029,21 @@ button.active {
   opacity: 0.9;
 }
 
+/* The client's own lines — a command's answer, a tip given or received — seen by this player only. */
+.chat-system .chat-text {
+  color: #ffd27a;
+  font-style: italic;
+}
+
+.chat-system .chat-speaker {
+  cursor: default;
+}
+
+.chat-system .chat-speaker:hover {
+  opacity: 0.65;
+  text-decoration: none;
+}
+
 .chat-compose {
   margin-top: 6px;
   display: flex;
@@ -927,6 +1131,24 @@ button.active {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   opacity: 0.75;
+}
+
+/* The dashboard's "watch this bot" (watch-link.ts): top centre, under the realm curtain, clear of the side panels. */
+.watch-badge {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--panel-bg);
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* ── The login screen (A8) ─────────────────────────────────────────────────────────────────────────────────────── */
@@ -1241,6 +1463,38 @@ button.active {
   gap: 6px;
 }
 
+.ham-level {
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffd76a;
+  text-shadow: 0 1px 1px #000;
+  white-space: nowrap;
+}
+
+.ham-pools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The way to the next combat level, a thin bar under the health. */
+.ham-xp {
+  position: relative;
+  width: 180px;
+  height: 4px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.ham-xp-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(180deg, #ffe08a 0%, #d8a21c 100%);
+  transition: width 0.25s ease-out;
+}
+
 .ham-label {
   font-size: 10px;
   font-weight: 700;
@@ -1375,4 +1629,119 @@ button.active {
   to {
     opacity: 0;
   }
+}
+
+/* The bazaar (bazaar.md § 6): near the top, right of the toolbar, and clear of the inventory window (whose stacks are picked
+   from it to sell). Deliberately plain: the mission table's rows, a strip of tabs, a refusal under the row it was about. */
+.bazaar {
+  top: 70px;
+  left: 320px;
+  width: 640px;
+  max-width: calc(100% - 340px);
+  max-height: 65%;
+  overflow-y: auto;
+}
+
+/* Narrower, both cannot sit side by side: the bazaar centred at the top, the inventory under it. */
+@media (max-width: 1300px) {
+  .bazaar {
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: calc(100% - 20px);
+    max-height: 45%;
+  }
+
+  .inventory.beside-bazaar {
+    top: auto;
+    bottom: 90px;
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    max-height: 38%;
+  }
+}
+
+.bazaar-here {
+  color: var(--muted);
+}
+
+.bazaar-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.bazaar-tabs button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.bazaar-filters {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.bazaar-filters input[type='number'] {
+  width: 80px;
+}
+
+.bazaar-table td {
+  vertical-align: middle;
+}
+
+.bazaar-table td.mk {
+  font-weight: 700;
+}
+
+.bazaar-table td.mk1 {
+  color: #c4c8cf;
+}
+
+.bazaar-table td.mk2 {
+  color: #6fdc6f;
+}
+
+.bazaar-table td.mk3 {
+  color: #5aa8ff;
+}
+
+.bazaar-table td.mk4 {
+  color: #b77cff;
+}
+
+.bazaar-table td.mk5 {
+  color: #ffcf4a;
+}
+
+/* A row the board no longer lists, kept while its refusal is read: "Sold to someone else first". */
+.bazaar-table tr.gone {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.bazaar-row-notice td {
+  padding: 2px 6px 4px;
+  color: #ffb39a;
+  background: rgba(255, 120, 90, 0.12);
+}
+
+.bazaar-pager {
+  margin-top: 6px;
+  align-items: center;
+  gap: 8px;
+}
+
+.bazaar-picked {
+  align-items: center;
+  gap: 8px;
+}
+
+/* With the bazaar open, a stack is picked for the Sell tab by a click. */
+.inventory-slot.pickable {
+  cursor: pointer;
+}
+
+.inventory-slot.picked {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }

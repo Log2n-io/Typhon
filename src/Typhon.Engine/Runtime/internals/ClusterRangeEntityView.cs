@@ -20,6 +20,7 @@ namespace Typhon.Engine.Internals;
 /// occupied slots, reading EntityIds directly from cluster SoA.
 /// </para>
 /// </summary>
+[MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
 internal sealed unsafe class ClusterRangeEntityView : IReadOnlyCollection<EntityId>, IEnumerator<EntityId>
 {
     private ArchetypeClusterState _state;

@@ -200,31 +200,24 @@ class PushVolumeTests : TestBase<PushVolumeTests>
             using (var tx = dbe.CreateQuickTransaction())
             {
                 var accessor = tx.For<ProjFlyer>();
-                try
+                foreach (var cluster in accessor.GetClusterEnumerator())
                 {
-                    foreach (var cluster in accessor.GetClusterEnumerator())
+                    var occupancy = cluster.OccupancyBits;
+                    while (occupancy != 0)
                     {
-                        var occupancy = cluster.OccupancyBits;
-                        while (occupancy != 0)
+                        var slot = BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
+                        if (random.Next(10) != 0)
                         {
-                            var slot = BitOperations.TrailingZeroCount(occupancy);
-                            occupancy &= occupancy - 1;
-                            if (random.Next(10) != 0)
-                            {
-                                continue;
-                            }
-
-                            var c = cluster.GetReadOnly(ProjFlyer.Bounds, slot).Bounds;
-                            cluster.WriteSpatial(ProjFlyer.Bounds, slot, Box(
-                                Math.Clamp(((c.MinX + c.MaxX) * 0.5) + ((random.NextDouble() - 0.5) * 3), -2000, 2000),
-                                Math.Clamp(((c.MinY + c.MaxY) * 0.5) + ((random.NextDouble() - 0.5) * 3), -2000, 2000),
-                                Math.Clamp(((c.MinZ + c.MaxZ) * 0.5) + ((random.NextDouble() - 0.5) * 3), -2000, 2000)));
+                            continue;
                         }
+
+                        var c = cluster.GetReadOnly(ProjFlyer.Bounds, slot).Bounds;
+                        cluster.WriteSpatial(ProjFlyer.Bounds, slot, Box(
+                            Math.Clamp(((c.MinX + c.MaxX) * 0.5) + ((random.NextDouble() - 0.5) * 3), -2000, 2000),
+                            Math.Clamp(((c.MinY + c.MaxY) * 0.5) + ((random.NextDouble() - 0.5) * 3), -2000, 2000),
+                            Math.Clamp(((c.MinZ + c.MaxZ) * 0.5) + ((random.NextDouble() - 0.5) * 3), -2000, 2000)));
                     }
-                }
-                finally
-                {
-                    accessor.Dispose();
                 }
 
                 tx.Commit();

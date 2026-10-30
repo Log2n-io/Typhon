@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Threading;
-using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 

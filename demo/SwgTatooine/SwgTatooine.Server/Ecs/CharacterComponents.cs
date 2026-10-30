@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace SwgTatooine.Server;
 
 /// <summary>
-/// The persistent you: a name, a wallet, and where you were when you logged out (A4).
+/// The persistent you: a name, and where you were when you logged out (A4). The wallet is <see cref="Wallet"/>, keyed by this character.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -24,10 +24,9 @@ namespace SwgTatooine.Server;
 /// of walking rather than a session. Reading it for anything other than deciding where to spawn is a bug waiting to happen.
 /// </para>
 /// </remarks>
-// Pack = 4 on the analyzer's advice: 8 + 64 + 8 + 12 + 2 + 1 + 8 is 103 bytes of field, which the longs would otherwise round to 112
-// — and 104 packed: the outfit sits in what was the padding after the realm. Both fit the inline spawn payload (TYPHON013), with room
-// for the fields G will add.
-[Component("Swg.Character", 2, StorageMode = StorageMode.Versioned)]
+// Pack = 4 on the analyzer's advice: 8 + 64 + 12 + 2 + 1 + 8 is 95 bytes of field, which the longs would otherwise round to 104 — and 96
+// packed. Revision 3: the wallet moved out to its own archetype (Wallet). Fits the inline spawn payload (TYPHON013), with room for the fields G will add.
+[Component("Swg.Character", 3, StorageMode = StorageMode.Versioned)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct Character
 {
@@ -66,15 +65,6 @@ public struct Character
     [Field]
     public String64 Name;
 
-    /// <summary>The wallet, in credits.</summary>
-    /// <remarks>
-    /// A <c>long</c>, which is right for the data and currently <b>unprojectable above 2³²</b>: every projected field funnels
-    /// through <c>double</c> → <c>uint</c>, so a balance past four billion is silently clamped on the wire (EN-A). Stored
-    /// correctly here; the defect is the projection pipeline's and is filed.
-    /// </remarks>
-    [Field]
-    public long Credits;
-
     /// <summary>Where the avatar was when it was last saved — the position a login spawns it at.</summary>
     [Field]
     public Point3F LastPosition;
@@ -107,4 +97,36 @@ public struct Character
     /// </remarks>
     [Field]
     public long LastSavedUtcTicks;
+}
+
+/// <summary>
+/// A character's combat level and XP (character-level.md § 1): CL 1-50, the XP since CL 1, and how much of it came from kills and from missions.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A component of its own, not fields on <see cref="Character"/>.</b> The profile is written at login and on the position cadence through the tick's
+/// transaction; XP by two serial systems through side transactions. Two writers of one component is the lost update the wallet moved out for; MVCC conflicts
+/// are per component, so a second component on the same entity is enough.
+/// </para>
+/// <para><b>The level is stored, not derived from <see cref="Xp"/></b>: it is read on every bind and every kill, and a retuned table must never take a level
+/// away. The body carries a copy (<see cref="PlayerLook.Level"/>, <see cref="PlayerLook.Xp"/>).</para>
+/// </remarks>
+[Component("Swg.CharacterProgress", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CharacterProgress
+{
+    /// <summary>Total XP since CL 1, clamped at <see cref="Progression.MaxXp"/> (1 691 050).</summary>
+    [Field] public int Xp;
+
+    /// <summary>Of which from kills: the 75/25 split per character, for tuning (crafting-catalog § 14.6).</summary>
+    [Field] public int KillXp;
+
+    /// <summary>Of which from missions.</summary>
+    [Field] public int MissionXp;
+
+    /// <summary>1 to 50; 0 = none, never for a created character.</summary>
+    [Field] public byte Level;
+
+    /// <summary>A new character's: CL 1, no XP.</summary>
+    public static CharacterProgress Start => new() { Level = 1 };
 }

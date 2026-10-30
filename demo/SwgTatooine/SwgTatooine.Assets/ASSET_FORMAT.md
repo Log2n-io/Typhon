@@ -5,7 +5,7 @@ The contract between the asset pipeline (`scripts/th_export.py`, `scripts/th_cha
 and everything that reads `build/assets/`: SwgTatooine.Server (`AssetOrigin`, `AssetColliders`), SwgTatooine.Client and
 the asset testbench.
 
-**Format revision 10** (2026-10-25). Every change to what is published gets a revision and an entry in the
+**Format revision 12** (2026-10-26). Every change to what is published gets a revision and an entry in the
 [changelog](#changelog) **before** it is published. A consumer that knows revision N reads the entries after N and
 nothing else.
 
@@ -81,8 +81,8 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 - `icons` (optional, revision 9): icons of some of the `assets`, keyed by asset id. `png` maps a size in pixels (a
   string) to a square PNG of that size: RGBA, transparent background, sRGB, the asset alone, rendered at that size
   (no scaling). `rev` is the icon's revision, the one in its file names. Sizes today: `32`, `48`. Icons today:
-  `swoop`, `sword_vibroblade`, `blaster_dl44`, `vibroknuckler`. A crop may leave part of the asset out (the swoop's
-  nose).
+  `swoop`, `sword_vibroblade`, `blaster_dl44`, `vibroknuckler` and every `item` (5.11). A crop may leave part of the
+  asset out (the swoop's nose).
 - `sha256` has one entry per descriptor, GLB, texture and icon the catalogue names (not the `.br` copies): the SHA-256 of the
   bytes that name was published with. A reader may verify a file against it; the server and the client do not.
 
@@ -94,7 +94,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 |---|---|---|
 | `schema` | int | 1 |
 | `id` | string | Asset id (snake_case, = catalogue key) |
-| `kind` | enum | `building`, `interior`, `interactable`, `prop`, `vehicle`, `character`, `creature`, `weapon` |
+| `kind` | enum | `building`, `interior`, `interactable`, `prop`, `vehicle`, `character`, `creature`, `weapon`, `item` |
 | `frame` | string | `"glTF: metres, +Y up, right-handed"`, informative |
 | `render.glb` | string | GLB file name |
 | `render.triangles` | int | LOD0 triangles |
@@ -103,8 +103,8 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 | `render.hidden_faces_removed` | int | Informative |
 | `render.lods` | object[] | Optional. Levels, LOD0 first: `{node, triangles, error_m?}`. `node` is the GLB node name. `error_m` (buildings): upper bound of the level's deviation from LOD0 in metres; switch when `error_m × pixels_per_metre / distance` falls under ~1 px. Characters have no `error_m` yet |
 | `bounds.render` | AABB | `[[minX, minY, minZ], [maxX, maxY, maxZ]]` of the LOD0 mesh |
-| `bounds.collision` | AABB | Same, of the colliders. `null` on weapons |
-| `collision` | object | Section 5.2. `null` on weapons |
+| `bounds.collision` | AABB | Same, of the colliders. `null` on weapons and items |
+| `collision` | object | Section 5.2. `null` on weapons and items |
 | `portals` | object[] | Section 5.3 |
 | `spawns` | object[] | Section 5.4 |
 | `interactions` | object[] | Section 5.5 |
@@ -131,6 +131,7 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 - Creatures: one box `Body`, axis-aligned in the asset frame: the bounds of every frame of the idle clip. A flier's
   box covers the bob of its hover, which its idle clip holds (the origin stays on the ground).
 - Weapons: none. A held weapon does not collide; hit tests use its `markers` (5.10).
+- Items: none.
 
 ### 5.3 Portals
 
@@ -158,8 +159,15 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 
 ### 5.5 Interactions
 
-`{kind, pos, rot, forward, radius, seat?}`: the stand point (feet height) a user occupies, facing `forward`, usable
-within `radius` metres.
+`{kind, pos, rot, forward, radius, seat?, reach_m?}`: the stand point (feet height) a user occupies, facing `forward`,
+usable within `radius` metres.
+
+- `reach_m` (optional, revision 12): the asset is **also usable from any side**, within `reach_m` metres in plan (x, z)
+  of the asset origin, which is the middle of its base. A reader that has it tests the user against that circle
+  instead of `radius` around `pos`. `pos` stays where a bot walks to (approach paths end on it, 5.7) and where a user
+  is put to face the screen. Today `ticket_terminal` 3.0, `bazaar_terminal` 3.3 and `mission_terminal` 2.9: 2.5 m past
+  each terminal's farthest point. For a child asset (the ticket terminal in the shuttleport), the origin is the child's
+  placed origin.
 
 | `kind` | Asset | Meaning |
 |---|---|---|
@@ -206,6 +214,7 @@ The exporter refuses a path whose ends break 1 or 3, or along which a 0.3 m squa
 | `source` | character, creature | `{pack, file, license, scale}`: provenance and the uniform scale applied |
 | `weapon` | weapon | `{class, clip, attach}`: section 5.10 |
 | `markers` | weapon | `[{kind, pos, rot, forward}]`: section 5.10 |
+| `item` | item | `{category, mk?, label?}`: section 5.11 |
 
 ### 5.9 Interior navigation (`nav`)
 
@@ -271,6 +280,38 @@ edge, the barrel), like every asset's front.
   - `blade_base`, `blade_tip` (swords, knuckler): the blade's ends, for trails and hit tests.
 - Placement is approximate: there are no finger joints, and the hand is a closed fist the grip passes through.
 
+### 5.11 Items (`item`)
+
+What a player carries, drops as loot or crafts with: crafting materials, cores, add-ons, parts, armour pieces (as
+objects: worn armour is not published yet), potions, kits and crates. Frame: origin = the middle of the item's
+footprint, `y` 0 = the ground it rests on, lying or standing as when dropped; front +Z. Real sizes (the player is
+1.8 m tall); a reader may scale them for display. No collision, no interactions.
+
+```json
+"item": { "category": "core",
+          "mk": { "material": "TH_ItemMk",
+                  "levels": [ { "base_color": [r, g, b], "emissive": [r, g, b], "emissive_strength": s } ] },
+          "label": "TH_ItemLabel" }
+```
+
+- `category`: `material`, `core`, `addon`, `part`, `armor`, `potion`, `kit`, `container` (enum, rule 3).
+- `mk` (materials, cores and add-ons, which drop at Mk I to V): `levels` has 5 entries, Mk I first. The GLB material
+  named `<asset_id>:<material>` (a band, a tag, the seams, the crystals or the glow) is published at `levels[0]`. To
+  show Mk n, set that material's base colour factor to `levels[n-1].base_color`, its emissive factor to `emissive`
+  and its `KHR_materials_emissive_strength` to `emissive_strength`. Colours are linear. The levels are the same on
+  every item today: plain metal, then green, blue, violet and gold, glowing more at each step.
+- `label` (the crate): the GLB material `<asset_id>:<label>` is a plate on the crate's front whose `TEXCOORD_0`
+  spans 0..1 across it, (0, 0) at its lower left seen from the front. Draw the content (an icon, a name) there.
+- Asset ids: `mat_*` (11: ore, water, metal, crystal, gas, chemical, fiber, hide, bone, gland, venom), `core_*` (4:
+  ranged, melee, armor, propulsion), `addon_*` (4: weapon, armor, tuning, additive), `part_*` (24: barrel_pistol,
+  barrel_carbine, power_cell, stock_bone, stock_fiber, grip, blade, knuckle_plate, vibro_unit, padded_segment,
+  composite_segment, compound_restorative, compound_stimulant, compound_hardener, compound_vital, vial,
+  structural_module, wall_module, storage_module, extraction_unit, assembly_unit, engine, repulsor, chassis),
+  `armor_padded_*` and `armor_composite_*` (6 each: helmet, torso, arms, legs, gloves, boots; arms, legs, gloves and
+  boots are pairs), `potion_*` (6: stim, regen, fury, haste, ironhide, vigor), `kit_*_repair` (4: weapon, armor,
+  vehicle, structure), `crate`. Two looks of one catalogue item are two assets (`part_stock_bone` / `_fiber`), as
+  are its two sizes (`part_barrel_pistol` / `_carbine`).
+
 ## 6. GLB
 
 - glTF 2.0 binary, one scene, the same frame as the descriptor.
@@ -281,11 +322,14 @@ edge, the barrel), like every asset's front.
   hidden on load with `KHR_node_visibility`, so a reader unaware of LODs shows LOD0 only.
 - **Textures:** shared ones by relative URI, the `<texture>-<rev>.ktx2` files of the catalogue, same folder; the
   per-asset AO map is embedded, on texture coordinate set 1, as `occlusionTexture`. Base colour and normals use set 0.
+  An asset with no texture (weapons, items) has its AO on set 0, except the crate (its label is set 0, its AO set 1):
+  read `occlusionTexture.texCoord`, as glTF says.
 - **Lights** (interiors): point lights, intensity in the exporter's unitless convention (watts / 4π).
 - **Characters:** one skin, 23 joints; the animations are the descriptor's `clips`, by name; they play in place.
 - **Creatures:** one skin, one primitive per flat-colour material (base colour factor, no texture, no AO); the root
   node carries the publish scale and turn; the animations are the descriptor's `clips`, by name; they play in place.
 - **Weapons:** static, no skin, like props: flat-colour materials with an embedded AO map, in the weapon frame (5.10).
+- **Items:** the same, in the item frame (5.11).
 
 ---
 
@@ -293,6 +337,20 @@ edge, the barrel), like every asset's front.
 
 Newest first. *Additive*: readers may ignore it. *Semantic*: a value's meaning or a rule changed, same fields.
 *Breaking*: `schema` changes. Each entry names the first catalogue carrying it and what a reader has to do.
+
+### Revision 12: 2026-10-26, catalogue `14` (additive)
+- `interactions[].reach_m` (5.5): usable from any side within that distance of the asset origin, in plan. On
+  `ticket_terminal` (rev 2), `bazaar_terminal` (rev 3) and `mission_terminal` (rev 3); nothing else changed in them.
+- Reader: to let players use a terminal from all around, test against `reach_m` about the asset origin when present.
+  Otherwise nothing (rule 2: an unknown field is ignored, and `radius` still works).
+
+### Revision 11: 2026-10-26, catalogue `12`, icons in `13` (additive)
+- Asset kind `item` (5.1) and its `item` field (5.11): 66 crafting items (materials, cores, add-ons, parts, armour
+  pieces as objects, potions, kits, the crate), made by `scripts/th_items.py`, each with an icon (section 4).
+- 6: the AO's texture coordinate set on assets with no texture (weapons since revision 8, items) is 0; follow
+  `occlusionTexture.texCoord`.
+- Reader: to show inventory and loot objects, read kind `item`; for Mk I-V, recolour `item.mk.material` (5.11).
+  Otherwise nothing (rule 3: skip the unknown kind).
 
 ### Revision 10: 2026-10-25, catalogue `11` (additive)
 - Interaction kind `manufacture` (5.5), on the new `factory`.

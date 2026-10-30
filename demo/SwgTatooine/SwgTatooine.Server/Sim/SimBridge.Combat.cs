@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Threading;
 
@@ -42,6 +43,18 @@ public sealed partial class SimBridge
     /// would be <c>EventQueueBase.OverflowCount</c>, which the run asserts is zero.
     /// </remarks>
     internal EventQueue<CombatEvent> CombatQueue { get; set; }
+
+    /// <summary>Every death the combat drain resolved this tick, for the XP system (<see cref="KillEvent"/>). Created on the schedule.</summary>
+    internal EventQueue<KillEvent> KillXpQueue { get; set; }
+
+    /// <summary>The same deaths, for the loot system: a queue is drained once, so each consumer has its own.</summary>
+    internal EventQueue<KillEvent> KillLootQueue { get; set; }
+
+    /// <summary>The deaths of the drain under way, pushed into both kill queues when it ends; reused, the drain is serial.</summary>
+    private readonly List<KillEvent> _kills = [];
+
+    /// <summary>The tick of the drain under way, for its <see cref="KillEvent"/>s.</summary>
+    private long _drainTick;
 
     /// <summary>
     /// A fighting player fires at its target: <see cref="SimPhases.Resolve"/>, over <see cref="Player"/>, in parallel.
@@ -89,6 +102,9 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var states = cluster.GetReadOnlySpan(Player.State);
             var controls = cluster.GetReadOnlySpan(Player.Control);
+
+            // The shooter's level, carried on its blow for the drain's level factor (character-level.md § 6).
+            var looks = cluster.GetReadOnlySpan(Player.Look);
 
             // READ-ONLY until a player in this cluster actually fires. GetSpan marks its cluster changed on the HANDOUT, so taking these mutably to read a
             // cooldown would claim a change for every player on every tick — and a cluster of parked players in a cantina writes nothing today, which is
@@ -177,8 +193,8 @@ public sealed partial class SimBridge
                 {
                     // A stance reaches between the two bodies' edges; the crowd's weapon reaches between centres, as it always has.
                     var verdict = possessed
-                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, TatooineData.StanceReachM[stance] + places[idx].HalfExtent)
-                        : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f);
+                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, TatooineData.StanceReachM[stance] + places[idx].HalfExtent, crowd: false)
+                        : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f, crowd: true);
                     if (verdict == TargetVerdict.Gone)
                     {
                         // Dead or destroyed — a broken lair, a mission ended. Nobody's choice survives that, so the target is dropped for a possessed
@@ -219,7 +235,9 @@ public sealed partial class SimBridge
                 if (target.IsNull)
                 {
                     // The only spatial query on the player's side of a fight, and it runs only for a fighting player that has nobody to shoot.
-                    if (!TryAcquireTarget(ctx, cluster.Realm, x, z, out target, out targetKind))
+                    // A scripted body fights at or below the crowd's level (content-levels.md § 5); a person chooses.
+                    var maxLevel = possessed ? ContentLevels.MaxLevel : TatooineData.CrowdLevel;
+                    if (!TryAcquireTarget(ctx, cluster.Realm, x, z, maxLevel, out target, out targetKind))
                     {
                         // A SCAN CADENCE, not a wasted tick. A player walking the one to two kilometres to its mission is in Combat the whole way with
                         // nothing in range, and without this it ran two radius queries every tick of that walk: measured at 12 500 query pairs over a
@@ -242,6 +260,7 @@ public sealed partial class SimBridge
                     Amount = vitals[idx].AttackDamage,
                     Kind = CombatEventKind.Damage,
                     TargetKind = targetKind,
+                    AttackerLevel = possessed ? looks[idx].Level : (byte)TatooineData.CrowdLevel,
                 });
 
                 // A stance strikes on its own steady beat, which a client plays one attack clip per hit to; the crowd keeps its random weapon delay.
@@ -316,7 +335,8 @@ public sealed partial class SimBridge
     /// <c>TryOpen</c> rather than <c>TryOpenMut</c> even though the caller may be about to damage what it finds. The
     /// damage itself happens in the consumer, on one thread, through the tick transaction.
     /// </remarks>
-    private static TargetVerdict CheckTarget(TickContext ctx, EntityId target, byte kind, float x, float z, float rangeSq, float edgeReach)
+    /// <param name="crowd">A scripted body's: a lair a held mission reserved since it was acquired is gone for it (missions.md § 8, MS-R5).</param>
+    private static TargetVerdict CheckTarget(TickContext ctx, EntityId target, byte kind, float x, float z, float rangeSq, float edgeReach, bool crowd)
     {
         if (!ctx.Accessor.TryOpen(target, out var entity))
         {
@@ -343,7 +363,7 @@ public sealed partial class SimBridge
             case CombatTargetKind.Lair:
             {
                 var spawner = entity.Read(CreatureLair.Spawner);
-                if (!IsStandingLair(spawner, entity.Read(CreatureLair.Vitals)))
+                if (!IsStandingLair(spawner, entity.Read(CreatureLair.Vitals)) || (crowd && !spawner.Mission.IsNull))
                 {
                     return TargetVerdict.Gone;
                 }
@@ -391,6 +411,10 @@ public sealed partial class SimBridge
         return d2 <= rangeSq ? TargetVerdict.InRange : TargetVerdict.OutOfRange;
     }
 
+    /// <summary>A creature's level, as its lair's (<see cref="TryAcquireTarget"/>'s remarks).</summary>
+    private static int CreatureLevel(TickContext ctx, in EntityRef creature)
+        => ctx.Accessor.TryOpen(creature.Read(Creature.Home).Lair, out var lair) ? lair.Read(CreatureLair.Spawner).Level : 0;
+
     /// <summary>
     /// The nearest LIVING creature within weapon range, or failing that a standing lair — what a player in
     /// <see cref="PlayerActivity.Combat"/> shoots at when it has nobody.
@@ -407,7 +431,13 @@ public sealed partial class SimBridge
     /// repaired it and a lair at zero would have stood broken for the life of the process. Lairs are transient now: one at
     /// zero is retired by the lair director and replaced elsewhere (<c>SimBridge.Lairs.cs</c>).</para>
     /// </remarks>
-    private bool TryAcquireTarget(TickContext ctx, RealmId realm, float x, float z, out EntityId target, out byte kind)
+    /// <param name="maxLevel">The highest level of creature or lair it takes: <see cref="TatooineData.CrowdLevel"/> for a scripted body.</param>
+    /// <remarks>
+    /// <b>A creature's level is read from its lair</b> (<see cref="CreatureHome"/> → <see cref="Lair.Level"/>), not from its
+    /// <see cref="CreatureBrain"/>: <c>CreatureCombat</c> writes the brain in parallel in this phase (ED-05), and a creature always has its lair's level —
+    /// it is spawned and refilled at it. A creature whose lair is gone counts as level 0: it dies with the lair's cascade in this tick's director pass.
+    /// </remarks>
+    private bool TryAcquireTarget(TickContext ctx, RealmId realm, float x, float z, int maxLevel, out EntityId target, out byte kind)
     {
         var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = RangedRange };
         target = EntityId.Null;
@@ -421,7 +451,7 @@ public sealed partial class SimBridge
             {
                 var hit = e.Current;
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
-                    || candidate.Read(Creature.Vitals).Health <= 0)
+                    || candidate.Read(Creature.Vitals).Health <= 0 || CreatureLevel(ctx, in candidate) > maxLevel)
                 {
                     continue;
                 }
@@ -446,9 +476,13 @@ public sealed partial class SimBridge
             while (lairs.MoveNext())
             {
                 var hit = lairs.Current;
+                // Never a mission's lair: only the crowd acquires targets here, and a stranger's break only moves the holder's mission (missions.md MS-6,
+                // lair-objectives.md L-5).
                 if (hit.DistanceSq >= bestSq || !ctx.Accessor.TryOpen(hit.Entity, out var candidate)
                     || !IsStandingLair(candidate.Read(CreatureLair.Spawner), candidate.Read(CreatureLair.Vitals))
-                    || IsShielded(candidate.Read(CreatureLair.Spawner)))
+                    || IsShielded(candidate.Read(CreatureLair.Spawner))
+                    || !candidate.Read(CreatureLair.Spawner).Mission.IsNull
+                    || candidate.Read(CreatureLair.Spawner).Level > maxLevel)
                 {
                     continue;
                 }
@@ -576,6 +610,7 @@ public sealed partial class SimBridge
                     Amount = vitals[idx].AttackDamage,
                     Kind = CombatEventKind.Damage,
                     TargetKind = CombatTargetKind.Player,
+                    AttackerLevel = brains[idx].Level,
                 });
 
                 t.AttackCooldown = minDelay + (int)(Hash01(Salt(ctx.TickNumber, cluster.GetEntityId(idx).EntityKey, 0x1E35A7BDu)) * delaySpan);
@@ -631,6 +666,8 @@ public sealed partial class SimBridge
         Span<CombatEvent> events = pending <= 128 ? stackalloc CombatEvent[128] : new CombatEvent[pending];
         var n = CombatQueue.Drain(events);
         var tx = ctx.Transaction;
+        _kills.Clear();
+        _drainTick = ctx.TickNumber;
         var corpseTicks = Math.Max(1, (int)(_config.CorpseSeconds * _config.TickRateHz));
         long damageApplied = 0;
         long killed = 0;
@@ -669,6 +706,13 @@ public sealed partial class SimBridge
                 // counted rather than ignored, because a non-zero value would mean an assumption above has stopped holding.
                 stale++;
                 continue;
+            }
+
+            // The B4 level factor (character-level.md § 6), here where the target is open: the blow, the health removed and the Attack a client draws all
+            // carry the scaled amount.
+            if (ev.Kind == CombatEventKind.Damage)
+            {
+                events[i].Amount = ScaleByLevel(ev.Amount, ev.AttackerLevel, LevelOf(ref target, ev.TargetKind));
             }
 
             var landed = false;
@@ -723,6 +767,21 @@ public sealed partial class SimBridge
             }
         }
 
+        // The deaths, to the XP and the loot systems (character-level.md § 2). After the loop, so the writers are taken once and only on a tick with a death.
+        if (_kills.Count != 0)
+        {
+            var xp = ctx.Writer(KillXpQueue);
+            var loot = ctx.Writer(KillLootQueue);
+            foreach (var kill in _kills)
+            {
+                xp.Push(kill);
+                loot.Push(kill);
+                KillTap?.Enqueue(kill);
+            }
+
+            Interlocked.Add(ref _killEvents, _kills.Count);
+        }
+
         if (damageApplied != 0)
         {
             Interlocked.Add(ref _damageApplied, damageApplied);
@@ -735,6 +794,7 @@ public sealed partial class SimBridge
 
         if (lairHits != 0)
         {
+            Interlocked.Add(ref _lairHitsTotal, lairHits);
             Interlocked.Add(ref _lairHits, lairHits);
         }
 
@@ -835,26 +895,80 @@ public sealed partial class SimBridge
 
         // One fewer standing between the lair and whoever comes for it: at none, it can be destroyed.
         EntityId home = target.Read(Creature.Home).Lair;
+        var mission = EntityId.Null;
         if (tx.TryOpenMut(home, out var lair))
         {
             var spawner = lair.Read(CreatureLair.Spawner);
+            mission = spawner.Mission;
             spawner.Guards = Math.Max(0, spawner.Guards - 1);
             lair.Set(CreatureLair.Spawner, spawner);
             TatooineReplication.Replicate(in lair);
         }
+        else
+        {
+            home = EntityId.Null;   // a home that is gone is no lair for the KillEvent to name
+        }
 
-        // The loot, written to the shooter's Inventory in this transaction. A counter rather than an Item entity, and deliberately: an event cannot spawn
-        // another archetype's entity until #907 is fixed, so real items are S3's work and out of WP-3's scope. What the counter DOES exercise is the thing
-        // worth exercising — a Versioned write on a cluster archetype, in the tick's unit of work, every time something dies.
-        Loot(tx, ev.Attacker, ai.Template);
+        var at = target.Read(Creature.Bounds);
+        _kills.Add(new KillEvent
+        {
+            Killer = KillerOf(ev.Attacker),
+            Victim = target.Id,
+            Lair = home,
+            Mission = mission,
+            Tick = _drainTick,
+            X = at.X,
+            Z = at.Z,
+            Realm = target.Read(Creature.Realm).Value,
+            VictimKind = CreatureTemplates.IsCamp(ai.Template) ? KillVictimKind.Foe : KillVictimKind.Creature,
+            VictimLevel = ai.Level,
+            Species = ai.Template,
+        });
         return true;
+    }
+
+    /// <summary>
+    /// A blow scaled by the level difference: × <see cref="Progression.LevelPercent"/>(attacker − target), ×0.5–1.5, at least 1; unchanged when either side has
+    /// no level.
+    /// </summary>
+    internal static int ScaleByLevel(int amount, int attackerLevel, int targetLevel)
+    {
+        if (attackerLevel <= 0 || targetLevel <= 0 || amount <= 0)
+        {
+            return amount;
+        }
+
+        return Math.Max(1, (int)((((long)amount * Progression.LevelPercent(attackerLevel - targetLevel)) + 50) / 100));
+    }
+
+    /// <summary>The level a blow lands on: a creature's or a lair's content level, a character's CL, <see cref="TatooineData.CrowdLevel"/> for a scripted body.</summary>
+    private static int LevelOf(ref EntityRefMut target, byte targetKind)
+    {
+        switch (targetKind)
+        {
+            case CombatTargetKind.Creature:
+                return target.Read(Creature.Ai).Level;
+            case CombatTargetKind.Lair:
+                return target.Read(CreatureLair.Spawner).Level;
+            case CombatTargetKind.Player:
+                return target.Read(Player.Control).Kind == ControllerKind.Scripted ? TatooineData.CrowdLevel : target.Read(Player.Look).Level;
+            default:
+                return 0;
+        }
+    }
+
+    /// <summary>The killer a <see cref="KillEvent"/> names: the attacker when it is a Player body, nobody when it was a creature.</summary>
+    private EntityId KillerOf(EntityId attacker)
+    {
+        _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
+        return attacker.ArchetypeId == _playerArchetype.Value ? attacker : EntityId.Null;
     }
 
     /// <summary>
     /// Damage to a lair. A wild lair at zero is retired by the lair director in this tick's Economy phase; a mission's is the mission desk's, after it in the
     /// same phase — completed if its holder's blow is among those that broke it (<see cref="Lair.OwnerHit"/>), drawn again if not.
     /// </summary>
-    private static bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
+    private bool ApplyToLair(ref EntityRefMut target, in CombatEvent ev)
     {
         var v = target.Read(CreatureLair.Vitals);
         var spawner = target.Read(CreatureLair.Spawner);
@@ -869,6 +983,27 @@ public sealed partial class SimBridge
         {
             spawner.OwnerHit = 1;
             target.Set(CreatureLair.Spawner, spawner);
+        }
+
+        // Broken by this blow: one KillEvent, once — a later blow finds it no longer standing.
+        if (v.Health == 0)
+        {
+            var at = target.Read(CreatureLair.Bounds);
+            _kills.Add(new KillEvent
+            {
+                Killer = KillerOf(ev.Attacker),
+                Victim = target.Id,
+                Lair = target.Id,
+                Mission = spawner.Mission,
+                Tick = _drainTick,
+                X = at.X,
+                Z = at.Z,
+                Realm = target.Read(CreatureLair.Realm).Value,
+                VictimKind = KillVictimKind.Lair,
+                VictimLevel = (byte)Math.Clamp(spawner.Level, 0, byte.MaxValue),
+                Species = (byte)Math.Clamp(spawner.CreatureTemplate, 0, byte.MaxValue),
+                OwnerHit = (byte)(spawner.OwnerHit != 0 ? 1 : 0),
+            });
         }
 
         TatooineReplication.Replicate(in target);
@@ -997,38 +1132,6 @@ public sealed partial class SimBridge
         TatooineReplication.Replicate(in target);
         moved = true;
         return true;
-    }
-
-    /// <summary>Points a scripted body at its mission's lair, and sets it walking (the mission desk, at the take and whenever the lair moves).</summary>
-    /// <remarks>
-    /// <para><b>The crowd's only.</b> A person is told over the wire — the journal and its waypoint — and walks there or not, which is what a mission is; a
-    /// destination written onto a possessed body would overwrite the one its client sent, the two-deciders bug SWG-01 exists to prevent.</para>
-    /// <para><b>The timer is sized for the walk, not for the fight.</b> A lair 0.5-2 km out at the mounted speed is one to three minutes away, and the
-    /// 120 s the activity mix hands a fighter would expire mid-desert and re-roll the activity — which is how a mission that was taken would still never
-    /// be reached.</para>
-    /// </remarks>
-    private void SendOnMission(Transaction tx, EntityId body, float x, float z)
-    {
-        if (!tx.TryOpenMut(body, out var player) || player.Read(Player.Control).Kind != ControllerKind.Scripted)
-        {
-            return;
-        }
-
-        var state = player.Read(Player.State);
-        state.Activity = PlayerActivity.Combat;
-        state.ActivityTicks = MissionWalkSeconds * _config.TickRateHz;
-        state.MissionX = x;
-        state.MissionZ = z;
-        player.Set(Player.State, state);
-        var move = player.Read(Player.Move);
-        move.DestX = x;
-        move.DestZ = z;
-        move.SpeedMps = TatooineData.PlayerMountSpeedMps;
-        var place = player.Read(Player.Bounds);
-        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, place.X, place.Z, x, z);
-        player.Set(Player.Move, move);
-        TatooineReplication.Replicate(in player);
-        Interlocked.Increment(ref _missionsAssigned);
     }
 
     /// <summary>
@@ -1176,6 +1279,15 @@ public sealed partial class SimBridge
         state.ActivityTicks = (int)(TatooineData.CrowdReactSeconds * _config.TickRateHz);
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTick, at.X, at.Z, move.DestX, move.DestZ);
         body.Set(Player.State, state);
+
+        // A fight-back or a flight is not the lair objective it may have had: that fight is over (lair-objectives.md; review, 2026-10-26).
+        var route = body.Read(Player.Route);
+        if (route.Objective != 0)
+        {
+            route.Objective = 0;
+            body.Set(Player.Route, route);
+        }
+
         body.Set(Player.Move, move);
         body.Set(Player.Session, session);
         if (shout)
@@ -1265,47 +1377,6 @@ public sealed partial class SimBridge
 
     /// <summary>What the crowd said when it was attacked or joined in.</summary>
     public long CrowdShouts => Interlocked.Read(ref _crowdShouts);
-
-    /// <summary>[EST] Seconds a scripted body is given to walk to its mission and fight there; past it the crowd gives the mission up.</summary>
-    internal const int MissionWalkSeconds = 300;
-
-    /// <summary>A completed mission's payout, into its holder's <see cref="Inventory"/> — a Versioned write in the tick's unit of work.</summary>
-    private void Reward(Transaction tx, EntityId body, int credits)
-    {
-        if (!tx.TryOpenMut(body, out var player))
-        {
-            return;
-        }
-
-        var inv = player.Read(Player.Inventory);
-        inv.Credits += credits;
-        player.Set(Player.Inventory, inv);
-        var state = player.Read(Player.State);
-        state.MissionsCompleted++;
-        player.Set(Player.State, state);
-        TatooineReplication.Replicate(in player);
-        Interlocked.Increment(ref _missionRewards);
-    }
-
-    /// <summary>What a kill drops, into the shooter's <see cref="Inventory"/>.</summary>
-    /// <remarks>
-    /// Silently does nothing when the attacker has gone — a kill still counts, because the creature is just as dead whether or not anybody was left to
-    /// collect. The alternative, dropping the whole kill, would make a creature immortal whenever its killer logged out on the same tick.
-    /// </remarks>
-    private static void Loot(Transaction tx, EntityId attacker, byte template)
-    {
-        if (attacker.IsNull || !tx.TryOpenMut(attacker, out var player))
-        {
-            return;
-        }
-
-        var credits = template < CreatureTemplates.LootCredits.Length ? CreatureTemplates.LootCredits[template] : 0;
-        var inv = player.Read(Player.Inventory);
-        inv.Credits += credits;
-        inv.ItemCount++;
-        inv.ItemValue += credits;
-        player.Set(Player.Inventory, inv);
-    }
 
     /// <summary>
     /// Whether a lair's occupants still stand between it and whoever attacks it: nothing damages it until they are dead (Loïc, 2026-10-24).

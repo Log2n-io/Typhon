@@ -668,7 +668,7 @@ class CommittedDisciplineTests : TestBase<CommittedDisciplineTests>
         Exception refused = null;
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<CmEntity>();
+            var accessor = tx.For<CmEntity>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 refused = TrySetWallet(cluster, System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits));

@@ -213,41 +213,34 @@ class CellPromotionSpawnRaceTests : TestBase<CellPromotionSpawnRaceTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<PcpUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var chunkId = cluster.ChunkId;
+            var cellKey = cs.ClusterCellMap[chunkId];
+            if (cellKey < 0)
             {
-                var chunkId = cluster.ChunkId;
-                var cellKey = cs.ClusterCellMap[chunkId];
-                if (cellKey < 0)
-                {
-                    continue;
-                }
-
-                ref var box = ref cs.ClusterAabbs[chunkId];
-                Assert.That(float.IsPositiveInfinity(box.MinX), Is.False,
-                    $"cluster {chunkId} holds entities but its bound was reset to Empty — a spawn acted on the retired back-pointers (CA-01)");
-
-                dbe.Realm0Grid.CellOrigin(cellKey, out var originX, out var originY, out _);
-#pragma warning disable TYPHON009
-                var positions = cluster.GetSpan(PcpUnit.Pos);
-#pragma warning restore TYPHON009
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var b = ref positions[slot].Bounds;
-                    Assert.That((float)(b.MinX - originX), Is.InRange(box.MinX, box.MaxX),
-                        $"cluster {chunkId} slot {slot} sits outside its own bound on X — a widen was lost in the promotion window (CA-01)");
-                    Assert.That((float)(b.MinY - originY), Is.InRange(box.MinY, box.MaxY),
-                        $"cluster {chunkId} slot {slot} sits outside its own bound on Y — a widen was lost in the promotion window (CA-01)");
-                }
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            ref var box = ref cs.ClusterAabbs[chunkId];
+            Assert.That(float.IsPositiveInfinity(box.MinX), Is.False,
+                $"cluster {chunkId} holds entities but its bound was reset to Empty — a spawn acted on the retired back-pointers (CA-01)");
+
+            dbe.Realm0Grid.CellOrigin(cellKey, out var originX, out var originY, out _);
+#pragma warning disable TYPHON009
+            var positions = cluster.GetSpan(PcpUnit.Pos);
+#pragma warning restore TYPHON009
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var b = ref positions[slot].Bounds;
+                Assert.That((float)(b.MinX - originX), Is.InRange(box.MinX, box.MaxX),
+                    $"cluster {chunkId} slot {slot} sits outside its own bound on X — a widen was lost in the promotion window (CA-01)");
+                Assert.That((float)(b.MinY - originY), Is.InRange(box.MinY, box.MaxY),
+                    $"cluster {chunkId} slot {slot} sits outside its own bound on Y — a widen was lost in the promotion window (CA-01)");
+            }
         }
     }
 }

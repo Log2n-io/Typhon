@@ -1,6 +1,37 @@
+import { conClass, viewerClOf } from '../data/content-level';
+import { inspectorTitle } from '../data/progress';
 import { doorRealmOf } from '../data/realm-view';
+import { useEffect, useState } from 'react';
+import { BALANCE_OF_REFRESH_MS, formatCredits, readBalanceOf } from '../data/wallet';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
+
+/** A selected player's credits (Loïc, 2026-10-27), read now and every {@link BALANCE_OF_REFRESH_MS}; `null` until read, or for none. */
+function useBalanceOf(name: string | null): number | null {
+  // Kept with the name it was read for, so a new selection shows nothing until its own read lands, without a reset in the effect.
+  const [read, setRead] = useState<{ readonly name: string; readonly credits: number | null } | null>(null);
+  useEffect(() => {
+    if (name === null) {
+      return undefined;
+    }
+
+    let live = true;
+    const read = (): void => {
+      void readBalanceOf(name).then((credits) => {
+        if (live) {
+          setRead({ name, credits });
+        }
+      });
+    };
+    read();
+    const timer = window.setInterval(read, BALANCE_OF_REFRESH_MS);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [name]);
+  return read !== null && read.name === name ? read.credits : null;
+}
 
 /** The picked entity, live: what the server replicated for it, and where it is going. */
 export function Inspector() {
@@ -17,12 +48,26 @@ export function Inspector() {
   const canViewRealm = useStats((s) => s.stats?.canViewRealm) ?? false;
   const canSpectate = useStats((s) => s.stats?.canSpectate) ?? false;
   const ridingNetId = useStats((s) => s.stats?.ridingNetId) ?? 0;
+
+  // The viewer's combat level, for a level's con colour (character-level.md § 8); none for the god camera.
+  const viewerCl = useStats((s) => viewerClOf(s.stats?.vitals?.level));
+
+  // Stats arrive four times a second: until then, what was published may describe the previous selection.
+  const inspection = selectedNetId !== 0 && published?.netId === selectedNetId ? published : null;
+  const credits = useBalanceOf(inspection?.playerName ?? null);
   if (selectedNetId === 0) {
     return null;
   }
 
-  // Stats arrive four times a second: until then, what was published may describe the previous selection.
-  const inspection = published?.netId === selectedNetId ? published : null;
+  const title =
+    inspection === null
+      ? null
+      : inspectorTitle(
+          `${inspection.archetype} #${selectedNetId}`,
+          inspection.archetype,
+          Number(inspection.fields.find((f) => f.name === 'level')?.value ?? 0),
+          viewerCl,
+        );
 
   // A door, when the thing picked has one. `interior` rides in with the entity (`Structure.InteriorRealm`), so it is read
   // from the replicated fields by name rather than given a slot of its own in `Inspection` — the inspector already
@@ -42,11 +87,31 @@ export function Inspector() {
   return (
     <div className="panel inspector">
       <div className="hud-title">
-        {inspection === null ? `#${selectedNetId}` : `${inspection.archetype} #${selectedNetId}`}
+        {title === null ? (
+          `#${selectedNetId}`
+        ) : (
+          <>
+            {title.name}
+            {/* As the name tag: only "CL n" in its con colour (render/labels.ts). */}
+            {title.level === '' ? null : (
+              <>
+                {' ('}
+                <span className={title.con === null ? undefined : `con-${title.con}`}>{title.level}</span>
+                {')'}
+              </>
+            )}
+          </>
+        )}
       </div>
       {inspection !== null && (
         <table>
           <tbody>
+            {credits !== null && (
+              <tr>
+                <td>Credits</td>
+                <td>{formatCredits(credits)}</td>
+              </tr>
+            )}
             {inspection.hasPosition && (
               <>
                 <tr>
@@ -68,12 +133,16 @@ export function Inspector() {
                 </tr>
               </>
             )}
-            {inspection.fields.map((f) => (
-              <tr key={f.name}>
-                <td>{f.name}</td>
-                <td>{f.value}</td>
-              </tr>
-            ))}
+            {inspection.fields.map((f) => {
+              // A level reads in its con colour against the viewer's CL (content-levels.md § 6): neutral until the CL is replicated.
+              const con = f.name === 'level' ? conClass(Number(f.value), viewerCl) : undefined;
+              return (
+                <tr key={f.name}>
+                  <td>{f.name}</td>
+                  <td className={con}>{f.value}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

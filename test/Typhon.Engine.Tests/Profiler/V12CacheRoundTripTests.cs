@@ -162,6 +162,7 @@ public sealed class V12CacheRoundTripTests
             postTickSummaries: postRows ?? System.Array.Empty<PostTickSummary>(),
             queueIdToName: queueNames ?? new Dictionary<ushort, string>(),
             systemArchetypeTouches: System.Array.Empty<SystemArchetypeTouchSummary>(),
-            entityLifecycleRuns: System.Array.Empty<EntityLifecycleRun>());
+            entityLifecycleRuns: System.Array.Empty<EntityLifecycleRun>(),
+            threads: System.Array.Empty<ThreadTableEntry>());
     }
 }

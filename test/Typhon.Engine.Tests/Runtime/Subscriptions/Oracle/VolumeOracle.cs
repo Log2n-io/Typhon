@@ -552,52 +552,45 @@ internal sealed unsafe class VolumeOracle : IDisposable
         }
 
         var accessor = tx.For<ProjFlyer>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                var occupancy = cluster.OccupancyBits;
+            var occupancy = cluster.OccupancyBits;
 #pragma warning disable TYPHON009
-                var bounds = stride == Stride.Drift ? cluster.GetSpan(ProjFlyer.Bounds) : default;
+            var bounds = stride == Stride.Drift ? cluster.GetSpan(ProjFlyer.Bounds) : default;
 #pragma warning restore TYPHON009
-                var touched = false;
-                while (occupancy != 0)
+            var touched = false;
+            while (occupancy != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (!targets.TryGetValue(cluster.GetEntityId(slot).RawValue, out var move))
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (!targets.TryGetValue(cluster.GetEntityId(slot).RawValue, out var move))
-                    {
-                        continue;
-                    }
-
-                    var current = cluster.GetReadOnly(ProjFlyer.Bounds, slot).Bounds;
-                    var x = (current.MinX + current.MaxX) * 0.5;
-                    var y = (current.MinY + current.MaxY) * 0.5;
-                    var z = (current.MinZ + current.MaxZ) * 0.5;
-                    var next = stride == Stride.Teleport
-                        ? Bounds3(Clamp(move.X), Clamp(move.Y), Altitude())
-                        : Bounds3(Clamp(x + move.Dx), Clamp(y + move.Dy), ClampAltitude(z + move.Dz));
-                    if (stride == Stride.Drift)
-                    {
-                        bounds[slot] = next;
-                        touched = true;
-                        _harness.Subscriptions.Commands.Replicate(in cluster, slot);
-                    }
-                    else
-                    {
-                        cluster.WriteSpatial(ProjFlyer.Bounds, slot, next);
-                    }
+                    continue;
                 }
 
-                if (touched)
+                var current = cluster.GetReadOnly(ProjFlyer.Bounds, slot).Bounds;
+                var x = (current.MinX + current.MaxX) * 0.5;
+                var y = (current.MinY + current.MaxY) * 0.5;
+                var z = (current.MinZ + current.MaxZ) * 0.5;
+                var next = stride == Stride.Teleport
+                    ? Bounds3(Clamp(move.X), Clamp(move.Y), Altitude())
+                    : Bounds3(Clamp(x + move.Dx), Clamp(y + move.Dy), ClampAltitude(z + move.Dz));
+                if (stride == Stride.Drift)
                 {
-                    cluster.MarkDirty(ProjFlyer.Bounds);
+                    bounds[slot] = next;
+                    touched = true;
+                    _harness.Subscriptions.Commands.Replicate(in cluster, slot);
+                }
+                else
+                {
+                    cluster.WriteSpatial(ProjFlyer.Bounds, slot, next);
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            if (touched)
+            {
+                cluster.MarkDirty(ProjFlyer.Bounds);
+            }
         }
     }
 
@@ -610,49 +603,42 @@ internal sealed unsafe class VolumeOracle : IDisposable
         }
 
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                var occupancy = cluster.OccupancyBits;
+            var occupancy = cluster.OccupancyBits;
 #pragma warning disable TYPHON009
-                var bounds = stride == Stride.Drift ? cluster.GetSpan(ProjCreature.Bounds) : default;
+            var bounds = stride == Stride.Drift ? cluster.GetSpan(ProjCreature.Bounds) : default;
 #pragma warning restore TYPHON009
-                var touched = false;
-                while (occupancy != 0)
+            var touched = false;
+            while (occupancy != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (!targets.TryGetValue(cluster.GetEntityId(slot).RawValue, out var move))
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (!targets.TryGetValue(cluster.GetEntityId(slot).RawValue, out var move))
-                    {
-                        continue;
-                    }
-
-                    var current = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
-                    var x = (current.MinX + current.MaxX) * 0.5;
-                    var y = (current.MinY + current.MaxY) * 0.5;
-                    var next = stride == Stride.Teleport ? Bounds2(Clamp(move.X), Clamp(move.Y)) : Bounds2(Clamp(x + move.Dx), Clamp(y + move.Dy));
-                    if (stride == Stride.Drift)
-                    {
-                        bounds[slot] = next;
-                        touched = true;
-                        _harness.Subscriptions.Commands.Replicate(in cluster, slot);
-                    }
-                    else
-                    {
-                        cluster.WriteSpatial(ProjCreature.Bounds, slot, next);
-                    }
+                    continue;
                 }
 
-                if (touched)
+                var current = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                var x = (current.MinX + current.MaxX) * 0.5;
+                var y = (current.MinY + current.MaxY) * 0.5;
+                var next = stride == Stride.Teleport ? Bounds2(Clamp(move.X), Clamp(move.Y)) : Bounds2(Clamp(x + move.Dx), Clamp(y + move.Dy));
+                if (stride == Stride.Drift)
                 {
-                    cluster.MarkDirty(ProjCreature.Bounds);
+                    bounds[slot] = next;
+                    touched = true;
+                    _harness.Subscriptions.Commands.Replicate(in cluster, slot);
+                }
+                else
+                {
+                    cluster.WriteSpatial(ProjCreature.Bounds, slot, next);
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            if (touched)
+            {
+                cluster.MarkDirty(ProjCreature.Bounds);
+            }
         }
     }
 
@@ -684,33 +670,26 @@ internal sealed unsafe class VolumeOracle : IDisposable
     private void WriteLevel<T>(Transaction tx, EntityId target, Comp<ProjAi> ai, ushort level) where T : Archetype<T>
     {
         var accessor = tx.For<T>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (cluster.GetEntityId(slot).RawValue != target.RawValue)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (cluster.GetEntityId(slot).RawValue != target.RawValue)
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
 #pragma warning disable TYPHON009
-                    var span = cluster.GetSpan(ai);
+                var span = cluster.GetSpan(ai);
 #pragma warning restore TYPHON009
-                    span[slot].Level = level;
-                    cluster.MarkDirty(ai);
-                    _harness.Subscriptions.Commands.Replicate(in cluster, slot);
-                    return;
-                }
+                span[slot].Level = level;
+                cluster.MarkDirty(ai);
+                _harness.Subscriptions.Commands.Replicate(in cluster, slot);
+                return;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
     }
 

@@ -27,6 +27,10 @@ export interface PlayerVitals {
   readonly health: number;
   /** Health over its maximum, 0–1, from the replicated `hp` everyone sees (8 bits). */
   readonly fraction: number;
+  /** The character's combat level, 1–50, from the replicated `level`; `NaN` before it arrives (character-level.md § 8). */
+  readonly level: number;
+  /** The way to the next level, 0–1, from the owner-only `xp` byte; `NaN` before it arrives. */
+  readonly xpFraction: number;
 }
 
 /** The avatar is down: knocked out (1) or dead (2), the server's `Downed`, and the seconds until it is up or cloned. */
@@ -41,6 +45,45 @@ export interface LayerStats {
   readonly held: number;
   readonly near: number;
   readonly far: number;
+  /**
+   * The players held, by who drives them — `null` on every other row: the crowd the server simulates (no name), the bots
+   * (their account says so, the replicated `bot`), and the people. Held only: the mesh and dot counts stay the row's.
+   */
+  readonly drivers: PlayerDrivers | null;
+}
+
+/** The players in view by who drives them. */
+export interface PlayerDrivers {
+  readonly crowd: number;
+  readonly bots: number;
+  readonly people: number;
+}
+
+/**
+ * Counts the players of a store by who drives them: no `nameId` is the scripted crowd, `bot` 1 a bot of the fleet, the rest
+ * people. Fields the schema does not carry count as absent: no names at all is all crowd.
+ */
+export function countDrivers(
+  live: ArrayLike<number>,
+  liveCount: number,
+  nameIds: ArrayLike<number> | null,
+  bots: ArrayLike<number> | null,
+): PlayerDrivers {
+  let crowd = 0;
+  let botCount = 0;
+  let people = 0;
+  for (let i = 0; i < liveCount; i++) {
+    const slot = live[i];
+    if (nameIds === null || !(nameIds[slot] > 0)) {
+      crowd++;
+    } else if (bots !== null && bots[slot] === 1) {
+      botCount++;
+    } else {
+      people++;
+    }
+  }
+
+  return { crowd, bots: botCount, people };
 }
 
 export interface InspectedField {
@@ -63,6 +106,8 @@ export interface Inspection {
   /** False for an archetype without a position: x, z, speed, heading and epoch mean nothing. */
   readonly hasPosition: boolean;
   readonly fields: readonly InspectedField[];
+  /** A player's account name, once replicated; `null` for anything else, and for the scripted crowd, which has none. */
+  readonly playerName: string | null;
 }
 
 /**

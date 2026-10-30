@@ -99,6 +99,13 @@ internal sealed class RequestCorrelationMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        if (context.WebSockets.IsWebSocketRequest)
+        {
+            // A WebSocket upgrade is not a request: it lasts the session's whole life, and the commands it carries are roots of their own (#1522).
+            await _next(context).ConfigureAwait(false);
+            return;
+        }
+
         var start = Stopwatch.GetTimestamp();
         var failed = false;
         try

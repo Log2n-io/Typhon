@@ -32,6 +32,8 @@ namespace Typhon.Engine.Internals;
 /// single largest cost in the old fill.
 /// </para>
 /// </remarks>
+[MustDispose(Reason = "owns a ChunkAccessor ('_indexAccessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a ChunkAccessor by value ('_indexAccessor'): a copy duplicates its slots and pins")]
 internal unsafe struct ArchetypeSortedStream : IDisposable
 {
     /// <summary>

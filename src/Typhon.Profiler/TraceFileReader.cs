@@ -584,6 +584,12 @@ public sealed class TraceFileReader : IDisposable
     }
 
     /// <summary>
+    /// True once <see cref="ReadNextBlock"/> met a block cut off by the end of the stream — the trace of a process killed mid-write (#1522). The
+    /// blocks before it are whole and were returned; the cut block is dropped, and the trace reads as ending there.
+    /// </summary>
+    public bool Truncated { get; private set; }
+
+    /// <summary>
     /// Reads the next compressed block of raw records. Returns the decoded byte payload in <paramref name="records"/>; caller walks it as a
     /// sequence of u16-size-prefixed records.
     /// </summary>
@@ -608,6 +614,7 @@ public sealed class TraceFileReader : IDisposable
 
         if (bytesRead < 4)
         {
+            Truncated = true;
             return false;
         }
 
@@ -634,10 +641,18 @@ public sealed class TraceFileReader : IDisposable
 
         if (bytesRead < TraceBlockEncoder.BlockHeaderSize)
         {
+            Truncated = true;
             return false;
         }
 
         var (uncompressedBytes, compressedBytes, count) = TraceBlockEncoder.ReadBlockHeader(blockHeader);
+        if (_stream.CanSeek && _stream.Length - _stream.Position < compressedBytes)
+        {
+            // The writer was killed between this block's header and the end of its payload: the trace ends at the last whole block.
+            Truncated = true;
+            return false;
+        }
+
         recordCount = count;
 
         if (_compressedBuffer.Length < compressedBytes)

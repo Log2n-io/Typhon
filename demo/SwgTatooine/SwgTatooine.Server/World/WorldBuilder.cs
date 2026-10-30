@@ -61,6 +61,7 @@ public static class WorldBuilder
 
         SpawnCities(dbe, map, config, census, ref rng, index, plan);
         PlanSites(map, config, index, realm);
+        census.FrontiersDisplaced = index.FrontiersDisplaced;
         SpawnPointsOfInterest(dbe, map, config, census, ref rng, index, plan);
         SpawnWilderness(dbe, config, census, ref rng, index);
         SpawnPlayerStructures(dbe, map, config, census, ref rng, plan);
@@ -751,11 +752,13 @@ public static class WorldBuilder
     }
 
     /// <summary>
-    /// Plans a planet's lair sites — every point of interest, then every wilderness region — with the number of lairs each keeps standing.
+    /// Plans a planet's lair sites — every point of interest, every wilderness region, every city's fringe, then four frontier patches per city — with the
+    /// number of lairs each keeps standing, and the planet's <see cref="LevelMap"/> (content-levels.md § 2).
     /// </summary>
     /// <remarks>
-    /// <b>From the map and the configuration alone, so a reopened world plans the identical list</b> (<c>WorldRebuild</c>): a lair on disk names its site by
-    /// position in it (<see cref="Lair.Site"/>), and the director refills each site to the target planned here.
+    /// <b>From the map, the scales and the realm alone — never the seed — so a reopened world plans the identical list</b> (<c>WorldRebuild</c>): a lair on disk names
+    /// its site by position in it (<see cref="Lair.Site"/>), and the director refills each site to the target planned here. The fringes and frontiers are
+    /// APPENDED, so the landmarks' and regions' indices are what they always were.
     /// </remarks>
     /// <param name="map">The planet's geometry.</param>
     /// <param name="config">The run's scales.</param>
@@ -768,17 +771,244 @@ public static class WorldBuilder
             throw new InvalidOperationException($"PlanSites needs an index with no sites; this one holds {index.Sites.Count}.");
         }
 
+        var s = config.ContentScale;
+        var levels = new LevelMap(map.Cities, s);
+        index.Levels = levels;
+        // A constant salt and the realm, NOT the run's seed: the plan is a fact about the map, which a lair on disk names its site by, and a --persist reopen
+        // under another --seed must plan the very same sites and bands (review 1). Each planet still gets its own.
+        var rng = new Rng(0x1E7E15A3u + (realm * 0x9E3779B9u));
+
+        // Landmarks: one band each, uniform over the bands their kinds cover — the camps' 25-50, so III to V.
         foreach (var poi in map.Pois)
         {
-            index.Sites.Add(new LairSite(realm, poi.X, poi.Z, poi.Radius, TatooineData.PoiLairTemplates, Scale(poi.Lairs, config.PopulationScale)));
+            var band = DrawBand(TatooineData.PoiLairTemplates, ref rng);
+            index.Sites.Add(new LairSite(realm, poi.X, poi.Z, poi.Radius, TatooineData.PoiLairTemplates, Scale(poi.Lairs, config.PopulationScale),
+                LairSiteKind.Landmark, band));
+            levels.AddAnchor(poi.X, poi.Z, poi.Radius, band);
         }
 
-        foreach (var region in map.SpawnRegions)
+        // Regions: a seeded shuffle of II-V, each band twice over the eight. Their density is cut to RegionDensityShare, which pays for the fringes and
+        // the frontiers below (R2: the world's totals held).
+        var bands = new int[map.SpawnRegions.Count];
+        for (var i = 0; i < bands.Length; i++)
         {
-            var areaSqKm = MathF.PI * region.Radius * region.Radius / 1_000_000f;
-            var lairs = Scale((int)MathF.Round(areaSqKm * region.LairsPerSqKm), config.PopulationScale);
-            index.Sites.Add(new LairSite(realm, region.X, region.Z, region.Radius, region.Templates, lairs));
+            bands[i] = 2 + (i % 4);
         }
+
+        for (var i = bands.Length - 1; i > 0; i--)
+        {
+            var j = rng.NextInt(0, i + 1);
+            (bands[i], bands[j]) = (bands[j], bands[i]);
+        }
+
+        for (var i = 0; i < map.SpawnRegions.Count; i++)
+        {
+            var region = map.SpawnRegions[i];
+            var areaSqKm = MathF.PI * region.Radius * region.Radius / 1_000_000f;
+            var lairs = Scale((int)MathF.Round(areaSqKm * region.LairsPerSqKm * TatooineData.RegionDensityShare), config.PopulationScale);
+            index.Sites.Add(new LairSite(realm, region.X, region.Z, region.Radius, region.Templates, lairs, LairSiteKind.Region, bands[i]));
+            levels.AddAnchor(region.X, region.Z, region.Radius, bands[i]);
+        }
+
+        // Fringes: the annulus every city's ramp spans, from its no-spawn margin to the ramp's end, at a density that does not change with the world's
+        // scale (the regions' convention: TatooineMap divides theirs by s²). Every wild kind; the level picks among them.
+        for (var c = 0; c < map.Cities.Count; c++)
+        {
+            var city = map.Cities[c];
+            var inner = city.Radius + (ContentLevels.NoSpawnMarginM * s);
+            var outer = city.Radius + (ContentLevels.RampM * s);
+            var areaSqKm = MathF.PI * ((outer * outer) - (inner * inner)) / 1_000_000f;
+            var lairs = Scale((int)MathF.Round(areaSqKm * TatooineData.FringeLairsPerSqKm / (s * s)), config.PopulationScale);
+            index.CrowdSites.Add(index.Sites.Count);
+            index.CrowdPlaces.Add((city.X, city.Z, outer, city.Radius));
+            index.Sites.Add(new LairSite(realm, city.X, city.Z, outer, WildKinds, lairs, LairSiteKind.Fringe, band: 0, innerRadius: inner, city: c));
+        }
+
+        PlanFrontiers(map, config, index, levels, realm, ref rng);
+    }
+
+    /// <summary>Every wild kind, 0-8: what a fringe draws from.</summary>
+    private static readonly int[] WildKinds = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+    /// <summary>The wild kinds of each band (index = band): what a frontier patch draws from.</summary>
+    private static readonly int[][] FrontierKinds =
+    [
+        [], ContentLevels.WildKindsOfBand(1), ContentLevels.WildKindsOfBand(2), ContentLevels.WildKindsOfBand(3), ContentLevels.WildKindsOfBand(4),
+        ContentLevels.WildKindsOfBand(5),
+    ];
+
+    /// <summary>One band, II-V, uniform over those some of <paramref name="kinds"/> cover.</summary>
+    private static int DrawBand(int[] kinds, ref Rng rng)
+    {
+        Span<int> covered = stackalloc int[4];
+        var n = 0;
+        for (var band = 2; band <= 5; band++)
+        {
+            foreach (var k in kinds)
+            {
+                if (ContentLevels.Covers(k, band))
+                {
+                    covered[n++] = band;
+                    break;
+                }
+            }
+        }
+
+        return n == 0 ? 2 + rng.NextInt(0, 4) : covered[rng.NextInt(0, n)];
+    }
+
+    /// <summary>The bearings a city's frontier patches are chosen among.</summary>
+    private const int FrontierBearings = 16;
+
+    /// <summary>
+    /// Four frontier patches per city, one per band II-V, each a disc 1.0-2.0 km from the city's edge (content-levels.md § 2.2) — every band a short ride
+    /// from every city.
+    /// </summary>
+    /// <remarks>
+    /// Sixteen bearings round the city, each at its own distance; a bearing is valid when its whole disc is inside the world and outside every other
+    /// city's ramp. The bands, shuffled, take in turn the valid bearing farthest in angle from those already taken. A city with no valid bearing left takes
+    /// the one that violates least, and says so (<see cref="WorldIndex.FrontiersDisplaced"/>).
+    /// </remarks>
+    private static void PlanFrontiers(TatooineMap map, SimConfig config, WorldIndex index, LevelMap levels, ushort realm, ref Rng rng)
+    {
+        var s = config.ContentScale;
+        var patch = TatooineData.FrontierRadiusM * s;
+        var ramp = ContentLevels.RampM * s;
+        var half = config.WorldEdgeM * 0.5f * InsideEdge;
+        Span<float> cx = stackalloc float[FrontierBearings];
+        Span<float> cz = stackalloc float[FrontierBearings];
+        Span<float> violation = stackalloc float[FrontierBearings];
+        Span<bool> taken = stackalloc bool[FrontierBearings];
+        Span<int> order = stackalloc int[4];
+        for (var c = 0; c < map.Cities.Count; c++)
+        {
+            var city = map.Cities[c];
+            var theta0 = rng.NextFloat() * MathF.PI * 2f;
+            for (var j = 0; j < FrontierBearings; j++)
+            {
+                var angle = theta0 + (j * MathF.PI * 2f / FrontierBearings);
+                var d = city.Radius + ramp + patch + rng.NextRange(0f, 400f * s);
+                cx[j] = city.X + (MathF.Cos(angle) * d);
+                cz[j] = city.Z + (MathF.Sin(angle) * d);
+                taken[j] = false;
+
+                // How far the disc is out of the world, plus how far it reaches into another city's ramp: 0 when it is valid.
+                var v = MathF.Max(0f, MathF.Abs(cx[j]) + patch - half) + MathF.Max(0f, MathF.Abs(cz[j]) + patch - half);
+                for (var o = 0; o < map.Cities.Count; o++)
+                {
+                    if (o == c)
+                    {
+                        continue;
+                    }
+
+                    var other = map.Cities[o];
+                    var dx = cx[j] - other.X;
+                    var dz = cz[j] - other.Z;
+                    v += MathF.Max(0f, other.Radius + ramp + patch - MathF.Sqrt((dx * dx) + (dz * dz)));
+                }
+
+                violation[j] = v;
+            }
+
+            for (var b = 0; b < 4; b++)
+            {
+                order[b] = 2 + b;
+            }
+
+            for (var b = 3; b > 0; b--)
+            {
+                var k = rng.NextInt(0, b + 1);
+                (order[b], order[k]) = (order[k], order[b]);
+            }
+
+            for (var b = 0; b < 4; b++)
+            {
+                var band = order[b];
+                var pick = -1;
+                var bestSpread = -1f;
+                for (var j = 0; j < FrontierBearings; j++)
+                {
+                    if (taken[j] || violation[j] > 0f)
+                    {
+                        continue;
+                    }
+
+                    var spread = AngleFromTaken(j, taken);
+                    if (spread > bestSpread)
+                    {
+                        bestSpread = spread;
+                        pick = j;
+                    }
+                }
+
+                if (pick < 0)
+                {
+                    var least = float.MaxValue;
+                    for (var j = 0; j < FrontierBearings; j++)
+                    {
+                        if (!taken[j] && violation[j] < least)
+                        {
+                            least = violation[j];
+                            pick = j;
+                        }
+                    }
+
+                    index.FrontiersDisplaced++;
+                    index.DisplacedFrontiers.Add($"{city.Name} band {band}");
+                }
+
+                taken[pick] = true;
+                var (x, z) = Inside(cx[pick], cz[pick], config);
+                index.Sites.Add(new LairSite(realm, x, z, patch, FrontierKinds[band], Scale(TatooineData.FrontierLairs, config.PopulationScale),
+                    LairSiteKind.Frontier, band, city: c));
+                levels.AddAnchor(x, z, patch, band);
+            }
+        }
+    }
+
+    /// <summary>A bearing's smallest distance to the bearings already taken, in bearing steps; the number of bearings when none is.</summary>
+    private static float AngleFromTaken(int j, ReadOnlySpan<bool> taken)
+    {
+        var best = (float)FrontierBearings;
+        for (var k = 0; k < taken.Length; k++)
+        {
+            if (taken[k])
+            {
+                var steps = Math.Abs(j - k);
+                best = Math.Min(best, Math.Min(steps, FrontierBearings - steps));
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Tries at a point in a site, inside the world and clear of every city, before a lair is given up (the build) or waits (the director).</summary>
+    internal const int LairPlacementTries = 8;
+
+    /// <summary>
+    /// A point for a lair in a site — uniform by area in its disc or annulus, inside the world, and never inside a city or within
+    /// <see cref="ContentLevels.NoSpawnMarginM"/> of one (Core3's cities are <c>NOSPAWNAREA</c>). The build's and the lair director's one rule.
+    /// </summary>
+    /// <returns><see langword="false"/> when <see cref="LairPlacementTries"/> draws all fell in a city.</returns>
+    internal static bool TryPlaceLair(LairSite site, LevelMap levels, ref Rng rng, SimConfig config, out float x, out float z)
+    {
+        var margin = ContentLevels.NoSpawnMarginM * config.ContentScale;
+        var inner2 = site.InnerRadius * site.InnerRadius;
+        var outer2 = site.Radius * site.Radius;
+        for (var attempt = 0; attempt < LairPlacementTries; attempt++)
+        {
+            var a = rng.NextFloat() * MathF.PI * 2f;
+            var r = MathF.Sqrt(inner2 + ((outer2 - inner2) * rng.NextFloat()));
+            (x, z) = Inside(site.X + (MathF.Cos(a) * r), site.Z + (MathF.Sin(a) * r), config);
+            if (!levels.NearCity(x, z, margin))
+            {
+                return true;
+            }
+        }
+
+        x = 0f;
+        z = 0f;
+        return false;
     }
 
     /// <summary>
@@ -808,27 +1038,34 @@ public static class WorldBuilder
         // Part-way through a life already: see SimConfig.LairLifeMinSeconds for why the first retirements are spread rather than arriving as one wave.
         var lifeMin = (long)(config.LairLifeMinSeconds * 0.25f * config.TickRateHz);
         var lifeMax = (long)(config.LairLifeMaxSeconds * config.TickRateHz);
+        var placed = 0;
         while (done < at.Target)
         {
             var n = Math.Min(lairsPerBatch, at.Target - done);
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < n; i++)
             {
-                var (lx, lz) = Inside(rng.PointInDisc(at.X, at.Z, at.Radius), config);
-                var template = CreatureTemplates.PickLair(at.Templates, ref rng);
+                // Place, then level, then kind (content-levels.md § 2.4): the kind is drawn from those whose range covers the level where it stands. One that
+                // cannot be placed clear of the cities is left to the director, which refills the site to its target.
+                if (!TryPlaceLair(at, index.Levels, ref rng, config, out var lx, out var lz))
+                {
+                    continue;
+                }
+
+                var level = index.Levels.LevelAt(lx, lz, ref rng);
+                var template = CreatureTemplates.PickLair(at.Templates, level, ref rng);
                 var expire = lifeMin + (long)(rng.NextFloat() * (lifeMax - lifeMin));
-                var lairId = SpawnLair(tx, ref rng, template, lx, lz, site + 1, expire, config, terrain, _realm);
-                census.Lairs++;
-                census.Creatures += CreatureTemplates.SpawnLimit[template];
-                census.CreaturesByTemplate[template] += CreatureTemplates.SpawnLimit[template];
+                var lairId = SpawnLair(tx, ref rng, template, level, lx, lz, site + 1, expire, config, terrain, _realm);
+                census.CountLair(template, level, at.Kind);
                 index.Lairs.Add(lairId);
+                placed++;
             }
 
             tx.Commit();
             done += n;
         }
 
-        at.Live = at.Target;
+        at.Live = placed;
     }
 
     /// <summary>The half-extent of a lair's placement box, metres: the published nest and camps are about 6 m across.</summary>
@@ -846,6 +1083,7 @@ public static class WorldBuilder
     /// <param name="tx">The transaction both go in.</param>
     /// <param name="rng">Draws the creatures' places and outfits.</param>
     /// <param name="template">The <see cref="CreatureTemplates"/> entry.</param>
+    /// <param name="level">Its content level, 1-50: its creatures' too, and what their health and damage and its own health are computed from.</param>
     /// <param name="x">Where, east.</param>
     /// <param name="z">Where, north.</param>
     /// <param name="site">The <see cref="Lair.Site"/>: one-based, 0 for a destroy-mission lair.</param>
@@ -854,9 +1092,10 @@ public static class WorldBuilder
     /// <param name="terrain">The planet's ground.</param>
     /// <param name="realm">The planet.</param>
     /// <returns>The lair.</returns>
-    internal static EntityId SpawnLair(Transaction tx, ref Rng rng, int template, float x, float z, int site, long expireTick, SimConfig config,
-        TerrainField terrain, ushort realm)
+    internal static EntityId SpawnLair(Transaction tx, ref Rng rng, int template, int level, float x, float z, int site, long expireTick,
+        SimConfig config, TerrainField terrain, ushort realm)
     {
+        level = ContentLevels.Clamp(level);
         var perLair = CreatureTemplates.SpawnLimit[template];
         var lairBounds = default(LairPlacement);
         lairBounds.SetAt(x, z, terrain.GroundAt(x, z), LairHalfM);
@@ -868,9 +1107,10 @@ public static class WorldBuilder
             Guards = perLair,
             SpawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale,
             Site = site,
+            Level = level,
             ExpireTick = expireTick,
         };
-        var lairHealth = CreatureTemplates.LairHealth(template);
+        var lairHealth = ContentLevels.LairHealth(level, template);
         var lairVitals = new LairVitals { Health = lairHealth, MaxHealth = lairHealth };
         var lairId = tx.Spawn<CreatureLair>(
             CreatureLair.Bounds.Set(in lairBounds),
@@ -880,7 +1120,7 @@ public static class WorldBuilder
 
         for (var k = 0; k < perLair; k++)
         {
-            SpawnCreature(tx, ref rng, lairId, template, x, z, k, config, terrain, realm);
+            SpawnCreature(tx, ref rng, lairId, template, level, x, z, k, config, terrain, realm);
         }
 
         return lairId;
@@ -897,9 +1137,11 @@ public static class WorldBuilder
     /// <see cref="TerrainField.Shared"/> is a concurrent-dictionary probe. The comment that used to sit here claimed the
     /// opposite of what the code did.
     /// </param>
-    internal static EntityId SpawnCreature(Transaction tx, ref Rng rng, EntityId lairId, int template,
+    /// <param name="level">Its lair's level: what its health and its hit are computed from (content-levels.md § 3).</param>
+    internal static EntityId SpawnCreature(Transaction tx, ref Rng rng, EntityId lairId, int template, int level,
         float lairX, float lairZ, int slot, SimConfig config, TerrainField terrain, ushort realm)
     {
+        level = ContentLevels.Clamp(level);
         // Jittered along the ring and OUTWARD only: inward would put a body in the nest's own collider (2.15 m) or the camp's tent.
         var ring = (slot / 4) + 1;
         var angle = (MathF.PI * 0.25f) + ((slot % 4) * MathF.PI * 0.5f) + ((ring - 1) * MathF.PI * 0.25f) + rng.NextRange(-0.25f, 0.25f);
@@ -928,17 +1170,20 @@ public static class WorldBuilder
             AggroRadius = CreatureTemplates.Aggressive[template] ? TatooineData.AggroRadiusM * config.ContentScale : 0f,
             Template = (byte)template,
             Skin = (byte)rng.NextInt(0, CreatureTemplates.Bodies[template].Length),
+            Level = (byte)level,
         };
 
         // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms, which at this tick rate is four to ten
         // ticks — the AI is deliberately not a per-tick cost. In its own component, because nothing on the wire reads it (see CreatureTimers).
         var timers = new CreatureTimers { ThinkCooldown = rng.NextInt(1, AiTicksMax(config)), AttackCooldown = rng.NextInt(0, 8) };
         var move = new CreatureMotion { SpeedMps = CreatureTemplates.SpeedMps[template] };
+        var foe = CreatureTemplates.IsCamp(template);
+        var health = ContentLevels.CreatureHealth(level, foe);
         var vitals = new CreatureVitals
         {
-            Health = CreatureTemplates.Health[template],
-            MaxHealth = CreatureTemplates.Health[template],
-            AttackDamage = CreatureTemplates.Damage[template],
+            Health = health,
+            MaxHealth = health,
+            AttackDamage = ContentLevels.CreatureHit(level, foe),
         };
         return tx.Spawn<Creature>(
             Creature.Bounds.Set(in bounds),
@@ -1212,13 +1457,11 @@ public static class WorldBuilder
                     DestZ = z,
                 };
                 var vitals = new PlayerVitals { Health = 1400, MaxHealth = 1400, AttackDamage = 95, AttackCooldown = rng.NextInt(0, 10) };
-                var inv = new Inventory { Credits = 5_000, ItemCount = 0, ItemValue = 0 };
                 var id = tx.Spawn<Player>(
                     Player.Bounds.Set(in bounds),
                     Player.Move.Set(in move),
                     Player.State.Set(in state),
                     Player.Vitals.Set(in vitals),
-                    Player.Inventory.Set(in inv),
                     Player.Realm.Set(new PlayerRealm(_realm)));
                 index.Players.Add(id);
                 census.Players++;
@@ -1340,6 +1583,12 @@ public static class WorldBuilder
         if (kind == StructureKind.MissionTerminal)
         {
             _index?.Terminals.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
+        }
+
+        // The market desk's terminals (bazaar.md § 2.3), recorded the same way.
+        if (kind == StructureKind.Bazaar)
+        {
+            _index?.Bazaars.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
         }
     }
 

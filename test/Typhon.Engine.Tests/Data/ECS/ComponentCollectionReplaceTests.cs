@@ -699,7 +699,6 @@ class ComponentCollectionReplaceTests : TestBase<ComponentCollectionReplaceTests
                 }
             }
 
-            accessor.Dispose();
             Assert.That(t.Commit(), Is.True);
         }
 

@@ -253,6 +253,11 @@ public sealed class IncrementalCacheBuilder : IDisposable
     /// <summary>Read-only view of finalized entity spawn/destroy runs, sorted by (TickNumber, FirstEntityKey).</summary>
     public IReadOnlyList<EntityLifecycleRun> EntityLifecycleRuns => _entityLifecycleRuns;
 
+    /// <summary>Every thread slot the capture named so far, by slot: the cache's thread table.</summary>
+    public IReadOnlyList<ThreadTableEntry> Threads => [.. _threads.Values];
+
+    private readonly SortedDictionary<byte, ThreadTableEntry> _threads = new();
+
     /// <summary>Read-only view of finalized per-tick post-tick markers.</summary>
     public IReadOnlyList<PostTickSummary> PostTickSummaries => _postTickSummaries;
 
@@ -492,6 +497,19 @@ public sealed class IncrementalCacheBuilder : IDisposable
             var kind = (TraceEventKind)records[pos + 2];
             var startTs = BinaryPrimitives.ReadInt64LittleEndian(records[(pos + 4)..]);
 
+            if (kind == TraceEventKind.ThreadInfo && size >= ThreadInfoEventCodec.PrefixSize)
+            {
+                // A slot is named once, wherever its first record falls: gathered here for the cache's thread table, so a reader names every lane
+                // without having loaded the chunk that happens to hold the name. A later claim of the same slot renames it.
+                var nameLength = Math.Min((int)BinaryPrimitives.ReadUInt16LittleEndian(records[(pos + CommonHeaderSize + 4)..]),
+                    size - ThreadInfoEventCodec.PrefixSize);
+                var name = System.Text.Encoding.UTF8.GetString(records.Slice(pos + ThreadInfoEventCodec.PrefixSize, nameLength));
+                var threadKind = size > ThreadInfoEventCodec.PrefixSize + nameLength
+                    ? (ThreadKind)records[pos + ThreadInfoEventCodec.PrefixSize + nameLength]
+                    : ThreadKind.Other;
+                _threads[records[pos + 3]] = new ThreadTableEntry(records[pos + 3], threadKind, name);
+            }
+
             if (kind == TraceEventKind.TickStart)
             {
                 if (_tickActive)
@@ -702,7 +720,9 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 // tick that has not begun, and folding them here would attribute setup-phase work to tick 1.
                 FoldLifecycleEvent(kind, records, pos, size);
 
-                if (_preTickBuffer.Length + size <= PreTickBufferCap)
+                // ThreadInfo is exempt from the cap: a few bytes a thread, and without it a lane loses its name — a start-up that writes more than
+                // the cap before the first tick (the SWG demo spawns its world there: 20 MB) dropped 21 of its 26.
+                if (_preTickBuffer.Length + size <= PreTickBufferCap || kind == TraceEventKind.ThreadInfo)
                 {
                     _preTickBuffer.Write(records.Slice(pos, size));
                     if (startTs < _preTickFirstTs)
@@ -830,7 +850,8 @@ public sealed class IncrementalCacheBuilder : IDisposable
                 };
                 CacheHeader.SetIdentifier(ref cacheHeader, _fingerprint);
                 _sink.WriteTrailer(_tickSummaries, metrics, aggArr, _chunkManifest, _spanNames, default, cacheHeader,
-                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName, _systemArchetypeTouches, _entityLifecycleRuns);
+                    _systemTickSummaries, _queueTickSummaries, _postTickSummaries, _queueIdToName, _systemArchetypeTouches, _entityLifecycleRuns,
+                    Threads);
             }
         }
         finally

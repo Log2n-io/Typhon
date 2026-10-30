@@ -131,6 +131,8 @@ export interface ServerConfig {
   readonly assets: AssetSet | null;
   /** When each port's shuttle is down (`shuttle-flight.ts`), or `null` from a server where nothing flies. */
   readonly shuttle: ShuttleSchedule | null;
+  /** The demo dashboard's port on the server's host, linked from the HUD; `null` when the server announces none. */
+  readonly dashboardPort: number | null;
 }
 
 function readShuttle(value: unknown): ShuttleSchedule | null {
@@ -377,9 +379,20 @@ export async function fetchServerConfig(): Promise<ServerConfig | null> {
       realms: readRealms((body as Record<string, unknown>).realms),
       assets: readAssets((body as Record<string, unknown>).assets),
       shuttle: readShuttle((body as Record<string, unknown>).shuttle),
+      dashboardPort: dashboardPortOf((body as Record<string, unknown>).dashboardPort),
     };
   } catch {
     // A page served from somewhere else, or an older server. Not knowing is a state the UI handles.
     return null;
   }
+}
+
+/** A published dashboard port: a whole number from 1 to 65535, or `null`. */
+export function dashboardPortOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535 ? value : null;
+}
+
+/** The dashboard's address on the host this page was served from, or `null` without a port. */
+export function dashboardUrl(port: number | null, location: { protocol: string; hostname: string }): string | null {
+  return port === null ? null : `${location.protocol}//${location.hostname}:${String(port)}/`;
 }

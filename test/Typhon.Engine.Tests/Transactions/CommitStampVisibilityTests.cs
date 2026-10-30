@@ -66,7 +66,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     private static long ClusterHead(DatabaseEngine dbe)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accessor = tx.For<CsWalletArch>();
+        var accessor = tx.For<CsWalletArch>();
         long value = -1;
         var seen = 0;
         foreach (var cluster in accessor.GetClusterEnumerator())
@@ -1307,7 +1307,7 @@ class CommitStampVisibilityTests : TestBase<CommitStampVisibilityTests>
     private static int BagClusterHead(DatabaseEngine dbe)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accessor = tx.For<EvoCcUnit>();
+        var accessor = tx.For<EvoCcUnit>();
         var value = -1;
         foreach (var cluster in accessor.GetClusterEnumerator())
         {

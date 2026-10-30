@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Clock } from '@typhondb/client';
 
 import { SpeedClass } from '../src/data/source';
 import { Predictor, speedForClass } from '../src/app/predictor';
@@ -422,5 +423,47 @@ describe('Predictor', () => {
     expect(predictor.x).toBe(-300);
     expect(predictor.z).toBe(400);
     expect(predictor.snaps).toBe(0);
+  });
+});
+
+describe('the predictor fed by a real clock', () => {
+  /**
+   * The review of 2026-10-28: the predictor sampled its path at `now − renderDelayMs`, the clock's TARGET, while the
+   * authority it was handed is evaluated at the clock's slewed render time. A late frame moves the target at once and render
+   * time only follows at a few percent per frame, so for hundreds of ms the two instants differ by the jump: on a 40 m/s swoop
+   * a correction pulls the body, then the clock drags it back. Fed `renderLagMs`, the instant actually rendered, a body that
+   * moves exactly as the server does carries no correction through a late burst.
+   */
+  it('carries no correction through a burst of late frames on a 40 m/s straight line', () => {
+    const PERIOD = 100;
+    const SPEED = 40;
+    const DOWNLINK = 30;
+    const clock = new Clock({ tickPeriodMs: PERIOD, initialDelayMs: 150 });
+    const predictor = new Predictor();
+    // Server time of tick k is k·PERIOD; the body starts at server time 0, which this client sees at local DOWNLINK.
+    const startLocal = DOWNLINK;
+    predictor.start(startLocal, 0, 0);
+    let next = 0;
+    let worst = 0;
+    for (let now = startLocal; now < startLocal + 8000; now += FRAME_MS) {
+      while (next * PERIOD + DOWNLINK <= now) {
+        const late = next >= 40 && next < 44 ? 150 : 0; // a burst 3 s in
+        clock.onFrame(next, next * PERIOD + DOWNLINK + late);
+        next++;
+      }
+
+      clock.update(now);
+      predictor.setIntent(0, SPEED);
+      // The authority as the client evaluates it: the server's path at the clock's render time.
+      const authX = (Math.max(0, clock.renderTime * PERIOD) * SPEED) / 1000;
+      predictor.step(now, FRAME_S, authX, 0, clock.renderLagMs);
+      if (now > startLocal + 2000) {
+        // Where the body really is now, by the same rule: the displayed position must be it, not it plus a correction.
+        worst = Math.max(worst, Math.abs(predictor.x - ((now - startLocal) * SPEED) / 1000));
+      }
+    }
+
+    expect(predictor.snaps).toBe(0);
+    expect(worst).toBeLessThan(0.05);
   });
 });

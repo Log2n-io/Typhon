@@ -177,48 +177,41 @@ sealed class InPlaceClusterWriteSurvivalTests : TestBase<InPlaceClusterWriteSurv
         using (var tx = engine.CreateQuickTransaction())
         {
             var accessor = tx.For<ProjCreature>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var bits = cluster.OccupancyBits;
+                if (how == HandedOutWrite.Ref)
                 {
-                    var bits = cluster.OccupancyBits;
-                    if (how == HandedOutWrite.Ref)
-                    {
-                        while (bits != 0)
-                        {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                            bits &= bits - 1;
-                            ref var ai = ref cluster.Get(ProjCreature.Ai, slot);
-                            ai.ThinkCooldown += 1_000_003;
-                            written[cluster.GetEntityId(slot)] = ai.ThinkCooldown;
-                        }
-
-                        continue;
-                    }
-
-                    var span = cluster.GetSpan(ProjCreature.Ai);
-                    if (how == HandedOutWrite.SpanThenCheckpointThenStore)
-                    {
-                        Assert.That(CheckpointNow(engine), Is.True, "premise: the mid-walk checkpoint ran");
-                    }
-
                     while (bits != 0)
                     {
                         var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
                         bits &= bits - 1;
-                        span[slot].ThinkCooldown += 1_000_003;
-                        written[cluster.GetEntityId(slot)] = span[slot].ThinkCooldown;
+                        ref var ai = ref cluster.Get(ProjCreature.Ai, slot);
+                        ai.ThinkCooldown += 1_000_003;
+                        written[cluster.GetEntityId(slot)] = ai.ThinkCooldown;
                     }
 
-                    if (how == HandedOutWrite.SpanThenBreak)
-                    {
-                        break;
-                    }
+                    continue;
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
+
+                var span = cluster.GetSpan(ProjCreature.Ai);
+                if (how == HandedOutWrite.SpanThenCheckpointThenStore)
+                {
+                    Assert.That(CheckpointNow(engine), Is.True, "premise: the mid-walk checkpoint ran");
+                }
+
+                while (bits != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    span[slot].ThinkCooldown += 1_000_003;
+                    written[cluster.GetEntityId(slot)] = span[slot].ThinkCooldown;
+                }
+
+                if (how == HandedOutWrite.SpanThenBreak)
+                {
+                    break;
+                }
             }
 
             tx.Commit();
@@ -255,28 +248,21 @@ sealed class InPlaceClusterWriteSurvivalTests : TestBase<InPlaceClusterWriteSurv
     {
         using var tx = engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            if (random.Next(20) != 0)
             {
-                if (random.Next(20) != 0)
-                {
-                    continue;
-                }
-
-                var slot = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits);
-                var current = cluster.GetReadOnlySpan(ProjCreature.Bounds)[slot];
-                var x = ((current.Bounds.MinX + current.Bounds.MaxX) * 0.5f) + 0.01f;
-                var y = (current.Bounds.MinY + current.Bounds.MaxY) * 0.5f;
-                var moved = current;
-                moved.Bounds = new AABB2F { MinX = x - 0.5f, MinY = y - 0.5f, MaxX = x + 0.5f, MaxY = y + 0.5f };
-                cluster.WriteSpatial(ProjCreature.Bounds, slot, moved);
-                written[(long)cluster.GetEntityId(slot).RawValue] = (x, y);
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            var slot = System.Numerics.BitOperations.TrailingZeroCount(cluster.OccupancyBits);
+            var current = cluster.GetReadOnlySpan(ProjCreature.Bounds)[slot];
+            var x = ((current.Bounds.MinX + current.Bounds.MaxX) * 0.5f) + 0.01f;
+            var y = (current.Bounds.MinY + current.Bounds.MaxY) * 0.5f;
+            var moved = current;
+            moved.Bounds = new AABB2F { MinX = x - 0.5f, MinY = y - 0.5f, MaxX = x + 0.5f, MaxY = y + 0.5f };
+            cluster.WriteSpatial(ProjCreature.Bounds, slot, moved);
+            written[(long)cluster.GetEntityId(slot).RawValue] = (x, y);
         }
 
         tx.Commit();

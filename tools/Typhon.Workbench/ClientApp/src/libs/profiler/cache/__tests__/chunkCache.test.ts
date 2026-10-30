@@ -3,6 +3,7 @@ import {
   createChunkCache,
   assembleTickViewAndNumbers,
   computePendingRangesUs,
+  seedThreadNames,
 } from '@/libs/profiler/cache/chunkCache';
 import type { ChunkManifestEntry, TickSummary } from '@/libs/profiler/model/types';
 import { buildEmptyTick } from '@/libs/profiler/model/__tests__/spanBuilder';
@@ -163,5 +164,20 @@ describe('computePendingRangesUs', () => {
 
   it('empty manifest or summary returns no ranges', () => {
     expect(computePendingRangesUs(null, [], [], { startUs: 0, endUs: 100 })).toEqual([]);
+  });
+});
+
+describe('seedThreadNames', () => {
+  it('names every slot of the capture from its thread table before any chunk loads', () => {
+    const cache = createChunkCache();
+    seedThreadNames(cache, [{ slot: 9, name: 'Typhon.Worker-8', kind: 1 }, { slot: '48', name: '.NET TP Worker', kind: 2 }]);
+    expect([...cache.threadNames]).toEqual([[9, 'Typhon.Worker-8'], [48, '.NET TP Worker']]);
+    expect(cache.threadKinds.get(48)).toBe(2);
+  });
+
+  it('is a no-op for a cache too old to carry the table', () => {
+    const cache = createChunkCache();
+    seedThreadNames(cache, null);
+    expect(cache.threadNames.size).toBe(0);
   });
 });

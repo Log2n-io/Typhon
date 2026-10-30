@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -246,6 +247,73 @@ class BulkEnumerateTests : TestBase<BulkEnumerateTests>
         }
     }
 
+    /// <summary>
+    /// #1514: a point lookup through an index whose component sits in ONE archetype allocates nothing once warm. It used to cost ~3 KB a call (three lists,
+    /// the archetype iterator, a source object and two one-element <c>ChunkAccessor</c> arrays), which a caller looping over 55 000 keys turned into
+    /// 288 MB per 30 s. <see cref="CompGuild"/> is held by one test archetype, with a unique and an AllowMultiple index.
+    /// </summary>
+    [Test]
+    public void SecondaryIndex_PointLookup_OneArchetype_AllocatesNothingOnceWarm()
+    {
+        using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.RegisterComponentFromAccessor<CompGuild>();
+        dbe.InitializeArchetypes();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                var guild = new CompGuild(i, i * 10);
+                tx.Spawn<CompGuildArch>(CompGuildArch.Guild.Set(in guild));
+            }
+
+            tx.Commit();
+        }
+
+        var unique = dbe.GetIndexRef<CompGuild, int>(g => g.MemberCap);
+        var multiple = dbe.GetIndexRef<CompGuild, int>(g => g.Level);
+
+        using var reader = dbe.CreateQuickTransaction();
+        long Lookups(int n)
+        {
+            var found = 0L;
+            for (var i = 0; i < n; i++)
+            {
+                var cap = (i % 10) * 10;
+                using (var e = reader.EnumerateIndex<CompGuild, int>(unique, cap, cap))
+                {
+                    while (e.MoveNext())
+                    {
+                        found += e.CurrentComponent.MemberCap;
+                    }
+                }
+
+                var level = i % 10;
+                using (var e = reader.EnumerateIndex<CompGuild, int>(multiple, level, level))
+                {
+                    while (e.MoveNext())
+                    {
+                        found++;
+                    }
+                }
+            }
+
+            return found;
+        }
+
+        Lookups(50);   // warm: JIT, the cached source descriptors, the pooled key buffer
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var found = Lookups(1_000);
+        var perCall = (GC.GetAllocatedBytesForCurrentThread() - before) / 2_000.0;
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(found, Is.EqualTo(1_000 * 45L + 1_000), "every lookup must still find its entity");
+            Assert.That(perCall, Is.LessThan(8.0), $"a warm point lookup allocated {perCall:F1} bytes");
+        });
+    }
+
     [Test]
     public void SecondaryIndex_AllowMultiple()
     {
@@ -399,7 +467,7 @@ class BulkEnumerateTests : TestBase<BulkEnumerateTests>
         using var tx = dbe.CreateQuickTransaction();
 
         Assert.Throws<System.InvalidOperationException>(() =>
-            tx.EnumerateIndex<CompD, float>(staleRef, float.MinValue, float.MaxValue));
+            tx.EnumerateIndex<CompD, float>(staleRef, float.MinValue, float.MaxValue).Dispose());
     }
 
     [Test]

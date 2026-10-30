@@ -125,7 +125,6 @@ public static class B7ScalingExperiment
                 if (clusterSize == 0) clusterSize = cluster.ClusterSize;
                 liveRows += BitOperations.PopCount(cluster.OccupancyBits);
             }
-            dacc.Dispose();
         }
         double occupancy = clusterCount == 0 ? 0 : (double)liveRows / (clusterCount * (double)clusterSize);
         long valueBytes = liveRows * 8;                                   // useful payload (the long Value column)
@@ -187,7 +186,6 @@ public static class B7ScalingExperiment
                     ulong bits = cluster.OccupancyBits;
                     while (bits != 0) { int idx = BitOperations.TrailingZeroCount(bits); bits &= bits - 1; sum += span[idx].Value; }
                 }
-                sacc.Dispose();
                 GC.KeepAlive(sum);
             }, 1, warmupBatches: 5, minMs: 500);
             result = count / (ns / 1e9) / 1e6;
@@ -235,7 +233,6 @@ public static class B7ScalingExperiment
             sw.Stop();
             GC.KeepAlive(sum);
             result = passes * liveSlice / sw.Elapsed.TotalSeconds / 1e6;
-            acc.Dispose();
             tx.Dispose();
         }) { IsBackground = true };
         th.Start();
@@ -292,7 +289,6 @@ public static class B7ScalingExperiment
                 }
                 passes[wid] = localPasses;
                 GC.KeepAlive(localSum);
-                acc.Dispose();
                 tx.Dispose();
             }) { IsBackground = true };
             workers[w].Start();

@@ -1,3 +1,4 @@
+import type { RequestRow } from '@/libs/profiler/correlation/requests';
 import {
   HTTP_METHOD_NAMES,
   TraceEventKind,
@@ -278,6 +279,7 @@ export interface SpanData {
  *  - **marker**: a discrete event instant (GC, memory alloc event)
  *  - **phase**: a tick lifecycle phase span (RuntimePhaseSpan — WriteTickFence, UoW Flush, OutputPhase, etc.)
  *  - **phase-marker**: a single-point lifecycle landmark (UoW Create / UoW Flush glyph in the phase track)
+ *  - **request**: an HTTP request or client command, from a root lane (#1517)
  *
  * Off-CPU overlay bars are deliberately NOT selectable — they're a hover-only visual (the hover tooltip surfaces
  * wait reason / duration); see routeSelection in TimeArea.tsx. Carried on the unified selection bus as the `span` /
@@ -289,7 +291,8 @@ export type ProfilerSelection =
   | { kind: 'tick'; tickNumber: number }
   | { kind: 'marker'; marker: MarkerSelection }
   | { kind: 'phase'; phase: PhaseSpan; tickNumber: number }
-  | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number };
+  | { kind: 'phase-marker'; marker: PhaseMarker; tickNumber: number }
+  | { kind: 'request'; row: RequestRow };
 
 /** All data for a single tick */
 export interface TickData {
@@ -954,6 +957,29 @@ export function findTickIndex(trace: ProcessedTrace, tickNumber: number): number
 /**
  * Build a {@link TickData} from a tick's raw events.
  */
+const DISPATCH_OUTCOME_NAMES = ['skipped', 'inline', 'parallel', 'pipeline'];
+
+/**
+ * Span label. Fan-out and dispatch spans name their systems: a bare "Scheduler.Dependency.FanOut" said a fan-out was slow but not whose, and
+ * every completing system's fan-out looked the same on the lane.
+ */
+export function spanDisplayName(evt: TraceEvent, systems: SystemDef[]): string {
+  // An HTTP request (#1517) reads as its method and route: "Http.Request" alone would make every request on a lane look alike.
+  if (evt.kind === TraceEventKind.ExternalRequest) {
+    return `${HTTP_METHOD_NAMES[evt.httpMethod ?? 0] ?? 'OTHER'} ${evt.httpRoute ?? ''}`;
+  }
+  const base = SpanKindNames[evt.kind] ?? `Kind[${evt.kind}]`;
+  const sysName = (idx: number | undefined) => (idx === undefined ? '?' : systems[idx]?.name ?? `System[${idx}]`);
+  if (evt.kind === TraceEventKind.SchedulerDependencyFanOut && evt.completingSystemIndex !== undefined) {
+    return `FanOut after ${sysName(evt.completingSystemIndex)}`;
+  }
+  if (evt.kind === TraceEventKind.SchedulerSuccessorDispatch && evt.successorIndex !== undefined) {
+    const outcome = DISPATCH_OUTCOME_NAMES[evt.dispatchOutcome ?? -1] ?? `outcome ${evt.dispatchOutcome}`;
+    return `Dispatch ${sysName(evt.successorIndex)} (${outcome})`;
+  }
+  return base;
+}
+
 export function processTickEvents(tickNumber: number, events: TraceEvent[], systems: SystemDef[]): TickData {
   let startUs = Infinity;
   let endUs = -Infinity;
@@ -1464,10 +1490,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
           if (evt.kind === TraceEventKind.ExternalRequest) hasExternalRequest = true;
           const span: SpanData = {
             kind: evt.kind,
-            // An HTTP request (#1517) reads as its method and route: "Http.Request" alone would make every request on a lane look alike.
-            name: evt.kind === TraceEventKind.ExternalRequest
-              ? `${HTTP_METHOD_NAMES[evt.httpMethod ?? 0] ?? 'OTHER'} ${evt.httpRoute ?? ''}`
-              : SpanKindNames[evt.kind] ?? `Kind[${evt.kind}]`,
+            name: spanDisplayName(evt, systems),
             threadSlot: evt.threadSlot,
             startUs: evt.timestampUs,
             endUs: evt.timestampUs + duration,

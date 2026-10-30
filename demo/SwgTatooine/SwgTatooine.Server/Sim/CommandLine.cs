@@ -133,6 +133,7 @@ public static class CommandLine
         c.SessionBudgetBytesPerSecond = r.Int("--session-budget", c.SessionBudgetBytesPerSecond,
             "per-player outbound budget, bytes per second; 0 is none", min: 0);
         c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
+        c.EnterBudgetPerFrame = r.Int("--enter-budget", c.EnterBudgetPerFrame, "entity enters per session frame (owed cap 4x); 0 = engine default", min: 0);
         c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
         c.AvatarSaveIntervalS = r.Dbl(
             "--avatar-save-interval", c.AvatarSaveIntervalS, "how often a live avatar's position is saved, s; 0 disables it", min: 0d);
@@ -142,6 +143,7 @@ public static class CommandLine
             "--max-sessions", c.MaxSessions, "clients connected at once; the engine's session table, 65535 is structural", min: 1, max: 65535);
         c.ResumeGraceS = r.Dbl(
             "--resume-grace", c.ResumeGraceS, "how long a link-dead session's avatar waits for its client, s; 0 disables resume", min: 0d);
+        c.DashboardPort = r.Int("--dashboard-port", c.DashboardPort, "the demo dashboard's port on this host, linked from the client; 0 for none", min: 0, max: 65535);
         c.AuthBurst = r.Int("--auth-burst", c.AuthBurst, "/auth attempts one address may make at once; 0 keeps the default 10", min: 0);
         c.AuthRefillMs = r.Int("--auth-refill-ms", c.AuthRefillMs, "ms for one /auth attempt to come back; 0 keeps the default 6000", min: 0);
         c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
@@ -182,6 +184,7 @@ public static class CommandLine
         c.IdleCreatureFraction = r.Dbl("--idle-creatures", c.IdleCreatureFraction, "share of creatures that never think", min: 0d, max: 1d);
         c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair replaces a creature it lost", min: 0.001f);
         c.CorpseSeconds = r.Float("--corpse-s", c.CorpseSeconds, "seconds a dead creature lies before it is destroyed", min: 0.001f);
+        c.XpRatePercent = r.Int("--xp-rate", c.XpRatePercent, "percent every XP grant is scaled by; 100 = the balance model's", min: 0, max: 100_000);
         var life = r.Floats("--lair-life-s", [c.LairLifeMinSeconds, c.LairLifeMaxSeconds], "shortest,longest seconds a wild lair stands");
         if (life.Length != 2 || !(life[0] > 0f) || life[1] < life[0])
         {
@@ -191,6 +194,8 @@ public static class CommandLine
         c.LairLifeMinSeconds = life[0];
         c.LairLifeMaxSeconds = life[1];
         c.LairReplaceSeconds = r.Float("--lair-replace-s", c.LairReplaceSeconds, "seconds before a retired lair's site spawns another", min: 0.001f);
+        c.MissionOfflineReleaseSeconds = r.Float("--mission-offline-s", c.MissionOfflineReleaseSeconds,
+            "seconds a mission's holder may stay offline before the mission is cancelled and its lair released", min: 0.001f);
 
         r.Group("persistence and output");
         c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");
@@ -212,7 +217,9 @@ public static class CommandLine
         c.RedirectPort = r.Int("--redirect-port", c.RedirectPort, "port that serves only a redirect to https; 0 maps none", min: 0, max: 65535);
         c.AuthLocalOnly = r.Switch("--auth-local-only", "answer /auth only for callers on a private address; required on a public bind with no CDN");
         c.AuthIterations = r.Int(
-            "--auth-iterations", c.AuthIterations, "PBKDF2 work factor for new passwords; 0 keeps the default 600000", min: 0);
+            "--auth-iterations", c.AuthIterations, $"PBKDF2 work factor for new passwords; 0 keeps the default {PasswordHash.DefaultIterations}", min: 0);
+        c.StopDeadlineS = r.Int("--stop-deadline-s", c.StopDeadlineS, "seconds a stopping server has to exit before it is killed", min: 1, max: 3600);
+        c.WedgeS = r.Int("--wedge-s", c.WedgeS, "seconds the tick may stand still before the server stops itself; 0 never", min: 0, max: 3600);
         c.Origins = origins == null ? [] : origins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then
@@ -293,8 +300,8 @@ public static class CommandLine
         if (c.AuthIterations > 0 && c.AuthIterations < PasswordHash.MinimumIterations)
         {
             throw new ArgumentException(
-                $"--auth-iterations {c.AuthIterations} is below the floor of {PasswordHash.MinimumIterations}. Below that a leaked hash table is "
-                + "crackable on one laptop, so the hashing would read as protection without being any.");
+                $"--auth-iterations {c.AuthIterations} is below the floor of {PasswordHash.MinimumIterations}. "
+                + "That is a typo, not a work factor.");
         }
 
         if (c.ServePort == 0 && (c.TlsChainPath.Length > 0 || c.TlsKeyPath.Length > 0 || c.RedirectPort > 0 || c.AuthLocalOnly))

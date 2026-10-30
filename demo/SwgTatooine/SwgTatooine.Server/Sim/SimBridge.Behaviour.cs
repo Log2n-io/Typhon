@@ -423,6 +423,70 @@ public sealed partial class SimBridge
         return true;
     }
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_ALT_PROBE</c>: logs possessed bodies whose altitude is off the terrain under them.</summary>
+    /// <remarks>
+    /// A client read a player's server altitude 35 m below and 18 m above the terrain (2026-10-27). The candidates are a resumed avatar's
+    /// saved altitude, which nothing re-derives while it stands still, and a collision disc's remembered floor. Each line carries what tells
+    /// them apart: the terrain, the disc's floor and whether the body is moving. Off by default; the JIT folds the test away.
+    /// </remarks>
+    private static readonly bool AltitudeProbe = Environment.GetEnvironmentVariable("SWG_ALT_PROBE") == "1";
+
+    /// <summary>How often <see cref="AltitudeProbe"/> samples, in ticks: every 5 s at 50 Hz.</summary>
+    private const long AltitudeProbeEveryTicks = 250;
+
+    /// <summary>Logs one possessed body when its altitude is more than a metre off the terrain.</summary>
+    private void ProbeAltitude(RealmId realm, EntityId body, in PlayerPlacement place, in PlayerMotion move, in PlayerProximity disc)
+    {
+        if (realm.Value >= _config.Planets)
+        {
+            return;
+        }
+
+        var ground = GroundAt(realm, place.X, place.Z);
+        if (MathF.Abs(place.Y - ground) < 1f)
+        {
+            return;
+        }
+
+        Console.WriteLine(
+            $"[alt-probe] {body} at ({place.X:F1}, {place.Z:F1}) y {place.Y:F2} terrain {ground:F2} dy {place.Y - ground:+0.00;-0.00} "
+            + $"disc floor {disc.SurfaceY:F2} disc realm {disc.Realm} vel ({move.VelX:F3}, {move.VelZ:F3})");
+    }
+
+    /// <summary>Diagnostic switch, read once from <c>SWG_MOVE_TRACE</c>: every client-driven body's position, each tick it moves, to a CSV.</summary>
+    /// <remarks>
+    /// Movement stuttered for every player at a regular cadence (2026-10-28). The trace says whether the server's own positions advance evenly in
+    /// tick and in time; the client records what it draws, and the two are compared. Off by default; the JIT folds the test away.
+    /// </remarks>
+    private static readonly bool MoveTrace = Environment.GetEnvironmentVariable("SWG_MOVE_TRACE") == "1";
+
+    private static readonly Lock MoveTraceGate = new();
+    private static System.IO.StreamWriter _moveTraceOut;
+
+    /// <summary>One line of <see cref="MoveTrace"/>: the position the body starts this tick's step from, i.e. where the previous tick left it.</summary>
+    private static void TraceMove(long tick, EntityId entity, byte kind, in PlayerPlacement p, in PlayerMotion move)
+    {
+        if (kind == ControllerKind.Scripted)
+        {
+            return;
+        }
+
+        lock (MoveTraceGate)
+        {
+            if (_moveTraceOut == null)
+            {
+                var path = Environment.GetEnvironmentVariable("SWG_MOVE_TRACE_FILE") ?? "move-trace.csv";
+                _moveTraceOut = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
+                _moveTraceOut.WriteLine("tick,stopwatchMs,unixMs,entity,x,z,y,velX,velZ");
+                Console.WriteLine($"  move trace: {System.IO.Path.GetFullPath(path)}");
+            }
+
+            var ms = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            _moveTraceOut.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{tick},{ms:F3},{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()},{entity},{p.X:F4},{p.Z:F4},{p.Y:F3},{move.VelX:F5},{move.VelZ:F5}"));
+        }
+    }
+
     /// <summary>
     /// The A/B switch for rung (c)'s cost, read once from <c>SWG_NO_SLOPE</c>.
     /// </summary>
@@ -563,12 +627,13 @@ public sealed partial class SimBridge
         // counter sitting next to its siblings in the same cache line, so the contended form would have chunks invalidating each other's line to maintain a
         // number nobody reads inside the tick.
         var skipped = 0L;
+        var objectives = default(ObjectiveCounts);
+
+        // A fighter's objective is checked once a second (lair-objectives.md L-4), each on its own beat.
+        var objectiveEvery = Math.Max(1, hz);
 
         // Bodies a door or a shuttle put somewhere else this tick (Teleport, in Spawn, before this phase): see the possessed branch below.
         var landed = LandedThisTick;
-
-        // A fighter's ask for a mission, to the mission desk (Economy phase, this tick).
-        var asks = ctx.Writer(MissionAskQueue);
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -624,6 +689,12 @@ public sealed partial class SimBridge
                         stop.DestZ = places[idx].Z;
                     }
 
+                    if (AltitudeProbe && tick % AltitudeProbeEveryTicks == 0)
+                    {
+                        ProbeAltitude(cluster.Realm, cluster.GetEntityId(idx), in places[idx], in motions[idx],
+                            in cluster.GetReadOnlySpan(Player.Proximity)[idx]);
+                    }
+
                     skipped++;
                     continue;
                 }
@@ -668,6 +739,32 @@ public sealed partial class SimBridge
                 if (state.ActivityTicks > 0)
                 {
                     state.ActivityTicks = Math.Max(0, state.ActivityTicks - k);
+
+                    // A fight ends on its objective (lair-objectives.md L-4, plan G2): a fallen lair is replaced by the next of its point of interest, or
+                    // the fight is over and the fighter decides again; one still standing when the time runs out is given up, and counted as such.
+                    // Only a fight that HAS an objective: a fight-back (CombatResolve's Answer) and the world's first fighters are Combat too, with a
+                    // MissionX/Z that is no lair (review, 2026-10-26).
+                    if (state.Activity == PlayerActivity.Combat && routes[idx].Objective == 1)
+                    {
+                        if (state.ActivityTicks == 0)
+                        {
+                            if (ObjectiveStands(ctx, realm, state.MissionX, state.MissionZ))
+                            {
+                                objectives.GivenUp++;
+                            }
+
+                            routes[idx].Objective = 0;
+                        }
+                        else if ((tick + key) % objectiveEvery < k && !KeepObjective(ctx, ref state, ref move, realm, x, z, ref objectives))
+                        {
+                            routes[idx].Objective = 0;
+                            state.ActivityTicks = 0;
+                            move.VelX = 0f;
+                            move.VelZ = 0f;
+                            pushSlots |= 1UL << idx;
+                            continue;
+                        }
+                    }
 
                     // To, through or out of a door: its own waypoints and the crossing test (SimBridge.Portals).
                     if (ThinkPortal(ref state, ref move, ref routes[idx], realm, cluster.GetEntityId(idx), x, z, k, places[idx].HalfExtent))
@@ -722,6 +819,8 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                // A new decision: whatever the last fight's objective was, it is not this one's.
+                routes[idx].Objective = 0;
                 var roll = Hash01(Salt(tick, key, 0xC2B2AE35u));
                 if (roll < 0.40f
                     && TryWalkToPortal(ref state, ref move, x, z, realm, Salt(tick, key, 0x7F4A7C15u), Salt(tick, key, 0x2C1B3C6Du)))
@@ -759,26 +858,11 @@ public sealed partial class SimBridge
                     state.ActivityTicks = 200 * hz;
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                 }
-                else if (roll < 0.82f)
+                else if (roll < 0.82f && TryTakeObjective(ctx, ref state, ref move, ref routes[idx], realm, x, z, Salt(tick, key, 0x85EBCA77u)))
                 {
-                    // Go and fight: at a point of interest, where the lairs are — and ask the desk for a mission, which sends the body to its lair instead when
-                    // a terminal is near enough (missions.md § 6). Asked every time; the desk ignores a body already holding one.
-                    if (_config.CrowdTakesMissions)
-                    {
-                        asks.Push(new MissionAsk { Player = cluster.GetEntityId(idx), X = x, Z = z, Realm = realm });
-                    }
-
-                    var poi = PickPoi(Salt(tick, key, 0x85EBCA77u));
-                    var ang = Hash01(Salt(tick, key, 0x1B873593u)) * MathF.PI * 2f;
-                    var r = poi.Radius * MathF.Sqrt(Hash01(Salt(tick, key, 0xCC9E2D51u)));
-                    move.DestX = poi.X + (MathF.Cos(ang) * r);
-                    move.DestZ = poi.Z + (MathF.Sin(ang) * r);
-                    move.SpeedMps = TatooineData.PlayerMountSpeedMps;
-                    state.Activity = PlayerActivity.Combat;
-                    state.ActivityTicks = 120 * hz;
-                    state.MissionX = move.DestX;
-                    state.MissionZ = move.DestZ;
-                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                    // Go and fight (lair-objectives.md): where lairs are left unattended, the nearest standing wild lair there as the objective. The crowd
+                    // takes no missions (economy-foundation.md § 1); with no lair to send it to, it roams instead — below.
+                    objectives.Taken++;
                 }
                 else
                 {
@@ -808,6 +892,8 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _possessedSkipped, skipped);
         }
+
+        Publish(in objectives);
     }
 
     private (float X, float Z, float Radius) PickCity(uint salt)
@@ -836,17 +922,6 @@ public sealed partial class SimBridge
         }
 
         return _index.Cities.Count - 1;
-    }
-
-    private (float X, float Z, float Radius) PickPoi(uint salt)
-    {
-        if (_index.Pois.Count == 0)
-        {
-            return PickCity(salt);
-        }
-
-        var i = (int)(Hash01(salt) * _index.Pois.Count) % _index.Pois.Count;
-        return _index.Pois[i];
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1033,6 +1108,10 @@ public sealed partial class SimBridge
 
                 var p = places[idx];
                 var h = p.HalfExtent;
+                if (MoveTrace)
+                {
+                    TraceMove(tick, cluster.GetEntityId(idx), cluster.GetReadOnlySpan(Player.Control)[idx].Kind, in p, in move);
+                }
 
                 // The bias is one tick's remainder and is NOT scaled by `k`: a realm visited every k-th tick moves k ticks of velocity in one visit, but
                 // the split happened once.

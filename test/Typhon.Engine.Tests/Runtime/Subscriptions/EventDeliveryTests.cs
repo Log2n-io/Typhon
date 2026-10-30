@@ -848,25 +848,18 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (cluster.GetEntityId(slot).RawValue == creature.RawValue)
                 {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (cluster.GetEntityId(slot).RawValue == creature.RawValue)
-                    {
-                        cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(x, 0f));
-                    }
+                    cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(x, 0f));
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

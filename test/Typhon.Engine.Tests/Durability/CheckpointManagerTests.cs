@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -342,6 +343,65 @@ public class CheckpointManagerTests : AllocatorTestBase
         ckpt.RunCheckpointCycle(durableLsn);
         Assert.That(ckpt.CheckpointLsn, Is.EqualTo(durableLsn), "once the page is captured, CheckpointLsn advances");
         Assert.That(ckpt.ConsecutiveGatedCycles, Is.EqualTo(0), "a fully-covered cycle resets the gate counter");
+    }
+
+    /// <summary>
+    /// A page refused on <see cref="CheckpointManager.StalledAfterCycles"/> cycles in a row turns the health Stalled and logs one warning naming it, with
+    /// its writer count; the cycle that covers it again clears both. The leaked registration of #1538 held the gate shut for 13 hours with the health
+    /// reading Ok and nothing above Information in the log: the WAL on disk was its only symptom.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("CP-13")]
+    public void RefusedPage_StallsHealth_UntilCovered()
+    {
+        CreateTestInfrastructure();
+        _walManager = CreateWalManager();
+        ProduceWalRecords(_walManager);
+        var memPageIdx = DirtyRegularPage();
+
+        using var ckpt = new CheckpointManager(_mmf, _uowRegistry, _walManager, _resourceOptions, _epochManager, _stagingPool, AllocationResource);
+        var log = new ListLogger();
+        ckpt.Logger = log;
+        var durableLsn = _walManager.DurableLsn;
+
+        _mmf.IncrementActiveChunkWriters(memPageIdx);   // a registration nobody releases
+        for (var cycle = 1; cycle < CheckpointManager.StalledAfterCycles; cycle++)
+        {
+            ckpt.RunCheckpointCycle(durableLsn);
+            Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Ok), $"cycle {cycle}: a page refused for fewer cycles than the threshold is not a stall");
+        }
+
+        ckpt.RunCheckpointCycle(durableLsn);
+        ckpt.RunCheckpointCycle(durableLsn);
+        Assert.Multiple(() =>
+        {
+            Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Stalled), "the page has been refused for the threshold's cycles");
+            Assert.That(log.Warnings, Has.Count.EqualTo(1), "one warning on entering the stall, not one per cycle");
+            Assert.That(log.Warnings[0], Does.Contain($"{memPageIdx}:1"), "the warning names the page and its writer count");
+        });
+
+        _mmf.DecrementActiveChunkWriters(memPageIdx);
+        ckpt.RunCheckpointCycle(durableLsn);
+        Assert.Multiple(() =>
+        {
+            Assert.That(ckpt.CheckpointLsn, Is.EqualTo(durableLsn), "premise: the page is captured and the watermark advances");
+            Assert.That(ckpt.Health, Is.EqualTo(DurabilityHealth.Ok), "the covering cycle clears the stall");
+            Assert.That(log.Informations, Has.Some.Contains("covered every page again"));
+        });
+    }
+
+    private sealed class ListLogger : ILogger
+    {
+        public readonly List<string> Warnings = [];
+        public readonly List<string> Informations = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter) =>
+            (logLevel == LogLevel.Warning ? Warnings : Informations).Add(formatter(state, exception));
     }
 
     /// <summary>Allocates a regular data page and dirties it without saving, so it is collected by the next checkpoint but stays dirty. Returns its in-memory

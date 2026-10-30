@@ -259,7 +259,7 @@ public sealed class ThreadSchedulingTests
             IReadOnlyList<ChunkManifestEntry> cm, IReadOnlyDictionary<int, string> sn, ReadOnlySpan<byte> sourceMetadataBytes, in CacheHeader h,
             IReadOnlyList<SystemTickSummary> sts, IReadOnlyList<QueueTickSummary> qts, IReadOnlyList<PostTickSummary> pts,
             IReadOnlyDictionary<ushort, string> qIdToName, IReadOnlyList<SystemArchetypeTouchSummary> sat,
-            IReadOnlyList<EntityLifecycleRun> elr)
+            IReadOnlyList<EntityLifecycleRun> elr, IReadOnlyList<ThreadTableEntry> threads)
             => throw new NotSupportedException("ListSink does not support trailer.");
 
         public void Dispose() { }

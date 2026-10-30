@@ -112,32 +112,25 @@ class ClientMembershipTests : TestBase<ClientMembershipTests>
             using (var tx = harness.Engine.CreateQuickTransaction())
             {
                 var accessor = tx.For<ProjCreature>();
-                try
+                foreach (var cluster in accessor.GetClusterEnumerator())
                 {
-                    foreach (var cluster in accessor.GetClusterEnumerator())
+                    var occupancy = cluster.OccupancyBits;
+                    while (occupancy != 0)
                     {
-                        var occupancy = cluster.OccupancyBits;
-                        while (occupancy != 0)
-                        {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                            occupancy &= occupancy - 1;
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
 
-                            // A DRIFT, not a teleport. An entity that moves at most 15 m a tick and sits 60 m inside the radius was inside it last
-                            // tick too, so the client has had every opportunity to hold it and a shortfall cannot be blamed on it having just arrived.
-                            ref readonly var was = ref cluster.GetReadOnlySpan(ProjCreature.Bounds)[slot];
-                            var x = Clamp(Centre(was.Bounds.MinX, was.Bounds.MaxX) + (float)((random.NextDouble() * 2d - 1d) * DriftM), SpreadM);
-                            var y = Clamp(Centre(was.Bounds.MinY, was.Bounds.MaxY) + (float)((random.NextDouble() * 2d - 1d) * DriftM), SpreadM);
-                            cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(x, y));
-                            if (((double)x * x) + ((double)y * y) <= (Reach - Margin) * (Reach - Margin))
-                            {
-                                inRange++;
-                            }
+                        // A DRIFT, not a teleport. An entity that moves at most 15 m a tick and sits 60 m inside the radius was inside it last
+                        // tick too, so the client has had every opportunity to hold it and a shortfall cannot be blamed on it having just arrived.
+                        ref readonly var was = ref cluster.GetReadOnlySpan(ProjCreature.Bounds)[slot];
+                        var x = Clamp(Centre(was.Bounds.MinX, was.Bounds.MaxX) + (float)((random.NextDouble() * 2d - 1d) * DriftM), SpreadM);
+                        var y = Clamp(Centre(was.Bounds.MinY, was.Bounds.MaxY) + (float)((random.NextDouble() * 2d - 1d) * DriftM), SpreadM);
+                        cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(x, y));
+                        if (((double)x * x) + ((double)y * y) <= (Reach - Margin) * (Reach - Margin))
+                        {
+                            inRange++;
                         }
                     }
-                }
-                finally
-                {
-                    accessor.Dispose();
                 }
 
                 tx.Commit();

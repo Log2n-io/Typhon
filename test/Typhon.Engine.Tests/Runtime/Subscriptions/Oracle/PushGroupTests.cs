@@ -1057,25 +1057,18 @@ class PushGroupTests : TestBase<PushGroupTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<GroupCitizen>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (cluster.GetEntityId(slot) == entity)
                 {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (cluster.GetEntityId(slot) == entity)
-                    {
-                        cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, y));
-                    }
+                    cluster.WriteSpatial(GroupCitizen.Bounds, slot, GroupTestSchema.At(x, y));
                 }
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

@@ -170,7 +170,7 @@ public sealed class PortalTable
             table.Twin[j] = i;
         }
 
-        using var structures = tx.For<WorldObject>();
+        var structures = tx.For<WorldObject>();
         var route = new List<(float X, float Z)>();
         for (var i = 0; i < ids.Count; i++)
         {

@@ -314,46 +314,121 @@ public static class TatooineData
     public const int MissionOffersPerTerminal = 20;
 
     /// <summary>
-    /// How far an offer's anchor lies from its terminal, metres.
+    /// How many offers in its window (CL − <see cref="MissionLevelBelow"/> to CL + <see cref="MissionLevelAbove"/>) a character standing at a terminal is
+    /// always shown: the demand draw follows the city's crowd, so a lone low-level player among levelled bots saw one offer of its level (Loïc, 2026-10-27).
+    /// </summary>
+    public const int MissionOffersPerViewer = 3;
+
+    /// <summary>The most offers a terminal lists past <see cref="MissionOffersPerTerminal"/> for the characters standing at it; they age out as any offer.</summary>
+    public const int MissionViewerOffersMax = 10;
+
+    /// <summary>
+    /// How far from its terminal an offer's lair is looked for first, metres (× <c>ContentScale</c>): a lair of the level chosen within it is drawn
+    /// uniformly; with none there, the nearest beyond it. The same reach bounds a held mission's re-target round the lair it lost (missions.md § 8).
     /// </summary>
     /// <remarks>
-    /// [CORE3] places a destroy mission 1-2 km from the PLAYER (<c>randomizeGenericDestroyMission</c>: base 1 000, random 1 000, both difficulty terms zero
-    /// in the shipped configuration), twenty tries, outside every city. Here the origin is the terminal, which stands inside a city of up to 456 m radius, so
-    /// the near bound is the city's edge rather than a kilometre.
+    /// Every band's frontier patch is 1.0-2.0 km from a city's edge (content-levels.md § 2.2), so from a terminal inside a city of up to 456 m radius, 3 km
+    /// takes in each band's patch. [CORE3] placed a destroy mission 1-2 km from the player; here it is a lair the world already has.
     /// </remarks>
-    public const float MissionMinDistanceM = 500f;
+    public const float MissionReachM = 3000f;
 
-    public const float MissionMaxDistanceM = 2000f;
+    /// <summary>How many levels below a character's CL the missions it is shown go (Loïc, 2026-10-26): the demand window's floor.</summary>
+    public const int MissionLevelBelow = 5;
 
-    /// <summary>How far round its anchor a mission's lair is drawn, metres: "about there" (missions.md, R2).</summary>
-    public const float MissionScatterM = 150f;
+    /// <summary>How many levels above its CL a character may take a mission: above it the desk refuses the take (Loïc, 2026-10-26); bots never try.</summary>
+    public const int MissionLevelAbove = 3;
 
-    /// <summary>Credits per difficulty level, plus as many again per kilometre: 150-300 at difficulty 1 (missions.md § 2.2).</summary>
-    public const int MissionRewardBase = 100;
+    /// <summary>
+    /// A mission's reward by its level, 1 to 50: <c>balance_model.py</c>'s <c>credit_flows(l)['reward']</c> = <c>(wage(l) − vendor_in) / missions_per_h</c>
+    /// (claude/design/SwgTatooine/design/balance/balance_model.py; crafting-catalog.md § 15, decision C2), to the nearest 5 — 485 at 1, 1 500 at 25, 4 850
+    /// at 50. Computed from the model's knobs below, as <see cref="Progression"/>'s XP table is, so a retuned knob moves every level.
+    /// </summary>
+    private static readonly int[] MissionRewards = BuildMissionRewards();
 
-    public const int MissionRewardPerKm = 100;
+    /// <summary><c>CREDITS['wage_cl1']</c>, <c>['wage_cl50']</c>: credits an on-level play-hour earns at CL 1 and CL 50, geometric in between.</summary>
+    public const int WageCl1 = 1000;
+
+    public const int WageCl50 = 10000;
+
+    /// <summary>
+    /// <c>vendor_in</c> as a share of the wage, in thousandths: <c>vendor_sold_share × loot_value × vendor_buys</c> = 0.15 × 1.0 × 0.20 — what an hour's loot
+    /// sold to the vendor brings in, the rest of the wage being the missions'.
+    /// </summary>
+    public const int VendorInPerMille = 30;
+
+    private static int[] BuildMissionRewards()
+    {
+        var table = new int[ContentLevels.MaxLevel + 1];
+        for (var l = 1; l <= ContentLevels.MaxLevel; l++)
+        {
+            var wage = WageCl1 * Math.Pow((double)WageCl50 / WageCl1, (l - 1) / (double)(ContentLevels.MaxLevel - 1));
+            var reward = wage * (1000 - VendorInPerMille) / 1000d / Progression.MissionsPerHour;
+            table[l] = (int)(Math.Round(reward / 5d, MidpointRounding.AwayFromZero) * 5d);
+        }
+
+        return table;
+    }
+
+    /// <summary>
+    /// How long a held mission's holder may stay offline before the mission is cancelled and its lair released, seconds (Loïc, 2026-10-27): a reserved lair
+    /// never expires, so a holder who does not come back would keep it from the world for ever. Counted by the desk in memory, from the pass that first
+    /// finds the holder gone — after a restart, from the reopen. <see cref="SimConfig.MissionOfflineReleaseSeconds"/> carries it.
+    /// </summary>
+    public const float MissionOfflineReleaseSeconds = 1800f;
 
     /// <summary>How long an untaken offer stays listed, seconds, before it is replaced: the shortest, and the spread above it.</summary>
     public const float MissionOfferLifeMinSeconds = 300f;
 
     public const float MissionOfferLifeSpanSeconds = 600f;
 
-    /// <summary>How long a mission's lair stands before it moves somewhere else round its anchor, seconds (missions.md, R6).</summary>
-    public const float MissionLairLifeSeconds = 1200f;
-
     /// <summary>
     /// How close to a mission terminal's centre a body must stand to take one of its missions, metres. The client's own gate is the tighter one.
     /// </summary>
     public const float MissionTerminalReachM = 6f;
 
-    /// <summary>How far from a terminal the scripted crowd may ask it for a mission, metres: a body anywhere in a town.</summary>
-    public const float MissionCrowdReachM = 1000f;
+    // ── The bazaar (claude/design/SwgTatooine/design/bazaar.md § 2.3; fees per crafting-catalog § 15.3) ─────────────────
 
-    /// <summary>
-    /// The credits a mission pays: <see cref="MissionRewardBase"/> plus <see cref="MissionRewardPerKm"/> per kilometre, per difficulty level, to the nearest 5.
-    /// </summary>
-    public static int MissionReward(int difficulty, float distanceM)
-        => (int)(MathF.Round(difficulty * (MissionRewardBase + (MissionRewardPerKm * distanceM / 1000f)) / 5f) * 5f);
+    /// <summary>How close to a bazaar terminal's centre a body must stand to list, collect, buy or sell to the vendor, metres: the mission terminal's rule.</summary>
+    public const float BazaarReachM = 6f;
+
+    /// <summary>How long a listing stands before it expires and returns to its seller, hours of world time (B8). [EST]</summary>
+    public const int ListingLifeHours = 24;
+
+    /// <summary>The most listings a character has <see cref="ListingState.Listed"/> at once (B9). [EST]</summary>
+    public const int MaxListings = 20;
+
+    /// <summary>The most listings reserved for a character as a buyer — <see cref="ListingState.Sold"/>, not collected — at once (B9). [EST]</summary>
+    public const int MaxReserved = 20;
+
+    /// <summary>The highest unit price a listing may ask, credits.</summary>
+    public const long MaxUnitPrice = 1_000_000;
+
+    /// <summary>The list fee, thousandths of the listing's total, at least 1 credit, paid at listing and never refunded (B6).</summary>
+    public const int ListFeePerMille = 10;
+
+    /// <summary>The sales tax, thousandths of the sale's total, rounded down, paid by the seller at the sale (B6, Q5).</summary>
+    public const int SalesTaxPerMille = 80;
+
+    /// <summary>What the vendor pays, thousandths of the units' market value, rounded down (B7, C3).</summary>
+    public const int VendorBuysPerMille = 200;
+
+    /// <summary>The board republishes at least this often, in seconds of world time, so /swg/market/prices follows what is held (drops change it outside the desk).</summary>
+    public const int MarketHeldRefreshSeconds = 60;
+
+    /// <summary>The fastest the desk republishes the browse snapshot, milliseconds (≤ 2 Hz).</summary>
+    public const int MarketPublishMs = 500;
+
+    /// <summary>Listings per page of <c>GET /swg/market</c>.</summary>
+    public const int BrowsePage = 20;
+
+    /// <summary>The list fee of a listing worth <paramref name="total"/> credits: max(1, ⌊1 %⌋).</summary>
+    public static long ListFee(long total) => Math.Max(1, total * ListFeePerMille / 1000);
+
+    /// <summary>The sales tax on a sale of <paramref name="total"/> credits: ⌊8 %⌋, 0 writing no row.</summary>
+    public static long SalesTax(long total) => total * SalesTaxPerMille / 1000;
+
+    /// <summary>The credits a mission of <paramref name="level"/> pays (<see cref="MissionRewards"/>); a level outside 1..50 is clamped into it.</summary>
+    public static int MissionReward(int level) => MissionRewards[Math.Clamp(level, 1, ContentLevels.MaxLevel)];
 
     /// <summary>Which of the eight directions a point lies in from another: 0 north (+Z), then clockwise — 2 east (+X), 4 south, 6 west.</summary>
     public static byte OctantOf(float dx, float dz)
@@ -474,6 +549,27 @@ public static class TatooineData
     /// same reason. Drawn from per lair, as a region's are.
     /// </summary>
     public static readonly int[] PoiLairTemplates = [CreatureTemplates.Ninja, CreatureTemplates.SandNinja, CreatureTemplates.Soldier];
+
+    /// <summary>
+    /// The level the scripted crowd counts as (content-levels.md § 5): its 1 400 hp is CL 10 health and its 95 damage per randomised delay about CL 10
+    /// on-band DPS. It fights only lairs and creatures at or below it — the city fringes — and the B4 level factor reads it for a scripted body.
+    /// </summary>
+    public const int CrowdLevel = 10;
+
+    /// <summary>Lairs per km² in a city's fringe, the annulus its ramp spans (content-levels.md § 2.2). [EST].</summary>
+    public const float FringeLairsPerSqKm = 10f;
+
+    /// <summary>A frontier patch's radius, metres: four per city, one per band II-V, 1.0-2.0 km from its edge.</summary>
+    public const float FrontierRadiusM = 300f;
+
+    /// <summary>Lairs a frontier patch keeps standing.</summary>
+    public const int FrontierLairs = 6;
+
+    /// <summary>
+    /// The share of their authored density the wilderness regions keep, so the city fringes and frontier patches content levels added do not grow the
+    /// world (Loïc, 2026-10-26, R2: hold the total): the lair and creature counts stay within a few per cent of what they were.
+    /// </summary>
+    public const float RegionDensityShare = 0.75f;
 }
 
 /// <summary>
@@ -512,52 +608,77 @@ public static class CreatureTemplates
     /// <summary>Creatures a lair of each template keeps alive. [EST], shaped by how SWG lairs felt: 4-6 typical, more for a camp.</summary>
     public static readonly int[] SpawnLimit = [6, 5, 4, 4, 4, 6, 5, 5, 6, 3];
 
-    /// <summary>Hit points. [EST].</summary>
-    public static readonly int[] Health = [180, 120, 220, 300, 520, 160, 640, 700, 760, 420];
+    /// <summary>The wild kinds — every template but the missions-only <see cref="BlueSoldier"/> — are 0 to this, exclusive.</summary>
+    public const int WildCount = 9;
+
+    /// <summary>
+    /// The lowest level a lair of each template is spawned at (crafting-catalog.md § 14.2, Loïc's B2 ranges): a species is a look and a ratio, its stats
+    /// come from the level (<see cref="ContentLevels"/>). Camps only from 25, so new characters fight beasts; the blue soldiers cover every level, for
+    /// missions.
+    /// </summary>
+    public static readonly int[] MinLevel = [1, 1, 8, 8, 18, 1, 25, 32, 38, 1];
+
+    /// <summary>The highest level of each template's range (<see cref="MinLevel"/>).</summary>
+    public static readonly int[] MaxLevel = [10, 10, 22, 22, 32, 10, 40, 46, 50, 50];
+
+    /// <summary>Whether a template's range covers a level.</summary>
+    public static bool CoversLevel(int template, int level) => level >= MinLevel[template] && level <= MaxLevel[template];
 
     /// <summary>Whether a template is a camp of foes — people — rather than a beasts' lair.</summary>
     public static bool IsCamp(int template) => template is Ninja or SandNinja or Soldier or BlueSoldier;
 
     /// <summary>
-    /// A lair's hit points: four of its own occupants', and never under 1 500 — harder to destroy than any foe it holds (Loïc, 2026-10-24), and only once
-    /// they are all dead (<c>Lair.Guards</c>).
+    /// A lair kind for a site at a level: the site's kinds that cover the level or, when none does, every wild kind that does (content-levels.md § 2.4);
+    /// then a camp with <see cref="TatooineData.CampShare"/>'s odds when one qualifies, a beasts' lair otherwise, uniform within each.
     /// </summary>
-    public static int LairHealth(int template) => System.Math.Max(1500, 4 * Health[template]);
-
-    /// <summary>
-    /// A lair kind for a site: a camp with <see cref="TatooineData.CampShare"/>'s odds when the site names one, a beasts' lair otherwise, uniform within each.
-    /// </summary>
-    public static int PickLair(int[] kinds, ref Rng rng)
+    /// <remarks>Allocation-free: the lair director calls it on the tick.</remarks>
+    public static int PickLair(int[] kinds, int level, ref Rng rng)
     {
-        var camps = 0;
+        System.Span<int> pool = stackalloc int[Count];
+        var n = 0;
         foreach (var k in kinds)
         {
-            camps += IsCamp(k) ? 1 : 0;
-        }
-
-        var beasts = kinds.Length - camps;
-        var wantCamp = camps > 0 && (beasts == 0 || rng.NextFloat() < TatooineData.CampShare);
-        var pick = rng.NextInt(0, wantCamp ? camps : beasts);
-        foreach (var k in kinds)
-        {
-            if (IsCamp(k) == wantCamp && pick-- == 0)
+            if (CoversLevel(k, level))
             {
-                return k;
+                pool[n++] = k;
             }
         }
 
-        return kinds[0];
+        if (n == 0)
+        {
+            for (var k = 0; k < WildCount; k++)
+            {
+                if (CoversLevel(k, level))
+                {
+                    pool[n++] = k;
+                }
+            }
+        }
+
+        if (n == 0)
+        {
+            return kinds.Length > 0 ? kinds[0] : Rat;
+        }
+
+        var camps = 0;
+        for (var i = 0; i < n; i++)
+        {
+            camps += IsCamp(pool[i]) ? 1 : 0;
+        }
+
+        var beasts = n - camps;
+        var wantCamp = camps > 0 && (beasts == 0 || rng.NextFloat() < TatooineData.CampShare);
+        var pick = rng.NextInt(0, wantCamp ? camps : beasts);
+        for (var i = 0; i < n; i++)
+        {
+            if (IsCamp(pool[i]) == wantCamp && pick-- == 0)
+            {
+                return pool[i];
+            }
+        }
+
+        return pool[0];
     }
-
-    /// <summary>Damage per attack. [EST].</summary>
-    public static readonly int[] Damage = [12, 8, 16, 24, 34, 14, 38, 40, 32, 26];
-
-    /// <summary>[EST] Credits a kill drops, roughly a quarter of the creature's hit points — big game pays more.</summary>
-    /// <remarks>
-    /// The value is arbitrary and says so; what is not arbitrary is that a kill writes it into <see cref="Inventory"/> on the tick the creature dies, which
-    /// is the first steady-state <c>Versioned</c> write this world has ever made (gap G3).
-    /// </remarks>
-    public static readonly int[] LootCredits = [45, 30, 55, 75, 130, 40, 160, 175, 190, 105];
 
     /// <summary>Movement speed in metres per second. [EST], below a player's 5 m/s so a player can always disengage.</summary>
     public static readonly float[] SpeedMps = [3.4f, 2.6f, 2.0f, 2.4f, 3.0f, 4.0f, 4.2f, 4.2f, 3.8f, 3.6f];

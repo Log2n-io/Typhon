@@ -127,31 +127,24 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var tags = new List<int>();
+            var holdsIt = false;
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var tags = new List<int>();
-                var holdsIt = false;
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var t = cluster.GetReadOnly(ClMigUnit.Pos, slot).Tag;
-                    holdsIt |= t == tag;
-                    tags.Add(t);
-                }
-
-                if (holdsIt)
-                {
-                    return tags;
-                }
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var t = cluster.GetReadOnly(ClMigUnit.Pos, slot).Tag;
+                holdsIt |= t == tag;
+                tags.Add(t);
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            if (holdsIt)
+            {
+                return tags;
+            }
         }
 
         return [];
@@ -335,25 +328,18 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClMigUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
                 {
-                    var bits = cluster.OccupancyBits;
-                    while (bits != 0)
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    if (cluster.GetReadOnly(ClMigUnit.Pos, slot).Tag == 999)
                     {
-                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        if (cluster.GetReadOnly(ClMigUnit.Pos, slot).Tag == 999)
-                        {
-                            cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(190f, 90f, 999));
-                        }
+                        cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(190f, 90f, 999));
                     }
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();
@@ -436,25 +422,18 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
                 var rng = new Random(seed + 100);
                 using var tx = dbe.CreateQuickTransaction();
                 var accessor = tx.For<ClMigUnit>();
-                try
+                foreach (var cluster in accessor.GetClusterEnumerator())
                 {
-                    foreach (var cluster in accessor.GetClusterEnumerator())
+                    var bits = cluster.OccupancyBits;
+                    while (bits != 0)
                     {
-                        var bits = cluster.OccupancyBits;
-                        while (bits != 0)
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        bits &= bits - 1;
+                        if ((slot & 7) == (seed & 7))
                         {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                            bits &= bits - 1;
-                            if ((slot & 7) == (seed & 7))
-                            {
-                                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(2f + (float)rng.NextDouble() * 196f, 2f + (float)rng.NextDouble() * 96f));
-                            }
+                            cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(2f + (float)rng.NextDouble() * 196f, 2f + (float)rng.NextDouble() * 96f));
                         }
                     }
-                }
-                finally
-                {
-                    accessor.Dispose();
                 }
 
                 tx.Commit();
@@ -471,80 +450,73 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClMigUnit>();
-            try
+            var mismatches = new List<string>();
+            var posSlot = state.SpatialSlot.Slot;
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                var mismatches = new List<string>();
-                var posSlot = state.SpatialSlot.Slot;
+                var mappedCell = state.ClusterCellMap[cluster.ChunkId];
+                var bits = cluster.OccupancyBits;
+                // Every occupied slot's spatial component is enabled: spawns into one cluster from several commits each set their bit on the
+                // cluster's shared word, and a plain read-modify-write there loses bits under exactly this race.
+                if ((cluster.EnabledBits(posSlot) & bits) != bits)
+                {
+                    mismatches.Add($"cluster {cluster.ChunkId} lost enabled bits: occupancy {bits:X} enabled {cluster.EnabledBits(posSlot):X}");
+                }
+
+                while (bits != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, slot);
+                    var actualCell = grid.WorldToCellKey(pos.Bounds.MinX, pos.Bounds.MinY, 0f);
+                    if (actualCell != mappedCell)
+                    {
+                        mismatches.Add(
+                            $"cluster {cluster.ChunkId} is mapped to cell {mappedCell} but slot {slot} (tag {pos.Tag}) sits at ({pos.Bounds.MinX:F1}, {pos.Bounds.MinY:F1}) in cell {actualCell}");
+                    }
+
+                    checkedEntities++;
+                }
+            }
+
+            if (mismatches.Count > 0)
+            {
+                // The failure dump that located both defects this test has found (a stale write-time flag executed at the drain; the pool's
+                // unordered (count, head) pair): which cell list holds each cluster, and per cluster how many of its entities resolve elsewhere.
+                var sb = new System.Text.StringBuilder();
+                for (var c = 0; c < 2; c++)
+                {
+                    dbe.Realm0Grid.TryGetCellKey(c, 0, 0, out var key);
+                    var pool = state.Realm0Spatial.CellClusterPool;
+                    sb.Append($"cell {key} list: [{string.Join(",", pool.GetClusters(key).ToArray())}] cursor {pool.GetScanCursor(key)} ")
+                        .Append($"count {EntitiesInCell(dbe, c)}\n");
+                }
+
                 foreach (var cluster in accessor.GetClusterEnumerator())
                 {
                     var mappedCell = state.ClusterCellMap[cluster.ChunkId];
                     var bits = cluster.OccupancyBits;
-                    // Every occupied slot's spatial component is enabled: spawns into one cluster from several commits each set their bit on the
-                    // cluster's shared word, and a plain read-modify-write there loses bits under exactly this race.
-                    if ((cluster.EnabledBits(posSlot) & bits) != bits)
-                    {
-                        mismatches.Add($"cluster {cluster.ChunkId} lost enabled bits: occupancy {bits:X} enabled {cluster.EnabledBits(posSlot):X}");
-                    }
-
+                    var inCell = 0;
+                    var outOfCell = 0;
                     while (bits != 0)
                     {
                         var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
                         bits &= bits - 1;
                         ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, slot);
-                        var actualCell = grid.WorldToCellKey(pos.Bounds.MinX, pos.Bounds.MinY, 0f);
-                        if (actualCell != mappedCell)
+                        if (grid.WorldToCellKey(pos.Bounds.MinX, pos.Bounds.MinY, 0f) == mappedCell)
                         {
-                            mismatches.Add(
-                                $"cluster {cluster.ChunkId} is mapped to cell {mappedCell} but slot {slot} (tag {pos.Tag}) sits at ({pos.Bounds.MinX:F1}, {pos.Bounds.MinY:F1}) in cell {actualCell}");
+                            inCell++;
                         }
-
-                        checkedEntities++;
+                        else
+                        {
+                            outOfCell++;
+                        }
                     }
+
+                    sb.Append($"#{cluster.ChunkId} cell {mappedCell} occ {System.Numerics.BitOperations.PopCount(cluster.OccupancyBits)} inCell {inCell} outOfCell {outOfCell}\n");
                 }
 
-                if (mismatches.Count > 0)
-                {
-                    // The failure dump that located both defects this test has found (a stale write-time flag executed at the drain; the pool's
-                    // unordered (count, head) pair): which cell list holds each cluster, and per cluster how many of its entities resolve elsewhere.
-                    var sb = new System.Text.StringBuilder();
-                    for (var c = 0; c < 2; c++)
-                    {
-                        dbe.Realm0Grid.TryGetCellKey(c, 0, 0, out var key);
-                        var pool = state.Realm0Spatial.CellClusterPool;
-                        sb.Append($"cell {key} list: [{string.Join(",", pool.GetClusters(key).ToArray())}] cursor {pool.GetScanCursor(key)} ")
-                            .Append($"count {EntitiesInCell(dbe, c)}\n");
-                    }
-
-                    foreach (var cluster in accessor.GetClusterEnumerator())
-                    {
-                        var mappedCell = state.ClusterCellMap[cluster.ChunkId];
-                        var bits = cluster.OccupancyBits;
-                        var inCell = 0;
-                        var outOfCell = 0;
-                        while (bits != 0)
-                        {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                            bits &= bits - 1;
-                            ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, slot);
-                            if (grid.WorldToCellKey(pos.Bounds.MinX, pos.Bounds.MinY, 0f) == mappedCell)
-                            {
-                                inCell++;
-                            }
-                            else
-                            {
-                                outOfCell++;
-                            }
-                        }
-
-                        sb.Append($"#{cluster.ChunkId} cell {mappedCell} occ {System.Numerics.BitOperations.PopCount(cluster.OccupancyBits)} inCell {inCell} outOfCell {outOfCell}\n");
-                    }
-
-                    Assert.Fail(string.Join("\n", mismatches) + "\n" + sb);
-                }
-            }
-            finally
-            {
-                accessor.Dispose();
+                Assert.Fail(string.Join("\n", mismatches) + "\n" + sb);
             }
         }
 
@@ -615,33 +587,26 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
         var checkedEntities = 0;
         using var readTx = dbe.CreateQuickTransaction();
         var accessor = readTx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                ref var box = ref state.ClusterAabbs[cluster.ChunkId];
-                var slot = state.ClusterSpatialIndexSlot[cluster.ChunkId];
-                Assert.That(slot, Is.GreaterThanOrEqualTo(0), $"cluster {cluster.ChunkId} has no index slot");
-                Assert.That((index.MinX[slot], index.MinY[slot], index.MaxX[slot], index.MaxY[slot]), Is.EqualTo((box.MinX, box.MinY, box.MaxX, box.MaxY)),
-                    $"the index box of cluster {cluster.ChunkId} lags its cluster box (CA-02)");
+            ref var box = ref state.ClusterAabbs[cluster.ChunkId];
+            var slot = state.ClusterSpatialIndexSlot[cluster.ChunkId];
+            Assert.That(slot, Is.GreaterThanOrEqualTo(0), $"cluster {cluster.ChunkId} has no index slot");
+            Assert.That((index.MinX[slot], index.MinY[slot], index.MaxX[slot], index.MaxY[slot]), Is.EqualTo((box.MinX, box.MinY, box.MaxX, box.MaxY)),
+                $"the index box of cluster {cluster.ChunkId} lags its cluster box (CA-02)");
 
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var s = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, s);
-                    var x = pos.Bounds.MinX - originX;
-                    var y = pos.Bounds.MinY - originY;
-                    Assert.That(x >= box.MinX - 1e-3f && x <= box.MaxX + 1e-3f && y >= box.MinY - 1e-3f && y <= box.MaxY + 1e-3f, Is.True,
-                        $"cluster {cluster.ChunkId} slot {s} at ({x:F2}, {y:F2}) is outside its box [{box.MinX:F2},{box.MinY:F2}]-[{box.MaxX:F2},{box.MaxY:F2}] (CA-01)");
-                    checkedEntities++;
-                }
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                var s = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, s);
+                var x = pos.Bounds.MinX - originX;
+                var y = pos.Bounds.MinY - originY;
+                Assert.That(x >= box.MinX - 1e-3f && x <= box.MaxX + 1e-3f && y >= box.MinY - 1e-3f && y <= box.MaxY + 1e-3f, Is.True,
+                    $"cluster {cluster.ChunkId} slot {s} at ({x:F2}, {y:F2}) is outside its box [{box.MinX:F2},{box.MinY:F2}]-[{box.MaxX:F2},{box.MaxY:F2}] (CA-01)");
+                checkedEntities++;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         Assert.That(checkedEntities, Is.EqualTo(Writers * SpawnsPerWriter));

@@ -33,6 +33,9 @@ internal sealed class SubscriptionProfiles
         /// <summary>A ClientRegion's near budget in entities (09 § 7); zero for none.</summary>
         public int NearBudget { get; init; }
 
+        /// <summary>The enters a frame's fill may take (<c>Fill</c>); zero for the engine's budget.</summary>
+        public int FillBudget { get; init; }
+
         // The near budget's counts in PushReplication.NearCounts, plus one: 0 is none.
         public int NearCountsPlusOne { get; init; }
 
@@ -264,6 +267,7 @@ internal sealed class SubscriptionProfiles
             Region = observer.Kind == ObserverKind.ClientRegion,
             MaxEdgeM = observer.Kind == ObserverKind.ClientRegion ? observer.MaxEdgeM : 0d,
             NearBudget = observer.Kind == ObserverKind.ClientRegion ? observer.NearBudget : 0,
+            FillBudget = observer.FillBudget,
             Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
             MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
             Slack = observer.Kind == ObserverKind.Sphere ? observer.VisibilitySlack : 0d,
@@ -349,6 +353,9 @@ internal sealed class SubscriptionProfiles
 
     /// <summary>A ClientRegion profile's near budget and its counts' index in <see cref="PushReplication.NearCounts"/>; (0, −1) for none.</summary>
     public (int Budget, int Counts) NearOf(int profile) => (_profiles[profile].NearBudget, _profiles[profile].NearCountsPlusOne - 1);
+
+    /// <summary>The enters a frame of profile <paramref name="profile"/>'s fill may take; zero for the engine's <c>EnterBudgetPerFrame</c>.</summary>
+    public int FillBudgetOf(int profile) => _profiles[profile].FillBudget;
 
     /// <summary>The widest extent any ClientRegion profile accepts, in metres; zero when none declares one. Every region window is sized for it.</summary>
     public double MaxRegionEdgeM

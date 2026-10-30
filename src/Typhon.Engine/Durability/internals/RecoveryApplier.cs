@@ -14,6 +14,7 @@ namespace Typhon.Engine.Internals;
 // collections (#389: ApplyCollectionFolds, which MUST run after an entity's Slot apply) are all wired. Runs single-threaded under one epoch scope with a
 // dedicated ChangeSet (so applied page mutations are captured by the sealing checkpoint). See 03-recovery.md §3.
 
+[MustDispose(Reason = "owns a ChunkAccessor ('_mapAccessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
 internal sealed unsafe class RecoveryApplier : IDisposable
 {
     /// <summary>One committed component value to restore (logical-truth payload + the TSN of the transaction that committed it).</summary>

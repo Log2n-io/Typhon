@@ -95,12 +95,6 @@ public partial class EntityAccessor : IDisposable
     internal int ComponentInfoCount => _componentInfos.Count;
 
     /// <summary>
-    /// Cached EntityMap accessor for same-archetype repeated lookups.
-    /// Reused across multiple calls targeting the same archetype. Disposed in ResetCore().
-    /// </summary>
-    private protected ushort _entityMapCacheArchId;
-
-    /// <summary>
     /// How many entities this accessor destroyed and has not committed (CLUSTERWALK-04). Always 0 except on a <see cref="Transaction"/>, the only accessor
     /// that destroys; here on the base so a cluster walk reads it once per cluster with no type test.
     /// </summary>
@@ -109,23 +103,27 @@ public partial class EntityAccessor : IDisposable
     /// <summary>The slots this accessor's own pending destroys hold in an archetype's clusters (CLUSTERWALK-04); null — none — except on a
     /// <see cref="Transaction"/>. Reached only when <see cref="OwnDestroyCount"/> moved.</summary>
     internal virtual OwnDestroyedSlots OwnDestroyedSlotsFor(ArchetypeMetadata meta, ArchetypeClusterState state) => null;
-    private protected ChunkAccessor<PersistentStore> _entityMapCacheAccessor;
-    private protected bool _hasEntityMapCache;
 
     /// <summary>
-    /// Bumped whenever an accessor that resolved an <see cref="EntityRef"/>'s cluster base lets go of a page — its cluster caches here and every
-    /// <see cref="ArchetypeAccessor{TArch}"/> built on this accessor (#1199). A handle resolved under an older value re-resolves its base.
+    /// Bumped whenever an accessor that resolved an <see cref="EntityRef"/>'s cluster base lets go of a page — a cluster accessor of the archetype cache
+    /// here, which every <see cref="ArchetypeAccessor{TArch}"/> built on this accessor resolves through (#1199). A handle resolved under an older value
+    /// re-resolves its base.
     /// </summary>
     internal readonly ResolveGeneration ClusterGeneration = new();
 
     /// <summary>
-    /// Cluster accessors for point lookups, one entry per archetype, least recently used replaced (cluster-eligible archetypes only). Several ways, not
-    /// one: two live handles of different archetypes (an attacker and its target) re-resolve through here in turn, and a single entry was disposed and
-    /// rebuilt on every alternation — each time invalidating every handle (#1199).
+    /// EntityMap and cluster accessors for point lookups, one entry per archetype, least recently used replaced. Several ways, not one: two live handles
+    /// of different archetypes (an attacker and its target) re-resolve through here in turn, and a single entry was disposed and rebuilt on every
+    /// alternation — each time invalidating every handle (#1199).
     /// </summary>
-    private ClusterCache _clusterCache;
-    private long _clusterCacheClock;
-    private byte _clusterCacheMru;
+    /// <remarks>
+    /// The only owner of these pages: an <see cref="ArchetypeAccessor{TArch}"/> holds none, so a copy of one or a missed dispose leaks nothing. They
+    /// are let go of where this accessor lets go of everything — commit, dispose, reset, and a point-in-time worker's end of system. An accessor that
+    /// owned them leaked their <c>ActiveChunkWriters</c> when copied or not disposed, and the checkpoint never covered those pages again (CP-13, #1538).
+    /// </remarks>
+    private ArchetypeCache _archetypeCache;
+    private long _archetypeCacheClock;
+    private byte _archetypeCacheMru;
 
     private protected int _entityOperationCount;
     private protected ChangeSet _changeSet;
@@ -564,16 +562,10 @@ public partial class EntityAccessor : IDisposable
     /// </remarks>
     internal void FlushAtSystemEnd()
     {
-        DisposeClusterCache();
+        DisposeArchetypeCache();
         foreach (var ci in _componentInfos.Values)
         {
             ci.ReleaseWindows(_changeSet);
-        }
-
-        if (_hasEntityMapCache)
-        {
-            _entityMapCacheAccessor.Dispose();
-            _hasEntityMapCache = false;
         }
 
         _changeSet?.ReleaseDirtyMarks();
@@ -646,12 +638,7 @@ public partial class EntityAccessor : IDisposable
         _owningThreadId = 0;
         _isPointInTime = false;
         _leaseDepth = 0;
-        if (_hasEntityMapCache)
-        {
-            _entityMapCacheAccessor.Dispose();
-            _hasEntityMapCache = false;
-        }
-        DisposeClusterCache();
+        DisposeArchetypeCache();
         if (_componentInfos.Capacity <= ComponentInfosMaxCapacity)
         {
             _componentInfos.Clear();
@@ -689,12 +676,7 @@ public partial class EntityAccessor : IDisposable
     {
         if (_isDisposed)
         {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-                _hasEntityMapCache = false;
-            }
-            DisposeClusterCache();
+            DisposeArchetypeCache();
             return;
         }
 

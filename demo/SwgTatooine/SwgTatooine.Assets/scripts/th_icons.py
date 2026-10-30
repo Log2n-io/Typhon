@@ -26,6 +26,7 @@ ICONS = {
     "blaster_dl44": (Vector((1.0, 0.0, 0.0)), 0.0, None),
     "vibroknuckler": (Vector((1.0, 0.0, 0.0)), 0.0, None),
 }
+ITEM_VIEW = (Vector((0.55, 1.0, -0.75)), 0.0, None)          # every item (kind "item") not in ICONS: 3/4 from front-left
 LIGHTS = (("key", 6.0, (0.55, -0.55, -0.63)), ("fill", 0.7, (-0.75, 0.15, -0.65)), ("rim", 5.0, (-0.25, -0.55, 0.8)))
 ONLY = os.environ.get("TH_ICONS_ONLY", "").split(",") if os.environ.get("TH_ICONS_ONLY") else None
 if not bpy.app.background:
@@ -68,10 +69,12 @@ for name, energy, d in LIGHTS:
     lo = bpy.data.objects.new(f"_icon_{name}", ld); sc.collection.objects.link(lo)
     lights.append((lo, Vector(d).normalized()))
 roots = {o["asset_id"]: o for o in bpy.data.objects if "asset_id" in o}
+views = dict(ICONS)
+views.update({aid: ITEM_VIEW for aid, o in sorted(roots.items()) if o.get("asset_kind") == "item" and aid not in ICONS})
 os.makedirs(STAGE_DIR, exist_ok=True)
 
 published, report = {}, {}
-for aid, (view, roll, crop) in ICONS.items():
+for aid, (view, roll, crop) in views.items():
     if ONLY and aid not in ONLY:
         continue
     root = roots[aid]

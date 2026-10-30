@@ -648,7 +648,38 @@ public sealed partial class TyphonRuntime : IDisposable
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
             SessionsClosed = ReadCloseCounts(subscriptions),
             FramesSkipped = ReadSkipCounts(subscriptions),
+            OwedOverflows = subscriptions?.Frames?.OwedOverflows ?? 0L,
+            OwedLosts = subscriptions?.Frames?.OwedLosts ?? 0L,
+            OwedLargest = subscriptions?.Frames?.OwedLargest ?? 0,
+            LogResets = ReadLogResets(subscriptions),
         };
+    }
+
+    /// <summary>
+    /// The push log's RESETs — a gap it no longer covers, or one it cannot fold — summed over every served realm's replication, read as
+    /// <see cref="ReadRealmStats"/> reads them: through <c>SnapshotFor</c>, off the tick, stale by a tick at most and never torn.
+    /// </summary>
+    private long ReadLogResets(SubscriptionsRuntime subscriptions)
+    {
+        var table = Engine?.RealmTable;
+        var hub = subscriptions?.Hub;
+        if (table == null || table.MaxRealms <= 1 || hub == null)
+        {
+            var push = subscriptions?.Push;
+            return push == null ? 0L : System.Threading.Volatile.Read(ref push.LogTooOld) + System.Threading.Volatile.Read(ref push.LogAmbiguous);
+        }
+
+        var sum = 0L;
+        foreach (var realm in table.Registered)
+        {
+            var replication = hub.SnapshotFor(realm.Id.Value);
+            if (replication != null)
+            {
+                sum += System.Threading.Volatile.Read(ref replication.LogTooOld) + System.Threading.Volatile.Read(ref replication.LogAmbiguous);
+            }
+        }
+
+        return sum;
     }
 
     /// <summary>The session table's cumulative closes per reason; zeros with no replication.</summary>
@@ -915,6 +946,11 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             _parallelAccessors[i]?.Dispose();
         }
+
+        // A tick's UoW is disposed at its end; one a tick never reached (a FatalStop, a shutdown between its start and its end) still holds its registry
+        // slot and change set. Nothing ticks past Quiesce, so it is released here.
+        _currentUow?.Dispose();
+        _currentUow = null;
 
         // The profiler is intentionally NOT finalized here. ProfilerBootstrap finalizes the trace from the engine
         // storage's Disposing event (ManagedPagedMMF, disposed after DatabaseEngine) — that runs deterministically on
@@ -2858,7 +2894,9 @@ public sealed partial class TyphonRuntime : IDisposable
                 // PersistentStore path: ClusterRangeEntityView for sequential cluster-order iteration.
                 // Per-worker pool (sized to WorkerCount) — must index by workerId, not chunkIndex,
                 // since oversubscription (ChunksPerWorker > 1) allows chunkIndex >= workerCount.
+#pragma warning disable TYPHON004 // Pooled per worker, not created here: the runtime disposes the pool
                 var rangeView = GetOrCreateTierRangeView(sysIdx, workerId);
+#pragma warning restore TYPHON004
                 rangeView.Reset(cs, cs.ClusterSegment, tierIds, clusterStart, clusterEnd);
                 entities = rangeView;
             }

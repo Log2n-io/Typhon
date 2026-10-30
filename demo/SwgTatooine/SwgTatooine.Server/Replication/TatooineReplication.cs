@@ -287,6 +287,81 @@ public struct TakeMission
     public uint Serial;
 }
 
+/// <summary>
+/// "Give this player some of my credits" (economy-foundation.md E0-7): <c>/tip &lt;amount&gt;</c> typed in chat with a player selected. Applied by the
+/// <c>Ledger</c> system as one <see cref="TransferKind.Tip"/> row, or refused with the reason.
+/// </summary>
+public struct GiveCredits
+{
+    /// <summary>The recipient's body, as the session was shown it.</summary>
+    public uint Target;
+
+    /// <summary>Credits to give, 1 to <see cref="EconomyLedger.MaxTip"/>.</summary>
+    public uint Amount;
+}
+
+/// <summary>
+/// "List these units on the bazaar" (bazaar.md § 3.1): <see cref="Quantity"/> units of one (template, Mk) from the inventory, at a unit price, at the bazaar
+/// terminal the player stands at. Applied by the <c>Market</c> system, or refused with the reason.
+/// </summary>
+public struct MarketList
+{
+    /// <summary>The item template's id (<see cref="ItemCatalog"/>).</summary>
+    public ushort Template;
+
+    /// <summary>1-5; 0 for an item without a Mk.</summary>
+    public byte Mk;
+
+    /// <summary>Units, 1-99.</summary>
+    public byte Quantity;
+
+    /// <summary>Credits per unit, 1..<see cref="TatooineData.MaxUnitPrice"/>.</summary>
+    public uint UnitPrice;
+}
+
+/// <summary>"Take my listing off the board" — from anywhere (bazaar.md B5). Its units are reserved for the seller at its city, or delivered there.</summary>
+public struct MarketCancel
+{
+    /// <summary>The listing's entity id, raw, as <c>/swg/market/mine</c> gave it.</summary>
+    public ulong Listing;
+}
+
+/// <summary>
+/// "Buy this listing, whole, at this price" — at any bazaar terminal (bazaar.md B2, B5). One buyer: the first wins, a later one is refused
+/// <see cref="TatooineReplication.MarketSold"/>.
+/// </summary>
+public struct MarketBuy
+{
+    /// <summary>The listing's entity id, raw, as <c>/swg/market</c> gave it.</summary>
+    public ulong Listing;
+
+    /// <summary>The unit price the buyer was shown: another price is refused <see cref="TatooineReplication.MarketSold"/>.</summary>
+    public uint UnitPrice;
+}
+
+/// <summary>
+/// "Give me what is reserved for me here" — at a bazaar terminal of the listing's city (bazaar.md B3). 0 collects all of the character's there that fit,
+/// oldest first.
+/// </summary>
+public struct MarketCollect
+{
+    /// <summary>The listing's entity id, raw; 0 for all.</summary>
+    public ulong Listing;
+}
+
+/// <summary>"Sell these units to the vendor" (bazaar.md B7): destroyed, paid ⌊count × value × 20 %⌋ from World. At a bazaar terminal.</summary>
+public struct SellToVendor
+{
+    /// <summary>The item template's id.</summary>
+    public ushort Template;
+
+    /// <summary>1-5; 0 for an item without a Mk.</summary>
+    public byte Mk;
+
+    /// <summary>Units, 1-99.</summary>
+    public byte Quantity;
+}
+
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
 public struct AbandonMission
 {
@@ -368,6 +443,54 @@ public struct Chat
 
     /// <summary>Which realm they were in, for the routing.</summary>
     public ushort Realm;
+}
+
+/// <summary>
+/// A move of credits or items that concerns one player, told to that player's session on the tick it is written: a drop, a tip, a sale and its tax, a
+/// purchase, a reward. What the client says in its chat.
+/// </summary>
+/// <remarks>
+/// <b>Pushed, never read back.</b> The ledgers are the operators' audit trail and the game client never reads them (Loïc, 2026-10-29): it used to ask for a
+/// character's last twenty rows on every wallet and inventory read, which cost a walk of the character's whole history (#1532). A notice carries what one
+/// line of chat needs, once, and nothing the client could page through.
+/// </remarks>
+public struct PlayerNotice
+{
+    /// <summary><see cref="Ledger"/>: credits moved.</summary>
+    public const byte Credits = 1;
+
+    /// <summary><see cref="Ledger"/>: items moved.</summary>
+    public const byte Items = 2;
+
+    /// <summary><see cref="Credits"/> or <see cref="Items"/>.</summary>
+    public byte Ledger;
+
+    /// <summary>1 when this player received, 0 when it gave.</summary>
+    public byte Incoming;
+
+    /// <summary>The item's Mk; 0 for credits.</summary>
+    public byte Mk;
+
+    /// <summary>The item's template; 0 for credits.</summary>
+    public ushort Template;
+
+    /// <summary>How many items; 0 for credits.</summary>
+    public int Count;
+
+    /// <summary>How many credits, never negative: <see cref="Incoming"/> says which way; 0 for items.</summary>
+    public long Amount;
+
+    /// <summary>What the move is about — the victim, the lair, the listing, the mission — as the ledger row's <c>Ref</c>: the rows of one drop share it.</summary>
+    public long Ref;
+
+    /// <summary>The kind, by name: <c>TransferKind.NameOf</c> or <c>ItemMoveKind.NameOf</c>.</summary>
+    public Utf8Text256 Kind;
+
+    /// <summary>The other side's character name; empty for the world.</summary>
+    public Utf8Text256 Other;
+
+    /// <summary>The item's name, from the catalogue: the client has no item table. Empty for credits.</summary>
+    public Utf8Text256 Name;
 }
 
 /// <summary>
@@ -585,6 +708,9 @@ public static partial class TatooineReplication
     /// <summary>The session kind a small-view client names in <c>HELLO</c>.</summary>
     public const string PlayerKind = "player";
 
+    /// <summary>Enters per frame of the whole-world god and overview cameras (ObserverBuilder.Fill, #1511): the engine's default is 500.</summary>
+    public const int GodFillPerFrame = 5000;
+
     /// <summary>How far a player sees, in metres.</summary>
     /// <remarks>
     /// Chosen as a plausible awareness range for a ground game at this world scale, not measured from anything: what it is here for is that a player's view
@@ -742,6 +868,82 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a mission command from a session with no body in the world — a spectator, or one whose avatar is not bound yet.</summary>
     public const byte NotInWorld = AckReasons.FirstApplicationReason + 14;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> for more than the giver's wallet holds.</summary>
+    public const byte TipNotEnough = AckReasons.FirstApplicationReason + 15;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> naming nothing this session was shown, or something with no wallet — a creature, a building, the scripted crowd.</summary>
+    public const byte TipNoRecipient = AckReasons.FirstApplicationReason + 16;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> naming the giver's own body.</summary>
+    public const byte TipSelf = AckReasons.FirstApplicationReason + 17;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> to a body farther than <see cref="EconomyLedger.TipReachM"/>, or in another realm.</summary>
+    public const byte TipTooFar = AckReasons.FirstApplicationReason + 18;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="GiveCredits"/> of zero credits, or more than <see cref="EconomyLedger.MaxTip"/>.</summary>
+    public const byte TipBadAmount = AckReasons.FirstApplicationReason + 19;
+
+    /// <summary>A tip applied and then lost with its transaction, which did not commit: nothing moved, and it can be sent again.</summary>
+    public const byte TipFailed = AckReasons.FirstApplicationReason + 20;
+
+    /// <summary>A take or a cancel applied and then lost with the desk's transaction, which did not commit: nothing changed, and it can be sent again.</summary>
+    public const byte MissionFailed = AckReasons.FirstApplicationReason + 21;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="TakeMission"/> for an offer above the taker character's combat level + <see cref="TatooineData.MissionLevelAbove"/>
+    /// (Loïc, 2026-10-26: a mission above a character is not for it).
+    /// </summary>
+    public const byte MissionAboveLevel = AckReasons.FirstApplicationReason + 22;
+
+    // The bazaar's refusals (bazaar.md § 3.1), 151-163. A market command from a session with no body is refused NotInWorld.
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a list, a buy, a collect or a vendor sale from a body not within <see cref="TatooineData.BazaarReachM"/> of a bazaar terminal.
+    /// </summary>
+    public const byte MarketNotAtBazaar = AckReasons.FirstApplicationReason + 23;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketCollect"/> at a bazaar of another city than the listing's.</summary>
+    public const byte MarketWrongCity = AckReasons.FirstApplicationReason + 24;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="MarketBuy"/> for a listing sold to someone else first, no longer listed, gone, or at another price; a
+    /// <see cref="MarketCancel"/> of a listing no longer listed. The race loser's.
+    /// </summary>
+    public const byte MarketSold = AckReasons.FirstApplicationReason + 25;
+
+    /// <summary><c>ACKS</c> reason: a buy, or a list fee, the wallet does not cover.</summary>
+    public const byte MarketNotEnough = AckReasons.FirstApplicationReason + 26;
+
+    /// <summary><c>ACKS</c> reason: a list or a vendor sale of more units than the inventory holds.</summary>
+    public const byte MarketNoItems = AckReasons.FirstApplicationReason + 27;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a list or a vendor sale naming no item, a Mk its template refuses, a quantity outside 1-99, or a price outside
+    /// 1..<see cref="TatooineData.MaxUnitPrice"/>.
+    /// </summary>
+    public const byte MarketBadListing = AckReasons.FirstApplicationReason + 28;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketList"/> from a character with <see cref="TatooineData.MaxListings"/> listed already.</summary>
+    public const byte MarketListingCap = AckReasons.FirstApplicationReason + 29;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketBuy"/> from a character with <see cref="TatooineData.MaxReserved"/> purchases uncollected.</summary>
+    public const byte MarketReservedCap = AckReasons.FirstApplicationReason + 30;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketCollect"/> whose units do not fit the inventory — for "all", when none did.</summary>
+    public const byte MarketNoRoom = AckReasons.FirstApplicationReason + 31;
+
+    /// <summary><c>ACKS</c> reason: a cancel of a listing that is not the character's, or a collect of one not reserved for it.</summary>
+    public const byte MarketNotYours = AckReasons.FirstApplicationReason + 32;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="MarketBuy"/> of the buyer's own listing.</summary>
+    public const byte MarketOwnListing = AckReasons.FirstApplicationReason + 33;
+
+    /// <summary>A market command applied and then lost with the desk's transaction, which did not commit: nothing changed, and it can be sent again.</summary>
+    public const byte MarketFailed = AckReasons.FirstApplicationReason + 34;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="SellToVendor"/> whose payout rounds to 0 — an item with no market value, or too few units of a cheap one.</summary>
+    public const byte MarketWorthless = AckReasons.FirstApplicationReason + 35;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1249,8 +1451,26 @@ public static partial class TatooineReplication
     // Whether the declarations were made: a measurement run has no replication, and an announcement there has nobody to reach.
     private static bool _declared;
 
+    /// <summary>Whether this process serves clients: the replication was declared.</summary>
+    public static bool Declared => _declared;
+
     // Announcements emitted, for the periodic report.
     private static long _announced;
+
+    // Notices told, for the periodic report.
+    private static long _noticesTold;
+
+    /// <summary>Notices told to a session.</summary>
+    public static long NoticesTold => System.Threading.Interlocked.Read(ref _noticesTold);
+
+    /// <summary>Tells <paramref name="notice"/> to <paramref name="session"/>, when this process serves clients. From a serial system.</summary>
+    public static void Tell(TickContext tick, uint session, in PlayerNotice notice)
+    {
+        if (_declared && tick.Subscriptions != null && tick.Subscriptions.EmitTo(SessionId.FromValue(session), in notice))
+        {
+            System.Threading.Interlocked.Increment(ref _noticesTold);
+        }
+    }
 
     /// <summary>Announces <paramref name="news"/> to its realm's subtree, when this process serves clients. From a serial system.</summary>
     /// <param name="tick">The tick context of the system this is called from.</param>
@@ -1467,8 +1687,11 @@ public static partial class TatooineReplication
         {
             subs.Profile(GodProfile, p =>
             {
+                // Fill: an operator's camera, not a population (Loïc, 2026-10-27) — its enters per frame (and owed cap) past the engine's 500, so the whole
+                // planet loads in ~1 s rather than ~8 (#1511's measurement: 84 frames → 11); still paced by bytes, at most half a frame.
                 p.Detection(detection)
                     .World()
+                    .Fill(GodFillPerFrame)
                     .Of<Creature>()
                     .Of<CityNpc>()
                     .Of<Player>()
@@ -1488,6 +1711,7 @@ public static partial class TatooineReplication
                 p.Detection(detection)
                     .World()
                     .AroundControlled()
+                    .Fill(GodFillPerFrame)
                     .Of<Creature>()
                     .Of<CityNpc>()
                     .Of<Player>()
@@ -1691,6 +1915,43 @@ public static partial class TatooineReplication
             .Roles(SessionRole.Player)
             .Field(a => a.Mission, Codec.U64, "mission"));
 
+        // The economy (economy-foundation.md). Queued, because each is a payment and two tips are two payments; two a second with a burst of four, which a
+        // person typing /tip does not reach. Applied by the Ledger system, in arrival order.
+        subs.Command<GiveCredits>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(g => g.Target, Codec.VarUInt, "target")
+            .Field(g => g.Amount, Codec.VarUInt, "amount"));
+
+        // The bazaar (bazaar.md § 3.1). Queued, because each is a payment or a movement of items; the tip's rate. Applied by the Market system, in arrival
+        // order within a kind: the race between two buyers of one listing is settled by that order.
+        subs.Command<MarketList>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Template, Codec.VarUInt, "template")
+            .Field(m => m.Mk, Codec.U8, "mk")
+            .Field(m => m.Quantity, Codec.U8, "quantity")
+            .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice"));
+        subs.Command<MarketCancel>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Listing, Codec.U64, "listing"));
+        subs.Command<MarketBuy>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Listing, Codec.U64, "listing")
+            .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice"));
+        subs.Command<MarketCollect>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Listing, Codec.U64, "listing"));
+        subs.Command<SellToVendor>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Template, Codec.VarUInt, "template")
+            .Field(m => m.Mk, Codec.U8, "mk")
+            .Field(m => m.Quantity, Codec.U8, "quantity"));
+
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
         subs.Command<Say>(c => c
@@ -1700,6 +1961,20 @@ public static partial class TatooineReplication
 
         // Heard within 50 m of the speaker AND in the speaker's realm. The realm clause is what makes two players at the
         // same coordinates in two different cantinas unable to hear each other, and it is the engine's to enforce.
+        // Told to the one session it concerns, by EmitTo (SimBridge.Notices.cs).
+        subs.Event<PlayerNotice>(e => e
+            .RouteToSession()
+            .Field(n => n.Ledger, Codec.U8, "ledger")
+            .Field(n => n.Incoming, Codec.U8, "incoming")
+            .Field(n => n.Mk, Codec.U8, "mk")
+            .Field(n => n.Template, Codec.VarUInt, "template")
+            .Field(n => n.Count, Codec.VarInt, "count")
+            .Field(n => n.Amount, Codec.VarInt64, "amount")
+            .Field(n => n.Ref, Codec.VarInt64, "ref")
+            .Field(n => n.Kind, Codec.Str(16), "kind")
+            .Field(n => n.Other, Codec.Str(64), "other")
+            .Field(n => n.Name, Codec.Str(64), "name"));
+
         subs.Event<Chat>(e => e
             .RouteNear(c => new Vector3D(c.X, c.Z, 0d), c => new RealmId(c.Realm), TatooineData.SayRangeM)
             .Entity(c => c.Speaker, "speaker")
@@ -2564,6 +2839,63 @@ public static partial class TatooineReplication
     private static double SendCpuFrom;
     private static int SendGen0From;
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_MOVE_TRACE</c>: each finished tick's timing and its three slowest systems, to a CSV.</summary>
+    /// <remarks>The companion of <c>SimBridge.MoveTrace</c> (2026-10-28): which system made a tick late, beside the positions that tick produced.</remarks>
+    private static readonly bool TickTrace = Environment.GetEnvironmentVariable("SWG_MOVE_TRACE") == "1";
+
+    private static System.IO.StreamWriter _tickTraceOut;
+
+    /// <summary>One line of <see cref="TickTrace"/>, for <paramref name="tickNumber"/>, read from the scheduler's telemetry ring once that tick is recorded.</summary>
+    private static void TraceTick(long tickNumber)
+    {
+        var ring = Scheduler?.Telemetry;
+        if (ring == null || !ring.TryGetTick(tickNumber, out var t) || !ring.TryGetSystemMetrics(tickNumber, out var systems))
+        {
+            return;
+        }
+
+        if (_tickTraceOut == null)
+        {
+            var path = (Environment.GetEnvironmentVariable("SWG_MOVE_TRACE_FILE") ?? "move-trace.csv") + ".ticks.csv";
+            _tickTraceOut = new System.IO.StreamWriter(path, append: false) { AutoFlush = true };
+            _tickTraceOut.WriteLine("tick,stopwatchMs,durationMs,intervalMs,uowFlushMs,lostWakesTotal,tickLostWakes,sys1,us1,work1,trans1,strag1,ent1,sys2,us2,work2,trans2,strag2,ent2,sys3,us3,work3,trans3,strag3,ent3");
+        }
+
+        int a = -1, b = -1, c = -1;
+        for (var i = 0; i < systems.Length; i++)
+        {
+            var d = systems[i].DurationUs;
+            if (a < 0 || d > systems[a].DurationUs)
+            {
+                (a, b, c) = (i, a, b);
+            }
+            else if (b < 0 || d > systems[b].DurationUs)
+            {
+                (b, c) = (i, b);
+            }
+            else if (c < 0 || d > systems[c].DurationUs)
+            {
+                c = i;
+            }
+        }
+
+        var names = Scheduler.Systems;
+        var top = new System.Text.StringBuilder();
+        foreach (var i in (ReadOnlySpan<int>)[a, b, c])
+        {
+            top.Append(',').Append(i < 0 ? "" : names[systems[i].SystemIndex].Name)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].DurationUs)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].WorkUs)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].TransitionLatencyUs)
+                .Append(',').Append(i < 0 ? 0 : (int)systems[i].StragglerGapUs)
+                .Append(',').Append(i < 0 ? 0 : systems[i].EntitiesProcessed);
+        }
+
+        var ms = System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        _tickTraceOut.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{tickNumber},{ms:F3},{t.ActualDurationMs:F3},{t.TickIntervalMs:F3},{t.UowFlushMs:F3},{Scheduler.LostWakeCount},{t.LostWakes}{top}"));
+    }
+
     /// <summary>
     /// The periodic replication report: what the track did, cumulatively, every three hundred ticks.
     /// </summary>
@@ -2574,6 +2906,11 @@ public static partial class TatooineReplication
     /// </remarks>
     public static void ReportTick(TickContext tick)
     {
+        if (TickTrace)
+        {
+            TraceTick(tick.TickNumber - 1);
+        }
+
         var subs = tick.Subscriptions;
         if (subs == null)
         {

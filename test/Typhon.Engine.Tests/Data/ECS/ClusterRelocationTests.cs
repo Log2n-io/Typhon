@@ -62,24 +62,17 @@ class ClusterRelocationTests : TestBase<ClusterRelocationTests>
         var result = new List<(int, int, float, float)>();
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var b = ref positions[slot].Bounds;
-                    result.Add((cluster.ChunkId, slot, 0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY)));
-                }
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var b = ref positions[slot].Bounds;
+                result.Add((cluster.ChunkId, slot, 0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY)));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
         return result;
     }
@@ -88,23 +81,16 @@ class ClusterRelocationTests : TestBase<ClusterRelocationTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var (x, y) = position(cluster.ChunkId, slot);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
-                }
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var (x, y) = position(cluster.ChunkId, slot);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
         tx.Commit();
     }
@@ -640,34 +626,27 @@ class ClusterRelocationTests : TestBase<ClusterRelocationTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    ref readonly var pos = ref positions[slot];
-                    uint h = (uint)((pos.Tag * 0x9E3779B1) ^ (step * 0x85EBCA6B));
-                    h ^= h >> 15;
-                    h *= 0x2C1B3C6D;
-                    h ^= h >> 13;
+                ref readonly var pos = ref positions[slot];
+                uint h = (uint)((pos.Tag * 0x9E3779B1) ^ (step * 0x85EBCA6B));
+                h ^= h >> 15;
+                h *= 0x2C1B3C6D;
+                h ^= h >> 13;
 
-                    float dx = (((h & 0xFF) / 255f) - 0.5f) * 2f;
-                    float dy = ((((h >> 8) & 0xFF) / 255f) - 0.5f) * 2f;
-                    float x = Math.Clamp((0.5f * (pos.Bounds.MinX + pos.Bounds.MaxX)) + dx, 2f, 98f);
-                    float y = Math.Clamp((0.5f * (pos.Bounds.MinY + pos.Bounds.MaxY)) + dy, 2f, 98f);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, pos.Tag));
-                }
+                float dx = (((h & 0xFF) / 255f) - 0.5f) * 2f;
+                float dy = ((((h >> 8) & 0xFF) / 255f) - 0.5f) * 2f;
+                float x = Math.Clamp((0.5f * (pos.Bounds.MinX + pos.Bounds.MaxX)) + dx, 2f, 98f);
+                float y = Math.Clamp((0.5f * (pos.Bounds.MinY + pos.Bounds.MaxY)) + dy, 2f, 98f);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y, pos.Tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -707,27 +686,20 @@ class ClusterRelocationTests : TestBase<ClusterRelocationTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                int slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    ref readonly var b = ref positions[slot].Bounds;
-                    float x = Math.Clamp((0.5f * (b.MinX + b.MaxX)) + ((float)rng.NextDouble() - 0.5f) * 2f, 2f, 98f);
-                    float y = Math.Clamp((0.5f * (b.MinY + b.MaxY)) + ((float)rng.NextDouble() - 0.5f) * 2f, 2f, 98f);
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
-                }
+                ref readonly var b = ref positions[slot].Bounds;
+                float x = Math.Clamp((0.5f * (b.MinX + b.MaxX)) + ((float)rng.NextDouble() - 0.5f) * 2f, 2f, 98f);
+                float y = Math.Clamp((0.5f * (b.MinY + b.MaxY)) + ((float)rng.NextDouble() - 0.5f) * 2f, 2f, 98f);
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

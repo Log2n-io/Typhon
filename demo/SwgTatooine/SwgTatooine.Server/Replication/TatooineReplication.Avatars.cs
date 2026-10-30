@@ -81,6 +81,9 @@ public static partial class TatooineReplication
     /// <summary>Ground height at a point, so a scattered spawn lands ON the terrain rather than at the capital's height.</summary>
     private static Func<float, float, float> SpawnGroundAt;
 
+    /// <summary>Diagnostic switch, read once from <c>SWG_ALT_PROBE</c>; see <c>SimBridge.ProbeAltitude</c>.</summary>
+    private static readonly bool AltitudeProbe = Environment.GetEnvironmentVariable("SWG_ALT_PROBE") == "1";
+
     /// <summary>
     /// Refuses to start a server that cannot host characters.
     /// </summary>
@@ -729,18 +732,19 @@ public static partial class TatooineReplication
             {
                 Account = account,
                 Name = identity.Name == default(String64) ? (String64)DisplayNameFor(account) : identity.Name,
-                Credits = CharacterStore.StartingCredits,
                 LastPosition = SpawnFor(account),
                 LastRealm = DefaultSpawnRealm,
                 Outfit = TatooineData.OutfitFor(account, identity.Outfit),
                 LastSavedUtcTicks = DateTime.UtcNow.Ticks,
             };
 
-            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(profile));
+            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(profile), CharacterArch.Progress.Set(CharacterProgress.Start));
             System.Threading.Interlocked.Increment(ref _charactersCreated);
         }
 
-        var avatar = SpawnAvatar(tx, session, in profile);
+        // Its level and XP, which its body carries: the level everyone reads, the health that level gives (character-level.md § 4).
+        var progress = ProgressOf(tx, character);
+        var avatar = SpawnAvatar(tx, session, in profile, in progress);
 
         // Control does both halves: it tells the engine which entity this session drives, and — with the AroundControlled player
         // profile — puts the session in that entity's realm and centres its sphere on it.
@@ -748,6 +752,9 @@ public static partial class TatooineReplication
 
         BoundPlayer[session.Value] = avatar;
         CharacterOfSession[session.Value] = character;
+
+        // Its wallet, opened with its grant on a first login: the Ledger system's to write, later in this tick (economy-foundation.md E0-1).
+        BodiesBound.Add((character, avatar));
         SessionOfAccount[account.RawValue] = session.Value;
         PlayingAccounts[account.RawValue] = 0;
         AccountOfSession.Remove(session.Value);
@@ -1054,7 +1061,6 @@ public static partial class TatooineReplication
         var saved = profile.Read(CharacterArch.Profile);
         saved.LastPosition = new Point3F { X = place.X, Y = place.Y, Z = place.Z };
         saved.LastRealm = realm.Value;
-        saved.Credits = body.Read(Player.Inventory).Credits;
         saved.LastSavedUtcTicks = DateTime.UtcNow.Ticks;
         profile.Set(CharacterArch.Profile, saved);
 
@@ -1111,10 +1117,19 @@ public static partial class TatooineReplication
     /// first step before its client had seen it, and a zero destination would send it to the planet's origin.
     /// </para>
     /// </remarks>
-    private static EntityId SpawnAvatar(Transaction tx, SessionId session, in Character profile)
+    private static EntityId SpawnAvatar(Transaction tx, SessionId session, in Character profile, in CharacterProgress progress)
     {
         var bounds = default(PlayerPlacement);
         bounds.SetAt(profile.LastPosition.X, profile.LastPosition.Z, profile.LastPosition.Y, TatooineData.PlayerBodyHalfM);
+        if (AltitudeProbe && SpawnGroundAt != null)
+        {
+            // SWG_ALT_PROBE (SimBridge.ProbeAltitude): the saved altitude a resumed body starts at, against the terrain under it. Rooms have their
+            // own floor, so only a large gap on realm 0 means anything.
+            var ground = SpawnGroundAt(profile.LastPosition.X, profile.LastPosition.Z);
+            Console.WriteLine(
+                $"[alt-probe] resume realm {profile.LastRealm} at ({profile.LastPosition.X:F1}, {profile.LastPosition.Z:F1}) saved y {profile.LastPosition.Y:F2} "
+                + $"terrain {ground:F2} dy {profile.LastPosition.Y - ground:+0.00;-0.00}");
+        }
 
         var state = new PlayerState
         {
@@ -1140,15 +1155,15 @@ public static partial class TatooineReplication
             SwoopMps = SpeedFor(SpeedClasses.Swoop),
         };
 
+        // Its character's level's health (character-level.md § 1): 1 040 at CL 1, 1 400 at CL 10, the crowd's.
+        var health = Progression.HealthFor(progress.Level);
         var vitals = new PlayerVitals
         {
-            Health = AvatarMaxHealth,
-            MaxHealth = AvatarMaxHealth,
+            Health = health,
+            MaxHealth = health,
             AttackDamage = AvatarAttackDamage,
             AttackCooldown = 0,
         };
-
-        var inventory = new Inventory { Credits = profile.Credits, ItemCount = 0, ItemValue = 0 };
 
         var control = default(PlayerControl);
         control.Kind = ControllerKind.Human;
@@ -1158,22 +1173,43 @@ public static partial class TatooineReplication
         owner.Target = EntityId.Null;
 
         // What everyone draws this body in, and the name they read on it: the character's own, so every client — this one included — agrees.
-        var look = new PlayerLook { Outfit = profile.Outfit, NameId = PlayerNames.IdFor(profile.Name.AsString) };
+        var look = new PlayerLook
+        {
+            Outfit = profile.Outfit,
+            NameId = PlayerNames.IdFor(profile.Name.AsString),
+            Bot = AccountOf(tx, profile.Account).Bot,
+            Level = progress.Level,
+            Xp = Progression.XpByte(in progress),
+        };
 
         return tx.Spawn<Player>(
             Player.Bounds.Set(in bounds),
             Player.Move.Set(in move),
             Player.State.Set(in state),
             Player.Vitals.Set(in vitals),
-            Player.Inventory.Set(in inventory),
             Player.Control.Set(in control),
             Player.Session.Set(in owner),
             Player.Look.Set(in look),
             Player.Realm.Set(new PlayerRealm(profile.LastRealm)));
     }
 
-    /// <summary>An avatar's health. The pooled crowd's 1400, so a human is neither tougher nor more fragile than the world it is in.</summary>
-    private const int AvatarMaxHealth = 1400;
+    /// <summary>
+    /// A character's level and XP, read where its body is spawned; <see cref="CharacterProgress.Start"/> for one that has none, which a created character
+    /// never is.
+    /// </summary>
+    internal static CharacterProgress ProgressOf(Transaction tx, EntityId character)
+    {
+        if (tx.TryOpen(character, out var entity))
+        {
+            var progress = entity.Read(CharacterArch.Progress);
+            if (progress.Level != 0)
+            {
+                return progress;
+            }
+        }
+
+        return CharacterProgress.Start;
+    }
 
     /// <summary>An avatar's attack damage, matching the pooled crowd's.</summary>
     private const int AvatarAttackDamage = 95;
@@ -1185,7 +1221,7 @@ public static partial class TatooineReplication
     /// <remarks>An open by entity id, not an index read: the id is what the token carried.</remarks>
     private static Account AccountOf(Transaction tx, EntityId account)
     {
-        using var accounts = tx.For<AccountArch>();
+        var accounts = tx.For<AccountArch>();
         return accounts.TryOpen(account, out var entity) ? entity.Read(AccountArch.Identity) : default;
     }
 
@@ -1282,6 +1318,16 @@ public static partial class TatooineReplication
         return BoundPlayer.TryGetValue(session.Value, out body) && CharacterOfSession.TryGetValue(session.Value, out character);
     }
 
+    /// <summary>Every character with a session now, to the session: whom a notice is told to (<c>SimBridge.Notices.cs</c>).</summary>
+    internal static void FillCharacterSessions(Dictionary<EntityId, uint> sessions)
+    {
+        sessions.Clear();
+        foreach (var (session, character) in CharacterOfSession)
+        {
+            sessions[character] = session;
+        }
+    }
+
     /// <summary>Fills <paramref name="bodies"/> with every character that has a body in the world now, and that body.</summary>
     /// <param name="bodies">Cleared first.</param>
     /// <remarks>
@@ -1304,9 +1350,41 @@ public static partial class TatooineReplication
         }
     }
 
+    /// <summary>
+    /// The inverse of <see cref="FillCharacterBodies"/>: every body a character drives, held bodies included, to its character — what a kill's killer
+    /// resolves through (character-level.md § 2). A body missing from it is the crowd's: no character, no XP, no loot.
+    /// </summary>
+    internal static void FillBodyCharacters(Dictionary<EntityId, EntityId> characters)
+    {
+        characters.Clear();
+        foreach (var (session, character) in CharacterOfSession)
+        {
+            if (BoundPlayer.TryGetValue(session, out var body))
+            {
+                characters[body] = character;
+            }
+            else if (ResumingPlayer.TryGetValue(session, out var hold))
+            {
+                characters[hold.Avatar] = character;
+            }
+        }
+    }
+
+    /// <summary>The bodies bound to a character this tick, and their character: for the Ledger system, which opens a first login's wallet.</summary>
+    /// <remarks>Written by the session system (Input phase), drained by the Ledger system (Economy phase): one after the other on the tick, never at once.</remarks>
+    private static readonly List<(EntityId Character, EntityId Body)> BodiesBound = [];
+
+    /// <summary>Moves this tick's bound bodies into <paramref name="into"/>, which it does not clear, and forgets them.</summary>
+    internal static void DrainBodiesBound(List<(EntityId Character, EntityId Body)> into)
+    {
+        into.AddRange(BodiesBound);
+        BodiesBound.Clear();
+    }
+
     /// <summary>Forgets every avatar binding. Called from <see cref="ResetSessionAccounting"/>.</summary>
     private static void ResetAvatarAccounting()
     {
+        BodiesBound.Clear();
         AccountOfSession.Clear();
         CharacterOfSession.Clear();
         SessionOfAccount.Clear();

@@ -53,6 +53,13 @@ internal struct CombatEvent
 
     /// <summary>Which archetype <see cref="Target"/> belongs to. See <see cref="CombatTargetKind"/>.</summary>
     public byte TargetKind;
+
+    /// <summary>
+    /// The attacker's level, for the B4 level factor the drain applies to <see cref="Amount"/> (character-level.md § 6): a character's CL, a creature's content
+    /// level, <see cref="TatooineData.CrowdLevel"/> for a scripted body; 0 for none, which scales nothing.
+    /// </summary>
+    /// <remarks>Carried, so the drain opens no extra entity: it has the target open already and reads its level there. In the padding: still 24 bytes.</remarks>
+    public byte AttackerLevel;
 }
 
 /// <summary>What a <see cref="CombatEvent"/> is.</summary>
@@ -95,4 +102,75 @@ public static class CombatTargetKind
     /// a session's player never fired; it fired the day it did.
     /// </remarks>
     public const byte Unshootable = 3;
+}
+
+/// <summary>
+/// One death — a creature's, a camp foe's or a lair's — as the serial combat drain saw it: who killed what, of which level and kind, where (character-level.md
+/// § 2). Captured there because nothing after it can: a broken wild lair is destroyed by the lair director later in the same tick.
+/// </summary>
+/// <remarks>
+/// <b>Pushed into two queues</b>, <see cref="SimBridge.KillXpQueue"/> and <see cref="SimBridge.KillLootQueue"/>: <c>EventQueue.Drain</c> consumes, so one
+/// queue cannot feed both the XP and the loot systems, and a death is a few a second, so the second push is free.
+/// </remarks>
+[StructLayout(LayoutKind.Sequential)]
+internal struct KillEvent
+{
+    /// <summary>The Player body whose blow killed; <c>EntityId.Null</c> when the blow was a creature's. A crowd body is kept, and resolves to no character.</summary>
+    public EntityId Killer;
+
+    /// <summary>The creature, or the lair.</summary>
+    public EntityId Victim;
+
+    /// <summary>A creature's home lair (<see cref="CreatureHome.Lair"/>); the lair itself for a lair; <c>EntityId.Null</c> when it has none.</summary>
+    public EntityId Lair;
+
+    /// <summary>That lair's <see cref="Server.Lair.Mission"/> (a held mission), <c>EntityId.Null</c> for a wild lair.</summary>
+    public EntityId Mission;
+
+    /// <summary>The tick it died on.</summary>
+    public long Tick;
+
+    /// <summary>Where it died.</summary>
+    public float X;
+
+    public float Z;
+
+    /// <summary>Its realm.</summary>
+    public ushort Realm;
+
+    /// <summary>See <see cref="KillVictimKind"/>.</summary>
+    public byte VictimKind;
+
+    /// <summary>Its content level, 1 to 50; 0 when it has none.</summary>
+    public byte VictimLevel;
+
+    /// <summary>Its creature template (<see cref="CreatureTemplates"/>): the brain's for a creature or foe, the lair's for a lair. What loot is made of.</summary>
+    public byte Species;
+
+    /// <summary>
+    /// For a lair, its <see cref="Server.Lair.OwnerHit"/> as this blow left it: 1 when its mission's holder landed a blow among those that broke it. The
+    /// desk completes the mission on exactly that, so the XP and the loot systems test the same byte: a mission lair's break is a stranger's only at 0.
+    /// </summary>
+    public byte OwnerHit;
+}
+
+/// <summary>A body to bring up to its character's progress: what the mission desk hands <c>Progression</c> after paying a mission's XP (character-level.md § 5).</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct ProgressRefresh
+{
+    /// <summary>The holder's body.</summary>
+    public EntityId Body;
+
+    /// <summary>Its character's progress, as the desk committed it.</summary>
+    public CharacterProgress Progress;
+}
+
+/// <summary>What a <see cref="KillEvent"/> killed.</summary>
+internal static class KillVictimKind
+{
+    public const byte Creature = 1;
+
+    public const byte Foe = 2;
+
+    public const byte Lair = 3;
 }

@@ -72,6 +72,8 @@ internal unsafe partial class SpatialRTree<TStore>
     /// <summary>
     /// Ref struct enumerator for AABB overlap queries. Uses stack-based DFS with OLC read validation per node. Zero heap allocations.
     /// </summary>
+    [MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
     internal ref struct AABBQueryEnumerator
     {
         private readonly SpatialRTree<TStore> _tree;
@@ -320,6 +322,7 @@ internal unsafe partial class SpatialRTree<TStore>
 
         public SpatialQueryResult Current => _current;
 
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public AABBQueryEnumerator GetEnumerator() => this;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -807,6 +810,8 @@ internal unsafe partial class SpatialRTree<TStore>
     internal RadiusEnumerator QueryRadius(ReadOnlySpan<double> center, double radius, ChangeSet changeSet = null, uint categoryMask = 0)
         => new(this, center, radius, changeSet, categoryMask);
 
+    [MustDispose(Reason = "owns a AABBQueryEnumerator ('_inner'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a AABBQueryEnumerator by value ('_inner'): a copy duplicates its slots and pins")]
     internal ref struct RadiusEnumerator
     {
         private AABBQueryEnumerator _inner;
@@ -831,6 +836,7 @@ internal unsafe partial class SpatialRTree<TStore>
         }
 
         public SpatialQueryResult Current => _inner.Current;
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public RadiusEnumerator GetEnumerator() => this;
 
         public bool MoveNext()
@@ -871,6 +877,8 @@ internal unsafe partial class SpatialRTree<TStore>
     [InlineArray(SpatialRTreeConstants.RayHeapInlineCapacity)]
     internal struct RayHeapDistances { private double _element0; }
 
+    [MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
     internal ref struct RayEnumerator
     {
         private readonly SpatialRTree<TStore> _tree;
@@ -1015,6 +1023,7 @@ internal unsafe partial class SpatialRTree<TStore>
         }
 
         public SpatialQueryResult Current => _current;
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public RayEnumerator GetEnumerator() => this;
 
         public bool MoveNext()
@@ -1252,6 +1261,8 @@ internal unsafe partial class SpatialRTree<TStore>
     [InlineArray(256)]
     internal struct FrustumStackBuffer { private int _element0; }
 
+    [MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
     internal ref struct FrustumEnumerator
     {
         private readonly SpatialRTree<TStore> _tree;
@@ -1313,6 +1324,7 @@ internal unsafe partial class SpatialRTree<TStore>
         }
 
         public SpatialQueryResult Current => _current;
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public FrustumEnumerator GetEnumerator() => this;
 
         public bool MoveNext()

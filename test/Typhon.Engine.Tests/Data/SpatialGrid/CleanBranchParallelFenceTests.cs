@@ -81,34 +81,27 @@ class CleanBranchParallelFenceTests : TestBase<CleanBranchParallelFenceTests>
     private static void DriftEveryEntity(Transaction tx)
     {
         var accessor = tx.For<CbpUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — the write goes through WriteSpatial.
+            // TYPHON009 flags un-barriered spatial mutation through a span. This span is READ only — the write goes through WriteSpatial.
 #pragma warning disable TYPHON009
-                var positions = cluster.GetSpan(CbpUnit.Pos);
+            var positions = cluster.GetSpan(CbpUnit.Pos);
 #pragma warning restore TYPHON009
-                ulong bits = cluster.OccupancyBits;
-                while (bits != 0)
+            ulong bits = cluster.OccupancyBits;
+            while (bits != 0)
+            {
+                int slotIndex = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+
+                ref readonly var b = ref positions[slotIndex].Bounds;
+                float x = b.MinX + DriftStep;
+                if (x >= WorldExtent - 1f)
                 {
-                    int slotIndex = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-
-                    ref readonly var b = ref positions[slotIndex].Bounds;
-                    float x = b.MinX + DriftStep;
-                    if (x >= WorldExtent - 1f)
-                    {
-                        x = 1f;
-                    }
-
-                    cluster.WriteSpatial(CbpUnit.Pos, slotIndex, PointAt(x, b.MinY));
+                    x = 1f;
                 }
+
+                cluster.WriteSpatial(CbpUnit.Pos, slotIndex, PointAt(x, b.MinY));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
     }
 

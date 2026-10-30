@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  causalKeyOf, commandCausalKey, computeRequests, groupRequests, percentile, spansForCausal,
+  causalKeyOf, commandCausalKey, computeRequests, filterRequests, rootsInView, groupRequests, NO_REQUEST_FILTER, percentile, spansForCausal, type RequestRow,
 } from '@/libs/profiler/correlation/requests';
 import { buildSpan, buildTick } from '@/libs/profiler/model/__tests__/spanBuilder';
 import type { SpanData } from '@/libs/profiler/model/traceModel';
@@ -169,5 +169,41 @@ describe('spansForCausal', () => {
     const other = caused(commandCausalKey(1, 2, 4), 150, 160);
     const ticks = [buildTick({ tickNumber: 1, startUs: 0, durationUs: 400, spans: [b, other] }), buildTick({ tickNumber: 2, startUs: 400, durationUs: 400, spans: [a] })];
     expect(spansForCausal(ticks, key)).toEqual([b, a]);
+  });
+});
+
+describe('filterRequests', () => {
+  const row = (label: string, session: number | undefined, totalUs: number): RequestRow => ({
+    id: label, key: label, kind: 'command', label, session, startUs: 0, endUs: totalUs, totalUs, spanCount: 0, engineUs: 0, markers: [],
+  });
+  const rows = [row('command 3 → Combat', 1, 500), row('command 24 → PlayerSessions', 2, 30_000), row('command 24 → PlayerSessions', 1, 900)];
+  const keep = (f: Partial<typeof NO_REQUEST_FILTER>) => filterRequests(rows, { ...NO_REQUEST_FILTER, ...f }).map((r) => `${r.label}@${r.session}`);
+
+  it('is the same array when off', () => {
+    expect(filterRequests(rows, NO_REQUEST_FILTER)).toBe(rows);
+    expect(filterRequests(rows, { ...NO_REQUEST_FILTER, text: '  ' })).toBe(rows);
+  });
+
+  it('matches the label case-insensitively, one session, a floor on the total, all together', () => {
+    expect(keep({ text: 'playersessions' })).toEqual(['command 24 → PlayerSessions@2', 'command 24 → PlayerSessions@1']);
+    expect(keep({ session: 1 })).toEqual(['command 3 → Combat@1', 'command 24 → PlayerSessions@1']);
+    expect(keep({ minTotalUs: 900 })).toEqual(['command 24 → PlayerSessions@2', 'command 24 → PlayerSessions@1']);
+    expect(keep({ text: 'Player', session: 1, minTotalUs: 901 })).toEqual([]);
+    expect(keep({ text: 'Player', session: 1, minTotalUs: 900 })).toEqual(['command 24 → PlayerSessions@1']);
+  });
+});
+
+describe('rootsInView', () => {
+  const row = (key: string, startUs: number, endUs: number): RequestRow => ({
+    id: key, key, kind: 'command', label: key, startUs, endUs, totalUs: endUs - startUs, spanCount: 0, engineUs: 0, markers: [],
+  });
+  const rows = [row('before', 0, 90), row('across', 50, 150), row('inside', 110, 120), row('after', 200, 260), row('ending-at-start', 40, 100)];
+
+  it('keeps what overlaps the view, including what started before it', () => {
+    expect(rootsInView(rows, { startUs: 100, endUs: 200 }).map((r) => r.key)).toEqual(['across', 'inside', 'ending-at-start']);
+  });
+
+  it('is empty for an empty view', () => {
+    expect(rootsInView(rows, { startUs: 100, endUs: 100 })).toEqual([]);
   });
 });

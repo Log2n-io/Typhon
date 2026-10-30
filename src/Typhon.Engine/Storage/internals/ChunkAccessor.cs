@@ -34,6 +34,7 @@ namespace Typhon.Engine.Internals;
 /// whole epoch scope. The clock hand may reclaim any slot but the most recently used one, so one miss can release the page of any earlier address: use
 /// an address before the next access through the same accessor, or resolve it again by chunk id.</para>
 /// </remarks>
+[MustDispose(Reason = "pins its pages and keeps their ActiveChunkWriters registered: the checkpoint never covers them again and the WAL is never recycled (CP-13)")]
 [NoCopy(Reason = "struct with mutable SIMD cache and epoch-pinned pages")]
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, IPageStore

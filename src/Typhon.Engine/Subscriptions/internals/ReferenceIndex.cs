@@ -15,6 +15,8 @@ namespace Typhon.Engine.Internals;
 /// fence and the published frames (EW-01). A caller holds an epoch (PS-02). Unlike <see cref="BoundViewpoint"/> it needs no spatial index: a reference may
 /// name any archetype.
 /// </remarks>
+[MustDispose(Reason = "owns a ChunkAccessor ('_map'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a ChunkAccessor by value ('_map'): a copy duplicates its slots and pins")]
 internal unsafe struct EntityLocator : IDisposable
 {
     private readonly DatabaseEngine _engine;

@@ -228,7 +228,7 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
 
         // Iterate via cluster enumerator
         using var txView = dbe.CreateQuickTransaction();
-        using var ants = txView.For<ClT6MixedSvT>();
+        var ants = txView.For<ClT6MixedSvT>();
         using var clusters = ants.GetClusterEnumerator();
         int total = 0;
         foreach (var cluster in clusters)
@@ -267,7 +267,7 @@ class ClusterTransientTests : TestBase<ClusterTransientTests>
         }
 
         using var txView = dbe.CreateQuickTransaction();
-        using var ants = txView.For<ClT6PureT>();
+        var ants = txView.For<ClT6PureT>();
         using var clusters = ants.GetClusterEnumerator();
         int total = 0;
         foreach (var cluster in clusters)

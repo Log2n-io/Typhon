@@ -1,6 +1,5 @@
 using JetBrains.Annotations;
 using System;
-using Typhon.Engine.Internals;
 using Typhon.Protocol;
 
 namespace Typhon.Engine;

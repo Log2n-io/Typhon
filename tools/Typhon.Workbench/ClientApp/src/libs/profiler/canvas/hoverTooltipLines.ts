@@ -184,7 +184,7 @@ export function buildHoverTooltipLines(hover: TimeAreaHover): string[] | null {
       if (r.kind !== 'dropped') lines.push(`Total: ${formatDuration(r.totalUs)}`);
       if (r.status !== undefined) lines.push(`Status: ${r.status}`);
       if (r.session !== undefined) lines.push(`Session: ${r.session}`);
-      if (r.spanCount > 0) lines.push(`Engine: ${formatDuration(r.engineUs)} in ${r.spanCount.toLocaleString()} spans`);
+      if (r.spanCount > 0) lines.push(`Engine: ${formatDuration(r.engineUs)} in ${r.spanCount.toLocaleString()} span${r.spanCount === 1 ? '' : 's'}`);
       if (r.ringWaitUs !== undefined) lines.push(`Ring wait: ${formatDuration(r.ringWaitUs)}`);
       if (r.tickWaitUs !== undefined) lines.push(`Tick wait: ${formatDuration(r.tickWaitUs)}`);
       if (r.sendWaitUs !== undefined) lines.push(`Send wait: ${formatDuration(r.sendWaitUs)}`);

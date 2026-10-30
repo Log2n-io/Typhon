@@ -266,6 +266,14 @@ public enum CacheSectionId : ushort
     /// because entity ids are monotonic and never recycled.
     /// </summary>
     EntityLifecycle = 19,
+
+    /// <summary>
+    /// Thread table (v19): every thread slot the capture named, with its name and <see cref="ThreadKind"/>, gathered from all the trace's
+    /// <c>ThreadInfo</c> records wherever they fell. A slot is named once, when its thread first records something — before the first tick or at
+    /// any point after — so a reader that only learned names from the chunks it had loaded showed "Slot N" for most lanes. Layout:
+    /// <c>u16 count</c>, then <c>count × (u8 slot, u8 kind, short-string name)</c>.
+    /// </summary>
+    ThreadTable = 20,
 }
 
 /// <summary>
@@ -585,7 +593,9 @@ public static class TraceFileCacheConstants
     /// </remarks>
     // 18: PostTickSummary lost its subscription-output field with the replication rewrite. The rows are read at a fixed stride, so an older cache would
     // misparse rather than read a zero — the version bump is what forces those caches to be rebuilt instead.
-    public const ushort CurrentChunkerVersion = 18;
+    // 19: the ThreadTable section, and ThreadInfo records exempt from the pre-tick buffer's cap — a start-up writing more than the cap before the
+    // first tick (the SWG demo: 20 MB) silently dropped most thread names. Older caches must rebuild to name their lanes.
+    public const ushort CurrentChunkerVersion = 19;
 
     /// <summary>Sidecar file extension, appended to the source path (e.g., <c>foo.typhon-trace</c> → <c>foo.typhon-trace-cache</c>).</summary>
     public const string CacheFileExtension = "-cache";

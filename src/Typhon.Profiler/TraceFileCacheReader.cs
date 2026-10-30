@@ -51,6 +51,7 @@ public sealed class TraceFileCacheReader : IDisposable
     private readonly List<QueueTickSummary> _queueTickSummaries = [];
     private readonly List<PostTickSummary> _postTickSummaries = [];
     private readonly Dictionary<ushort, string> _queueIdToName = new();
+    private readonly List<ThreadTableEntry> _threads = [];
     // ── v15 (#327) ──────────────────────────────────────────────────────
     private readonly List<SystemArchetypeTouchSummary> _systemArchetypeTouches = [];
     // ── v17 (#620) ──────────────────────────────────────────────────────
@@ -140,6 +141,9 @@ public sealed class TraceFileCacheReader : IDisposable
 
     /// <summary>v12 queue-id → display-name map. Empty for v11-or-older caches.</summary>
     public IReadOnlyDictionary<ushort, string> QueueIdToName => _queueIdToName;
+
+    /// <summary>v19: every named thread slot of the capture. Empty for older caches.</summary>
+    public IReadOnlyList<ThreadTableEntry> Threads => _threads;
 
     /// <summary>v15 per-(tick, system, archetype) entity-touch rows. Empty for v14-or-older caches.</summary>
     public IReadOnlyList<SystemArchetypeTouchSummary> SystemArchetypeTouches => _systemArchetypeTouches;
@@ -421,6 +425,27 @@ public sealed class TraceFileCacheReader : IDisposable
         if (_sectionsByid.TryGetValue(CacheSectionId.EntityLifecycle, out var elSec))
         {
             LoadStructArray(elSec, _entityLifecycleRuns);
+        }
+        // v19 section. Optional — an older cache has no thread table, which reads as no names.
+        if (_sectionsByid.TryGetValue(CacheSectionId.ThreadTable, out var thSec))
+        {
+            LoadThreadTable(thSec);
+        }
+    }
+
+    private void LoadThreadTable(SectionTableEntry section)
+    {
+        _stream.Position = section.Offset;
+        Span<byte> u16Buf = stackalloc byte[2];
+        Span<byte> entryHead = stackalloc byte[3];
+        _stream.ReadExactly(u16Buf);
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(u16Buf);
+        for (var i = 0; i < count; i++)
+        {
+            _stream.ReadExactly(entryHead);
+            var nameBytes = new byte[entryHead[2]];
+            _stream.ReadExactly(nameBytes);
+            _threads.Add(new ThreadTableEntry(entryHead[0], (ThreadKind)entryHead[1], Encoding.UTF8.GetString(nameBytes)));
         }
     }
 

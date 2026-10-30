@@ -8,7 +8,8 @@ using Microsoft.CodeAnalysis.Operations;
 namespace Typhon.Analyzers;
 
 /// <summary>
-/// Unified analyzer that protects types marked with <c>[NoCopy]</c> from value copies.
+/// Unified analyzer that protects no-copy types from value copies: marked <c>[NoCopy]</c>, or holding one by value at any depth — copying the outer
+/// copies the inner (<see cref="OwnershipCatalog"/>).
 /// <list type="bullet">
 ///   <item><b>TYPHON001</b> — Parameters must use the <c>ref</c> modifier (not <c>in</c> or by value).</item>
 ///   <item><b>TYPHON003</b> — Assignments, variable declarations, and returns must not create copies.</item>
@@ -62,25 +63,30 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
 
-        // TYPHON001: parameter ref enforcement
-        context.RegisterSyntaxNodeAction(
-            AnalyzeMethodDeclaration,
-            SyntaxKind.MethodDeclaration,
-            SyntaxKind.ConstructorDeclaration,
-            SyntaxKind.DelegateDeclaration,
-            SyntaxKind.LocalFunctionStatement);
+        context.RegisterCompilationStartAction(start =>
+        {
+            var catalog = new OwnershipCatalog(start.Compilation);
 
-        // TYPHON003: copy detection
-        context.RegisterOperationAction(AnalyzeAssignment, OperationKind.SimpleAssignment);
-        context.RegisterOperationAction(AnalyzeVariableDeclarator, OperationKind.VariableDeclarator);
-        context.RegisterOperationAction(AnalyzeReturn, OperationKind.Return);
+            // TYPHON001: parameter ref enforcement
+            start.RegisterSyntaxNodeAction(
+                node => AnalyzeMethodDeclaration(node, catalog),
+                SyntaxKind.MethodDeclaration,
+                SyntaxKind.ConstructorDeclaration,
+                SyntaxKind.DelegateDeclaration,
+                SyntaxKind.LocalFunctionStatement);
+
+            // TYPHON003: copy detection
+            start.RegisterOperationAction(op => AnalyzeAssignment(op, catalog), OperationKind.SimpleAssignment);
+            start.RegisterOperationAction(op => AnalyzeVariableDeclarator(op, catalog), OperationKind.VariableDeclarator);
+            start.RegisterOperationAction(op => AnalyzeReturn(op, catalog), OperationKind.Return);
+        });
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // TYPHON001 — parameter analysis
     // ═══════════════════════════════════════════════════════════════════════
 
-    private static void AnalyzeMethodDeclaration(SyntaxNodeAnalysisContext context)
+    private static void AnalyzeMethodDeclaration(SyntaxNodeAnalysisContext context, OwnershipCatalog catalog)
     {
         var parameterList = context.Node switch
         {
@@ -99,7 +105,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         foreach (var parameter in parameterList.Parameters)
         {
             var typeSymbol = context.SemanticModel.GetTypeInfo(parameter.Type!).Type;
-            if (typeSymbol == null || !IsNoCopyType(typeSymbol))
+            if (typeSymbol == null || !catalog.IsNoCopy(typeSymbol))
             {
                 continue;
             }
@@ -122,7 +128,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
                     parameter.GetLocation(),
                     parameter.Identifier.Text,
                     typeSymbol.Name,
-                    FormatReason(typeSymbol)));
+                    FormatReason(catalog, typeSymbol)));
             }
         }
     }
@@ -131,11 +137,11 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
     // TYPHON003 — copy detection
     // ═══════════════════════════════════════════════════════════════════════
 
-    private static void AnalyzeAssignment(OperationAnalysisContext context)
+    private static void AnalyzeAssignment(OperationAnalysisContext context, OwnershipCatalog catalog)
     {
         var assignment = (ISimpleAssignmentOperation)context.Operation;
 
-        if (!IsNoCopyType(assignment.Target.Type))
+        if (!catalog.IsNoCopy(assignment.Target.Type))
         {
             return;
         }
@@ -157,14 +163,14 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
             assignment.Syntax.GetLocation(),
             GetExpressionName(assignment.Value),
             assignment.Target.Type.Name,
-            FormatReason(assignment.Target.Type)));
+            FormatReason(catalog, assignment.Target.Type)));
     }
 
-    private static void AnalyzeVariableDeclarator(OperationAnalysisContext context)
+    private static void AnalyzeVariableDeclarator(OperationAnalysisContext context, OwnershipCatalog catalog)
     {
         var declarator = (IVariableDeclaratorOperation)context.Operation;
         var localSymbol = declarator.Symbol;
-        if (localSymbol == null || !IsNoCopyType(localSymbol.Type))
+        if (localSymbol == null || !catalog.IsNoCopy(localSymbol.Type))
         {
             return;
         }
@@ -201,19 +207,26 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
             declarator.Syntax.GetLocation(),
             expressionName,
             localSymbol.Type.Name,
-            FormatReason(localSymbol.Type)));
+            FormatReason(catalog, localSymbol.Type)));
     }
 
-    private static void AnalyzeReturn(OperationAnalysisContext context)
+    private static void AnalyzeReturn(OperationAnalysisContext context, OwnershipCatalog catalog)
     {
         var returnOp = (IReturnOperation)context.Operation;
-        if (returnOp.ReturnedValue == null || !IsNoCopyType(returnOp.ReturnedValue.Type))
+        if (returnOp.ReturnedValue == null || !catalog.IsNoCopy(returnOp.ReturnedValue.Type))
         {
             return;
         }
 
         // Ref-returning methods/properties don't copy
         if (context.ContainingSymbol is IMethodSymbol { ReturnsByRef: true })
+        {
+            return;
+        }
+
+        // A member marked [AllowCopy] deliberately returns a copy of itself — `GetEnumerator() => this` on an enumerator a foreach consumes
+        if (context.ContainingSymbol is IMethodSymbol method
+            && (HasAllowCopyAttribute(method) || (method.AssociatedSymbol != null && HasAllowCopyAttribute(method.AssociatedSymbol))))
         {
             return;
         }
@@ -237,7 +250,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
             returnOp.Syntax.GetLocation(),
             GetExpressionName(returnOp.ReturnedValue),
             returnOp.ReturnedValue.Type.Name,
-            FormatReason(returnOp.ReturnedValue.Type)));
+            FormatReason(catalog, returnOp.ReturnedValue.Type)));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -248,7 +261,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
     /// Where <c>[NoCopy]</c> and <c>[AllowCopy]</c> are declared. The match used to name <c>Typhon.Engine</c>, which neither attribute has lived in since
     /// #331, so the analyzer never fired and a by-value <c>ChunkAccessor</c> compiled without a word (#1226).
     /// </summary>
-    internal const string AttributeNamespace = "Typhon.Engine.Internals";
+    internal const string AttributeNamespace = OwnershipCatalog.AttributeNamespace;
 
     /// <summary>
     /// Checks whether the given member is marked with <c>[AllowCopy]</c>.
@@ -268,82 +281,48 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
     }
 
     /// <summary>
-    /// Checks whether the given type is marked with <c>[NoCopy]</c>.
+    /// Whether a by-value call or read of a member declared to return <paramref name="declaredType"/> hands over a value nobody else holds.
     /// </summary>
-    private static bool IsNoCopyType(ITypeSymbol typeSymbol)
-    {
-        if (typeSymbol == null)
-        {
-            return false;
-        }
+    /// <remarks>
+    /// <para>Not a <c>ref</c> return: it hands out an EXISTING instance (a rented, cached accessor), so taking it into a by-value local copies it — the
+    /// PS-19 leak. A caller that takes it by ref (a ref local or ref assignment) copies nothing and never gets here.</para>
+    /// <para>Not a member declared to return a type parameter: <c>List&lt;T&gt;</c>'s indexer, <c>Nullable&lt;T&gt;.Value</c>, a generic
+    /// <c>T Get&lt;T&gt;()</c>. Its body returns a <c>T</c>, which no rule can tell is a no-copy type, so its copy is reported here or nowhere.</para>
+    /// <para>This replaces the requirement that every factory carry <c>[AllowCopy]</c>: the analyzer could not tell a factory from a getter at the call
+    /// site, but it does not need to — the getter's copy is in the getter's return, which TYPHON003 reports. <c>[AllowCopy]</c> is left for a member
+    /// that deliberately returns a copy of itself (<c>GetEnumerator() =&gt; this</c>).</para>
+    /// </remarks>
+    private static bool HandsOverAFreshValue(RefKind refKind, ITypeSymbol declaredType) =>
+        refKind == RefKind.None && declaredType is not ITypeParameterSymbol;
 
-        foreach (var attr in typeSymbol.GetAttributes())
-        {
-            if (attr.AttributeClass?.Name is "NoCopyAttribute" or "NoCopy" &&
-                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == AttributeNamespace)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// Extracts the <c>Reason</c> property from the <c>[NoCopy]</c> attribute, if present.
-    /// Returns a formatted suffix like " — reason text" or an empty string.
-    /// </summary>
-    private static string FormatReason(ITypeSymbol typeSymbol)
-    {
-        if (typeSymbol == null)
-        {
-            return "";
-        }
-
-        foreach (var attr in typeSymbol.GetAttributes())
-        {
-            if (attr.AttributeClass?.Name is "NoCopyAttribute" or "NoCopy" &&
-                attr.AttributeClass.ContainingNamespace?.ToDisplayString() == AttributeNamespace)
-            {
-                foreach (var namedArg in attr.NamedArguments)
-                {
-                    if (namedArg.Key == "Reason" && namedArg.Value.Value is string reason && reason.Length > 0)
-                    {
-                        return " — " + reason;
-                    }
-                }
-            }
-        }
-
-        return "";
-    }
+    /// <summary>The message suffix for a no-copy type: its marker's reason, or the field through which it holds one.</summary>
+    private static string FormatReason(OwnershipCatalog catalog, ITypeSymbol typeSymbol) => catalog.IsNoCopy(typeSymbol, out var reason) ? reason : "";
 
     /// <summary>
     /// Returns <c>true</c> if the operation is an allowed value for [NoCopy] types:
-    /// <c>default</c>, <c>new</c> expressions, or invocations/properties marked with <c>[AllowCopy]</c>.
+    /// <c>default</c>, <c>new</c>, a throw, or a by-value call or property read of a member declared to return the type
+    /// (see <see cref="HandsOverAFreshValue"/>).
     /// </summary>
     private static bool IsAllowedValue(IOperation operation)
     {
         var unwrapped = UnwrapConversions(operation);
 
-        if (unwrapped is IDefaultValueOperation or IObjectCreationOperation)
+        // A throw produces no value: `_ => throw ...` in a switch, `?? throw ...`
+        if (unwrapped is IDefaultValueOperation or IObjectCreationOperation or IThrowOperation)
         {
             return true;
         }
 
-        // Method calls returning [NoCopy] types require [AllowCopy] — the analyzer cannot
-        // distinguish factories (fresh value) from getters (copy of existing state).
+        // A by-value call or property read hands over a value its caller now owns. A getter that duplicates live state does so in its own body —
+        // `=> _field`, `return _array[i]`, `return *p` — and that return is reported where it is written, so the call site need not ask. Two exceptions:
         if (unwrapped is IInvocationOperation invocation)
         {
-            // A ref-returning method hands out an EXISTING instance (a rented, cached accessor), so taking it into a by-value local copies it whatever its
-            // marking — the PS-19 leak. Every caller that takes it by ref returned earlier (a ref local or ref assignment is no copy).
-            return HasAllowCopyAttribute(invocation.TargetMethod) && invocation.TargetMethod.RefKind == RefKind.None;
+            return HandsOverAFreshValue(invocation.TargetMethod.RefKind, invocation.TargetMethod.OriginalDefinition.ReturnType);
         }
 
-        // Property reads marked [AllowCopy] — sentinel properties like None that inline to direct construction
-        if (unwrapped is IPropertyReferenceOperation propRef && HasAllowCopyAttribute(propRef.Property))
+        if (unwrapped is IPropertyReferenceOperation propRef)
         {
-            return true;
+            return HandsOverAFreshValue(propRef.Property.RefKind, propRef.Property.OriginalDefinition.Type);
         }
 
         // Conditional: both branches must be allowed

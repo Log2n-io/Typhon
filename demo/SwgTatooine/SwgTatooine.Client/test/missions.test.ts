@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Descriptor } from '../src/assets/descriptor';
-import { missionMenuItems, missionTerminalOf } from '../src/app/ticket-terminal';
+import { missionTerminalAction, missionTerminalOf } from '../src/app/ticket-terminal';
 import {
   JOURNAL_RETRY_MS,
+  listedOffers,
   MISSION_ANSWER_MS,
   MissionJournal,
   missionRefusal,
@@ -21,6 +22,7 @@ const offer = (serial: number, over: Partial<MissionOffer> = {}): MissionOffer =
   serial,
   kind: 0,
   difficulty: 1,
+  level: 1,
   reward: 150,
   octant: 0,
   distanceM: 500,
@@ -49,6 +51,39 @@ describe('a mission', () => {
     expect(missionRefusal(142)).toContain('not in the world');
     expect(missionRefusal(200)).toBe('Refused (200)');
   });
+
+  it('reads a take refused above your level (placeholder code, until the server names it)', () => {
+    expect(missionRefusal(150)).toContain('above your level');
+  });
+});
+
+describe("a terminal's filter", () => {
+  const levels = (l: readonly MissionOffer[]) => l.map((o) => o.level);
+  const all = Array.from({ length: 10 }, (_, level) => offer(level + 1, { level }));
+
+  it("lists only the offers from five below the viewer's CL to three above, and says how many it left out", () => {
+    const listed = listedOffers(all, 5, false);
+    expect(levels(listed.rows)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(listed.hidden).toBe(1);
+  });
+
+  it('lists every offer with "Show all"', () => {
+    const listed = listedOffers(all, 5, true);
+    expect(levels(listed.rows)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(listed.hidden).toBe(0);
+  });
+
+  it('lists every offer without a viewer CL', () => {
+    expect(levels(listedOffers(all, null, false).rows)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it('is toggled in the store', () => {
+    useMissions.setState({ showAll: false });
+    useMissions.getState().toggleShowAll();
+    expect(useMissions.getState().showAll).toBe(true);
+    useMissions.getState().toggleShowAll();
+    expect(useMissions.getState().showAll).toBe(false);
+  });
 });
 
 describe('a terminal list', () => {
@@ -56,13 +91,13 @@ describe('a terminal list', () => {
     offer(1, { reward: 200, distanceM: 1200, octant: 3 }),
     offer(2, { reward: 300, distanceM: 1900, octant: 0 }),
     offer(3, { reward: 150, distanceM: 500, octant: 3 }),
-    offer(4, { reward: 200, distanceM: 1100, octant: 0, difficulty: 2 }),
+    offer(4, { reward: 200, distanceM: 1100, octant: 0, level: 7 }),
   ];
 
   it('sorts by reward, best first, and by distance, nearest first', () => {
     expect(sortOffers(list, 'reward', true).map((o) => o.serial)).toEqual([2, 1, 4, 3]);
     expect(sortOffers(list, 'distance', false).map((o) => o.serial)).toEqual([3, 4, 1, 2]);
-    expect(sortOffers(list, 'difficulty', true)[0].serial).toBe(4);
+    expect(sortOffers(list, 'level', true)[0].serial).toBe(4);
   });
 
   it('sorts by direction north first, clockwise, nearest first within one: missions packed by area', () => {
@@ -71,8 +106,8 @@ describe('a terminal list', () => {
 
   it('never swaps two equal rows between two frames: ties break on the serial', () => {
     const tied = [offer(9), offer(7), offer(8)];
-    expect(sortOffers(tied, 'difficulty', false).map((o) => o.serial)).toEqual([7, 8, 9]);
-    expect(sortOffers([...tied].reverse(), 'difficulty', false).map((o) => o.serial)).toEqual([7, 8, 9]);
+    expect(sortOffers(tied, 'level', false).map((o) => o.serial)).toEqual([7, 8, 9]);
+    expect(sortOffers([...tied].reverse(), 'level', false).map((o) => o.serial)).toEqual([7, 8, 9]);
   });
 });
 
@@ -99,11 +134,8 @@ describe('a mission terminal', () => {
     expect(missionTerminalOf({ ...terminal, interactions: [] }, 0, 0, 0, 0)).toBeNull();
   });
 
-  it('offers its list and the journal', () => {
-    expect(missionMenuItems(42).map((i) => i.action)).toEqual([
-      { kind: 'missions', terminal: 42 },
-      { kind: 'journal' },
-    ]);
+  it("opens its own list of missions at once, the journal being the toolbar's", () => {
+    expect(missionTerminalAction(42)).toEqual({ kind: 'missions', terminal: 42 });
   });
 });
 
@@ -113,6 +145,7 @@ describe('the journal', () => {
     kind: 6,
     name: 'ninja hideout',
     difficulty: 1,
+    level: 4,
     reward: 200,
     octant: 2,
     distanceM: 1000,
@@ -298,6 +331,7 @@ describe('the mission panels', () => {
       kind: 0,
       name,
       difficulty: 1,
+      level: 2,
       reward,
       octant: 0,
       distanceM: 900,

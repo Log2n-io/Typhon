@@ -33,6 +33,8 @@ export interface MissionState {
   readonly offers: readonly MissionOffer[];
   readonly sort: OfferSort;
   readonly descending: boolean;
+  /** Whether the list shows the offers out of the viewer's reach too — "Show all"; off, only those it would take. */
+  readonly showAll: boolean;
   /** The last thing worth saying about a take or a cancel — a refusal, usually — or `null`. */
   readonly notice: string | null;
   /** The serial of the offer last asked for, while no answer has come — for {@link MISSION_ANSWER_MS} at most: its row says so. */
@@ -56,6 +58,7 @@ export interface MissionState {
   readonly setOffers: (offers: readonly MissionOffer[]) => void;
   /** Sorts by a column; the same column again flips the order. */
   readonly sortBy: (by: OfferSort) => void;
+  readonly toggleShowAll: () => void;
   readonly take: (offer: MissionOffer) => void;
   readonly cancel: (id: string) => void;
   /** The server refused a take, or the cancel of mission `cancelled`. */
@@ -79,6 +82,7 @@ export const useMissions = create<MissionState>((set, get) => ({
   offers: [],
   sort: 'reward',
   descending: true,
+  showAll: false,
   notice: null,
   asking: null,
   cancelling: [],
@@ -103,10 +107,11 @@ export const useMissions = create<MissionState>((set, get) => ({
   },
   sortBy: (by) => {
     const s = get();
-    // Reward and difficulty read best first; distance and direction nearest and north first.
-    set(
-      s.sort === by ? { descending: !s.descending } : { sort: by, descending: by === 'reward' || by === 'difficulty' },
-    );
+    // Reward and level read highest first; distance and direction nearest and north first.
+    set(s.sort === by ? { descending: !s.descending } : { sort: by, descending: by === 'reward' || by === 'level' });
+  },
+  toggleShowAll: () => {
+    set({ showAll: !get().showAll });
   },
   take: (offer) => {
     const sent = get().actions?.take(offer.netId, offer.serial) ?? false;

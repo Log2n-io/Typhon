@@ -165,26 +165,19 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClCohUnit>();
-            try
+            var c = 0;
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                var c = 0;
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var originX = 10f + (c * 5f);
+                var originY = 10f + (c * 7f);
+                c++;
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
                 {
-                    var originX = 10f + (c * 5f);
-                    var originY = 10f + (c * 7f);
-                    c++;
-                    var bits = cluster.OccupancyBits;
-                    while (bits != 0)
-                    {
-                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(originX + (slot % 4), originY + (slot / 4)));
-                    }
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(originX + (slot % 4), originY + (slot / 4)));
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();
@@ -234,26 +227,19 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClCohUnit>();
-            try
+            var c = 0;
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                var c = 0;
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var originX = 10f + (c * 5f);
+                var originY = 10f + (c * 7f);
+                c++;
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
                 {
-                    var originX = 10f + (c * 5f);
-                    var originY = 10f + (c * 7f);
-                    c++;
-                    var bits = cluster.OccupancyBits;
-                    while (bits != 0)
-                    {
-                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(originX + (slot % 4), originY + (slot / 4)));
-                    }
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(originX + (slot % 4), originY + (slot / 4)));
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();
@@ -310,28 +296,21 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
             using (var tx = dbe.CreateQuickTransaction())
             {
                 var accessor = tx.For<ClCohUnit>();
-                try
+                var c = 0;
+                foreach (var cluster in accessor.GetClusterEnumerator())
                 {
-                    var c = 0;
-                    foreach (var cluster in accessor.GetClusterEnumerator())
+                    var originX = 10f + (c * 3f);
+                    var originY = 10f + (c * 5f);
+                    c++;
+                    var bits = cluster.OccupancyBits;
+                    var i = 0;
+                    while (bits != 0)
                     {
-                        var originX = 10f + (c * 3f);
-                        var originY = 10f + (c * 5f);
-                        c++;
-                        var bits = cluster.OccupancyBits;
-                        var i = 0;
-                        while (bits != 0)
-                        {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                            bits &= bits - 1;
-                            var t = i++ / (float)Math.Max(1, SlotsPerCluster(dbe) - 1);
-                            cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(originX + (t * spread), originY + (t * spread)));
-                        }
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        bits &= bits - 1;
+                        var t = i++ / (float)Math.Max(1, SlotsPerCluster(dbe) - 1);
+                        cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(originX + (t * spread), originY + (t * spread)));
                     }
-                }
-                finally
-                {
-                    accessor.Dispose();
                 }
 
                 tx.Commit();
@@ -372,25 +351,18 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<ClCohUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var bits = cluster.OccupancyBits;
+                var i = 0;
+                while (bits != 0)
                 {
-                    var bits = cluster.OccupancyBits;
-                    var i = 0;
-                    while (bits != 0)
-                    {
-                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        // Spread each cluster over half the cell — past the 0.20 fall-back with room to spare.
-                        var t = i++ / (float)Math.Max(1, SlotsPerCluster(dbe) - 1);
-                        cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(10f + (t * 0.5f * CellSize), 10f + (t * 0.5f * CellSize)));
-                    }
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    // Spread each cluster over half the cell — past the 0.20 fall-back with room to spare.
+                    var t = i++ / (float)Math.Max(1, SlotsPerCluster(dbe) - 1);
+                    cluster.WriteSpatial(ClCohUnit.Pos, slot, PointAt(10f + (t * 0.5f * CellSize), 10f + (t * 0.5f * CellSize)));
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
 
             tx.Commit();

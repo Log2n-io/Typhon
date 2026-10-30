@@ -157,12 +157,6 @@ public sealed class SimConfig
     /// </remarks>
     public float FacilityDensityPerKm2 = 8f;
 
-    /// <summary>
-    /// Whether the scripted crowd takes missions from the terminals (missions.md § 6): on, so people race the crowd for offers and the workload keeps its
-    /// mission traffic. Off holds a terminal's list still for a check that takes a particular offer, and is the other arm of an A/B on that traffic.
-    /// </summary>
-    public bool CrowdTakesMissions = true;
-
     /// <summary>Share of in-city idle decisions that walk into a building instead. [EST]</summary>
     public float InteriorShare = 0.25f;
 
@@ -514,6 +508,12 @@ public sealed class SimConfig
     public int IngressBytesPerSecond = 16 * 1024;
 
     /// <summary>
+    /// <c>--enter-budget N</c>: entity enters a session's frame may carry (the engine's <c>EnterBudgetPerFrame</c>, which also sets the owed cap at 4 × N);
+    /// 0 keeps the engine's default (500). Exposed to measure the whole-world god camera, whose fill a RESET restarts once its owed set passes the cap.
+    /// </summary>
+    public int EnterBudgetPerFrame;
+
+    /// <summary>
     /// <c>--max-clients N</c>: how many player sessions are admitted at once; 0 (the default) is unlimited.
     /// </summary>
     /// <remarks>
@@ -601,6 +601,12 @@ public sealed class SimConfig
     /// loaded on purpose, which is why it is a flag and not a different default: every real deployment keeps ten.
     /// </remarks>
     public int AuthBurst;
+
+    /// <summary>
+    /// The port the demo's dashboard (<c>SwgTatooine.Dashboard</c>) listens on, on the same host as this server — published in <c>/typhon/demo.json</c>
+    /// so the client can link to it; 0 when there is none.
+    /// </summary>
+    public int DashboardPort = 5090;
 
     /// <summary>
     /// <c>--auth-refill-ms M</c>: how long one <c>/auth</c> attempt takes to come back, in milliseconds; <c>0</c> keeps the six-second default.
@@ -770,6 +776,9 @@ public sealed class SimConfig
     /// </remarks>
     public float CorpseSeconds = 6f;
 
+    /// <summary>Percent every XP grant is scaled by (<c>--xp-rate</c>, character-level.md § 3): a demo and soak knob, not a balance one. 100 is the model's.</summary>
+    public int XpRatePercent = 100;
+
     /// <summary>
     /// The shortest and longest a wild lair stands before it is retired, in seconds (<c>--lair-life-s min,max</c>), whether or not anybody destroyed it.
     /// </summary>
@@ -790,6 +799,12 @@ public sealed class SimConfig
 
     /// <summary>Seconds before a retired lair's site spawns its replacement (<c>--lair-replace-s</c>).</summary>
     public float LairReplaceSeconds = 60f;
+
+    /// <summary>
+    /// Seconds a held mission's holder may stay offline before the mission is cancelled and its lair released (<c>--mission-offline-s</c>;
+    /// <see cref="TatooineData.MissionOfflineReleaseSeconds"/>).
+    /// </summary>
+    public float MissionOfflineReleaseSeconds = TatooineData.MissionOfflineReleaseSeconds;
 
     /// <summary>
     /// Per-system <c>MinChunkSize</c> for the awareness system only. <c>0</c> leaves it on the global floor.
@@ -840,6 +855,12 @@ public sealed class SimConfig
     /// does not know about is a token it would have to refuse — see <see cref="ArgReader"/>.
     /// </remarks>
     public int ServePort;
+
+    /// <summary><c>--stop-deadline-s</c>: how long a stopping server has to exit before it is killed (<see cref="ServerGuard"/>, #1532).</summary>
+    public int StopDeadlineS = 30;
+
+    /// <summary><c>--wedge-s</c>: how long the tick may stand still before the server stops itself; 0 never (<see cref="ServerGuard"/>, #1532).</summary>
+    public int WedgeS = 30;
 
     /// <summary><c>--sweep</c>: run the partitioning matrix instead of one configuration.</summary>
     public bool RunSweep;

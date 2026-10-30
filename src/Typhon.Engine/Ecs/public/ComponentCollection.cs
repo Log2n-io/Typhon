@@ -10,6 +10,8 @@ namespace Typhon.Engine;
 /// disposed; disposal commits the pending buffer writes.
 /// </summary>
 /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
+[MustDispose(Reason = "owns a ChunkAccessor ('_ca'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+[NoCopy(Reason = "holds a ChunkAccessor by value ('_ca'): a copy duplicates its slots and pins")]
 [PublicAPI]
 public unsafe ref struct ComponentCollectionAccessor<T> : IDisposable where T : unmanaged
 {

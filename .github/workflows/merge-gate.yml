@@ -171,6 +171,8 @@ jobs:
               - 'src/Typhon.Client/**'
               # The navigation library the server and the bots both plan routes with; in the suite's closure through both.
               - 'demo/SwgTatooine/SwgTatooine.Navigation/**'
+              # The demo dashboard: the suite checks the bots' telemetry against its real /bots/report endpoint, so it references it.
+              - 'demo/SwgTatooine/SwgTatooine.Dashboard/**'
               # The SWG suite runs through the engine's sharder, from its own plan.
               - 'bench/aws/shard.py'
               - 'bench/aws/shards-swg.json'

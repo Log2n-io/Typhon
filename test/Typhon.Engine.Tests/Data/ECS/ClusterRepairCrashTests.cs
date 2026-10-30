@@ -72,24 +72,17 @@ class ClusterRepairCrashTests : TestBase<ClusterRepairCrashTests>
         var result = new Dictionary<int, (float, float)>();
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var b = ref positions[slot].Bounds;
-                    result[positions[slot].Tag] = (0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY));
-                }
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var b = ref positions[slot].Bounds;
+                result[positions[slot].Tag] = (0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         return result;

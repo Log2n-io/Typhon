@@ -132,7 +132,9 @@ internal static class Program
             // no deployment's.
             var clientRoot = config.ClientDirectory ?? TatooineSim.DefaultClientRoot(AppContext.BaseDirectory);
             sim.ServeAsync(config.ServePort, clientRoot, config.BindAddress, config.Origins).GetAwaiter().GetResult();
-            return 0;
+
+            // Stopped by its guard for a fault — a tick abort or a stalled tick — rather than asked to: not a success (#1532).
+            return sim.Guard?.Faulted == true ? ServerGuard.FaultExitCode : 0;
         }
         Console.WriteLine($"  {sim.Census}");
         if (sim.Reopened)
@@ -146,6 +148,17 @@ internal static class Program
         if (composition.Length > 0)
         {
             Console.WriteLine($"  creatures: {composition}");
+        }
+
+        // One line answers "is every band populated, and did any frontier patch get squeezed?" (content-levels.md § Monitoring).
+        Console.WriteLine($"  {sim.Census.Levels()}");
+        // Every planet's, as the census line counts them over the galaxy.
+        for (var planet = 0; planet < sim.Indexes.Length; planet++)
+        {
+            foreach (var displaced in sim.Indexes[planet].DisplacedFrontiers)
+            {
+                Console.WriteLine($"  !! planet {planet}: frontier patch {displaced} displaced: no valid bearing");
+            }
         }
 
         // Live cell count is only reachable through TickContext.SpatialGrid, so it is reported by the telemetry system

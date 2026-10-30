@@ -30,7 +30,16 @@ public record ProfilerMetadataDto(
     // #354 W4 — runtime partitioning hierarchy (Engine → Track → DAG → Phase → System), projected from the trace's
     // Tracks + DAGs tables. Empty for traces with no track data. The flat <see cref="Phases"/> list is retained as a
     // derived first-seen rollup for consumers not yet migrated to the hierarchy.
-    TrackDto[] Tracks);
+    TrackDto[] Tracks,
+    // v19 — every named thread slot of the capture, so lanes are labelled whichever chunks are loaded. Empty for older caches and live sessions,
+    // whose names arrive with their ThreadInfo records.
+    ThreadDto[] Threads);
+
+/// <summary>A named thread slot of a capture.</summary>
+/// <param name="Slot">The thread slot, as the lanes number it.</param>
+/// <param name="Name">The thread's name.</param>
+/// <param name="Kind">Its <c>ThreadKind</c>: 0 main, 1 worker, 2 pool, 3 other.</param>
+public record ThreadDto(int Slot, string Name, int Kind);
 
 /// <summary>
 /// One Track — the top level of the runtime partitioning hierarchy (<c>Engine → Track → DAG → Phase → System</c>, #354).

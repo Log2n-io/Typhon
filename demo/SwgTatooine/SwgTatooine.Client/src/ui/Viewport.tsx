@@ -5,10 +5,16 @@ import { startInventoryPoll } from '../app/inventory-poll';
 import { fetchRealmInventory } from '../data/realm-inventory';
 import { fetchServerConfig } from '../data/server-config';
 import { RealmFade } from './RealmFade';
+import { WatchBadge } from './WatchBadge';
 import { TerrainLoading } from './TerrainLoading';
 import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
+import { tipRefusal } from '../data/wallet';
+import type { MarketCommand } from '../data/market';
+import { watchFromMessage, watchFromParam, watchFromUrl, watchOriginAllowed } from '../app/watch-link';
+import { useChat } from '../state/chat-store';
 import { useMissions } from '../state/mission-store';
+import { useMarket } from '../state/market-store';
 import { useRealms } from '../state/realm-store';
 import { useSessionStore } from '../state/session-store';
 import { useTerrain } from '../state/terrain-store';
@@ -95,6 +101,11 @@ export function websocketUrl(location: { protocol: string; host: string }): stri
  * god camera stays reachable with no token at all — it is the one tool that has to work on a box nobody has an account on
  * — which is why this takes a nullable token rather than requiring one.
  */
+/** A bazaar command refused — "Sold to someone else first" — shown on the row it was about (bazaar.md § 6). */
+function onMarketRefused(reason: number, command: MarketCommand): void {
+  useMarket.getState().refused(reason, command);
+}
+
 function factoryFor(
   kind: SourceKind,
   token: string | null,
@@ -108,6 +119,7 @@ function factoryFor(
         population: ui.population,
         latencyMs: ui.latencyMs,
         jitterMs: ui.jitterMs,
+        onMarketRefused,
       });
   }
 
@@ -139,6 +151,11 @@ function factoryFor(
       onMissionRefused: (reason, cancelled) => {
         // "Already taken", "three held", "too far": an accepted take is never answered, so the panel hears only this.
         useMissions.getState().refused(reason, cancelled);
+      },
+      onMarketRefused,
+      onTipRefused: (reason) => {
+        // "Not enough credits", "too far": an accepted tip is never answered — the wallet moves instead.
+        useChat.getState().notice(`Tip refused: ${tipRefusal(reason)}`);
       },
       onSpectateRefused: () => {
         // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the
@@ -188,6 +205,26 @@ export function Viewport() {
     const app = new ClientApp(canvas, overlay, factoryFor(kind, token, noteClosed), terrain);
     app.start();
 
+    // "Watch this bot" from the dashboard (watch-link.ts): the god camera only, from the URL it was opened with and then
+    // from the follow messages the dashboard posts to this window.
+    let onWatch: ((event: MessageEvent) => void) | null = null;
+    if (godRequested(window.location.search)) {
+      const opened = watchFromUrl(window.location.search);
+      if (opened !== null) {
+        useUi.getState().watchBot(opened);
+      }
+
+      const watchFrom = watchFromParam(window.location.search);
+      onWatch = (event: MessageEvent) => {
+        const target = watchFromMessage(event.data);
+        if (target !== null && watchOriginAllowed(event.origin, window.location.hostname, watchFrom)) {
+          useUi.getState().watchBot(target);
+        }
+      };
+
+      window.addEventListener('message', onWatch);
+    }
+
     // The mock honours whatever it is asked for, so its ceiling is simply the largest the slider offers — stated, not
     // left unknown, because "unknown" makes the HUD hedge with "(asked)" about a source that never clamps anything.
     let cancelled = false;
@@ -212,6 +249,7 @@ export function Viewport() {
                 },
           );
           useUi.getState().setRealms(config.realms);
+          useUi.getState().setDashboardPort(config.dashboardPort);
           // The published asset set, when this server serves one. Mounted here rather than in the constructor because it
           // is the server that says whether there is anything to mount, and that answer arrives over HTTP.
           if (config.assets !== null) {
@@ -249,6 +287,10 @@ export function Viewport() {
 
     return () => {
       cancelled = true;
+      if (onWatch !== null) {
+        window.removeEventListener('message', onWatch);
+      }
+
       if (poll !== 0) {
         window.clearInterval(poll);
       }
@@ -271,6 +313,7 @@ export function Viewport() {
       <div ref={overlayRef} className="viewport-overlay" />
       {terrain === null ? <TerrainLoading /> : null}
       <RealmFade />
+      <WatchBadge />
     </div>
   );
 }

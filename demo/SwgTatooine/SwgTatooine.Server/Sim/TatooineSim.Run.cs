@@ -383,6 +383,9 @@ public sealed partial class TatooineSim
     /// <summary>Ticks on which the mission desk committed anything, each a durable write; see <see cref="SimBridge.MissionCommits"/>.</summary>
     public long MissionCommits => _bridge?.MissionCommits ?? 0;
 
+    /// <summary>Ticks on which the <c>Loot</c> system committed item writes, each a durable write; see <see cref="SimBridge.LootCommits"/>.</summary>
+    public long LootCommits => _bridge?.LootCommits ?? 0;
+
     /// <summary>Entities the mission desk spawned, wrote or destroyed; see <see cref="SimBridge.MissionEntities"/>.</summary>
     public long MissionEntities => _bridge?.MissionEntities ?? 0;
 
@@ -403,6 +406,15 @@ public sealed partial class TatooineSim
 
     /// <summary>Combat events dropped at the queue's growth ceiling — a dropped effect, and expected to be zero (SWG-02).</summary>
     public long CombatQueueOverflow => _bridge?.CombatQueue?.OverflowCount ?? 0L;
+
+    /// <summary>Kill events the XP queue dropped at its ceiling — a kill nobody was paid for; expected to be zero (character-level.md § 2).</summary>
+    public long KillXpOverflow => _bridge?.KillXpQueue?.OverflowCount ?? 0L;
+
+    /// <summary>Kill events the loot queue dropped at its ceiling; expected to be zero.</summary>
+    public long KillLootOverflow => _bridge?.KillLootQueue?.OverflowCount ?? 0L;
+
+    /// <summary>Body refreshes the desk's Progress queue dropped at its ceiling — a body showing a stale level until its next grant; expected to be zero.</summary>
+    public long ProgressOverflow => _bridge?.ProgressQueue?.OverflowCount ?? 0L;
 
     /// <summary>The deepest the combat queue got on the last tick — what says whether the 1 024 budget is anywhere near binding.</summary>
     public long CombatQueuePeak => _bridge?.CombatQueue?.PeakDepth ?? 0L;
@@ -672,8 +684,13 @@ public sealed partial class TatooineSim
         // The corpses CreatureThink hands to the lair director, which alone may destroy. A few a second at the baseline; sized like the combat queue.
         _bridge.CorpseQueue = dag.CreateEventQueue<CorpseEvent>("Corpses", 1024);
 
-        // The crowd's asks for a mission, from PlayerThink to the mission desk. A few a second at --pop 5.
-        _bridge.MissionAskQueue = dag.CreateEventQueue<MissionAsk>("MissionAsks", 1024);
+        // Every death the combat drain resolves, for the XP and the loot systems (character-level.md § 2): one queue each, since a queue is drained once.
+        // A few deaths a tick at 500 bots; a queue nobody reads yet is simply reset at the next tick's start.
+        _bridge.KillXpQueue = dag.CreateEventQueue<KillEvent>("KillsXp", 256);
+        _bridge.KillLootQueue = dag.CreateEventQueue<KillEvent>("KillsLoot", 256);
+
+        // The bodies of the holders the mission desk paid XP to, for Progression to bring up to it (character-level.md § 5): a few a minute.
+        _bridge.ProgressQueue = dag.CreateEventQueue<ProgressRefresh>("Progress", 256);
 
         if (_config.Shuttles)
         {
@@ -735,16 +752,28 @@ public sealed partial class TatooineSim
         dag.Produces("PlayerCombat", _bridge.CombatQueue)
             .Produces("CreatureCombat", _bridge.CombatQueue)
             .Consumes("CombatResolve", _bridge.CombatQueue);
+        dag.Produces("CombatResolve", _bridge.KillXpQueue)
+            .Produces("CombatResolve", _bridge.KillLootQueue);
 
         dag.Add(new EconomySystem(_bridge));
         dag.Add(new LairLifeSystem(_bridge));
         dag.Add(new MissionDeskSystem(_bridge));
+        dag.Add(new LedgerSystem(_bridge));
+        dag.Add(new LootSystem(_bridge));
+        dag.Add(new MarketSystem(_bridge));
+        dag.Add(new NoticesSystem(_bridge));
+        dag.Add(new ProgressionSystem(_bridge));
+
+        // Progression has no work but these two, so it consumes both and is skipped on a tick with neither (character-level.md § 2, § 5). In the Report phase,
+        // after the whole Economy phase: the lair director reads PlayerLook there, before the desk, so a writer of it in that phase would have to run first.
+        dag.Consumes("Progression", _bridge.KillXpQueue)
+            .Produces("Missions", _bridge.ProgressQueue)
+            .Consumes("Progression", _bridge.ProgressQueue);
         // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
         // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
         // pass. So the lair director ran its 2 Hz pass only on a pass tick that also brought a corpse, and the desk never ran at all with the crowd off
         // (found 2026-10-25). The phases order the producers first (Think before Economy); ReadsEvents states the edge on each consumer.
         dag.Produces("CreatureThink", _bridge.CorpseQueue);
-        dag.Produces("PlayerThink", _bridge.MissionAskQueue);
 
         // Only a server has sessions. In the simulation's own DAG rather than one of its own, because an intent writes PlayerMotion and PlayerThink writes it
         // too — see PlayerSessionSystem.

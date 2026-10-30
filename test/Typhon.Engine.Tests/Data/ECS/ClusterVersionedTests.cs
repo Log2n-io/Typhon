@@ -133,7 +133,7 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
 
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<ClVMixed>();
+            var accessor = tx.For<ClVMixed>();
             var entity = accessor.Open(id);
 
             var pos = entity.Read(ClVMixed.Pos);
@@ -214,7 +214,7 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         // Iterate via cluster enumerator — should read HEAD from SoA
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<ClVMixed>();
+            var accessor = tx.For<ClVMixed>();
             int entityCount = 0;
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
@@ -268,7 +268,7 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         // Bulk iterate — should see updated HEAD
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<ClVMixed>();
+            var accessor = tx.For<ClVMixed>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 ulong bits = cluster.OccupancyBits;
@@ -537,7 +537,7 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         // Bulk iteration should also see original
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<ClVMixed>();
+            var accessor = tx.For<ClVMixed>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 var healths = cluster.GetReadOnlySpan(ClVMixed.Health);
@@ -588,7 +588,7 @@ class ClusterVersionedTests : TestBase<ClusterVersionedTests>
         var bulkValues = new Dictionary<long, int>();
         using (var tx = dbe.CreateQuickTransaction())
         {
-            using var accessor = tx.For<ClVMixed>();
+            var accessor = tx.For<ClVMixed>();
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 ulong bits = cluster.OccupancyBits;

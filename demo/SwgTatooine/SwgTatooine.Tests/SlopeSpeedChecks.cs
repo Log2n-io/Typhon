@@ -229,7 +229,6 @@ public sealed class SlopeSpeedChecks
         config.Unpaced = true;
 
         // The same creatures before and after: the crowd taking missions spawns their lairs, occupants and all, within the eight ticks (missions.md).
-        config.CrowdTakesMissions = false;
         using TatooineSim sim = new(config);
         sim.Initialize();
 

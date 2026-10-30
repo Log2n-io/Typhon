@@ -1,0 +1,351 @@
+@page "/bots"
+@implements IDisposable
+@inject BotBoard Board
+@inject WatchLink Link
+@inject IJSRuntime JS
+
+<PageTitle>Tatooine bots</PageTitle>
+
+@{
+    var v = Board.Latest;
+    var f = v.Fleet;
+    var live = v.At != DateTime.MinValue && (DateTime.UtcNow - v.At).TotalSeconds < 15;
+}
+
+<header class="top">
+    <h1>Bots</h1>
+    <span class="dot @(live ? "up" : "down")"></span>
+    <span class="muted">
+        @(v.At == DateTime.MinValue
+            ? "no report yet: run the bots with --dashboard http://<this host>:<port>"
+            : $"run {v.Run} · {v.Reports} report(s) · last {Age(v.At)} ago · tick {v.Tick}")
+    </span>
+    <nav class="links"><a href="">← Dashboard</a></nav>
+</header>
+
+@if (f is not null)
+{
+    <main class="grid">
+        <section class="card">
+            <h2>Fleet</h2>
+            <div class="kpis">
+                @Kpi("bots", F(f.Bots, 0))
+                @Kpi("goal changes / bot-min, mean", F(f.GoalChangesPerBotMin.Mean, 2))
+                @Kpi("p50 · p90 · max", $"{F(f.GoalChangesPerBotMin.P50, 1)} · {F(f.GoalChangesPerBotMin.P90, 1)} · {F(f.GoalChangesPerBotMin.Max, 1)}",
+                    f.GoalChangesPerBotMin.P90 > 6)
+                @Kpi("reversals / bot-min, mean", F(f.ReversalsPerBotMin.Mean, 2))
+                @Kpi("p50 · p90 · max", $"{F(f.ReversalsPerBotMin.P50, 1)} · {F(f.ReversalsPerBotMin.P90, 1)} · {F(f.ReversalsPerBotMin.Max, 1)}",
+                    f.ReversalsPerBotMin.P90 > 2)
+                @Kpi("time stuck, total", $"{F(f.StuckS / 60d, 1)} min")
+                @Kpi("hunts / min", F(BotBoard.Of(f.PerMin, "hunts"), 1))
+                @Kpi("missions taken · done · cancelled / min",
+                    $"{F(BotBoard.Of(f.PerMin, "missionsTaken"), 1)} · {F(BotBoard.Of(f.PerMin, "missionsCompleted"), 1)} · "
+                    + F(BotBoard.Of(f.PerMin, "missionsCancelled"), 1))
+                @Kpi("mounts · dismounts / min", $"{F(BotBoard.Of(f.PerMin, "mounts"), 1)} · {F(BotBoard.Of(f.PerMin, "dismounts"), 1)}")
+            </div>
+            <p class="muted small">rates over the last @F(f.WindowS, 0) s</p>
+            @Spark("goal changes/bot-min p90", "")
+            @Spark("reversals/bot-min p90", "")
+            @Spark("legs stuck/min", "/min")
+            @Spark("hunts given up/min", "/min")
+        </section>
+
+        <section class="card">
+            <h2>Market</h2>
+            @if (!f.Totals.ContainsKey(BotBoard.MarketKeys.Trades))
+            {
+                <p class="muted">this swarm does not trade (built before the market, or run with --no-market)</p>
+            }
+            else
+            {
+                var bought = BotBoard.Of(f.Totals, BotBoard.MarketKeys.Bought);
+                var lost = BotBoard.Of(f.Totals, BotBoard.MarketKeys.BuyLost);
+                <div class="kpis">
+                    @Kpi("bazaar visits / min", F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Trades), 1))
+                    @Kpi("listed · vendored · bought / min",
+                        $"{F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Listed), 1)} · "
+                        + $"{F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Vendored), 1)} · "
+                        + F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Bought), 1))
+                    @Kpi("collected / min", F(BotBoard.Of(f.PerMin, BotBoard.MarketKeys.Collected), 1))
+                    @Kpi("bazaar visits since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Trades), 0))
+                    @Kpi("listed since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Listed), 0))
+                    @Kpi("vendored since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Vendored), 0))
+                    @Kpi("bought · lost the race", $"{F(bought, 0)} · {F(lost, 0)}")
+                    @Kpi("race won", Pct(bought, bought + lost))
+                    @Kpi("wins seen collected", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Won), 0))
+                    @Kpi("collected since start", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Collected), 0))
+                    @Kpi("refused since start (151-163)", F(BotBoard.Of(f.Totals, BotBoard.MarketKeys.Refused), 0))
+                    @Kpi("market chosen · done / min",
+                        $"{F(BotBoard.Of(f.WhyPerMin, BotBoard.MarketKeys.Chosen), 1)} · "
+                        + F(BotBoard.Of(f.WhyPerMin, BotBoard.MarketKeys.Done), 1))
+                </div>
+                @Spark("market trades/min", "/min")
+                <p class="muted small">lost the race: refused 153, another bot bought it first (expected under load) · wins seen collected: bazaar buy rows in
+                    the bot's inventory</p>
+                @if (f.MarketRefusedBy.Any(r => r.Value > 0))
+                {
+                    var commands = BotBoard.MarketCommands(f);
+                    <h3>Refused, by reason</h3>
+                    <table class="ledger">
+                        <tr><th>reason</th><th class="num">since start</th><th class="num">of commands</th></tr>
+                        @foreach (var (reason, n) in f.MarketRefusedBy.Where(r => r.Value > 0).OrderByDescending(r => r.Value))
+                        {
+                            <tr style="@(BotBoard.UnexpectedRefusal(reason, n, commands) ? "color:var(--bad)" : null)">
+                                <td>@reason</td><td class="num">@F(n, 0)</td><td class="num">@Pct(n, commands)</td>
+                            </tr>
+                        }
+                    </table>
+                    <p class="muted small">
+                        sold (153), notEnough (154), noRoom (159): the race and the bot's own state ·
+                        any other above 1 % of the commands is a bot or server bug (BZ-16)
+                    </p>
+                }
+            }
+        </section>
+
+        <section class="card">
+            <h2>What they are doing</h2>
+            <table class="bars">
+                @foreach (var (goal, n) in f.Goals.Where(g => g.Value > 0).OrderByDescending(g => g.Value))
+                {
+                    <tr>
+                        <td><span class="swatch" style="background:@Colour(goal)"></span>@goal</td>
+                        <td class="num">@F(n, 0)</td>
+                        <td class="bar"><div style="width:@Pct(n, f.Bots);background:@Colour(goal)"></div></td>
+                    </tr>
+                }
+            </table>
+            <h3>Why goals ended and began</h3>
+            <table class="ledger">
+                <tr><th>reason</th><th class="num">/ min</th><th class="num">since start</th></tr>
+                @foreach (var (why, n) in f.Why.Where(w => w.Value > 0 && w.Key != "None")
+                    .OrderByDescending(w => BotBoard.Of(f.WhyPerMin, w.Key)).ThenByDescending(w => w.Value))
+                {
+                    <tr><td>@why</td><td class="num">@F(BotBoard.Of(f.WhyPerMin, why), 1)</td><td class="num">@F(n, 0)</td></tr>
+                }
+            </table>
+            <h3>Walks</h3>
+            <table class="ledger">
+                <tr><th>event</th><th class="num">/ min</th><th class="num">since start</th></tr>
+                @foreach (var (leg, n) in f.Legs.Where(l => l.Value > 0))
+                {
+                    <tr><td>@leg</td><td class="num">@F(BotBoard.Of(f.LegsPerMin, leg), 1)</td><td class="num">@F(n, 0)</td></tr>
+                }
+            </table>
+        </section>
+
+        <section class="card wide">
+            <h2>Traced bots</h2>
+            <table class="ledger traced">
+                <tr>
+                    <th>bot</th><th>goal</th><th class="num">for</th><th class="num">changes / min</th><th class="num">reversals</th><th class="num">stuck</th>
+                    <th class="num">CL</th><th>where</th><th></th>
+                </tr>
+                @foreach (var b in v.Bots)
+                {
+                    var l = b.Latest;
+                    <tr class="@(l.Index == _selected ? "selected" : null)" @onclick="() => _selected = l.Index">
+                        <td>#@l.Index@(l.Home ? " ⌂" : "")</td>
+                        <td><span class="swatch" style="background:@Colour(l.Goal)"></span>@l.Goal</td>
+                        <td class="num">@F(l.GoalForS, 0) s</td>
+                        <td class="num">@F(PerMin(l.GoalChanges, l.Tick, v.Hz), 2)</td>
+                        <td class="num">@l.Reversals</td>
+                        <td class="num">@l.Stuck</td>
+                        <td class="num">@l.Cl</td>
+                        <td>@(l.Realm != 0 ? $"indoors ({l.Realm})" : $"{F(l.X, 0)}, {F(l.Z, 0)}")@(l.Mounted ? " · swoop" : "")</td>
+                        <td>@WatchButton(l)</td>
+                    </tr>
+                }
+            </table>
+            <p class="muted small">⌂ lives in the home city · click a row for its trail and timeline · Watch: the 3D client's god camera follows it</p>
+        </section>
+
+        @if (v.Bots.FirstOrDefault(b => b.Latest.Index == _selected) is { } sel)
+        {
+            <section class="card">
+                <h2>Bot #@sel.Latest.Index — trail @WatchButton(sel.Latest)</h2>
+                @Trail(sel)
+                <h3>Time per goal</h3>
+                <table class="bars">
+                    @foreach (var (goal, s) in sel.Latest.GoalS.OrderByDescending(g => g.Value))
+                    {
+                        <tr>
+                            <td><span class="swatch" style="background:@Colour(goal)"></span>@goal</td>
+                            <td class="num">@F(s, 0) s</td>
+                            <td class="bar"><div style="width:@Pct(s, sel.Latest.GoalS.Values.Sum());background:@Colour(goal)"></div></td>
+                        </tr>
+                    }
+                </table>
+                <p class="muted small">intents: @string.Join(" · ", sel.Latest.Intents.Select(i => $"{i.Key} {i.Value}"))</p>
+            </section>
+
+            <section class="card">
+                <h2>Bot #@sel.Latest.Index — last @sel.Events.Length events</h2>
+                <table class="ledger timeline">
+                    @foreach (var e in sel.Events.Reverse())
+                    {
+                        <tr class="@e.Kind @(e.Reversal ? "reversal" : null)">
+                            <td class="num">−@F((v.Tick - e.Tick) / v.Hz, 1) s</td>
+                            <td>@e.Kind</td>
+                            <td>@Describe(e)</td>
+                        </tr>
+                    }
+                </table>
+            </section>
+        }
+    </main>
+}
+
+@code {
+    private int _selected = -1;
+
+    protected override void OnInitialized() => Board.Changed += Refresh;
+
+    public void Dispose() => Board.Changed -= Refresh;
+
+    private void Refresh() => _ = InvokeAsync(async () =>
+    {
+        StateHasChanged();
+        await FollowAcrossAsync();
+    });
+
+    /// <summary>
+    /// "Watch" (bot-telemetry.md § 7). Plain HTML onclick, not Blazor's: the click opens the client's window itself, inside the click's own user
+    /// activation (wwwroot/watch.js). No button before the bot has reported a body.
+    /// </summary>
+    private RenderFragment WatchButton(TracedBotReport bot) => __builder =>
+    {
+        if (bot.NetId == 0)
+        {
+            return;
+        }
+
+        <button class="watch" title="Open the 3D client's god camera on this bot, and follow it" onclick="tatooineWatch.watch(this); event.stopPropagation()"
+                data-net-id="@bot.NetId" data-realm="@bot.Realm" data-x="@Coord(bot.X)" data-z="@Coord(bot.Z)" data-bot="@bot.Index"
+                data-client-url="@Link.ClientUrl" data-server-port="@Link.ServerPort">Watch</button>
+    };
+
+    private static string Coord(double v) => v.ToString("0.#", CultureInfo.InvariantCulture);
+
+    /// <summary>Tells the watch window when the watched bot's body changed realm or netId, so it follows the bot through a door; see watch.js.</summary>
+    private async Task FollowAcrossAsync()
+    {
+        var bots = Board.Latest.Bots;
+        if (bots.Count == 0)
+        {
+            return;
+        }
+
+        var args = new object[bots.Count];
+        for (var i = 0; i < bots.Count; i++)
+        {
+            var l = bots[i].Latest;
+            args[i] = new { bot = l.Index, netId = l.NetId, realm = l.Realm, x = Math.Round(l.X, 1), z = Math.Round(l.Z, 1) };
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("tatooineWatch.update", (object)args);
+        }
+        catch (Exception e) when (e is JSException or JSDisconnectedException or TaskCanceledException or InvalidOperationException)
+        {
+            // A closed tab, or a render before the circuit is up: the next report tries again.
+        }
+    }
+
+    private static string F(double v, int digits) => double.IsNaN(v) ? "—" : v.ToString(digits == 0 ? "N0" : "N" + digits, CultureInfo.InvariantCulture);
+
+    private static string Pct(double part, double whole)
+        => whole > 0 ? $"{Math.Clamp(part / whole * 100d, 0d, 100d).ToString("0.#", CultureInfo.InvariantCulture)}%" : "0%";
+
+    /// <summary>A traced bot's goal changes per minute since the run began.</summary>
+    private static double PerMin(long changes, long tick, double hz) => tick > 0 ? changes / (tick / hz / 60d) : 0d;
+
+    private static string Age(DateTime at)
+    {
+        var s = (DateTime.UtcNow - at).TotalSeconds;
+        return s < 90 ? $"{s:0} s" : $"{s / 60:0} min";
+    }
+
+    /// <summary>A goal's colour, the same on every chart of the page.</summary>
+    private static string Colour(string goal) => goal switch
+    {
+        "Choosing" => "#8b97a5",
+        "Travelling" => "#5aa9e6",
+        "Hunting" => "#ff7a6b",
+        "Idling" => "#6b7785",
+        "Waiting" => "#c792ea",
+        "Visiting" => "#f0b84a",
+        "Indoors" => "#6fcf8a",
+        "Questing" => "#ff9f43",
+        _ => "#e7ecf1",
+    };
+
+    private static string Describe(BotEventReport e) => e.Kind switch
+    {
+        "goal" => $"{e.From} → {e.To}"
+            + (e.Exit is null or "None" ? "" : $" · ended: {e.Exit}")
+            + $" · began: {e.Enter}"
+            + (e.Subject != 0 || e.Metres > 0 ? $" ({e.Subject}{(e.Metres > 0 ? $", {e.Metres:0} m" : "")})" : ""),
+        "leg" => $"{e.Leg} · {e.Points} point(s) · {e.Metres:0} m to go",
+        _ => $"{e.Intent} c{e.Speed}"
+            + (e.Heading is { } h ? $" · {(h * 180d / Math.PI):0}°" : "")
+            + (e.Subject != 0 ? $" · target {e.Subject}" : "")
+            + (e.Reversal ? " · REVERSAL" : ""),
+    };
+
+    private static RenderFragment Kpi(string label, string value, bool alarm = false) => __builder =>
+    {
+        <div class="kpi @(alarm ? "alarm" : null)"><div class="value">@value</div><div class="label">@label</div></div>
+    };
+
+    private RenderFragment Spark(string series, string unit) => __builder =>
+    {
+        var values = Board.History(series);
+        if (values.Length < 2)
+        {
+            return;
+        }
+
+        var max = Math.Max(1e-9, values.Max());
+        var points = string.Join(' ', values.Select((x, i) => string.Create(CultureInfo.InvariantCulture,
+            $"{i * 300d / (BotBoard.HistoryLength - 1):0.#},{38 - (x / max * 36):0.#}")));
+        <div class="spark">
+            <svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline points="@points" /></svg>
+            <span class="muted">@series — peak @F(max, 1)@unit</span>
+        </div>
+    };
+
+    /// <summary>The trail on the planet, north up, each step coloured by the goal it was taken in; the last point ringed.</summary>
+    private static RenderFragment Trail(TracedBotView bot) => __builder =>
+    {
+        var pts = bot.Trail.Where(p => p.Realm == 0).ToArray();
+        if (pts.Length < 2)
+        {
+            <p class="muted">no trail on the planet yet</p>
+            return;
+        }
+
+        var (minX, maxX, minZ, maxZ) = (pts.Min(p => p.X), pts.Max(p => p.X), pts.Min(p => p.Z), pts.Max(p => p.Z));
+        var span = Math.Max(20d, Math.Max(maxX - minX, maxZ - minZ));
+        var (cx, cz) = ((minX + maxX) / 2d, (minZ + maxZ) / 2d);
+        string Sx(double x) => (150d + ((x - cx) / span * 280d)).ToString("0.#", CultureInfo.InvariantCulture);
+        string Sz(double z) => (150d - ((z - cz) / span * 280d)).ToString("0.#", CultureInfo.InvariantCulture);
+        var last = pts[^1];
+        <svg class="trail" viewBox="0 0 300 300">
+            @for (var i = 1; i < pts.Length; i++)
+            {
+                var (a, b) = (pts[i - 1], pts[i]);
+                <line x1="@Sx(a.X)" y1="@Sz(a.Z)" x2="@Sx(b.X)" y2="@Sz(b.Z)" stroke="@Colour(b.Goal)" stroke-dasharray="@(b.Mounted ? "4 2" : null)" />
+            }
+            <circle cx="@Sx(last.X)" cy="@Sz(last.Z)" r="5" fill="none" stroke="@Colour(last.Goal)" />
+        </svg>
+        <p class="muted small">
+            @F(span, 0) m across, last @F(pts.Length, 0) s · dashed: on the swoop ·
+            @foreach (var goal in pts.Select(p => p.Goal).Distinct())
+            {
+                <span class="swatch" style="background:@Colour(goal)"></span>@goal<text> </text>
+            }
+        </p>
+    };
+}

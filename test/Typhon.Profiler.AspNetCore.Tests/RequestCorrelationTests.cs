@@ -54,6 +54,9 @@ public class RequestCorrelationTests
     public async Task SetUp()
     {
         Assert.That(ProfilerCorrelation.IsActive, Is.True, "the module initializer must have turned correlation on");
+        // One fixture instance serves every test: what a test left in the queues must not reach the next.
+        _spans.Clear();
+        _allDataRequested.Clear();
 
         _registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "correlation-tests" });
         _observer = new TraceRingObserver(_registry.Profiler, captureRawBytes: true);
@@ -71,6 +74,7 @@ public class RequestCorrelationTests
                 })
                 .Configure(app =>
                 {
+                    app.UseWebSockets();
                     app.UseRouting();
                     app.UseEndpoints(e =>
                     {
@@ -85,6 +89,11 @@ public class RequestCorrelationTests
                         });
                         e.MapPost("/fail/{code:int}", (int code) => Results.StatusCode(code));
                         e.MapGet("/boom", (Func<string>)(() => throw new InvalidOperationException("handler failure")));
+                        e.Map("/ws", async (HttpContext ctx) =>
+                        {
+                            using var socket = await ctx.WebSockets.AcceptWebSocketAsync();
+                            await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "bye", default);
+                        });
                     });
                 }))
             .StartAsync();
@@ -166,6 +175,18 @@ public class RequestCorrelationTests
 
         var root = ExternalRequests().Single();
         Assert.That((root.Status, root.Route), Is.EqualTo(((ushort)500, "/boom")));
+    }
+
+    [Test]
+    public async Task A_websocket_session_is_not_recorded_as_a_request()
+    {
+        var socket = await _host.GetTestServer().CreateWebSocketClient().ConnectAsync(new Uri(_host.GetTestServer().BaseAddress, "ws"), default);
+        await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "bye", default);
+        socket.Dispose();
+
+        // A request after the session, so the wait below ends on it rather than timing out: the only root recorded must be that one.
+        await _client.GetAsync("/items/1");
+        Assert.That(ExternalRequests().Select(r => r.Route), Is.EqualTo(new[] { "/items/{id}" }));
     }
 
     [Test]

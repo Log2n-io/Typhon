@@ -1,11 +1,12 @@
 import type { ChunkSpan, OffCpuStore, ProfilerSelection, SpanData, TickData } from '@/libs/profiler/model/traceModel';
 import type { TimeRange, TrackLayout, Viewport } from '@/libs/profiler/model/uiTypes';
 import type { TimeAreaHover } from './timeAreaHitTest';
-import { flowSegments, type FlowPoint } from '@/libs/profiler/correlation/causalFlow';
+import type { RequestRow } from '@/libs/profiler/correlation/requests';
+import { flowSegments, isStepPoint, STEP_MARK_RADIUS, type FlowPoint, type FlowSegment } from '@/libs/profiler/correlation/causalFlow';
 import {
-  DROPPED_MARK_HALF_WIDTH, firstRootEndingAfter, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID, type RootLane, type RootLanes,
+  DROPPED_MARK_HALF_WIDTH, firstRootEndingAfter, isRootLaneId, ROOT_COMMANDS_TRACK_ID, ROOT_HTTP_TRACK_ID, type RootLane, type RootLanes,
 } from '@/libs/profiler/correlation/rootLanes';
-import { relativeLuminanceHex } from '@/libs/color/contrast';
+import { darken, lighten, relativeLuminanceHex } from '@/libs/color/contrast';
 import {
   colorForChunk,
   colorForSpan,
@@ -280,6 +281,24 @@ function readableOnBar(barHex: string, theme: StudioTheme): string {
   return pick === 'dark' ? theme.textOnLightBar : theme.textOnDarkBar;
 }
 
+/**
+ * The colour a bar shows once composited over the canvas background at <paramref name="alpha"/> — what text drawn on it actually sits on, so
+ * {@link readableOnBar} judges the right colour (a dark bar dimmed to 35 % on the light theme is a pale bar). The light background is near white and
+ * the dark one near black, so mixing toward those is close enough for a black-or-white pick. Cached: a frame asks for the same few pairs.
+ */
+const _compositedCache = new Map<string, string>();
+function compositedOver(barHex: string, alpha: number, theme: StudioTheme): string {
+  if (alpha >= 1) return barHex;
+  const key = `${barHex}|${alpha}|${theme.isDark ? 1 : 0}`;
+  let out = _compositedCache.get(key);
+  if (out === undefined) {
+    out = theme.isDark ? darken(barHex, 1 - alpha) : lighten(barHex, 1 - alpha);
+    if (_compositedCache.size >= TEXT_ON_BAR_CACHE_MAX) _compositedCache.clear();
+    _compositedCache.set(key, out);
+  }
+  return out;
+}
+
 // A per-frame cache of `new Set(visibleTicks)`: every lane needs the membership set to skip ticks already drawn in the
 // foreground pass, and they all receive the same `visibleTicks` array within one render — so build it once (first lane)
 // and reuse it, keyed by array identity so a new viewport (new array) rebuilds it. Both call sites read it read-only.
@@ -426,6 +445,12 @@ export interface TimeAreaInputs {
   causal?: CausalHighlight | null;
   /** The packed root lanes (#1517) the `roots-*` tracks draw. Absent → those tracks draw nothing. */
   rootLanes?: RootLanes;
+  /** Filled with this frame's flow segments, in canvas coordinates, so the pointer handlers can hit-test the arrows. */
+  flowSegmentsOut?: FlowSegment[];
+  /** Index into this frame's flow segments of the arrow under the pointer, drawn bolder; -1 for none. */
+  hoveredFlowSegment?: number;
+  /** Time of the lifecycle step whose diamond is under the pointer, drawn in the selection colour; null for none. */
+  hoveredStepUs?: number | null;
 }
 
 /** What {@link TimeAreaInputs.causal} highlights. */
@@ -435,7 +460,11 @@ export interface CausalHighlight {
   hi: string;
   lo: string;
   /** Lifecycle points with no span of their own (received, admitted, consumed, sent), by producing thread slot. */
-  markers: readonly { slot: number; us: number }[];
+  markers: readonly { slot: number; us: number; kind: 'received' | 'admitted' | 'consumed' | 'sent' }[];
+  /** Every loaded span carrying the key, so the flow reaches those outside the view; only the drawn ones when absent. */
+  spans?: readonly SpanData[];
+  /** The root itself, so the flow starts from it when its bar is outside the view. */
+  root?: RequestRow;
 }
 
 
@@ -525,7 +554,7 @@ export function drawTimeArea(
     // Track separator at bottom edge. `stripInsideLabel` = slot lanes in summary render inside
     // the label-row band, so their advance is LABEL_ROW_HEIGHT+TRACK_GAP; all other summary tracks
     // use the legacy 4-px dark strip below the label.
-    const stripInsideLabel = track.id.startsWith('slot-');
+    const stripInsideLabel = track.id.startsWith('slot-') || isRootLaneId(track.id);
     const trackAdvance = track.state === 'summary'
       ? (stripInsideLabel ? LABEL_ROW_HEIGHT + TRACK_GAP : LABEL_ROW_HEIGHT + 4)
       : (track.height + TRACK_GAP);
@@ -600,6 +629,9 @@ export function drawTimeArea(
       } else if (track.id.startsWith('slot-')) {
         const threadSlot = Number.parseInt(track.id.slice(5), 10);
         drawSlotSummary(ctx, threadSlot, visibleTicks, visStartUs, visEndUs, gutterWidth, contentWidth, pxOfUs, ty, width, theme);
+      } else if (isRootLaneId(track.id)) {
+        const lane = inputs.rootLanes === undefined ? undefined : track.id === ROOT_HTTP_TRACK_ID ? inputs.rootLanes.http : inputs.rootLanes.commands;
+        if (lane !== undefined) drawRootSummary(ctx, lane, track.id === ROOT_HTTP_TRACK_ID, visStartUs, visEndUs, gutterWidth, contentWidth, pxOfUs, ty, theme);
       } else if (track.id.startsWith('system-')) {
         const systemIdx = Number.parseInt(track.id.slice(7), 10);
         drawSystemSummary(ctx, systemIdx, visibleTicks, gutterWidth, contentWidth, pxOfUs, ty, width, theme);
@@ -627,7 +659,9 @@ export function drawTimeArea(
     // Root lanes (#1517) — the requests and commands that caused the work below.
     if (track.id === ROOT_HTTP_TRACK_ID || track.id === ROOT_COMMANDS_TRACK_ID) {
       const lane = inputs.rootLanes === undefined ? undefined : track.id === ROOT_HTTP_TRACK_ID ? inputs.rootLanes.http : inputs.rootLanes.commands;
-      if (lane !== undefined) drawRootLane(ctx, lane, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, hover, theme, causal, flowPoints);
+      if (lane !== undefined) {
+        drawRootLane(ctx, lane, track.id, visStartUs, visEndUs, gutterWidth, width, height, pxOfUs, ty, hover, theme, causal, flowPoints);
+      }
       continue;
     }
 
@@ -637,11 +671,16 @@ export function drawTimeArea(
     if (track.id.startsWith('slot-')) {
       const threadSlot = Number.parseInt(track.id.slice(5), 10);
       drawSlotLane(ctx, track, threadSlot, ticks, visibleTicks, visStartUs, visEndUs, gutterWidth, width, pxOfUs, ty, selection, hover, theme,
-        spanColorMode, spanPalette, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu, causal, flowPoints);
+        spanColorMode, spanPalette, gaugeData.offCpuBySlot.get(threadSlot), showOffCpu, causal, flowPoints, track.id);
       if (causal !== null) {
         for (const m of causal.markers) {
-          if (m.slot === threadSlot && m.us >= visStartUs && m.us <= visEndUs) {
-            flowPoints.push({ x: pxOfUs(m.us), y: ty + Math.min(track.height, 18) / 2, us: m.us, lane: threadSlot });
+          // Outside the view too: the flow reaches it and the canvas clips the arrow.
+          if (m.slot === threadSlot) {
+            const rowHeight = Math.min(track.height, 18);
+            flowPoints.push({
+              x: pxOfUs(m.us), y: ty + rowHeight / 2, us: m.us, lane: threadSlot, kind: m.kind, label: m.kind,
+              nav: { startUs: m.us, endUs: m.us, trackId: track.id, rowOffset: 0, rowHeight },
+            });
           }
         }
       }
@@ -672,8 +711,10 @@ export function drawTimeArea(
   }
 
   // Before the ruler pin, so a flow reaching a track scrolled under the sticky band is covered by it like the track's own content.
+  if (inputs.flowSegmentsOut !== undefined) inputs.flowSegmentsOut.length = 0;
+  if (causal !== null) appendOffViewFlowPoints(flowPoints, causal, tracks, vp.scrollY, pxOfUs, inputs.rootLanes);
   if (causal !== null && flowPoints.length > 1) {
-    drawCausalFlow(ctx, flowPoints, theme);
+    drawCausalFlow(ctx, flowPoints, theme, inputs.flowSegmentsOut, inputs.hoveredFlowSegment ?? -1, inputs.hoveredStepUs ?? null);
   }
 
   // Pin the ruler content: overwrite any scrolled track content that entered the ruler band.
@@ -983,6 +1024,7 @@ function drawSlotLane(
   showOffCpu: boolean,
   causal: CausalHighlight | null = null,
   flowPoints: FlowPoint[] = [],
+  trackId = '',
 ): void {
   const chunkRowHeight = track.chunkRowHeight ?? 0;
   const spanRegionTop = ty + chunkRowHeight;
@@ -1147,6 +1189,7 @@ function drawSlotLane(
       if (causalMatch) {
         ctx.globalAlpha = 1;
         causalHits.push(x1, sy, w, span.startUs);
+        causalSpans.push(span);
       }
       ctx.fillRect(x1, sy + SPAN_BAR_MARGIN, w, SPAN_BAR_HEIGHT);
 
@@ -1167,7 +1210,7 @@ function drawSlotLane(
         // the rationale (#377 perf follow-up, 2026-05-26). Per-span, this was the #1 hotspot in
         // the entire Workbench main thread (~21% self in prod recordings); removing the three
         // canvas state transitions and the clip-path eval drops it to a single `fillText`.
-        const textColor = readableOnBar(c, theme);
+        const textColor = readableOnBar(causal !== null && !causalMatch ? compositedOver(c, CAUSAL_DIM_ALPHA, theme) : c, theme);
         ctx.fillStyle = textColor;
         ctx.font = '12px monospace';
         ctx.textAlign = 'left';
@@ -1205,6 +1248,7 @@ function drawSlotLane(
   // With a request selected (#1517), every span but its own draws translucent — bars, coalesced runs and labels alike, at no extra fill. Its own
   // spans are outlined after both passes (flat x, y, w, us quads), so a coalesced run flushed later in the same pixel column cannot paint over them.
   const causalHits: number[] = [];
+  const causalSpans: SpanData[] = [];
   if (causal !== null) ctx.globalAlpha = CAUSAL_DIM_ALPHA;
   for (const tick of ticks) {
     if (!visSpanSet.has(tick)) drawOneTickSpans(tick, true);
@@ -1217,7 +1261,7 @@ function drawSlotLane(
   }
   ctx.globalAlpha = 1;
   for (let i = 0; i < causalHits.length; i += 4) {
-    outlineCausal(ctx, causalHits[i], causalHits[i + 1], causalHits[i + 2], causalHits[i + 3], theme, flowPoints, threadSlot);
+    outlineCausal(ctx, causalHits[i], causalHits[i + 1], causalHits[i + 2], causalSpans[i / 4], theme, flowPoints, threadSlot, trackId, ty);
   }
 
   // Off-CPU overlay — drawn last so the translucent band composites over the chunk + span rows. Opt-in via the
@@ -1660,37 +1704,129 @@ const CAUSAL_DIM_ALPHA = 0.35;
 
 /** Outlines a span carrying the selected causal id and records its flow point, keyed by its lane so the flow fans out once per lane. */
 function outlineCausal(
-  ctx: CanvasRenderingContext2D, x1: number, sy: number, w: number, startUs: number, theme: StudioTheme, flowPoints: FlowPoint[], lane: number,
+  ctx: CanvasRenderingContext2D, x1: number, sy: number, w: number, span: SpanData, theme: StudioTheme, flowPoints: FlowPoint[], lane: number,
+  trackId: string, ty: number,
 ): void {
   ctx.strokeStyle = theme.selectedOutline;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 1;
   ctx.strokeRect(x1 + 0.5, sy + SPAN_BAR_MARGIN + 0.5, Math.max(w - 1, 1), SPAN_BAR_HEIGHT - 1);
-  flowPoints.push({ x: x1, y: sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT / 2, us: startUs, lane });
+  flowPoints.push({
+    x: x1, y: sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT / 2, us: span.startUs, lane, kind: 'span', label: span.name, span,
+    nav: { startUs: span.startUs, endUs: span.endUs, trackId, rowOffset: sy - ty, rowHeight: SPAN_ROW_HEIGHT },
+  });
+}
+
+/**
+ * Adds the flow points the draw did not reach: the selected root's spans and its own bar outside the visible time range. Each is placed where it
+ * would be drawn (its time, its lane, its packed row), off the canvas or not, so the arrows to it are drawn and clipped at the edge, and a click on
+ * one still brings it into view. A lane hidden or collapsed has no row to place it on, so it is left out.
+ */
+export function appendOffViewFlowPoints(
+  points: FlowPoint[], causal: CausalHighlight, tracks: readonly TrackLayout[], scrollY: number, pxOfUs: (us: number) => number,
+  rootLanes: RootLanes | undefined,
+): void {
+  const placed = new Set<SpanData>();
+  let hasRoot = false;
+  for (const p of points) {
+    if (p.span !== undefined) placed.add(p.span);
+    if (p.root === true) hasRoot = true;
+  }
+  const expanded = (id: string): TrackLayout | undefined => {
+    const t = tracks.find((tr) => tr.id === id);
+    return t !== undefined && t.state !== 'summary' ? t : undefined;
+  };
+
+  for (const span of causal.spans ?? []) {
+    if (placed.has(span)) continue;
+    const track = expanded(`slot-${span.threadSlot}`);
+    if (track === undefined) continue;
+    const ty = track.y - scrollY;
+    const rawDepth = span.renderDepth ?? span.depth ?? 0;
+    const sy = rawDepth === -1 ? ty : ty + (track.chunkRowHeight ?? 0) + rawDepth * SPAN_ROW_HEIGHT;
+    points.push({
+      x: pxOfUs(span.startUs), y: sy + SPAN_BAR_MARGIN + SPAN_BAR_HEIGHT / 2, us: span.startUs, lane: span.threadSlot, kind: 'span', label: span.name, span,
+      nav: { startUs: span.startUs, endUs: span.endUs, trackId: track.id, rowOffset: sy - ty, rowHeight: SPAN_ROW_HEIGHT },
+    });
+  }
+
+  const root = causal.root;
+  if (hasRoot || root === undefined || root.kind === 'dropped' || rootLanes === undefined) return;
+  const trackId = root.kind === 'http' ? ROOT_HTTP_TRACK_ID : ROOT_COMMANDS_TRACK_ID;
+  const track = expanded(trackId);
+  const packed = (root.kind === 'http' ? rootLanes.http : rootLanes.commands).roots.find((p) => p.row.key === root.key);
+  if (track === undefined || packed === undefined) return;
+  const ty = track.y - scrollY;
+  const sy = ty + packed.lane * SPAN_ROW_HEIGHT + SPAN_BAR_MARGIN;
+  points.push({
+    x: pxOfUs(root.startUs), y: sy + SPAN_BAR_HEIGHT / 2, us: root.startUs, lane: ROOT_FLOW_LANE, root: true, kind: 'root', label: root.label,
+    nav: { startUs: root.startUs, endUs: root.endUs, trackId, rowOffset: sy - ty, rowHeight: SPAN_ROW_HEIGHT },
+  });
 }
 
 /** Draws the selected request's flow ({@link flowSegments}): a dashed line per segment, with an arrowhead into each point. */
-function drawCausalFlow(ctx: CanvasRenderingContext2D, points: FlowPoint[], theme: StudioTheme): void {
+function drawCausalFlow(
+  ctx: CanvasRenderingContext2D, points: FlowPoint[], theme: StudioTheme, out: FlowSegment[] | undefined, hovered: number, hoveredStepUs: number | null,
+): void {
   const segments = flowSegments(points);
-  ctx.strokeStyle = theme.selectedOutline;
-  ctx.fillStyle = theme.selectedOutline;
+  if (out !== undefined) for (const s of segments) out.push(s);
+  ctx.strokeStyle = theme.causalFlow;
+  ctx.fillStyle = theme.causalFlow;
   ctx.lineWidth = 1.5;
   ctx.setLineDash([4, 3]);
   ctx.beginPath();
-  for (const [from, to] of segments) {
+  for (let i = 0; i < segments.length; i++) {
+    if (i === hovered) continue;
+    const [from, to] = segments[i];
     ctx.moveTo(from.x, from.y);
     ctx.lineTo(to.x, to.y);
   }
   ctx.stroke();
   ctx.setLineDash([]);
-  for (const [from, to] of segments) {
-    if (Math.hypot(to.x - from.x, to.y - from.y) < 8) continue;
-    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+  if (hovered >= 0 && hovered < segments.length) {
+    // The arrow under the pointer: solid and bolder, in the selection colour, so it reads as the one a click follows.
+    const [from, to] = segments[hovered];
+    ctx.strokeStyle = theme.selectedOutline;
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(to.x, to.y);
-    ctx.lineTo(to.x - 7 * Math.cos(angle - 0.4), to.y - 7 * Math.sin(angle - 0.4));
-    ctx.lineTo(to.x - 7 * Math.cos(angle + 0.4), to.y - 7 * Math.sin(angle + 0.4));
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+  }
+  for (let i = 0; i < segments.length; i++) {
+    const [from, to] = segments[i];
+    const length = Math.hypot(to.x - from.x, to.y - from.y);
+    if (length < 8) continue;
+    ctx.fillStyle = i === hovered ? theme.selectedOutline : theme.causalFlow;
+    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+    // An arrow into a lifecycle step stops at the diamond's edge, so its head is not hidden under it.
+    const back = isStepPoint(to) ? STEP_MARK_RADIUS + 1 : 0;
+    const tipX = to.x - back * Math.cos(angle);
+    const tipY = to.y - back * Math.sin(angle);
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX - 7 * Math.cos(angle - 0.4), tipY - 7 * Math.sin(angle - 0.4));
+    ctx.lineTo(tipX - 7 * Math.cos(angle + 0.4), tipY - 7 * Math.sin(angle + 0.4));
     ctx.closePath();
     ctx.fill();
+  }
+
+  // A command's lifecycle steps have no span of their own: a diamond on their thread's lane gives each arrow something to point at.
+  const drawn = new Set<number>();
+  for (const p of points) {
+    if (!isStepPoint(p) || drawn.has(p.us)) continue;
+    drawn.add(p.us);
+    const hot = hoveredStepUs === p.us;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - STEP_MARK_RADIUS);
+    ctx.lineTo(p.x + STEP_MARK_RADIUS, p.y);
+    ctx.lineTo(p.x, p.y + STEP_MARK_RADIUS);
+    ctx.lineTo(p.x - STEP_MARK_RADIUS, p.y);
+    ctx.closePath();
+    ctx.fillStyle = hot ? theme.selectedOutline : theme.causalFlow;
+    ctx.fill();
+    ctx.strokeStyle = theme.background;
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 }
 
@@ -1705,10 +1841,12 @@ const ROOT_FLOW_LANE = -1;
 function drawRootLane(
   ctx: CanvasRenderingContext2D,
   lane: RootLane,
+  trackId: string,
   visStartUs: number,
   visEndUs: number,
   gutterWidth: number,
   width: number,
+  height: number,
   pxOfUs: (us: number) => number,
   ty: number,
   hover: TimeAreaHover | null,
@@ -1719,14 +1857,19 @@ function drawRootLane(
   ctx.font = '12px monospace';
   ctx.textAlign = 'left';
   const hoveredId = hover !== null && hover.kind === 'root' ? hover.root.id : null;
-  const httpColor = theme.spans[2 % theme.spans.length];
-  const commandColor = theme.spans[5 % theme.spans.length];
+  const httpColor = theme.spans[ROOT_HTTP_COLOR_INDEX % theme.spans.length];
+  const commandColor = theme.spans[ROOT_COMMAND_COLOR_INDEX % theme.spans.length];
+  let stackedInView = 0;
   for (let r = 0; r < lane.rows.length; r++) {
+    // An extended lane can be taller than the canvas: its rows off screen are skipped.
+    const rowTop = ty + r * SPAN_ROW_HEIGHT;
+    if (rowTop > height || rowTop + SPAN_ROW_HEIGHT < 0) continue;
     const rowIdx = lane.rows[r].idx;
     for (let k = firstRootEndingAfter(lane, r, visStartUs); k < rowIdx.length; k++) {
       const { row, lane: laneRow, overflow } = lane.roots[rowIdx[k]];
       if (row.startUs > visEndUs) break;
       if (row.endUs < visStartUs) continue;
+      if (overflow) stackedInView++;
       const sy = ty + laneRow * SPAN_ROW_HEIGHT + SPAN_BAR_MARGIN;
       const x1 = pxOfUs(row.startUs);
       const selected = causal !== null && causal.key === row.key;
@@ -1765,21 +1908,116 @@ function drawRootLane(
 
       if (selected) {
         ctx.strokeStyle = theme.selectedOutline;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1;
         ctx.strokeRect(x1 + 0.5, sy + 0.5, Math.max(w - 1, 1), SPAN_BAR_HEIGHT - 1);
-        flowPoints.push({ x: Math.max(x1, gutterWidth), y: sy + SPAN_BAR_HEIGHT / 2, us: row.startUs, lane: ROOT_FLOW_LANE, root: true });
+        flowPoints.push({
+          x: Math.max(x1, gutterWidth), y: sy + SPAN_BAR_HEIGHT / 2, us: row.startUs, lane: ROOT_FLOW_LANE, root: true, kind: 'root', label: row.label,
+          nav: { startUs: row.startUs, endUs: row.endUs, trackId, rowOffset: sy - ty, rowHeight: SPAN_ROW_HEIGHT },
+        });
       } else if (hoveredId === row.id) {
         strokeHoverContour(ctx, x1, sy, w, SPAN_BAR_HEIGHT, theme);
       }
 
-      if (w > 24 && x1 + w > gutterWidth && x1 < width) {
-        ctx.fillStyle = readableOnBar(color, theme);
+      // A label stops where the next bar of its row starts: in the overflow row bars overlap, and the next one would paint over its middle.
+      let textRight = x1 + w;
+      for (let n = k + 1; n < rowIdx.length; n++) {
+        const next = lane.roots[rowIdx[n]].row;
+        if (next.kind === 'dropped') continue;
+        textRight = Math.min(textRight, pxOfUs(next.startUs));
+        break;
+      }
+      if (w > 24 && textRight > gutterWidth && x1 < width) {
         const textX = Math.max(x1 + 3, gutterWidth + 3);
+        // What the text sits on: the bar, lightened where the queueing waits are shaded, then dimmed with the rest of the bar.
+        const queuedTo = row.ringWaitUs !== undefined || row.tickWaitUs !== undefined
+          ? pxOfUs(row.startUs + (row.ringWaitUs ?? 0) + (row.tickWaitUs ?? 0))
+          : x1;
+        const underText = textX < queuedTo ? compositedOver(color, 0.5, theme) : color;
+        ctx.fillStyle = readableOnBar(compositedOver(underText, alpha, theme), theme);
         const status = row.status !== undefined ? ` ${row.status}` : '';
         fillTextTruncatedMono12px(ctx, `${row.label}${status} (${formatDuration(row.totalUs)})`, textX, sy + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET,
-          x1 + w - textX);
+          textRight - 3 - textX);
       }
     }
   }
   ctx.globalAlpha = 1;
+
+  // The roots stacked on the last row are otherwise indistinguishable: say how many of those in view are there.
+  if (stackedInView > 0) {
+    const text = `+${stackedInView.toLocaleString()} stacked`;
+    ctx.font = '11px monospace';
+    const tw = ctx.measureText(text).width;
+    const bx = width - tw - 24; // clear of the vertical scrollbar laid over the canvas edge
+    const by = ty + (lane.rowCount - 1) * SPAN_ROW_HEIGHT + SPAN_BAR_MARGIN;
+    ctx.fillStyle = theme.tooltipBackground;
+    ctx.fillRect(bx - 4, by, tw + 8, SPAN_BAR_HEIGHT);
+    ctx.fillStyle = theme.foreground;
+    ctx.fillText(text, bx, by + SPAN_BAR_HEIGHT - SPAN_BAR_TEXT_OFFSET);
+  }
+}
+
+const ROOT_HTTP_COLOR_INDEX = 2;
+const ROOT_COMMAND_COLOR_INDEX = 5;
+
+/**
+ * A collapsed root lane: per pixel column, how many roots are in flight (the column height, against the busiest column in view), in the lane
+ * colour, or the destructive one where a root slower than the lane P99 runs. Dropped commands are full-height destructive ticks. Its cost is the
+ * roots in view plus their pixel widths, whatever the load, so it stays the readable view under thousands of clients.
+ */
+function drawRootSummary(
+  ctx: CanvasRenderingContext2D,
+  lane: RootLane,
+  http: boolean,
+  visStartUs: number,
+  visEndUs: number,
+  gutterWidth: number,
+  contentWidth: number,
+  pxOfUs: (us: number) => number,
+  ty: number,
+  theme: StudioTheme,
+): void {
+  const cols = Math.max(1, Math.ceil(contentWidth));
+  const inFlight = new Int32Array(cols + 1);
+  const slow = new Uint8Array(cols);
+  const dropped: number[] = [];
+  for (let r = 0; r < lane.rows.length; r++) {
+    const rowIdx = lane.rows[r].idx;
+    for (let k = firstRootEndingAfter(lane, r, visStartUs); k < rowIdx.length; k++) {
+      const { row } = lane.roots[rowIdx[k]];
+      if (row.startUs > visEndUs) break;
+      if (row.endUs < visStartUs) continue;
+      const c1 = Math.max(0, Math.floor(pxOfUs(row.startUs) - gutterWidth));
+      if (row.kind === 'dropped') {
+        if (c1 < cols) dropped.push(c1);
+        continue;
+      }
+      const c2 = Math.min(cols - 1, Math.max(c1, Math.floor(pxOfUs(row.endUs) - gutterWidth)));
+      if (c1 > c2) continue;
+      inFlight[c1]++;
+      inFlight[c2 + 1]--;
+      if (row.totalUs >= lane.p99Us) slow.fill(1, c1, c2 + 1);
+    }
+  }
+  let peak = 0;
+  for (let c = 0, run = 0; c < cols; c++) {
+    run += inFlight[c];
+    inFlight[c] = run;
+    if (run > peak) peak = run;
+  }
+  const stripTop = ty + SUMMARY_STRIP_TOP_PAD;
+  const stripH = SUMMARY_STRIP_HEIGHT;
+  ctx.fillStyle = theme.summaryStripBg;
+  ctx.fillRect(gutterWidth, stripTop, contentWidth, stripH);
+  if (peak > 0) {
+    const color = theme.spans[(http ? ROOT_HTTP_COLOR_INDEX : ROOT_COMMAND_COLOR_INDEX) % theme.spans.length];
+    for (let c = 0; c < cols; c++) {
+      const n = inFlight[c];
+      if (n === 0) continue;
+      const h = Math.max(1, Math.round((stripH * n) / peak));
+      ctx.fillStyle = slow[c] === 1 ? theme.destructive : color;
+      ctx.fillRect(gutterWidth + c, stripTop + stripH - h, 1, h);
+    }
+  }
+  ctx.fillStyle = theme.destructive;
+  for (const c of dropped) ctx.fillRect(gutterWidth + c, stripTop, 1, stripH);
 }

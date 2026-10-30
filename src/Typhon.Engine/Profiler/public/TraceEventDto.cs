@@ -31,6 +31,7 @@ namespace Typhon.Profiler.Events;
 [System.Text.Json.Serialization.JsonDerivedType(typeof(OtherTraceEventDto), "other")]
 [System.Text.Json.Serialization.JsonDerivedType(typeof(QueryDefinitionDescribeEventDto), "queryDefinitionDescribe")]
 [System.Text.Json.Serialization.JsonDerivedType(typeof(QueryArgsEventDto), "queryArgs")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(PerTickSnapshotEventDto), "perTickSnapshot")]
 [System.Text.Json.Serialization.JsonDerivedType(typeof(ExternalRequestEventDto), "externalRequest")]
 [System.Text.Json.Serialization.JsonDerivedType(typeof(CorrelationInstantEventDto), "correlationInstant")]
 public abstract partial record TraceEventDto
@@ -100,6 +101,9 @@ public sealed record OtherTraceEventDto : TraceEventDto
     /// <summary>Numeric <see cref="TraceEventKind"/> value of the underlying record.</summary>
     public int OriginalKind { get; init; }
 
+    /// <summary>The <see cref="TraceEventKind"/> name of <see cref="OriginalKind"/> (<c>TickStart</c>, <c>TickEnd</c>…), or its number for a kind this build does not know.</summary>
+    public string KindName { get; init; }
+
     /// <summary>True when the record carried the span-header extension (i.e., was a span, not an instant).</summary>
     public bool IsSpan { get; init; }
 
@@ -109,6 +113,32 @@ public sealed record OtherTraceEventDto : TraceEventDto
     /// <inheritdoc/>
     public override byte KindByte => (byte)OriginalKind;
 }
+
+/// <summary>
+/// One <see cref="TraceEventKind.PerTickSnapshot"/> record: the gauges sampled at a tick's end. Surfaced typed rather than as
+/// <see cref="OtherTraceEventDto"/>, whose bare <c>other</c> hid every gauge from an API reader.
+/// </summary>
+public sealed record PerTickSnapshotEventDto : TraceEventDto
+{
+    /// <summary>The tick the producer stamped into the snapshot (may differ from <see cref="TraceEventDto.TickNumber"/>, the consumer's count).</summary>
+    public uint SnapshotTick { get; init; }
+
+    /// <summary>Snapshot flags as written by the producer.</summary>
+    public uint Flags { get; init; }
+
+    /// <summary>The sampled gauges, in wire order.</summary>
+    public GaugeValueDto[] Gauges { get; init; }
+
+    /// <inheritdoc/>
+    public override byte KindByte => (byte)TraceEventKind.PerTickSnapshot;
+}
+
+/// <summary>One gauge of a <see cref="PerTickSnapshotEventDto"/>.</summary>
+/// <param name="Gauge">The <see cref="GaugeId"/> name, or its number for a gauge this build does not know.</param>
+/// <param name="ValueKind">The <see cref="GaugeValueKind"/> name.</param>
+/// <param name="Value">The value as a number: a percentage for <see cref="GaugeValueKind.U32PercentHundredths"/> (hundredths divided out), the
+/// count, bytes or signed value otherwise. A double, because a JavaScript reader cannot hold a 64-bit integer exactly.</param>
+public sealed record GaugeValueDto(string Gauge, string ValueKind, double Value);
 
 /// <summary>An <see cref="TraceEventKind.ExternalRequest"/>: one HTTP request the host served (#1517).</summary>
 public sealed record ExternalRequestEventDto : TraceSpanEventDto

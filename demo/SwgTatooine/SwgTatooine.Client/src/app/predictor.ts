@@ -15,7 +15,7 @@ import { SpeedClass } from '../data/source';
  *
  * ## Reconciliation, and why it is shaped like this
  *
- * The authoritative position a client holds is interpolated at RENDER time, which trails real time by `Clock.renderDelayMs`.
+ * The authoritative position a client holds is interpolated at RENDER time, which trails real time by `Clock.renderLagMs`.
  * Two mistakes are available here, and the first version of this file made both.
  *
  * **Comparing the authority with the CURRENT predicted position** reads the render delay as error. A corrector that believes
@@ -196,7 +196,7 @@ export class Predictor {
   /**
    * The error that counts as a structural surprise at this speed and delay, in metres.
    *
-   * @param renderDelayMs The authority's lag, `Clock.renderDelayMs`.
+   * @param renderDelayMs The authority's lag, `Clock.renderLagMs`.
    * @returns The snap threshold.
    */
   snapLimit(renderDelayMs: number): number {
@@ -270,7 +270,8 @@ export class Predictor {
    * @param dtSeconds Seconds since the previous frame.
    * @param authX The authoritative (interpolated) position this frame.
    * @param authZ As {@link authX}.
-   * @param renderDelayMs How far behind real time the authority is — `Clock.renderDelayMs`.
+   * @param renderDelayMs How far behind real time the authority is — `Clock.renderLagMs`, the instant the clock actually
+   * rendered, not `Clock.renderDelayMs`, the target it slews toward.
    */
   step(nowMs: number, dtSeconds: number, authX: number, authZ: number, renderDelayMs: number): void {
     if (!this.active) {

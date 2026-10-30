@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Schema.Definition;
@@ -2861,6 +2860,12 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>Per-archetype B+Tree index slots for SingleVersion / Versioned components. Null if no such slot has indexed fields.</summary>
     public ClusterIndexSlot<PersistentStore>[] IndexSlots;
+
+    /// <summary>
+    /// <see cref="Transaction.EnumerateIndex{T,TKey}"/>'s source descriptors, [index slot][field], built on first use (#1514). Dropped by
+    /// <see cref="InitializeIndexes"/>, the only place the slots they describe are rebuilt.
+    /// </summary>
+    internal Transaction.IndexArchetypeSource[][] IndexEnumerationSources;
 
     /// <summary>
     /// The component slots a unique (non-AllowMultiple) index covers, one bit per slot: the persistent home in bits 0-15, the transient home in bits
@@ -10569,6 +10574,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         Debug.Assert(transientSlotCount == 0 || transientIndexSegment != null,
             "An archetype with an indexed Transient field needs its heap-backed index segment — eligibility detection and allocation have diverged (#655).");
 
+        IndexEnumerationSources = null;
         IndexSlots = new ClusterIndexSlot<PersistentStore>[slotCount];
         TransientIndexSlots = transientSlotCount > 0 ? new ClusterIndexSlot<TransientStore>[transientSlotCount] : null;
         var idx = 0;

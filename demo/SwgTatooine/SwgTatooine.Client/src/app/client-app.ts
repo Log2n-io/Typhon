@@ -1,3 +1,4 @@
+import type { PlayerNotice } from '../data/notices';
 import { FreeCamera } from '@babylonjs/core/Cameras/freeCamera';
 import { Engine } from '@babylonjs/core/Engines/engine';
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
@@ -43,13 +44,24 @@ import {
 import { meanAndP95, overviewPolicy, regionDue } from './frame-policy';
 import { headingFromVelocity } from '../math/vec';
 import { DATA_ARCHETYPES, resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
-import { altitudeField, altitudeOf, Placement } from '../data/placement';
+import { altitudeField, altitudeOf, groundedAltitude, Placement } from '../data/placement';
 import type { HealthBar } from '../render/labels';
 import { DamageText, type Anchor } from '../render/damage-text';
 import type { AnimationGraph } from '../character/animation-graph';
 import { PlayerNameDirectory } from '../data/player-names';
+import { entityTag, viewerClOf, type EntityTag } from '../data/content-level';
 import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
+import { playerMenuItems, WalletReader } from '../data/wallet';
+import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
+import { MockSource } from '../data/mock/mock-source';
+import type { MockInventory } from '../data/mock/inventory';
+import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
+import { parseMine, type MarketMine } from '../data/market';
+import { useMarket } from '../state/market-store';
+import { RevisionReader } from '../data/revision-reader';
+import { useItems } from '../state/items-store';
 import { useMissions } from '../state/mission-store';
+import { announceNotices, useWallet } from '../state/wallet-store';
 import { useSessionStore } from '../state/session-store';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { AssetSet } from '../data/server-config';
@@ -101,6 +113,7 @@ import {
   unprojectRay,
 } from '../render/view-math';
 import { useChat } from '../state/chat-store';
+import { LevelWatch } from '../data/progress';
 import { crossingKindOf, isIndoors, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived, askedFor, blackout, opacityAt } from './realm-transition';
 import {
@@ -113,12 +126,18 @@ import {
 } from './shuttle-flight';
 import { ShuttleView } from './shuttle-view';
 import {
-  missionMenuItems,
+  canUseAt,
+  bazaarMenuItems,
+  bazaarRegionAt,
+  bazaarTerminalOf,
+  crowdsTerminal,
+  missionTerminalAction,
   missionTerminalOf,
   ticketMenuItems,
   ticketTerminalOf,
   type TicketTerminal,
 } from './ticket-terminal';
+import { nextTabTarget, TAB_TARGET_RADIUS_M, type TabCandidate } from './tab-target';
 import { rayOnShapes, rayOnSlabs, type ShapeHit } from './world-pick';
 import { pressProgress, PressRing } from '../render/press-ring';
 import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
@@ -150,11 +169,20 @@ import {
 import { Predictor, speedForClass, type GrantedSpeeds } from './predictor';
 import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
-import { useStats, type DownNotice, type FeetReport, type Inspection, type PlayerVitals } from '../state/stats-store';
+import {
+  countDrivers,
+  useStats,
+  type DownNotice,
+  type FeetReport,
+  type Inspection,
+  type PlayerDrivers,
+  type PlayerVitals,
+} from '../state/stats-store';
 import { useUi, type NavRow, type ShuttleportPrompt, type UiState } from '../state/ui-store';
 import { insideCity, NAV_KINDS, navLabel, nearestFacilities, relativeBearing, type NavTarget } from './nav-finder';
 import { nearestShuttleport } from './shuttle';
 import { nextTravel } from './travel';
+import { applyWatchAction, stepWatch } from './watch-link';
 import { TerrainDetailGovernor } from './terrain-detail';
 import { CURSORS, cursorFor, selectionTone, type CursorSubject } from './game-cursor';
 import {
@@ -267,6 +295,7 @@ const PLANET_AT_START: RealmView = {
 
 /** {@link LayerStats} as this app holds it: the readonly face is what the store publishes. */
 interface MutableLayerStats {
+  drivers: PlayerDrivers | null;
   archetype: ArchetypeInfo;
   held: number;
   near: number;
@@ -297,6 +326,7 @@ class MutableFrameView implements FrameView {
   viewportWidth = 1;
   viewportHeight = 1;
   ground: GroundSampler = FLAT_GROUND;
+  groundTick: number | undefined = undefined;
   predicted: PredictedOverride | null = null;
   hidden: ReadonlySet<number> = NONE_HIDDEN;
   drawnElsewhere: ReadonlySet<number> = NONE_HIDDEN;
@@ -380,14 +410,31 @@ const STRUCTURE_ARCHETYPE = 'WorldObject';
 /** How far behind a structure's surface a body still counts as picked, metres: one standing against a wall, or at a terminal. */
 const PICK_SURFACE_SLACK_M = 0.6;
 
+/** Whether the layers' pick met a body's box: read through a call, since flow narrowing cannot see `layer.pick` set it. */
+function hitInside(hit: PickHit): boolean {
+  return hit.inside;
+}
+
 /** What the ticket terminal is called on its tag. */
 const TICKET_TERMINAL_LABEL = 'Ticket terminal';
+const TICKET_TERMINAL_TAG: EntityTag = entityTag(TICKET_TERMINAL_LABEL, 0, null);
 
 /** The mission terminal's asset: its `mission` interaction is where the terminal is used from (missions.md § 5). */
 const MISSION_TERMINAL_ASSET = 'mission_terminal';
 
 /** What a selected mission terminal is tagged. */
 const MISSION_TERMINAL_LABEL = 'Mission terminal';
+const MISSION_TERMINAL_TAG: EntityTag = entityTag(MISSION_TERMINAL_LABEL, 0, null);
+
+/** The bazaar terminal's asset: its `bazaar` interaction is where the board is used from (bazaar.md § 6). */
+const BAZAAR_TERMINAL_ASSET = 'bazaar_terminal';
+
+/** What a selected bazaar terminal is tagged: the structure's own name. */
+const BAZAAR_TERMINAL_LABEL = 'Bazaar';
+const BAZAAR_TERMINAL_TAG: EntityTag = entityTag(BAZAAR_TERMINAL_LABEL, 0, null);
+
+/** A tag before anything was tagged. */
+const NO_TAG: EntityTag = entityTag('', 0, null);
 
 /** How often an open terminal's list is gathered from the replicated offers, milliseconds: offers change a few times a minute. */
 const OFFER_SCAN_MS = 250;
@@ -400,9 +447,9 @@ const MISSION_NAV_KIND = 1000;
 
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
-  /** A shuttleport's ticket terminal, or a mission terminal (missions.md § 5). */
-  readonly kind: 'ticket' | 'mission';
-  /** The shuttleport's netId, or the mission terminal's own. */
+  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5) or a bazaar terminal (bazaar.md § 6). */
+  readonly kind: 'ticket' | 'mission' | 'bazaar';
+  /** The shuttleport's netId, or the mission or bazaar terminal's own. */
   readonly owner: number;
   readonly use: TicketTerminal;
   /** The terminal's world box, planet coordinates: what the pick's ray is tested against. */
@@ -439,6 +486,9 @@ const ENEMY_BAR_GAP_M = 0.35;
 const STRUCTURES_FIRST_MS = 1500;
 
 const CHARACTER_ARCHETYPES: readonly string[] = ['CityNpc', 'Player', 'Creature'];
+
+/** What Tab cycles through: players and the creatures to fight, not the city's NPCs. */
+const TAB_TARGET_ARCHETYPES: readonly string[] = ['Player', 'Creature'];
 
 /** The most of one creature species drawn at once. A lair holds four to eight; a view holds a few dozen lairs. */
 const SPECIES_CAPACITY = 512;
@@ -498,6 +548,8 @@ export class ClientApp {
   private readonly damage: DamageText;
   /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
   private readonly events: EventSink;
+  /** The notices of the frame being applied, said together (`announceNotices`). */
+  private noticeBatch: PlayerNotice[] = [];
   private readonly labels: Labels;
   /** What is said, over the speaker's head (2026-10-25, Loïc). */
   private readonly bubbles: SpeechBubbles;
@@ -637,18 +689,23 @@ export class ClientApp {
   private arrivedX = 0;
   private arrivedZ = 0;
 
-  private selectionText = '';
+  private selectionText: EntityTag = NO_TAG;
   /** The netId and archetype {@link selectionText} was built for: netIds are reused, by another archetype too. */
   private selectionTextNetId = 0;
   private selectionTextArchetype = -1;
   /** The {@link names} version the selection's text was built against: a name arriving later rebuilds it. */
   private selectionTextNames = -1;
+  /** The entity's level and the viewer's CL it was built with: a level-up on either side recolours it. */
+  private selectionTextLevel = 0;
+  private selectionTextViewer: number | null = null;
   /** The hovered thing's tag this frame, or `null`: the selection's text for what the pointer is over, cached the same way. */
-  private hoverTag: string | null = null;
-  private hoverText = '';
+  private hoverTag: EntityTag | null = null;
+  private hoverText: EntityTag = NO_TAG;
   private hoverTextNetId = 0;
   private hoverTextArchetype = -1;
   private hoverTextNames = -1;
+  private hoverTextLevel = 0;
+  private hoverTextViewer: number | null = null;
   /** Where {@link hoverTag} goes: the hover frame's rectangle, kept before the selection's frame reuses {@link frameRect}. */
   private readonly hoverRect: ScreenRect = { left: 0, top: 0, right: 0, bottom: 0 };
   /** The selection's frame, kept for its tag: the bars' frames are measured into {@link frameRect} after it. */
@@ -801,6 +858,19 @@ export class ClientApp {
         this.attacks.onChat(tick, speaker, text, own);
         this.bubbles.say(speaker, text, performance.now());
       },
+      // One frame's notices are said together, once the frame has applied: a drop's rows are one line, and a sale is said
+      // with the tax the same listing paid.
+      onNotice: (notice) => {
+        if (this.noticeBatch.length === 0) {
+          queueMicrotask(() => {
+            const batch = this.noticeBatch;
+            this.noticeBatch = [];
+            announceNotices(batch);
+          });
+        }
+
+        this.noticeBatch.push(notice);
+      },
     };
     this.labels = new Labels(overlay);
     this.bubbles = new SpeechBubbles(overlay);
@@ -810,6 +880,14 @@ export class ClientApp {
     useMissions.getState().setActions({
       take: (offer, serial) => this.source?.takeMission(offer, serial) ?? false,
       cancel: (id) => this.source?.abandonMission(id) ?? false,
+    });
+    // `/tip` and the player menu's "Tip…" give credits through whatever source is live, the same way.
+    useWallet.getState().setActions({ tip: (target, amount) => this.source?.giveCredits(target, amount) ?? false });
+    // The bazaar panel sends through whatever source is live, and reads the board from its server — or the mock's desk.
+    useMarket.getState().setActions({
+      send: (command) => this.source?.market(command) ?? false,
+      fetch: (url, init) => this.mockMarket()?.fetch(url, init) ?? fetch(url, init),
+      token: () => this.marketToken(),
     });
     // A chat cleared is a room left — a reconnect, a realm crossed — and the netIds the bubbles are keyed by are the old
     // room's: a bubble kept would float over whichever body was given the number next.
@@ -894,6 +972,17 @@ export class ClientApp {
       'keydown',
       (e) => {
         if (isTyping(e)) {
+          return;
+        }
+
+        // Tab: the nearest character, then the next one out at each press (Loïc, 2026-10-27). Not with a modifier, so
+        // Alt+Tab and Ctrl+Tab stay the system's and the browser's.
+        if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          if (!e.repeat) {
+            this.cycleTabTarget();
+          }
+
           return;
         }
 
@@ -1034,6 +1123,9 @@ export class ClientApp {
       }
 
       useUi.getState().setActionIcons(icons);
+      // The inventory's icons (inventory-loot.md § 6): every 32 px icon of the catalogue, found by the asset id the server
+      // names an item by.
+      useItems.getState().setIcons(itemIcons(mount.library.catalogue, (file) => set.base + file));
       this.shapeCache = [];
       this.staticAssets = new StaticAssets(
         mount.library,
@@ -1055,6 +1147,7 @@ export class ClientApp {
       void mount.library.describe(SHUTTLEPORT_ASSET).catch(() => undefined);
       void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(MISSION_TERMINAL_ASSET).catch(() => undefined);
+      void mount.library.describe(BAZAAR_TERMINAL_ASSET).catch(() => undefined);
 
       // <b>Nothing above waited for anything but the catalogue</b> (Loïc, 2026-10-26: what is lazy loads asynchronously,
       // and what waits on it is not drawn). The buildings ask for their own GLBs from the next frame, and the crowds build
@@ -1271,6 +1364,10 @@ export class ClientApp {
     useChat.getState().setSpeak(() => false);
     useMissions.getState().setActions(null);
     useMissions.getState().closeTerminal();
+    useWallet.getState().setActions(null);
+    useWallet.getState().closeInventory();
+    useMarket.getState().setActions(null);
+    useMarket.getState().reset();
     this.bubbles.dispose();
     this.frames.dispose();
     this.pressRing.dispose();
@@ -1358,6 +1455,16 @@ export class ClientApp {
     this.journal.clear();
     this.journalVersion = -1;
     useMissions.getState().resetJournal();
+    this.wallet.clear();
+    this.walletVersion = -1;
+    useWallet.getState().resetWallet();
+    useWallet.getState().closeInventory();
+    this.items.clear();
+    this.itemsVersion = -1;
+    useItems.getState().reset();
+    this.mine.clear();
+    this.mineVersion = -1;
+    useMarket.getState().reset();
     this.fight.clear();
     useMissions.getState().closeTerminal();
     this.clock = new Clock(CLOCK_OPTIONS);
@@ -1473,6 +1580,33 @@ export class ClientApp {
 
     this.lastReleaseMs = now;
     ui.spectate(0);
+  }
+
+  /**
+   * One step of a dashboard watch (`watch-link.ts`): into the bot's realm, over its last position, then onto its body once
+   * the server serves it. Before the selection check below, so a body found this frame is selected this frame.
+   */
+  private advanceWatch(now: number): void {
+    const ui = useUi.getState();
+    const watch = ui.watch;
+    if (watch === null) {
+      return;
+    }
+
+    const step = stepWatch(
+      watch,
+      {
+        realmId: this.source?.realm?.realmId ?? null,
+        canViewRealm: this.source?.canViewRealm ?? false,
+        found: this.world.locate(watch.target.netId) !== NOT_FOUND,
+      },
+      now,
+    );
+    if (step.state !== watch) {
+      ui.setWatch(step.state);
+    }
+
+    applyWatchAction(step.action, ui);
   }
 
   private adoptSourceRealm(): void {
@@ -2026,7 +2160,8 @@ export class ClientApp {
       return;
     }
 
-    this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderDelayMs);
+    // The lag the clock actually rendered at, not its target delay: the two differ for hundreds of ms after a late frame moves the target.
+    this.predictor.step(nowMs, dt, this.eyeX, this.eyeZ, this.clock.renderLagMs);
 
     // <b>And then out of the walls, the way the server will.</b> Prediction integrates the intent; without this it
     // walks through a building and reconciliation pulls back against a server that keeps pushing out, which settles
@@ -2811,6 +2946,7 @@ export class ClientApp {
       held: 0,
       near: 0,
       far: 0,
+      drivers: null,
     }));
     this.heatChannels = grid.schema.archetypes.map((index) => ({
       name: this.archetypes.name(index),
@@ -3087,6 +3223,7 @@ export class ClientApp {
     this.adoptSubject(now);
     this.syncOverview();
     this.advanceTransition(now);
+    this.advanceWatch(now);
     this.clock.update(now);
     // Held keys may stop following: read the UI state after them.
     this.input.update(dt);
@@ -3286,6 +3423,7 @@ export class ClientApp {
     const cam = inEye ? this.eyeCamera : this.mapCamera;
     this.activeAltitude = cam.altitude;
     this.updateMissions(now);
+    this.updateMarket(now);
     this.updateNav(now);
     this.paintNav(cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
@@ -3295,6 +3433,9 @@ export class ClientApp {
     const view = this.view;
     view.renderTick = this.clock.renderTick;
     view.renderFrac = this.clock.renderFrac;
+    // Bodies stand on this client's ground at the position they are drawn, on the planet only: a room's or space's altitude is
+    // the server's to say (groundedAltitude).
+    view.groundTick = this.profile.kind === 'planet' ? this.clock.latestTick : undefined;
     view.originX = this.origin.x;
     view.originZ = this.origin.z;
     view.eyeX = cam.eyeX - this.origin.x;
@@ -3681,9 +3822,15 @@ export class ClientApp {
       }
     }
 
+    // A terminal the ray meets wins over a body in front of it that stands AT it (`crowdsTerminal`): a busy port's queue
+    // otherwise took every click meant for the terminal behind it.
+    const bodyHit = hitInside(best);
+    const bodyX = planet.ox + planet.dx * best.depth;
+    const bodyZ = planet.oz + planet.dz * best.depth;
     for (const part of this.terminalsInView()) {
       const t = rayOnSlabs(planet, part.min[0], part.min[1], part.min[2], part.max[0], part.max[1], part.max[2]);
-      if (t <= maxT && (!best.inside || t < best.depth)) {
+      const crowded = bodyHit && best.netId !== 0 && crowdsTerminal(bodyX, bodyZ, part.use, part.min, part.max);
+      if (t <= maxT && (!best.inside || t < best.depth || crowded)) {
         best.archetype = -1;
         best.netId = 0;
         best.pixels = 0;
@@ -3726,8 +3873,8 @@ export class ClientApp {
   private readonly pickWall: ShapeHit = { t: 0, index: -1 };
 
   /**
-   * The terminals this frame's structures hold — shuttleports' ticket terminals and mission terminals, the parts the pick
-   * and the long press know — rebuilt when the structures are.
+   * The terminals this frame's structures hold — shuttleports' ticket terminals, mission and bazaar terminals, the parts the
+   * pick and the long press know — rebuilt when the structures are.
    *
    * <b>Rebuilt when a descriptor arrives, too.</b> They are asked for when the assets mount and arrive in their own time; a
    * list built before one arrived was kept until the structures next changed, so the first terminal walked up to after a quick
@@ -3739,12 +3886,14 @@ export class ClientApp {
     const port = library?.described(SHUTTLEPORT_ASSET) ?? null;
     const ticket = library?.described(TICKET_TERMINAL_ASSET) ?? null;
     const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
+    const bazaar = library?.described(BAZAAR_TERMINAL_ASSET) ?? null;
     if (
       this.partsEpoch === this.structureEpoch &&
       this.partsSet === this.assetSet &&
       this.partsFrom[0] === port &&
       this.partsFrom[1] === ticket &&
-      this.partsFrom[2] === mission
+      this.partsFrom[2] === mission &&
+      this.partsFrom[3] === bazaar
     ) {
       return this.terminalParts;
     }
@@ -3752,7 +3901,7 @@ export class ClientApp {
     this.terminalParts = [];
     this.partsEpoch = this.structureEpoch;
     this.partsSet = this.assetSet;
-    this.partsFrom = [port, ticket, mission];
+    this.partsFrom = [port, ticket, mission, bazaar];
 
     const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
@@ -3762,7 +3911,9 @@ export class ClientApp {
           ? ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw)
           : s.kind === StructureKind.MissionTerminal && mission !== null
             ? missionTerminalOf(mission, s.x, s.y, s.z, s.yaw)
-            : null;
+            : s.kind === StructureKind.Bazaar && bazaar !== null
+              ? bazaarTerminalOf(bazaar, s.x, s.y, s.z, s.yaw)
+              : null;
       if (use === null || use.corners === null) {
         continue;
       }
@@ -3776,7 +3927,8 @@ export class ClientApp {
         }
       }
 
-      const kind = s.kind === StructureKind.Shuttleport ? 'ticket' : 'mission';
+      const kind =
+        s.kind === StructureKind.Shuttleport ? 'ticket' : s.kind === StructureKind.Bazaar ? 'bazaar' : 'mission';
       this.terminalParts.push({ kind, owner: s.netId, use, min, max });
     }
 
@@ -3788,12 +3940,112 @@ export class ClientApp {
   /** The journal: the character's held missions, re-read whenever the body's `journal` revision moves. */
   private readonly journal = new MissionJournal(() => useSessionStore.getState().grant?.token ?? null);
   private journalVersion = -1;
+  /** One's own level, for the chat's level-up line (character-level.md § 8). */
+  private readonly levelWatch = new LevelWatch();
+
+  /** The wallet (economy-foundation.md E0-10): read whenever the body's `wallet` revision moves, as the journal is. */
+  private readonly wallet = new WalletReader(
+    () => (this.mockMarket() !== null ? 'mock' : (useSessionStore.getState().grant?.token ?? null)),
+    (url, init) => this.mockMarket()?.fetch(url, init) ?? fetch(url, init),
+  );
+  private walletVersion = -1;
+  /**
+   * The inventory (inventory-loot.md § 6): read whenever the body's `items` revision moves, as the wallet is. Against the
+   * mock, its own character's inventory answers instead of the server, under a token of its own.
+   */
+  private readonly items = new RevisionReader<InventorySnapshot>(
+    'swg/inventory',
+    parseInventory,
+    () => (this.mockInventory() !== null ? 'mock' : (useSessionStore.getState().grant?.token ?? null)),
+    (url, init) => this.mockInventory()?.fetch(url, init) ?? fetch(url, init),
+  );
+  private itemsVersion = -1;
+  /** The player whose context menu is open, for closing it when they leave the view. */
+  private playerMenuTarget = 0;
   private kindNamesSet: AssetSet | null = null;
   private offersAtMs = Number.NEGATIVE_INFINITY;
   /** The mission terminal whose context menu is open, for closing it when the body walks away. */
-  private missionMenuOwner = 0;
   private offersFor = 0;
   private offersKey = '';
+
+  /** The mock's character inventory when the source is the mock, which has no server to ask; `null` otherwise. */
+  private mockInventory(): MockInventory | null {
+    return this.source instanceof MockSource ? this.source.inventory : null;
+  }
+
+  /** The mock's bazaar and wallet when the source is the mock; `null` otherwise. */
+  private mockMarket(): MockMarket | null {
+    return this.source instanceof MockSource ? this.source.bazaar : null;
+  }
+
+  /** The token the bazaar's reads carry: the login's, or the mock's own. */
+  private marketToken(): string | null {
+    return this.mockMarket() !== null ? 'mock' : (useSessionStore.getState().grant?.token ?? null);
+  }
+
+  // ── Bazaar (bazaar.md § 6) ─────────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * This character's listings and reservations (`GET /swg/market/mine`), re-read when its `items` or `wallet` revision moves
+   * — the desk moves one or the other with every change it makes for the character (B10) — while the panel is open, while
+   * the last read held anything, and once per session to begin with.
+   */
+  private readonly mine = new RevisionReader<MarketMine>(
+    'swg/market/mine',
+    parseMine,
+    () => this.marketToken(),
+    (url, init) => this.mockMarket()?.fetch(url, init) ?? fetch(url, init),
+  );
+  private mineVersion = -1;
+  /** The bazaar terminal whose context menu is open, for closing it when the body walks away. */
+  private bazaarMenuOwner = 0;
+
+  /**
+   * The bazaar, every frame: where the body stands (the region of a bazaar terminal in reach, which is where list, buy,
+   * collect and vendor are allowed), `/mine` read on its revisions, the open panel's page re-read when due, and the terminal's
+   * menu closed when the body walks away from it.
+   */
+  private updateMarket(nowMs: number): void {
+    const market = useMarket.getState();
+    const mock = this.mockMarket();
+    const source = this.source;
+    let here = 0;
+    if (mock !== null) {
+      here = MOCK_BAZAAR_REGION;
+    } else if (source !== null && source.canPlay && source.selfNetId !== 0) {
+      // Where the body stands, as `canUse` reads it; the terminal's city is its structure's replicated region.
+      here = bazaarRegionAt(
+        this.terminalsInView(),
+        this.predictor.active ? this.predictor.x : this.eyeX,
+        this.predictor.active ? this.predictor.z : this.eyeZ,
+        (owner) => this.fieldOf(owner, 'region'),
+      );
+    }
+
+    market.setHere(here, mock !== null ? 0 : (source?.realm?.realmId ?? -1));
+    const wanted = market.open || market.mine === null || market.mine.listed.length + market.mine.reserved.length > 0;
+    const items =
+      mock !== null ? (this.mockInventory()?.revision(nowMs) ?? 0) : (source?.selfNumber('items') ?? Number.NaN);
+    const wallet = mock !== null ? mock.walletRevision() : (source?.selfNumber('wallet') ?? Number.NaN);
+    const playing = mock !== null || source?.canPlay === true;
+    this.mine.update(playing && wanted ? items + wallet : Number.NaN);
+    if (this.mine.version !== this.mineVersion) {
+      this.mineVersion = this.mine.version;
+      const mine = this.mine.value;
+      if (mine !== null) {
+        market.setMine(mine);
+      }
+    }
+
+    market.tick(nowMs);
+    const ui = useUi.getState();
+    if (ui.contextMenu?.source === 'bazaar') {
+      const menuPart = this.terminalPart(this.bazaarMenuOwner);
+      if (menuPart === null || !this.canUse(menuPart)) {
+        ui.closeContextMenu();
+      }
+    }
+  }
 
   /**
    * The journal and the open terminal's list, every frame: the journal read when its revision moved, the list gathered
@@ -3814,15 +4066,47 @@ export class ClientApp {
         this.journalVersion = this.journal.version;
         missions.setJournal(this.journal.missions, this.journal.completed);
       }
+
+      const reached = this.levelWatch.update(source.selfNetId, this.selfField('level'));
+      if (reached !== null) {
+        useChat.getState().notice(`You reached combat level ${reached}.`);
+      }
+    }
+
+    // The mock's character has a wallet of its own, its bazaar's (`data/mock/market.ts`), read the same way.
+    const mockMarket = this.mockMarket();
+    this.wallet.update(
+      mockMarket !== null
+        ? mockMarket.walletRevision()
+        : source?.canPlay === true
+          ? source.selfNumber('wallet')
+          : Number.NaN,
+    );
+    if (this.wallet.version !== this.walletVersion) {
+      this.walletVersion = this.wallet.version;
+      const wallet = this.wallet.wallet;
+      if (wallet !== null) {
+        useWallet.getState().setWallet(wallet);
+      }
+    }
+
+    const mock = this.mockInventory();
+    this.items.update(
+      mock !== null ? mock.revision(nowMs) : source?.canPlay === true ? source.selfNumber('items') : Number.NaN,
+    );
+    if (this.items.version !== this.itemsVersion) {
+      this.itemsVersion = this.items.version;
+      const items = this.items.value;
+      if (items !== null) {
+        useItems.getState().setSnapshot(items);
+        useMarket.getState().setStacks(items.items);
+      }
     }
 
     // The terminal's menu closes when the body walks away from it, as the ticket terminal's does.
     const ui = useUi.getState();
-    if (ui.contextMenu?.source === 'mission') {
-      const menuPart = this.terminalPart(this.missionMenuOwner);
-      if (menuPart === null || !this.canUse(menuPart)) {
-        ui.closeContextMenu();
-      }
+    if (ui.contextMenu?.source === 'player' && !this.canTip(this.playerMenuTarget)) {
+      ui.closeContextMenu();
     }
 
     const open = missions.terminal;
@@ -3885,6 +4169,7 @@ export class ClientApp {
     const serial = field('serial');
     const kind = field('kind');
     const difficulty = field('difficulty');
+    const level = field('level');
     const reward = field('reward');
     const octant = field('octant');
     const distanceM = field('distanceM');
@@ -3906,6 +4191,7 @@ export class ClientApp {
         serial: serial[slot],
         kind: kind[slot],
         difficulty: difficulty?.[slot] ?? 1,
+        level: level?.[slot] ?? 0,
         reward: reward[slot],
         octant: octant?.[slot] ?? 0,
         distanceM: distanceM?.[slot] ?? 0,
@@ -3925,7 +4211,7 @@ export class ClientApp {
     return this.terminalsInView().find((p) => p.owner === owner) ?? null;
   }
 
-  /** Whether this session's body stands where `part` can be used: within its published radius of its stand point. */
+  /** Whether this session's body stands where `part` can be used: inside its use disc (`canUseAt`). */
   private canUse(part: TerminalPart): boolean {
     const live = this.source;
     if (live === null || !live.canPlay || live.selfNetId === 0) {
@@ -3934,7 +4220,7 @@ export class ClientApp {
 
     const x = this.predictor.active ? this.predictor.x : this.eyeX;
     const z = this.predictor.active ? this.predictor.z : this.eyeZ;
-    return Math.hypot(part.use.x - x, part.use.z - z) <= part.use.radiusM;
+    return canUseAt(part.use, x, z);
   }
 
   /**
@@ -3945,11 +4231,29 @@ export class ClientApp {
     // A press with a menu open has already closed it: the menu hears every press first, in the capture phase.
     this.swallowClick = false;
     this.endPress();
-    this.pickAt(x, y);
+    const netId = this.pickAt(x, y);
     const part = this.pickedPart;
     if (part !== null && this.canUse(part)) {
-      this.press = { x, y, startMs: performance.now(), owner: part.owner, fired: false };
+      this.press = { x, y, startMs: performance.now(), owner: part.owner, player: 0, fired: false };
+    } else if (part === null && this.canTip(netId)) {
+      this.press = { x, y, startMs: performance.now(), owner: 0, player: netId, fired: false };
     }
+  }
+
+  /**
+   * Whether this session may offer to tip `netId`: another player in view, one with a name — a session's character, a
+   * person's or a bot's, which is what has a wallet; the scripted crowd carries no name and no wallet.
+   */
+  private canTip(netId: number): boolean {
+    const live = this.source;
+    return (
+      live !== null &&
+      live.canPlay &&
+      netId !== 0 &&
+      netId !== live.selfNetId &&
+      this.archetypeName(netId) === 'Player' &&
+      this.fieldOf(netId, 'nameId') > 0
+    );
   }
 
   /** Ends the press, opened or not: the ring goes, and the cursor is rewritten next frame. */
@@ -3960,7 +4264,7 @@ export class ClientApp {
   }
 
   /** The long press under way, or `null`. `fired` once its menu has opened. */
-  private press: { x: number; y: number; startMs: number; owner: number; fired: boolean } | null = null;
+  private press: { x: number; y: number; startMs: number; owner: number; player: number; fired: boolean } | null = null;
 
   /** Whether the next click is the one a long press ended in. */
   private swallowClick = false;
@@ -3972,8 +4276,8 @@ export class ClientApp {
       return false;
     }
 
-    const part = this.terminalPart(press.owner);
-    if (part === null || !this.canUse(part)) {
+    const part = press.player === 0 ? this.terminalPart(press.owner) : null;
+    if (press.player === 0 ? part === null || !this.canUse(part) : !this.canTip(press.player)) {
       this.endPress();
       return false;
     }
@@ -3987,29 +4291,59 @@ export class ClientApp {
     press.fired = true;
     this.pressRing.hide();
     const ui = useUi.getState();
+    if (part === null) {
+      // Another player: the menu is theirs, titled with their name, and they are the selection the tip will go to.
+      const target = press.player;
+      ui.select(target);
+      this.playerMenuTarget = target;
+      ui.openContextMenu({
+        x: press.x,
+        y: press.y,
+        title: this.names.nameOf(this.fieldOf(target, 'nameId')) ?? `Player #${String(target)}`,
+        source: 'player',
+        items: playerMenuItems(target),
+      });
+      return false;
+    }
+
     ui.selectPart({ owner: part.owner, kind: part.kind });
-    this.missionMenuOwner = part.kind === 'mission' ? part.owner : 0;
-    ui.openContextMenu(
-      part.kind === 'mission'
-        ? {
-            x: press.x,
-            y: press.y,
-            title: MISSION_TERMINAL_LABEL,
-            source: 'mission',
-            items: missionMenuItems(part.owner),
-          }
-        : {
-            x: press.x,
-            y: press.y,
-            title: 'Shuttle destinations',
-            source: 'ticket',
-            items: ticketMenuItems(
-              ui.shuttleport?.city ?? -1,
-              CITIES.map((c) => c.name),
-            ),
-          },
-    );
+    this.bazaarMenuOwner = part.kind === 'bazaar' ? part.owner : 0;
+    if (part.kind === 'bazaar') {
+      ui.openContextMenu({
+        x: press.x,
+        y: press.y,
+        title: BAZAAR_TERMINAL_LABEL,
+        source: 'bazaar',
+        items: bazaarMenuItems(useMarket.getState().mine?.reserved.length ?? 0),
+      });
+      return false;
+    }
+
+    if (part.kind === 'mission') {
+      ui.runContextAction(missionTerminalAction(part.owner));
+      return false;
+    }
+
+    ui.openContextMenu({
+      x: press.x,
+      y: press.y,
+      title: 'Shuttle destinations',
+      source: 'ticket',
+      items: ticketMenuItems(
+        ui.shuttleport?.city ?? -1,
+        CITIES.map((c) => c.name),
+      ),
+    });
     return false;
+  }
+
+  /** What a terminal part is tagged on screen. */
+  private partTag(part: TerminalPart): EntityTag {
+    return part.kind === 'mission'
+      ? MISSION_TERMINAL_TAG
+      : part.kind === 'bazaar'
+        ? BAZAAR_TERMINAL_TAG
+        : TICKET_TERMINAL_TAG;
   }
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */
@@ -4024,15 +4358,21 @@ export class ClientApp {
     // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
     this.selectedY = this.evalY;
     this.selectedHeading = headingOf(this.evalVx, this.evalVz, this.selectedHeading);
+    const level = this.levelOf(netId);
+    const viewerCl = this.viewerCl();
     if (
       this.selectionTextNetId !== netId ||
       this.selectionTextArchetype !== this.evalArchetype ||
-      this.selectionTextNames !== this.names.version
+      this.selectionTextNames !== this.names.version ||
+      this.selectionTextLevel !== level ||
+      this.selectionTextViewer !== viewerCl
     ) {
       this.selectionTextNetId = netId;
       this.selectionTextArchetype = this.evalArchetype;
       this.selectionTextNames = this.names.version;
-      this.selectionText = this.tagText(netId, this.evalArchetype);
+      this.selectionTextLevel = level;
+      this.selectionTextViewer = viewerCl;
+      this.selectionText = this.tagText(netId, this.evalArchetype, level, viewerCl);
     }
 
     return true;
@@ -4045,8 +4385,11 @@ export class ClientApp {
    * thing of that name where the viewer is looking. A real player by its account's name (A12: the replicated `nameId`,
    * resolved over HTTP, same day); the scripted crowd carries none. Everything else keeps its archetype and netId — and a
    * player whose name has not arrived yet keeps it until it does.
+   *
+   * The level follows the name — `name (CL 5)`, in its con colour against the viewer's CL (Loïc, 2026-10-26) — for whatever
+   * replicates a `level`: a player's body, a creature, a lair. The crowd's is 0, and says none.
    */
-  private tagText(netId: number, archetypeIndex: number): string {
+  private tagText(netId: number, archetypeIndex: number, level: number, viewerCl: number | null): EntityTag {
     const archetype = this.archetypes.name(archetypeIndex);
     const kindName =
       archetype === STRUCTURE_ARCHETYPE
@@ -4054,26 +4397,44 @@ export class ClientApp {
         : archetype === 'Player'
           ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? undefined)
           : undefined;
-    return kindName ?? `${this.archetypes.label(archetypeIndex)} #${netId}`;
+    return entityTag(kindName ?? `${this.archetypes.label(archetypeIndex)} #${netId}`, level, viewerCl);
   }
 
-  /** The hovered entity's tag text, rebuilt only when what is hovered, or the names behind it, changed. */
-  private hoverTextOf(netId: number): string | null {
+  /** An entity's replicated `level`, 0 for none: an archetype without one, or the crowd. */
+  private levelOf(netId: number): number {
+    const level = this.fieldOf(netId, 'level');
+    return Number.isFinite(level) && level > 0 ? level : 0;
+  }
+
+  /** The controlled avatar's combat level, what con colours compare with — the HUD's CL; `null` without one: the god camera. */
+  private viewerCl(): number | null {
+    const source = this.source;
+    return source === null || !source.canPlay ? null : viewerClOf(this.selfField('level'));
+  }
+
+  /** The hovered entity's tag text, rebuilt only when what is hovered, the names behind it, or a level changed. */
+  private hoverTextOf(netId: number): EntityTag | null {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND) {
       return null;
     }
 
     const archetype = archetypeOf(location);
+    const level = this.levelOf(netId);
+    const viewerCl = this.viewerCl();
     if (
       this.hoverTextNetId !== netId ||
       this.hoverTextArchetype !== archetype ||
-      this.hoverTextNames !== this.names.version
+      this.hoverTextNames !== this.names.version ||
+      this.hoverTextLevel !== level ||
+      this.hoverTextViewer !== viewerCl
     ) {
       this.hoverTextNetId = netId;
       this.hoverTextArchetype = archetype;
       this.hoverTextNames = this.names.version;
-      this.hoverText = this.tagText(netId, archetype);
+      this.hoverTextLevel = level;
+      this.hoverTextViewer = viewerCl;
+      this.hoverText = this.tagText(netId, archetype, level, viewerCl);
     }
 
     return this.hoverText;
@@ -4233,7 +4594,7 @@ export class ClientApp {
       }
 
       const use = ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw);
-      if (use !== null && Math.hypot(use.x - x, use.z - z) <= use.radiusM) {
+      if (use !== null && canUseAt(use, x, z)) {
         return true;
       }
     }
@@ -4391,7 +4752,12 @@ export class ClientApp {
       return null;
     }
 
-    return { health: source.selfNumber('health'), fraction: this.selfField('hp') };
+    return {
+      health: source.selfNumber('health'),
+      fraction: this.selfField('hp'),
+      level: this.selfField('level'),
+      xpFraction: source.selfNumber('xp') / 255,
+    };
   }
 
   /** A replicated field of any entity in view, or `NaN`. */
@@ -4594,7 +4960,7 @@ export class ClientApp {
    *
    * @returns Whether the selection was framed, its rectangle then in {@link frameRect} — where its tag is placed.
    */
-  private updateSelectionFeedback(matrix: ArrayLike<number>, selected: number, playing: boolean): string | null {
+  private updateSelectionFeedback(matrix: ArrayLike<number>, selected: number, playing: boolean): EntityTag | null {
     const width = this.cssSize.width;
     const height = this.cssSize.height;
     const self = this.source?.selfNetId ?? 0;
@@ -4630,12 +4996,7 @@ export class ClientApp {
         : hovered !== 0 && this.frameOf(matrix, hovered, width, height))
     ) {
       this.frames.show(0, this.frameRect, 'hover');
-      this.hoverTag =
-        hoveredPart !== null
-          ? hoveredPart.kind === 'mission'
-            ? MISSION_TERMINAL_LABEL
-            : TICKET_TERMINAL_LABEL
-          : this.hoverTextOf(hovered);
+      this.hoverTag = hoveredPart !== null ? this.partTag(hoveredPart) : this.hoverTextOf(hovered);
       this.hoverRect.left = this.frameRect.left;
       this.hoverRect.right = this.frameRect.right;
       this.hoverRect.top = this.frameRect.top;
@@ -4655,7 +5016,7 @@ export class ClientApp {
 
       this.frames.show(1, this.frameRect, 'passive');
       this.keepSelectionRect();
-      return selectedPart.kind === 'mission' ? MISSION_TERMINAL_LABEL : TICKET_TERMINAL_LABEL;
+      return this.partTag(selectedPart);
     }
 
     if (selected === 0 || !this.frameOf(matrix, selected, width, height)) {
@@ -4951,6 +5312,46 @@ export class ClientApp {
   /** The `WorldObject` archetype's index in the live catalog, or -1 before it is known. */
   private shuttleArchetype = -1;
 
+  /**
+   * Selects the next character for Tab: players but this one's avatar, and creatures, within {@link TAB_TARGET_RADIUS_M}
+   * of the avatar, ordered by distance (`nextTabTarget`). Nothing near, nothing changes.
+   */
+  private cycleTabTarget(): void {
+    const self = this.source?.selfNetId ?? 0;
+    if (self === 0 || !this.evaluate(self)) {
+      return;
+    }
+
+    const x = this.evalX;
+    const z = this.evalZ;
+    const r2 = TAB_TARGET_RADIUS_M * TAB_TARGET_RADIUS_M;
+    const candidates: TabCandidate[] = [];
+    for (const name of TAB_TARGET_ARCHETYPES) {
+      const archetype = this.archetypes.indexOf(name);
+      if (archetype < 0) {
+        continue;
+      }
+
+      const store = this.world.archetypeStore(archetype);
+      for (let i = 0; i < store.liveCount; i++) {
+        const netId = store.netIds[store.live[i]];
+        if (netId === self || !this.evaluate(netId)) {
+          continue;
+        }
+
+        const d2 = (this.evalX - x) ** 2 + (this.evalZ - z) ** 2;
+        if (d2 <= r2) {
+          candidates.push({ netId, d2, enemy: name === 'Creature' });
+        }
+      }
+    }
+
+    const next = nextTabTarget(candidates, useUi.getState().selectedNetId);
+    if (next !== 0) {
+      useUi.getState().select(next);
+    }
+  }
+
   private evaluate(netId: number): boolean {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND) {
@@ -4964,13 +5365,25 @@ export class ClientApp {
     }
 
     const slot = slotOf(location);
+    const ground = altitudeField(store);
+    if (ground !== null && this.profile.kind === 'planet') {
+      // Where the server last placed it, for the deck under it: the same altitude the packer draws (groundedAltitude).
+      evaluateSlot(store, slot, this.clock.latestTick, 0, this.scratch, 0);
+      const latest = this.placement.read(store.dims, this.scratch, 0);
+      this.evalLatestX = latest.x;
+      this.evalLatestZ = latest.z;
+    }
+
     evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
     const read = this.placement.read(store.dims, this.scratch, 0);
     this.evalX = read.x;
     this.evalZ = read.z;
     this.evalVx = read.vx;
     this.evalVz = read.vz;
-    this.evalY = altitudeOf(altitudeField(store), slot, read, this.profile.ground);
+    this.evalY =
+      ground !== null && this.profile.kind === 'planet'
+        ? groundedAltitude(ground, slot, read, this.evalLatestX, this.evalLatestZ, this.profile.ground)
+        : altitudeOf(ground, slot, read, this.profile.ground);
     this.evalArchetype = archetype;
     return true;
   }
@@ -5385,6 +5798,8 @@ export class ClientApp {
 
   /** {@link evaluate}'s output: one subject's interpolated placement, valid until the next call. */
   private evalX = 0;
+  private evalLatestX = 0;
+  private evalLatestZ = 0;
   private evalZ = 0;
   private evalY = 0;
   private evalVx = 0;
@@ -5408,6 +5823,18 @@ export class ClientApp {
       row.held = this.world.archetypeStore(i).liveCount;
       row.near = this.layers[i].nearCount;
       row.far = this.layers[i].farCount;
+      if (row.archetype.name === 'Player') {
+        // Who drives them: the crowd, the bots, the people — a viewer's split, four times a second over the players held.
+        const store = this.world.archetypeStore(i);
+        const nameField = store.fieldIndex('nameId');
+        const botField = store.fieldIndex('bot');
+        row.drivers = countDrivers(
+          store.live,
+          store.liveCount,
+          nameField < 0 ? null : store.fieldAt(nameField),
+          botField < 0 ? null : store.fieldAt(botField),
+        );
+      }
     }
 
     // The layers past the archetypes are the extra ones (the shuttleport's dome): their instances belong to the row of
@@ -5497,6 +5924,8 @@ export class ClientApp {
     const store = this.world.archetypeStore(archetype);
     const fields = describeFields(store, slot);
     const label = this.archetypes.label(archetype);
+    const playerName =
+      this.archetypes.name(archetype) === 'Player' ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? null) : null;
     if (!store.hasPosition) {
       return {
         archetype: label,
@@ -5509,6 +5938,7 @@ export class ClientApp {
         epoch: 0,
         hasPosition: false,
         fields,
+        playerName,
       };
     }
 
@@ -5526,6 +5956,7 @@ export class ClientApp {
       epoch: epochAt(store, slot, tick),
       hasPosition: true,
       fields,
+      playerName,
     };
   }
 }

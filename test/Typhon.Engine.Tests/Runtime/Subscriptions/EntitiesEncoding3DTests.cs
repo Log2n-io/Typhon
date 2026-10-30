@@ -236,7 +236,6 @@ class EntitiesEncoding3DTests : TestBase<EntitiesEncoding3DTests>
             break;
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 
@@ -261,7 +260,6 @@ class EntitiesEncoding3DTests : TestBase<EntitiesEncoding3DTests>
             cluster.MarkDirty(ProjFlyer.Ai);
         }
 
-        accessor.Dispose();
         tx.Commit();
     }
 

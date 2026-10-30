@@ -119,6 +119,11 @@ export function markerLines(
   for (const interaction of descriptor.interactions) {
     const at = pointToWorld(pose, interaction.pos);
     circle(set, at, interaction.radius ?? 0.5, INTERACTION_COLOUR);
+    if (interaction.reach_m !== undefined) {
+      // Where it is usable from: all round its origin (ASSET_FORMAT § 5.5).
+      circle(set, pointToWorld(pose, [0, 0, 0]), interaction.reach_m, INTERACTION_COLOUR, 48);
+    }
+
     arrow(set, at, markerForward(pose, interaction.rot, interaction.forward), 0.8, INTERACTION_COLOUR);
   }
 

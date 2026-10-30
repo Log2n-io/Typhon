@@ -1,3 +1,5 @@
+import { offerInReach } from './content-level';
+
 /**
  * Missions as a client sees them (claude/design/SwgTatooine/design/missions.md): a terminal's offers, replicated, and the
  * missions this character holds — its journal — read over HTTP.
@@ -23,6 +25,8 @@ export interface MissionOffer {
   /** The lair kind, which is also the name: an index into the server's creature list (`demo.json`). */
   readonly kind: number;
   readonly difficulty: number;
+  /** The level of the lair it sends you to, 1-50 (content-levels.md § 4). */
+  readonly level: number;
   readonly reward: number;
   /** 0 north, clockwise to 7 — see {@link OCTANT_NAMES}. */
   readonly octant: number;
@@ -37,6 +41,8 @@ export interface HeldMission {
   /** The lair kind's name, the server's: "ninja hideout", "rats". */
   readonly name: string;
   readonly difficulty: number;
+  /** Its lair's level, 1-50: every lair it draws is spawned at it. */
+  readonly level: number;
   readonly reward: number;
   readonly octant: number;
   readonly distanceM: number;
@@ -67,7 +73,7 @@ export function formatMissionDistance(m: number): string {
 }
 
 /** How a terminal's list can be ordered. */
-export type OfferSort = 'difficulty' | 'direction' | 'distance' | 'reward';
+export type OfferSort = 'level' | 'direction' | 'distance' | 'reward';
 
 /**
  * The offers in an order: by the key asked for, then by reward and the serial so two equal rows never swap places between
@@ -78,8 +84,8 @@ export function sortOffers(offers: readonly MissionOffer[], by: OfferSort, desce
   const sign = descending ? -1 : 1;
   const primary = (a: MissionOffer, b: MissionOffer): number => {
     switch (by) {
-      case 'difficulty':
-        return a.difficulty - b.difficulty;
+      case 'level':
+        return a.level - b.level;
       case 'direction':
         return a.octant - b.octant || a.distanceM - b.distanceM;
       case 'distance':
@@ -92,6 +98,23 @@ export function sortOffers(offers: readonly MissionOffer[], by: OfferSort, desce
   return [...offers].sort((a, b) => sign * primary(a, b) || b.reward - a.reward || a.serial - b.serial);
 }
 
+/**
+ * What a terminal lists (Loïc, 2026-10-26): by default only the offers within reach of the viewer's CL
+ * ({@link offerInReach}); with "Show all", every one. `hidden` is how many the default leaves out.
+ */
+export function listedOffers(
+  offers: readonly MissionOffer[],
+  viewerCl: number | null,
+  showAll: boolean,
+): { readonly rows: readonly MissionOffer[]; readonly hidden: number } {
+  if (showAll) {
+    return { rows: offers, hidden: 0 };
+  }
+
+  const rows = offers.filter((o) => offerInReach(o.level, viewerCl));
+  return { rows, hidden: offers.length - rows.length };
+}
+
 /** A refusal of a take or a cancel, as the server's ACKS reasons name them (`TatooineReplication.MissionTaken` …). */
 export const MISSION_REASONS: Readonly<Record<number, string>> = {
   137: 'You are down and cannot take a mission',
@@ -100,6 +123,8 @@ export const MISSION_REASONS: Readonly<Record<number, string>> = {
   140: 'Too far from the terminal',
   141: 'That mission is not yours',
   142: 'You are not in the world',
+  149: 'The server could not apply it — nothing changed, try again',
+  150: 'That mission is above your level',
 };
 
 /**
@@ -267,5 +292,10 @@ function isHeldMission(value: unknown): value is HeldMission {
   }
 
   const m = value as Record<string, unknown>;
-  return typeof m.id === 'string' && typeof m.kind === 'number' && typeof m.reward === 'number';
+  return (
+    typeof m.id === 'string' &&
+    typeof m.kind === 'number' &&
+    typeof m.level === 'number' &&
+    typeof m.reward === 'number'
+  );
 }

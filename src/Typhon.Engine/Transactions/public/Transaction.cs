@@ -4,6 +4,7 @@ using JetBrains.Annotations;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -21,6 +22,7 @@ namespace Typhon.Engine;
 /// Instances are pooled and reused; do not hold a reference past <see cref="Dispose"/>. Transactions are single-thread-affine — only the thread that created
 /// one may call its members. A write-write conflict at commit is resolved by the optional <see cref="ConcurrencyConflictHandler"/> (default: last-writer-wins).
 /// </remarks>
+[MustDispose(Reason = "leaves its changes uncommitted, its epoch pinned and its chain node holding the cleanup cutoff")]
 [PublicAPI]
 [DebuggerDisplay("TSN {TSN}, State: {State}")]
 public unsafe partial class Transaction : EntityAccessor
@@ -387,11 +389,6 @@ public unsafe partial class Transaction : EntityAccessor
 
         if (_isDisposed)
         {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-                _hasEntityMapCache = false;
-            }
             return;
         }
 
@@ -401,17 +398,11 @@ public unsafe partial class Transaction : EntityAccessor
         // just exit the epoch scope and remove from the chain.
         if (IsReadOnly)
         {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-                _hasEntityMapCache = false;
-            }
-
             // The component and cluster accessors hold a slot reference on every page cached in their slots, which no epoch releases. Reset recycles the
             // component entries without disposing them, and a transaction dropped by a full pool is never reset at all: left here, those pages could
             // never be evicted again. MarketHardeningTests' snapshot, read in short read-only transactions, left 94 % of its cache that way.
             FlushAccessors();
-            DisposeClusterCache();
+            DisposeArchetypeCache();
 
             // Before leaving the chain, not after: ComputeNextMinTSN reads the chain, and this transaction's own
             // membership is what has been holding the cutoff back. A reader that removes itself first and drains second
@@ -453,12 +444,7 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     dbe.LogTxDispose(tsn, "FlushAccessors");
                     FlushAccessors();
-                    DisposeClusterCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
-                    if (_hasEntityMapCache)
-                    {
-                        _entityMapCacheAccessor.Dispose();   // likewise: only Reset released it, and a dropped transaction kept up to 32 map pages pinned
-                        _hasEntityMapCache = false;
-                    }
+                    DisposeArchetypeCache();   // here, not only in Reset: a transaction dropped by a full pool is never reset
                 }
                 finally
                 {
@@ -703,6 +689,8 @@ public unsafe partial class Transaction : EntityAccessor
     
     /// <summary>Zero-copy, read-only <c>foreach</c> enumerator over the elements of a component collection buffer.</summary>
     /// <typeparam name="T">Unmanaged element type of the collection.</typeparam>
+    [MustDispose(Reason = "owns a BufferEnumerator ('_enumerator'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a BufferEnumerator by value ('_enumerator'): a copy duplicates its slots and pins")]
     [PublicAPI]
     public ref struct ReadOnlyCollectionEnumerator<T> where T : unmanaged
     {
@@ -717,6 +705,7 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public ReadOnlyCollectionEnumerator<T> GetEnumerator() => this;
 
         /// <summary>Zero-copy reference to the current element. Valid until the next <see cref="MoveNext"/> call.</summary>
@@ -772,12 +761,26 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         var fieldIndex = indexRef.FieldIndex;
-        var sources = new List<IndexArchetypeSource>();
-        var trees = new List<BTree<TKey, PersistentStore>>();
-        var multi = new List<bool>();
 
-        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        // The first match is held in locals and the lists exist only once a second archetype matches: one archetype holding the component is the common
+        // case, and a point lookup in a loop paid ~3 KB of lists, iterator and accessor arrays per call for it (#1514).
+        IndexArchetypeSource firstSource = null;
+        BTree<TKey, PersistentStore> firstTree = null;
+        var firstMulti = false;
+        List<IndexArchetypeSource> sources = null;
+        List<BTree<TKey, PersistentStore>> trees = null;
+        List<bool> multi = null;
+
+        // The registry's array up to the highest id rather than its GetAllArchetypes iterator, which allocates.
+        var maxArchetypeId = ArchetypeRegistry.MaxArchetypeId;
+        for (var archetypeId = 0; archetypeId <= maxArchetypeId; archetypeId++)
         {
+            var meta = ArchetypeRegistry.GetMetadata((ushort)archetypeId);
+            if (meta == null)
+            {
+                continue;
+            }
+
             var es = _dbe._archetypeStates[meta.ArchetypeId];
             var clusterState = es?.ClusterState;
             if (clusterState?.IndexSlots == null)
@@ -824,30 +827,38 @@ public unsafe partial class Transaction : EntityAccessor
                     $"TKey type mismatch: index uses '{field.Index.GetType().GenericTypeArguments[0].Name}', caller specified '{typeof(TKey).Name}'.");
             }
 
-            var layout = clusterState.Layout;
-            sources.Add(new IndexArchetypeSource
+            var source = IndexSourceOf(clusterState, es, meta, compSlot, ixSlotIdx, fieldIndex, field.FieldOffset);
+            if (firstSource == null)
             {
-                Meta = meta,
-                CompSlot = compSlot,
-                ClusterState = clusterState,
-                EngineState = es,
-                RecordSize = meta._entityRecordSize,
-                CompOffset = layout.ComponentOffset(compSlot),
-                CompSize = layout.ComponentSize(compSlot),
-                FieldOffset = field.FieldOffset,
-                VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[compSlot] : -1,
-            });
+                firstSource = source;
+                firstTree = typedIndex;
+                firstMulti = field.AllowMultiple;
+                continue;
+            }
 
+            if (sources == null)
+            {
+                sources = [firstSource];
+                trees = [firstTree];
+                multi = [firstMulti];
+            }
+
+            sources.Add(source);
             trees.Add(typedIndex);
             multi.Add(field.AllowMultiple);
+        }
+
+        if (firstSource == null)
+        {
+            return new IndexEntityEnumerator<T, TKey>([], [], ct, this, _changeSet);
         }
 
         // ONE archetype holds this component — the common case, and the one an early-terminating caller depends on. Stream straight off its cursor and
         // materialise nothing: a caller that breaks after N entries must pay for N entries, not for the whole range. Draining up front turns
         // EnumerateIndex(startKey, MaxValue) + break-at-100 from O(100) into O(everything at or after startKey), which is what a YCSB-style scan does.
-        if (trees.Count == 1)
+        if (sources == null)
         {
-            var streaming = new IndexEntityEnumerator<T, TKey>(trees[0], multi[0], minKey, maxKey, sources[0], ct, this, _changeSet);
+            var streaming = new IndexEntityEnumerator<T, TKey>(firstTree, firstMulti, minKey, maxKey, firstSource, ct, this, _changeSet);
             try
             {
                 streaming.AttachSnapshotSide(minKey, maxKey);
@@ -884,6 +895,55 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         return merged;
+    }
+
+    /// <summary>
+    /// The source descriptor for one indexed field of one archetype, built on first use and kept on the archetype's cluster state (#1514).
+    /// </summary>
+    /// <remarks>
+    /// Everything it holds is fixed for the cluster state's life: the layout, the record size and the field's offset are set when the state is built, and
+    /// <see cref="ArchetypeClusterState.InitializeIndexes"/> drops the cache whenever it rebuilds the index slots. Two threads racing on a cold entry each
+    /// build an identical descriptor and the last one published wins; the release/acquire pair is what lets a reader on arm64 see its fields.
+    /// </remarks>
+    private static IndexArchetypeSource IndexSourceOf(ArchetypeClusterState clusterState, ArchetypeEngineState es, ArchetypeMetadata meta, int compSlot,
+        int ixSlotIdx, int fieldIndex, int fieldOffset)
+    {
+        var perSlot = Volatile.Read(ref clusterState.IndexEnumerationSources);
+        if (perSlot == null)
+        {
+            perSlot = new IndexArchetypeSource[clusterState.IndexSlots.Length][];
+            perSlot = Interlocked.CompareExchange(ref clusterState.IndexEnumerationSources, perSlot, null) ?? perSlot;
+        }
+
+        var row = Volatile.Read(ref perSlot[ixSlotIdx]);
+        if (row == null)
+        {
+            row = new IndexArchetypeSource[clusterState.IndexSlots[ixSlotIdx].Fields.Length];
+            row = Interlocked.CompareExchange(ref perSlot[ixSlotIdx], row, null) ?? row;
+        }
+
+        var source = Volatile.Read(ref row[fieldIndex]);
+        if (source != null)
+        {
+            return source;
+        }
+
+        var layout = clusterState.Layout;
+        source = new IndexArchetypeSource
+        {
+            Meta = meta,
+            CompSlot = compSlot,
+            ClusterState = clusterState,
+            EngineState = es,
+            RecordSize = meta._entityRecordSize,
+            CompOffset = layout.ComponentOffset(compSlot),
+            CompSize = layout.ComponentSize(compSlot),
+            FieldOffset = fieldOffset,
+            VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[compSlot] : -1,
+        };
+        source.Alone = [source];
+        Volatile.Write(ref row[fieldIndex], source);
+        return source;
     }
 
     /// <summary>
@@ -1020,6 +1080,9 @@ public unsafe partial class Transaction : EntityAccessor
 
         /// <summary>Position among the archetype's Versioned slots, or -1 when this component is SingleVersion here.</summary>
         public int VersionedIndex;
+
+        /// <summary>A one-element array holding this source: the streaming enumerator's source list, cached with it so a lookup allocates none (#1514).</summary>
+        public IndexArchetypeSource[] Alone;
     }
 
     /// <summary>
@@ -1027,6 +1090,8 @@ public unsafe partial class Transaction : EntityAccessor
     /// Use <see cref="CurrentComponent"/> for zero-copy ref access into page memory, or <see cref="Current"/> for a convenience copy.
     /// Supports both unique and AllowMultiple indexes.
     /// </summary>
+    [MustDispose(Reason = "owns a ChunkAccessor ('_clusterAccessor0'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
+    [NoCopy(Reason = "holds a ChunkAccessor by value ('_clusterAccessor0'): a copy duplicates its slots and pins")]
     [PublicAPI]
     public ref struct IndexEntityEnumerator<T, TKey> where T : unmanaged where TKey : unmanaged
     {
@@ -1034,6 +1099,11 @@ public unsafe partial class Transaction : EntityAccessor
         private readonly IndexArchetypeSource[] _sources;
         private readonly ChunkAccessor<PersistentStore>[] _clusterAccessors;
         private readonly ChunkAccessor<PersistentStore>[] _mapAccessors;
+
+        // One archetype (the streaming path): its accessors live here and the two arrays above stay null. Each accessor carries a 32-page window, so the
+        // two one-element arrays they replace were most of what a point lookup allocated (#1514).
+        private ChunkAccessor<PersistentStore> _clusterAccessor0;
+        private ChunkAccessor<PersistentStore> _mapAccessor0;
         private int _entryIndex;
 
         /// <summary>Largest EntityMap record across the sources — the one buffer size that serves every archetype this enumerator spans.</summary>
@@ -1086,7 +1156,7 @@ public unsafe partial class Transaction : EntityAccessor
 
         /// <summary>Streaming constructor — one archetype, one cursor, no materialisation.</summary>
         internal IndexEntityEnumerator(BTree<TKey, PersistentStore> index, bool allowMultiple, TKey minKey, TKey maxKey, IndexArchetypeSource source,
-            ComponentTable ct, Transaction tx, ChangeSet changeSet) : this([], [source], ct, tx, changeSet)
+            ComponentTable ct, Transaction tx, ChangeSet changeSet) : this([], source.Alone, ct, tx, changeSet)
         {
             _streaming = true;
             _isAllowMultiple = allowMultiple;
@@ -1113,12 +1183,24 @@ public unsafe partial class Transaction : EntityAccessor
             _currentValueIndex = 0;
             _keyValues = [];
 
-            _clusterAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
-            _mapAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
-            for (var i = 0; i < sources.Length; i++)
+            if (sources.Length == 1)
             {
-                _clusterAccessors[i] = sources[i].ClusterState.ClusterSegment.CreateChunkAccessor(changeSet);
-                _mapAccessors[i] = sources[i].EngineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+                _clusterAccessors = null;
+                _mapAccessors = null;
+                _clusterAccessor0 = sources[0].ClusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+                _mapAccessor0 = sources[0].EngineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+            }
+            else
+            {
+                _clusterAccessor0 = default;
+                _mapAccessor0 = default;
+                _clusterAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
+                _mapAccessors = new ChunkAccessor<PersistentStore>[sources.Length];
+                for (var i = 0; i < sources.Length; i++)
+                {
+                    _clusterAccessors[i] = sources[i].ClusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+                    _mapAccessors[i] = sources[i].EngineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+                }
             }
 
             var maxRecord = 0;
@@ -1164,6 +1246,7 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         /// <summary>Returns this enumerator (enables the <c>foreach</c> pattern).</summary>
+        [AllowCopy]   // foreach takes this enumerator: the copy is the one it walks and disposes
         public IndexEntityEnumerator<T, TKey> GetEnumerator() => this;
 
         /// <summary>Convenience accessor — copies the component into a tuple. Prefer <see cref="CurrentComponent"/> for zero-copy.</summary>
@@ -1310,7 +1393,7 @@ public unsafe partial class Transaction : EntityAccessor
             var src = _sources[sourceIndex];
             var clusterChunkId = location >> 6;
             var slotIndex = location & 63;
-            var clusterBase = _clusterAccessors[sourceIndex].GetChunkAddress(clusterChunkId);
+            var clusterBase = ClusterAccessor(sourceIndex).GetChunkAddress(clusterChunkId);
             var layout = src.ClusterState.Layout;
             var isolated = src.Meta.VersionedSlotMask != 0;
             var occupied = (Volatile.Read(ref *(ulong*)clusterBase) & (1UL << slotIndex)) != 0;
@@ -1326,7 +1409,7 @@ public unsafe partial class Transaction : EntityAccessor
                 // the snapshot hid it (VIS-09), or a spawn is publishing. Its record decides, and must name this slot.
                 if (!isolated || (src.ClusterState.ClaimedBits(clusterChunkId) & (1UL << slotIndex)) == 0
                     || !SnapshotSlot.IsReservedSpawnVisible(entityRaw, clusterChunkId, slotIndex, src.EngineState, recordBuf, _transactionTSN,
-                        _tx.DBE.CommitCards, ref _mapAccessors[sourceIndex]))
+                        _tx.DBE.CommitCards, ref MapAccessor(sourceIndex)))
                 {
                     return false;
                 }
@@ -1346,7 +1429,7 @@ public unsafe partial class Transaction : EntityAccessor
                 // An archetype that promises isolation: born at or before the snapshot, and alive at it (#1247) — the cluster's summary answers for most.
                 if (isolated && occupied && !src.ClusterState.IsClusterFullyVisibleAt(clusterChunkId, _transactionTSN)
                     && !SnapshotSlot.IsVisibleAtSnapshot(entityRaw, true, src.EngineState, recordBuf, src.RecordSize, _transactionTSN, _tx.DBE.CommitCards,
-                        ref _mapAccessors[sourceIndex]))
+                        ref MapAccessor(sourceIndex)))
                 {
                     return false;
                 }
@@ -1356,7 +1439,7 @@ public unsafe partial class Transaction : EntityAccessor
                 // Hinted, not plain TryGet: entity keys are dense, so the location-hint cache resolves in one bucket visit instead of a full hash +
                 // directory + chain walk. Identical semantics — the hint is a pure accelerator that falls back on any mismatch. A hidden slot's record was
                 // read above.
-                if (occupied && !src.EngineState.EntityMap.TryGetWithHint(EntityId.FromRaw(entityRaw).EntityKey, recordBuf, ref _mapAccessors[sourceIndex]))
+                if (occupied && !src.EngineState.EntityMap.TryGetWithHint(EntityId.FromRaw(entityRaw).EntityKey, recordBuf, ref MapAccessor(sourceIndex)))
                 {
                     return false;
                 }
@@ -1389,6 +1472,27 @@ public unsafe partial class Transaction : EntityAccessor
             return true;
         }
 
+        [UnscopedRef]
+        private ref ChunkAccessor<PersistentStore> ClusterAccessor(int sourceIndex)
+        {
+            if (_clusterAccessors == null)
+            {
+                return ref _clusterAccessor0;
+            }
+
+            return ref _clusterAccessors[sourceIndex];
+        }
+
+        [UnscopedRef]
+        private ref ChunkAccessor<PersistentStore> MapAccessor(int sourceIndex)
+        {
+            if (_mapAccessors == null)
+            {
+                return ref _mapAccessor0;
+            }
+
+            return ref _mapAccessors[sourceIndex];
+        }
 
         /// <summary>
         /// Pulls the next <c>(key, location)</c> from whichever source this enumerator has: a live B+Tree cursor when one archetype holds the component, or
@@ -1462,7 +1566,9 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         /// <summary>Releases the per-archetype and component accessors (unpins accessed pages). Idempotent.</summary>
+#pragma warning disable TYPHON006 // Its _tx is borrowed: the transaction that created the enumerator, its caller's to dispose
         public void Dispose()
+#pragma warning restore TYPHON006
         {
             if (_disposed)
             {
@@ -1471,10 +1577,18 @@ public unsafe partial class Transaction : EntityAccessor
 
             _disposed = true;
 
-            for (var i = 0; i < _clusterAccessors.Length; i++)
+            if (_clusterAccessors == null)
             {
-                _clusterAccessors[i].Dispose();
-                _mapAccessors[i].Dispose();
+                _clusterAccessor0.Dispose();
+                _mapAccessor0.Dispose();
+            }
+            else
+            {
+                for (var i = 0; i < _clusterAccessors.Length; i++)
+                {
+                    _clusterAccessors[i].Dispose();
+                    _mapAccessors[i].Dispose();
+                }
             }
 
             if (_streaming)
@@ -1572,23 +1686,13 @@ public unsafe partial class Transaction : EntityAccessor
         // As the open: a refresh normally runs inside the transaction's epoch scope already, and a default guard must not be disposed.
         var needsGuard = NeedsEpochGuard();
         var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
-        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = id.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, id.ArchetypeId);
 
         var refreshable = PagedMMF.RefreshableWaitDepth;
         PagedMMF.RefreshableWaitDepth = 0;
         try
         {
-            if (!es.EntityMap.TryGetWithHint(id.EntityKey, record, ref _entityMapCacheAccessor)
+            if (!es.EntityMap.TryGetWithHint(id.EntityKey, record, ref entityMap)
                 || !EntityVisibility.IsVisibleInScan(record, TSN, CommitCards, es.EntityMap, id.EntityKey))
             {
                 return false;
@@ -1820,20 +1924,11 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         // Reuse cached EntityMap accessor when archetype matches
-        if (!_hasEntityMapCache || _entityMapCacheArchId != entityId.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = entityId.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, entityId.ArchetypeId);
 
         int recordSize = meta._entityRecordSize;
         byte* buf = stackalloc byte[recordSize];
-        if (!es.EntityMap.TryGet(entityId.EntityKey, buf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGet(entityId.EntityKey, buf, ref entityMap))
         {
             return 0;
         }
@@ -1878,27 +1973,18 @@ public unsafe partial class Transaction : EntityAccessor
         }
 
         // Reuse cached EntityMap accessor
-        if (!_hasEntityMapCache || _entityMapCacheArchId != entityId.ArchetypeId)
-        {
-            if (_hasEntityMapCache)
-            {
-                _entityMapCacheAccessor.Dispose();
-            }
-            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
-            _entityMapCacheArchId = entityId.ArchetypeId;
-            _hasEntityMapCache = true;
-        }
+        ref var entityMap = ref EntityMapAccessor(es, entityId.ArchetypeId);
 
         // TryGet copies full record, but we only need the header (first 14 bytes).
         // Use full record size to satisfy TryGet's contract, but stackalloc min header.
         int recordSize = meta._entityRecordSize;
         byte* fullBuf = stackalloc byte[recordSize];
-        if (!es.EntityMap.TryGet(entityId.EntityKey, fullBuf, ref _entityMapCacheAccessor))
+        if (!es.EntityMap.TryGet(entityId.EntityKey, fullBuf, ref entityMap))
         {
             return false;
         }
 
-        return EntityVisibility.IsVisible(fullBuf, TSN, CommitCards, es.EntityMap, entityId.EntityKey, ref _entityMapCacheAccessor, _epochManager);
+        return EntityVisibility.IsVisible(fullBuf, TSN, CommitCards, es.EntityMap, entityId.EntityKey, ref entityMap, _epochManager);
     }
 
     private Result<int, BTreeLookupStatus> GetCompRevTableFirstChunkId(long pk, ComponentInfo info)

@@ -111,24 +111,17 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var x = 3f + (float)rng.NextDouble() * 94f;
-                    var y = 3f + (float)rng.NextDouble() * 94f;
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
-                }
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var x = 3f + (float)rng.NextDouble() * 94f;
+                var y = 3f + (float)rng.NextDouble() * 94f;
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -761,27 +754,20 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    var crosses = (slot & 3) == 0;
-                    var originX = crosses ? CellSize : 0f;
-                    var x = originX + 3f + (float)rng.NextDouble() * 94f;
-                    var y = 3f + (float)rng.NextDouble() * 94f;
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
-                }
+                var crosses = (slot & 3) == 0;
+                var originX = crosses ? CellSize : 0f;
+                var x = originX + 3f + (float)rng.NextDouble() * 94f;
+                var y = 3f + (float)rng.NextDouble() * 94f;
+                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, y));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

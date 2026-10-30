@@ -5,6 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Globalization;
 using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SwgTatooine.Server.Accounts;
 
@@ -21,7 +23,8 @@ namespace SwgTatooine.Server.Accounts;
 public sealed record AuthRequest(
     [property: JsonPropertyName("name")] string Name,
     [property: JsonPropertyName("password")] string Password,
-    [property: JsonPropertyName("outfit")] int Outfit = 0);
+    [property: JsonPropertyName("outfit")] int Outfit = 0,
+    [property: JsonPropertyName("bot")] bool Bot = false);
 
 /// <summary>What a successful <c>/auth</c> call returns.</summary>
 /// <param name="Token">The bearer token to present on the WebSocket <c>HELLO</c>.</param>
@@ -98,9 +101,34 @@ public static class AuthEndpoints
         ArgumentNullException.ThrowIfNull(dbe);
         ArgumentNullException.ThrowIfNull(limiter);
 
-        app.MapPost("/auth/signup", (AuthRequest request, HttpContext context) => Signup(dbe, limiter, request, context));
-        app.MapPost("/auth/login", (AuthRequest request, HttpContext context) => Login(dbe, limiter, request, context));
+        app.MapPost("/auth/signup", (AuthRequest request, HttpContext context) => Gated(context, () => Signup(dbe, limiter, request, context)));
+        app.MapPost("/auth/login", (AuthRequest request, HttpContext context) => Gated(context, () => Login(dbe, limiter, request, context)));
         return app;
+    }
+
+    /// <summary>How many signups and logins may run at once: a quarter of the cores, at least one.</summary>
+    /// <remarks>
+    /// Waited on asynchronously, so a queued request holds no thread. Each one runs a KDF and synchronous engine reads, and every thread
+    /// that touches the engine takes an epoch-registry slot (256 in all): the old blocking gate inside the KDF parked one thread-pool
+    /// thread per queued login, and a 2 000-bot login wave grew the pool past that limit.
+    /// </remarks>
+    private static readonly SemaphoreSlim Gate = new(Math.Max(1, Environment.ProcessorCount / 4));
+
+    /// <summary>Runs <paramref name="handler"/> once <see cref="Gate"/> admits it.</summary>
+    /// <param name="context">The request, whose abort cancels the wait.</param>
+    /// <param name="handler">The synchronous endpoint body.</param>
+    /// <returns>The handler's result.</returns>
+    private static async Task<IResult> Gated(HttpContext context, Func<IResult> handler)
+    {
+        await Gate.WaitAsync(context.RequestAborted);
+        try
+        {
+            return handler();
+        }
+        finally
+        {
+            Gate.Release();
+        }
     }
 
     /// <summary>
@@ -138,7 +166,7 @@ public static class AuthEndpoints
             return TooMany();
         }
 
-        switch (AccountStore.TrySignup(dbe, request.Name, request.Password, out var account, request.Outfit))
+        switch (AccountStore.TrySignup(dbe, request.Name, request.Password, out var account, request.Outfit, request.Bot))
         {
             case AccountStore.SignupOutcome.Created:
                 return Results.Ok(Minted(account, request.Name));

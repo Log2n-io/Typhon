@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import { safeStorage } from './safeStorage';
 import type { TimeRange, TrackState } from '@/libs/profiler/model/uiTypes';
 import { useOptionsStore } from '@/stores/useOptionsStore';
+import { GAUGE_GROUPS } from '@/libs/profiler/canvas/gauges/region';
 
 /**
  * How the renderer colors span bars on slot lanes. Different lenses on the same data:
@@ -53,8 +54,12 @@ interface ProfilerViewState {
   scopeLinked: boolean;
   /** The frozen time window while unlinked (captured at the unlink toggle); `null` while linked. */
   pinnedRange: TimeRange | null;
-  /** Toggled by the `g` key. Hides the full gauge region. */
-  gaugeRegionVisible: boolean;
+  /**
+   * The gauge choice {@link toggleGaugeRegion} hid, restored when it shows the region again; `null` while the region shows.
+   * There is no separate region flag: the region is visible exactly when one gauge is ({@link selectGaugeRegionVisible}), so
+   * the filter's "Gauges" checkbox and the `g` key cannot disagree. A separate flag once hid the band with every gauge still checked.
+   */
+  gaugesBeforeHide: Record<string, boolean> | null;
   /** Per-system chunk-lanes section visibility. */
   perSystemLanesVisible: boolean;
   /**
@@ -157,7 +162,7 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       transientViewRange: INITIAL_VIEW_RANGE,
       scopeLinked: true,
       pinnedRange: null,
-      gaugeRegionVisible: true,
+      gaugesBeforeHide: null,
       perSystemLanesVisible: true,
       gaugeCollapse: {},
       gaugeVisibility: {},
@@ -198,7 +203,10 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         set((s) => (linked
           ? { scopeLinked: true, pinnedRange: null }
           : { scopeLinked: false, pinnedRange: s.viewRange })),
-      toggleGaugeRegion: () => set((s) => ({ gaugeRegionVisible: !s.gaugeRegionVisible })),
+      toggleGaugeRegion: () =>
+        set((s) => (anyGaugeVisible(s.gaugeVisibility)
+          ? { gaugesBeforeHide: s.gaugeVisibility, gaugeVisibility: allGaugesHidden() }
+          : { gaugeVisibility: s.gaugesBeforeHide && anyGaugeVisible(s.gaugesBeforeHide) ? s.gaugesBeforeHide : {}, gaugesBeforeHide: null })),
       togglePerSystemLanes: () => set((s) => ({ perSystemLanesVisible: !s.perSystemLanesVisible })),
       setGaugeCollapse: (groupId, state) =>
         set((s) => ({ gaugeCollapse: { ...s.gaugeCollapse, [groupId]: state } })),
@@ -262,11 +270,11 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
     {
       name: 'workbench-profiler-view',
       storage: safeStorage,
-      version: 5,
+      version: 6,
       // Only persist UX preferences; viewRange / transientViewRange are session-scoped and reset
       // on each open (never appear in `partialize`).
       partialize: (s) => ({
-        gaugeRegionVisible: s.gaugeRegionVisible,
+        gaugesBeforeHide: s.gaugesBeforeHide,
         perSystemLanesVisible: s.perSystemLanesVisible,
         gaugeCollapse: s.gaugeCollapse,
         gaugeVisibility: s.gaugeVisibility,
@@ -285,11 +293,14 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
       //   initialiser would already filter the field out of runtime state, but we delete it from
       //   the persisted blob explicitly so localStorage doesn't carry an orphan key forever.
       // v4 → v5 (#376 Phase 5): added `spanPalette` (default 'categorical'). Missing field defaults to categorical.
+      // v5 → v6: `gaugeRegionVisible` dropped — the region is visible when a gauge is. A stored `false` becomes every gauge
+      //   unchecked, with the previous choice kept for `g` to restore, so a band hidden before the upgrade stays hidden and now says so.
       migrate: (persisted: unknown, fromVersion: number): Partial<ProfilerViewState> | undefined => {
         if (!persisted || typeof persisted !== 'object') return undefined;
         const p = persisted as Partial<ProfilerViewState> & {
           gaugeCollapse?: Record<string, unknown>;
           liveFollowWindowUs?: number;
+          gaugeRegionVisible?: boolean;
         };
         if (fromVersion < 1 && p.gaugeCollapse) {
           const migrated: Record<string, TrackState> = {};
@@ -316,11 +327,31 @@ export const useProfilerViewStore = create<ProfilerViewState>()(
         if (fromVersion < 5) {
           p.spanPalette = p.spanPalette ?? 'categorical';
         }
+        if (fromVersion < 6) {
+          if (p.gaugeRegionVisible === false) {
+            p.gaugesBeforeHide = p.gaugeVisibility ?? {};
+            p.gaugeVisibility = allGaugesHidden();
+          }
+          delete p.gaugeRegionVisible;
+        }
         return p;
       },
     },
   ),
 );
+
+function anyGaugeVisible(visibility: Record<string, boolean>): boolean {
+  return GAUGE_GROUPS.some((g) => visibility[g.id] !== false);
+}
+
+function allGaugesHidden(): Record<string, boolean> {
+  return Object.fromEntries(GAUGE_GROUPS.map((g) => [g.id, false]));
+}
+
+/** Whether the gauge region shows: when at least one gauge group is checked. */
+export function selectGaugeRegionVisible(s: ProfilerViewState): boolean {
+  return anyGaugeVisible(s.gaugeVisibility);
+}
 
 /**
  * The time window the scheduling-cluster panels (System DAG / Critical Path / Data Flow) should bind to: the live

@@ -198,7 +198,21 @@ public sealed partial class TatooineSim : IDisposable
     {
         var services = new ServiceCollection();
         services
-            .AddLogging(cfg => cfg.SetMinimumLevel(LogLevel.Critical))
+            // A served world prints the engine's warnings: a move to Overloaded or Starved storage health, a back-pressure wait extended, an admission
+            // limit raised. It used to print nothing at all — no provider, and a Critical floor — so the 2026-10-29 wedge (#1532) left no line of what the
+            // engine saw. A measured run stays silent, as do the checks.
+            .AddLogging(cfg =>
+            {
+                cfg.SetMinimumLevel(_config.ServePort > 0 ? LogLevel.Warning : LogLevel.Critical);
+                if (_config.ServePort > 0)
+                {
+                    cfg.AddSimpleConsole(o =>
+                    {
+                        o.SingleLine = true;
+                        o.TimestampFormat = "HH:mm:ss ";
+                    });
+                }
+            })
             .AddResourceRegistry()
             .AddMemoryAllocator()
             .AddEpochManager()
@@ -275,7 +289,6 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<CityPlacement>();
         Dbe.RegisterComponentFromAccessor<CityArea>();
         Dbe.RegisterComponentFromAccessor<CityRegionRealm>();
-        Dbe.RegisterComponentFromAccessor<Inventory>();
         Dbe.RegisterComponentFromAccessor<StructureRealm>();
         Dbe.RegisterComponentFromAccessor<LairRealm>();
         Dbe.RegisterComponentFromAccessor<NpcRealm>();
@@ -299,6 +312,7 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<Account>();
         Dbe.RegisterComponentFromAccessor<AccountSecret>();
         Dbe.RegisterComponentFromAccessor<Character>();
+        Dbe.RegisterComponentFromAccessor<CharacterProgress>();
 
         // Missions (missions.md): offers listed at the terminals, and the held missions — Versioned and non-spatial like Character, for the same reasons.
         Dbe.RegisterComponentFromAccessor<MissionOfferPlacement>();
@@ -306,6 +320,20 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<MissionOfferRegion>();
         Dbe.RegisterComponentFromAccessor<MissionOfferRealm>();
         Dbe.RegisterComponentFromAccessor<HeldMission>();
+
+        // The economy (economy-foundation.md): wallets, the ledger and its head — Versioned and non-spatial, for the same reasons, and written by the
+        // Ledger system alone.
+        Dbe.RegisterComponentFromAccessor<Wallet>();
+        Dbe.RegisterComponentFromAccessor<LedgerEntry>();
+        Dbe.RegisterComponentFromAccessor<LedgerHead>();
+
+        // Items (inventory-loot.md): stacks, the item ledger and its head — Versioned and non-spatial like the wallets, written by ItemTransfer alone.
+        Dbe.RegisterComponentFromAccessor<ItemStack>();
+        Dbe.RegisterComponentFromAccessor<ItemLedgerEntry>();
+        Dbe.RegisterComponentFromAccessor<ItemLedgerHead>();
+
+        // The bazaar (bazaar.md § 2.1): listings, each its own escrow stack — Versioned and non-spatial like the stacks, written by the Market system alone.
+        Dbe.RegisterComponentFromAccessor<Listing>();
 
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed

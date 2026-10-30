@@ -4,6 +4,8 @@ import { DownNotice } from './DownNotice';
 import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
+import { InventoryWindow } from './InventoryWindow';
+import { BazaarPanel } from './BazaarPanel';
 import { NavPane } from './NavPane';
 import { Kicked } from './Kicked';
 import { Login } from './Login';
@@ -61,6 +63,8 @@ export function App() {
       </div>
       <MissionTerminal />
       <MissionJournalPanel />
+      <InventoryWindow />
+      <BazaarPanel />
       <Kicked />
     </div>
   );

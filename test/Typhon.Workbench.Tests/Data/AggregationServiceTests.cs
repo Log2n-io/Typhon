@@ -718,7 +718,8 @@ public sealed class AggregationServiceTests
                 PostTickSummaries: postRows ?? Array.Empty<PostTickSummary>(),
                 QueueIdToName: queueIdToName ?? new Dictionary<ushort, string>(),
                 SystemArchetypeTouches: archetypeTouches ?? Array.Empty<SystemArchetypeTouchSummary>(),
-                EntityLifecycleRuns: lifecycleRuns ?? Array.Empty<EntityLifecycleRun>());
+                EntityLifecycleRuns: lifecycleRuns ?? Array.Empty<EntityLifecycleRun>(),
+                Threads: Array.Empty<ThreadDto>());
         }
     }
 }

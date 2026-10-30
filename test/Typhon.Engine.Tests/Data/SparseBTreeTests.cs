@@ -117,6 +117,13 @@ public class SparseBTreeTests
         return tree.FinishMoveBatch(moves, ranges.AsSpan(0, rangeCount), ref accessor);
     }
 
+    /// <summary>Whether a multi-value lookup of <paramref name="key"/> finds a buffer; the buffer's accessor is let go of at once.</summary>
+    private static bool Finds(IntMultipleBTree<PersistentStore> tree, int key, ref ChunkAccessor<PersistentStore> accessor)
+    {
+        using var values = tree.TryGetMultiple(key, ref accessor);
+        return values.IsValid;
+    }
+
     [Test]
     [CancelAfter(15_000)]
     [VerifiesRule("IX-09")]
@@ -126,7 +133,7 @@ public class SparseBTreeTests
         {
             Assert.That(tree.Add(0, 100, ref accessor), Is.Zero, "an insert of 0 stores no element");
             Assert.That(tree.EntryCount, Is.Zero, "and files no key");
-            Assert.That(tree.TryGetMultiple(0, ref accessor).IsValid, Is.False, "a lookup of 0 finds nothing");
+            Assert.That(Finds(tree, 0, ref accessor), Is.False, "a lookup of 0 finds nothing");
             Assert.That(tree.RemoveValue(0, 0, 100, ref accessor), Is.True, "a removal from 0 is already done");
             Assert.That(tree.Remove(0, out _, ref accessor), Is.True);
 
@@ -183,9 +190,9 @@ public class SparseBTreeTests
         {
             tree.Sparse = false;
             tree.Add(0, 100, ref accessor);
-            Assert.That(tree.TryGetMultiple(0, ref accessor).IsValid, Is.True, "premise: the planted key 0 is there");
+            Assert.That(Finds(tree, 0, ref accessor), Is.True, "premise: the planted key 0 is there");
             tree.Sparse = true;
-            Assert.That(tree.TryGetMultiple(0, ref accessor).IsValid, Is.False, "a planted key 0 is not answered");
+            Assert.That(Finds(tree, 0, ref accessor), Is.False, "a planted key 0 is not answered");
         });
     }
 

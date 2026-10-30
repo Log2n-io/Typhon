@@ -24,9 +24,12 @@ public sealed class StagedWrites
 {
     private readonly ConcurrentQueue<Item> _queue = new();
 
-    private sealed class Item(Action<Transaction, long> write)
+    // The cause is captured on the staging thread and entered on the tick's: the request's trace id lives in its Activity, which the tick thread never
+    // sees, so without it the write's engine work shows in the Workbench as uncaused (#1517).
+    private sealed class Item(Action<Transaction, long> write, CausalId cause)
     {
         public readonly Action<Transaction, long> Write = write;
+        public readonly CausalId Cause = cause;
         public readonly ManualResetEventSlim Done = new();
         public Exception Fault;
         public long Tick = -1;
@@ -40,6 +43,7 @@ public sealed class StagedWrites
         {
             try
             {
+                using var cause = CausalScope.Enter(item.Cause);
                 using var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
                 item.Write(tx, ctx.TickNumber);
                 if (!tx.Commit())
@@ -65,7 +69,7 @@ public sealed class StagedWrites
     /// <returns>The tick that applied it.</returns>
     internal long Apply(Action<Transaction, long> write, Func<Exception> stopped, TimeSpan timeout)
     {
-        var item = new Item(write);
+        var item = new Item(write, CausalScope.Capture());
         _queue.Enqueue(item);
         var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
         while (!item.Done.Wait(20))

@@ -168,16 +168,9 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         var total = 0;
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
-            {
-                total += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
-            }
-        }
-        finally
-        {
-            accessor.Dispose();
+            total += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
         }
 
         return total;
@@ -189,24 +182,17 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         var result = new List<(long, int, int, float, float)>();
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    ref readonly var b = ref positions[slot].Bounds;
-                    result.Add((positions[slot].Tag, cluster.ChunkId, slot, 0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY)));
-                }
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ref readonly var b = ref positions[slot].Bounds;
+                result.Add((positions[slot].Tag, cluster.ChunkId, slot, 0.5f * (b.MinX + b.MaxX), 0.5f * (b.MinY + b.MaxY)));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         return result;
@@ -395,36 +381,29 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
             using (var tx = dbe.CreateQuickTransaction())
             {
                 var accessor = tx.For<ClMigUnit>();
-                try
+                foreach (var cluster in accessor.GetClusterEnumerator())
                 {
-                    foreach (var cluster in accessor.GetClusterEnumerator())
+                    var bits = cluster.OccupancyBits;
+                    while (bits != 0)
                     {
-                        var bits = cluster.OccupancyBits;
-                        while (bits != 0)
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        bits &= bits - 1;
+                        ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, slot);
+                        if (pos.Tag < 90_000)
                         {
-                            var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                            bits &= bits - 1;
-                            ref readonly var pos = ref cluster.GetReadOnly(ClMigUnit.Pos, slot);
-                            if (pos.Tag < 90_000)
-                            {
-                                continue;
-                            }
+                            continue;
+                        }
 
-                            // Half in, half out, phases opposite. Even-tag entities enter cell (0,0) on even ticks; odd-tag ones oscillate between
-                            // cells (1,0) and (2,0) and never reach it, so three of the six ticks carry crossings into the repaired cell — enough to
-                            // overlap a repair, which is what this needs, and measured: the ablation reddens on two of them.
-                            var goIn = ((pos.Tag & 1) == 0) == ((t & 1) == 0);
-                            var x = goIn ? pos.Bounds.MinX - CellSize : pos.Bounds.MinX + CellSize;
-                            if (x > 0f && x < WorldMax)
-                            {
-                                cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, pos.Bounds.MinY, pos.Tag));
-                            }
+                        // Half in, half out, phases opposite. Even-tag entities enter cell (0,0) on even ticks; odd-tag ones oscillate between
+                        // cells (1,0) and (2,0) and never reach it, so three of the six ticks carry crossings into the repaired cell — enough to
+                        // overlap a repair, which is what this needs, and measured: the ablation reddens on two of them.
+                        var goIn = ((pos.Tag & 1) == 0) == ((t & 1) == 0);
+                        var x = goIn ? pos.Bounds.MinX - CellSize : pos.Bounds.MinX + CellSize;
+                        if (x > 0f && x < WorldMax)
+                        {
+                            cluster.WriteSpatial(ClMigUnit.Pos, slot, PointAt(x, pos.Bounds.MinY, pos.Tag));
                         }
                     }
-                }
-                finally
-                {
-                    accessor.Dispose();
                 }
 
                 tx.Commit();
@@ -808,32 +787,25 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
     {
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<ClMigUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var positions = cluster.GetReadOnlySpan(ClMigUnit.Pos);
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
+                var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
 
-                    var h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (round * 0x27D4EB2F));
-                    h ^= h >> 15;
-                    h *= 0x2C1B3C6D;
-                    h ^= h >> 12;
-                    var g = h * 0x27D4EB2F;
-                    g ^= g >> 15;
+                var h = (uint)((cluster.ChunkId * 0x9E3779B1) ^ (slot * 0x85EBCA6B) ^ (round * 0x27D4EB2F));
+                h ^= h >> 15;
+                h *= 0x2C1B3C6D;
+                h ^= h >> 12;
+                var g = h * 0x27D4EB2F;
+                g ^= g >> 15;
 
-                    cluster.WriteSpatial(ClMigUnit.Pos, slot,
-                        PointAt(4f + (h % 10_000) * (92f / 10_000f), 4f + (g % 10_000) * (92f / 10_000f), positions[slot].Tag));
-                }
+                cluster.WriteSpatial(ClMigUnit.Pos, slot,
+                    PointAt(4f + (h % 10_000) * (92f / 10_000f), 4f + (g % 10_000) * (92f / 10_000f), positions[slot].Tag));
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

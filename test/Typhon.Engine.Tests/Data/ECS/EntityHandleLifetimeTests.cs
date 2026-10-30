@@ -234,9 +234,9 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
 
     private static void OpenOneOfEach(EntityAccessor tx, params EntityId[] ofOtherArchetypes)
     {
-        Assert.That(ofOtherArchetypes.Length, Is.GreaterThanOrEqualTo(EntityAccessor.ClusterCacheWays),
+        Assert.That(ofOtherArchetypes.Length, Is.GreaterThanOrEqualTo(EntityAccessor.ArchetypeCacheWays),
             "premise: one entity of each of as many other archetypes as the cluster cache has ways");
-        for (var i = 0; i < EntityAccessor.ClusterCacheWays; i++)
+        for (var i = 0; i < EntityAccessor.ArchetypeCacheWays; i++)
         {
             _ = tx.Open(ofOtherArchetypes[i]);
         }
@@ -369,14 +369,14 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     }
 
     /// <summary>
-    /// A handle from an <see cref="ArchetypeAccessor{TArch}"/> holds its page through that accessor's slot. Disposing the accessor lets go of it; the handle
-    /// then re-resolves through its transaction's cluster cache.
+    /// A handle from an <see cref="ArchetypeAccessor{TArch}"/> holds its page through its transaction's archetype cache, the accessor owning none (#1538).
+    /// When the cache lets go of the page, the handle re-resolves through it.
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
     [VerifiesRule("EP-03")]
     [Property("CacheSize", CacheBytes)]
-    public void ArchetypeAccessorHandle_ReadsAndSetsItsEntity_AfterItsAccessorIsDisposed()
+    public void ArchetypeAccessorHandle_ReadsAndSetsItsEntity_AfterTheCacheLetsGoOfItsPage()
     {
         var dbe = Build();
         using (var tx = dbe.CreateQuickTransaction())
@@ -385,7 +385,7 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
             var m = accessor.OpenMut(_fat[X]);
             var (memPage, filePage) = PageUnder(dbe, m);
 
-            accessor.Dispose();
+            PushHlFatArchOutOfTheClusterCache(tx);
             SpawnSmall(tx, 130);
             EvictUnder(dbe, memPage, filePage);
 
@@ -406,7 +406,7 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     {
         var dbe = Build();
         using var tx = dbe.CreateReadOnlyTransaction();
-        using var accessor = tx.For<HlFatArch>();
+        var accessor = tx.For<HlFatArch>();
         var a = accessor.Open(_fat[X]);
         var (memPage, filePage) = PageUnder(dbe, a);
 
@@ -515,7 +515,7 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
     [Property("CacheSize", CacheBytes)]
     public void ClusterCache_KeepsARecentlyUsedArchetype_WhenAnotherNeedsAnEntry()
     {
-        Assume.That(EntityAccessor.ClusterCacheWays, Is.EqualTo(4), "staged for four ways");
+        Assume.That(EntityAccessor.ArchetypeCacheWays, Is.EqualTo(4), "staged for four ways");
         var dbe = Build();
         using var tx = dbe.CreateReadOnlyTransaction();
         var a = tx.Open(_fat[X]);                // HlFatArch: the oldest entry
@@ -673,7 +673,6 @@ class EntityHandleLifetimeTests : TestBase<EntityHandleLifetimeTests>
         Assert.That(second.GetReadOnlySpan(HlFatArch.Fat).Length, Is.GreaterThan(0));
         clusters.Dispose();
         Assert.That(Throws(second), Is.True, "a ClusterRef was usable after its enumerator was disposed");
-        accessor.Dispose();
 
         static bool Throws(ClusterRef<HlFatArch> cluster)
         {

@@ -555,7 +555,6 @@ sealed class ExactWireTests : TestBase<ExactWireTests>
                 }
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
 

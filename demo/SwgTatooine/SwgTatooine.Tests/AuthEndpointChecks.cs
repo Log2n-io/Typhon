@@ -220,7 +220,7 @@ internal sealed class AuthEndpointChecks
         byte stored;
         using (var tx = _sim.Dbe.CreateQuickTransaction())
         {
-            using var accounts = tx.For<AccountArch>();
+            var accounts = tx.For<AccountArch>();
             stored = accounts.Open(account).Read(AccountArch.Identity).Outfit;
         }
 

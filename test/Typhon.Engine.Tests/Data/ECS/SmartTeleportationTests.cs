@@ -103,7 +103,6 @@ class SmartTeleportationTests : TestBase<SmartTeleportationTests>
                 }
             }
 
-            accessor.Dispose();
             tx.Commit();
         }
     }

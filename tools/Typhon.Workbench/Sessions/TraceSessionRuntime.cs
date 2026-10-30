@@ -885,7 +885,8 @@ public sealed partial class TraceSessionRuntime : IDisposable, IChunkProvider
             PostTickSummaries: postTicks,
             QueueIdToName: qNames,
             SystemArchetypeTouches: satTouches,
-            EntityLifecycleRuns: lifecycleRuns);
+            EntityLifecycleRuns: lifecycleRuns,
+            Threads: [.. reader.Threads.Select(t => new ThreadDto(t.Slot, t.Name, (int)t.Kind))]);
     }
 
     /// <summary>

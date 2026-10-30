@@ -20,7 +20,7 @@ from mathutils import Vector, Matrix, Quaternion
 #      re-encoded to KTX2 (KHR_texture_basisu); the shared library ones stay EXTERNAL (same <stem>-<rev> URI from every
 #      GLB, same folder -> the client caches one GPU texture), the AO is embedded
 #   5. descriptor: bounds, collision (shape library + colliders), portals, spawns, interactions, child assets,
-#      approach paths; interiors also their navigation graph (th_nav.py)
+#      approach paths; interiors also their navigation graph (th_nav.py); items their category and Mk tint
 #   6. buildings only: two coarser levels in the same GLB (see LODs below), listed in descriptor render.lods
 # Everything in the descriptor is in the glTF frame (metres, Y-up, right-handed), like the GLB.
 # Catalogue: catalogue-<version>.json (immutable, what the game server pins and announces) + catalogue.json (pointer).
@@ -40,6 +40,7 @@ AO_PX_PER_M = 32            # AO is low frequency
 AO_MIN, AO_MAX = 256, 2048
 AO_SAMPLES = 64
 AO_DISTANCE = {"interior": 1.0, "weapon": 0.1, "default": 1.5}
+ITEM_AO = (0.3, 0.02, 0.5)  # items (6 cm to 3 m): AO distance = 0.3 x the largest dimension, clamped to [0.02, 0.5] m
 PROBE_PX, PROBE_SAMPLES = 512, 16
 HIDDEN_AO = 0.02             # a face whose probe AO stays below this everywhere is never visible
 MIN_EVIDENCE = 4             # probe texels a face must cover before it may be culled (thinner faces are kept)
@@ -736,6 +737,8 @@ def descriptor(root, glb_name, me, materials, ao_res):
                                       "radius": o.get("interact_radius")}
             if "interact_seat" in o:
                 e["seat"] = o["interact_seat"]
+            if "interact_reach_m" in o:                           # usable from any side, about the asset origin
+                e["reach_m"] = round(o["interact_reach_m"], 3)
         elif "seat_id" in o:
             key, e = "seats", {"id": o["seat_id"], "pos": gv(loc), "rot": gq(rot), "forward": FORWARD,
                                "pose": {"clip": o["seat_clip"], "at": o["seat_clip_at"]}}
@@ -752,6 +755,8 @@ def descriptor(root, glb_name, me, materials, ao_res):
         targets[o.name] = (o, e)
     if d["kind"] == "weapon":
         d["weapon"] = weapon_block(root)
+    if d["kind"] == "item":
+        d["item"] = item_block(root, d["render"]["materials"])
     if d["kind"] == "interior":
         if not nav_nodes:
             raise ValueError(f"{aid}: an interior needs NAV_* nodes (th_interior_nav.py)")
@@ -784,6 +789,21 @@ def weapon_block(root):
     return {"class": root["weapon_class"], "clip": root["weapon_clip"],
             "attach": {"joint": root["grip_joint"], "pos": [_r(v) for v in root["grip_pos_m"]],
                        "rot": [_r(q.x, 6), _r(q.y, 6), _r(q.z, 6), _r(q.w, 6)]}}
+
+
+def item_block(root, materials):
+    """An item's category, and where it has them its Mk tint (th_items.py MK: the material the client recolours per Mk,
+    published at Mk I) and its label material (the plate the client draws the content on, UV0 0..1)."""
+    b = {"category": root["item_category"]}
+    if "item_mk" in root:
+        b["mk"] = json.loads(root["item_mk"])
+        if b["mk"]["material"] not in materials:
+            raise ValueError(f"{root['asset_id']}: Mk material {b['mk']['material']!r} is on no render mesh")
+    if "item_label" in root:
+        if root["item_label"] not in materials:
+            raise ValueError(f"{root['asset_id']}: label material {root['item_label']!r} is on no render mesh")
+        b["label"] = root["item_label"]
+    return b
 
 
 # ---------------- approach paths ----------------
@@ -903,10 +923,16 @@ def export_asset(root, shared_written):
     try:
         ob = build_render_mesh(root, sc)
         lights = lights_of(root, sc)
-        # no ground under interiors (they have a floor) nor under hand weapons (modelled round their grip, not on the ground)
-        occluders = [ground_plane(sc, FOUNDATION_D if kind == "building" else 0.0)] if kind not in ("interior", "weapon") else []
+        # no ground under interiors (they have a floor), hand weapons (modelled round their grip, not on the ground) nor
+        # items (shown in the inventory and in a hand as much as on the ground)
+        occluders = [ground_plane(sc, FOUNDATION_D if kind == "building" else 0.0)] if kind not in ("interior", "weapon", "item") else []
         levels = []                                        # LOD1+: (object, error_m)
-        with render_settings(sc, AO_DISTANCE.get(kind, AO_DISTANCE["default"])):
+        if kind == "item":
+            k, lo, hi = ITEM_AO
+            ao_dist = min(hi, max(lo, k * max(ob.dimensions)))
+        else:
+            ao_dist = AO_DISTANCE.get(kind, AO_DISTANCE["default"])
+        with render_settings(sc, ao_dist):
             # probe bake to drop faces no ray can reach (resting on/inside other parts, buried caps), then the final
             # unwrap + bake on what is left
             temp_mats, ao_img, culled, res = bake_ao(ob, aid, sc, occluders, stage, temps)

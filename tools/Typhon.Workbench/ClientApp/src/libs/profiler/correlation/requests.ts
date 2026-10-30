@@ -40,6 +40,7 @@ export type RequestKind = 'http' | 'command' | 'dropped';
 export interface CausalMarker {
   slot: number;
   us: number;
+  kind: 'received' | 'admitted' | 'consumed' | 'sent';
 }
 
 /** One root and what it cost. Breakdown fields are absent when the capture did not carry the instant that bounds them. */
@@ -213,8 +214,9 @@ export function computeRequests(ticks: readonly TickData[], range: TimeRange, sy
     const system = sysIdx !== undefined && sysIdx !== 0xffff ? systems[sysIdx]?.name ?? `System[${sysIdx}]` : undefined;
 
     const markers: CausalMarker[] = [];
-    for (const e of [receivedEvt, adm, consumption, frame]) {
-      if (e !== undefined) markers.push({ slot: e.threadSlot, us: e.timestampUs });
+    const steps = [[receivedEvt, 'received'], [adm, 'admitted'], [consumption, 'consumed'], [frame, 'sent']] as const;
+    for (const [e, kind] of steps) {
+      if (e !== undefined) markers.push({ slot: e.threadSlot, us: e.timestampUs, kind });
     }
 
     rows.push({
@@ -265,6 +267,39 @@ export function markersFor(rows: readonly RequestRow[], key: string): CausalMark
   return [];
 }
 
+/**
+ * What the Requests panel lists and the root lanes pack: a label substring (case-insensitive), one client session, a floor on the total. Each part
+ * is off when empty / null. Under thousands of clients, this is how a lane shows a readable handful instead of hundreds of rows.
+ */
+export interface RequestFilter {
+  text: string;
+  session: number | null;
+  minTotalUs: number | null;
+}
+
+export const NO_REQUEST_FILTER: RequestFilter = { text: '', session: null, minTotalUs: null };
+
+export const isRequestFilterActive = (f: RequestFilter): boolean => f.text.trim() !== '' || f.session !== null || f.minTotalUs !== null;
+
+/** The rows passing the filter; the same array when the filter is off, so memoized consumers do not recompute. */
+export function filterRequests(rows: RequestRow[], f: RequestFilter): RequestRow[] {
+  if (!isRequestFilterActive(f)) return rows;
+  const text = f.text.trim().toLowerCase();
+  return rows.filter((r) =>
+    (text === '' || r.label.toLowerCase().includes(text))
+    && (f.session === null || r.session === f.session)
+    && (f.minTotalUs === null || r.totalUs >= f.minTotalUs));
+}
+
+/**
+ * The roots the Requests panel lists for a view: those overlapping it, not only those starting in it. A command often outlives a tick, so zoomed
+ * on one tick most of what the root lanes draw started before it.
+ */
+export function rootsInView(rows: RequestRow[], view: { startUs: number; endUs: number }): RequestRow[] {
+  if (!(view.endUs > view.startUs)) return [];
+  return rows.filter((r) => r.startUs < view.endUs && r.endUs >= view.startUs);
+}
+
 /** Rows grouped by label, with count and latency percentiles (nearest-rank). */
 export function groupRequests(rows: readonly RequestRow[]): RequestGroup[] {
   const byLabel = new Map<string, RequestRow[]>();
@@ -290,6 +325,22 @@ export function percentile(sortedAsc: readonly number[], p: number): number {
   if (sortedAsc.length === 0) return 0;
   const rank = Math.ceil(p * sortedAsc.length);
   return sortedAsc[Math.min(sortedAsc.length, Math.max(1, rank)) - 1];
+}
+
+/**
+ * Every loaded span carrying a causal id, by key, each list in start order: built once per tick set, so the time area finds a selected root's spans
+ * (to route its flow to the ones outside the view) without a scan of every span per selection.
+ */
+export function indexSpansByCausal(ticks: readonly TickData[]): Map<string, SpanData[]> {
+  const index = new Map<string, SpanData[]>();
+  for (const tick of ticks) {
+    for (const span of tick.spans) {
+      const key = causalKeyOf(span);
+      if (key !== null) pushTo(index, key, span);
+    }
+  }
+  for (const spans of index.values()) spans.sort((a, b) => a.startUs - b.startUs);
+  return index;
 }
 
 /** Every loaded span carrying <paramref name="key"/>, in start order. */

@@ -722,6 +722,47 @@ public sealed class TraceRecordChainTests
     }
 
     /// <summary>
+    /// Instants and gauge/queue per-tick records reserve on the spillover chain like spans do. They used to reserve on the primary ring alone, so once a
+    /// busy slot's chain had extended, TickStart / TickEnd / the metronome wait were dropped while the spans around them survived in the spillover: the
+    /// trace then merged two ticks into one (a 117 ms "tick" for 18 ms of work) and every later tick number shifted by one.
+    /// </summary>
+    [Test]
+    public void TickMarkers_OnAFullPrimary_LandOnTheSpillover()
+    {
+        ThreadSlotRegistry.ResetForTests();
+        SpilloverRingPool.Initialize(2, 64 * 1024);
+        try
+        {
+            var slot = ThreadSlotRegistry.GetSlot(ThreadSlotRegistry.GetOrAssignSlot());
+            while (WriteRecord(slot.Buffer, 64, (byte)TraceEventKind.SchedulerChunk, 0x11)) { }
+            while (WriteRecord(slot.Buffer, 12, (byte)TraceEventKind.SchedulerChunk, 0x11)) { }   // not even a 12 B marker fits now
+            Assert.That(slot.ChainTail, Is.SameAs(slot.Buffer), "premise: the primary is full and the chain has not extended yet");
+
+            var ts = System.Diagnostics.Stopwatch.GetTimestamp();
+            TyphonEvent.EmitTickEnd(ts, overloadLevel: 0, tickMultiplier: 1);
+            TyphonEvent.EmitTickStart(ts + 1);
+
+            Assert.That(slot.ChainTail, Is.Not.SameAs(slot.Buffer), "the markers extended the chain instead of being dropped");
+            var buf = new byte[64 * 1024];
+            var n = slot.ChainTail.Drain(buf);
+            var kinds = new List<TraceEventKind>();
+            for (var pos = 0; pos < n;)
+            {
+                var size = BinaryPrimitives.ReadUInt16LittleEndian(buf.AsSpan(pos));
+                kinds.Add((TraceEventKind)buf[pos + 2]);
+                pos += (size + 1) & ~1;
+            }
+            Assert.That(kinds, Is.EqualTo(new[] { TraceEventKind.TickEnd, TraceEventKind.TickStart }));
+            Assert.That(slot.Buffer.DroppedEventsForKind((byte)TraceEventKind.TickEnd), Is.Zero);
+        }
+        finally
+        {
+            ThreadSlotRegistry.ReleaseCurrentThreadForTests();
+            ThreadSlotRegistry.ResetForTests();
+        }
+    }
+
+    /// <summary>
     /// The public breakdown (<see cref="TyphonProfiler.DroppedEventsByKind"/>) reads a claimed slot's drops by kind, and leaves out the drops that carry no
     /// kind (instants), which only <see cref="TyphonProfiler.TotalDroppedEvents"/> counts.
     /// </summary>

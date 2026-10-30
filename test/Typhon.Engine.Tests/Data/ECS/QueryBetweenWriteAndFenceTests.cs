@@ -157,7 +157,7 @@ class QueryBetweenWriteAndFenceTests : TestBase<QueryBetweenWriteAndFenceTests>
     private static (int chunkId, int slot) LocationOf(DatabaseEngine dbe, EntityId id)
     {
         using var tx = dbe.CreateQuickTransaction();
-        using var accessor = tx.For<QfUnit>();
+        var accessor = tx.For<QfUnit>();
         foreach (var cluster in accessor.GetClusterEnumerator())
         {
             var entityIds = cluster.EntityIds;

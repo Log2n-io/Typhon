@@ -1,6 +1,8 @@
+import { Fragment } from 'react';
 import { SpeedClass } from '../data/source';
 import { gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
+import { dashboardUrl } from '../data/server-config';
 import { useStats } from '../state/stats-store';
 import { useTerrain } from '../state/terrain-store';
 import { useUi } from '../state/ui-store';
@@ -18,6 +20,11 @@ export function Hud() {
   // conditionally.
   const terrainCached = useTerrain((s) => s.fromCache);
   const terrainLoadMs = useTerrain((s) => s.loadMs);
+  // The demo's dashboard, on the host this page came from, when the server announces one.
+  const dashboard = dashboardUrl(
+    useUi((s) => s.dashboardPort),
+    window.location,
+  );
   if (stats === null) {
     return <div className="panel hud">Starting…</div>;
   }
@@ -107,7 +114,20 @@ export function Hud() {
           </tr>
         </tbody>
       </table>
-      <div className="hud-title">Server ({stats.source.name})</div>
+      <div className="hud-title hud-server-title">
+        <span>Server ({stats.source.name})</span>
+        {dashboard === null ? null : (
+          <a
+            className="hud-dashboard"
+            href={dashboard}
+            target="_blank"
+            rel="noreferrer"
+            title="The demo's dashboard: economy, missions, bots, server health"
+          >
+            Dashboard ↗
+          </a>
+        )}
+      </div>
       <table>
         <tbody>
           <tr>
@@ -277,12 +297,36 @@ export function Hud() {
         </thead>
         <tbody>
           {stats.layers.map((layer) => (
-            <tr key={layer.archetype.name}>
-              <td>{layer.archetype.label}</td>
-              <td>{layer.held.toLocaleString()}</td>
-              <td>{layer.near.toLocaleString()}</td>
-              <td>{layer.far.toLocaleString()}</td>
-            </tr>
+            <Fragment key={layer.archetype.name}>
+              <tr>
+                <td>{layer.archetype.label}</td>
+                <td>{layer.held.toLocaleString()}</td>
+                <td>{layer.near.toLocaleString()}</td>
+                <td>{layer.far.toLocaleString()}</td>
+              </tr>
+              {layer.drivers === null ? null : (
+                <>
+                  <tr className="hud-sub" title="Players the server simulates: no account, no name">
+                    <td>· crowd</td>
+                    <td>{layer.drivers.crowd.toLocaleString()}</td>
+                    <td />
+                    <td />
+                  </tr>
+                  <tr className="hud-sub" title="Players of the bot fleet: their account says so">
+                    <td>· bots</td>
+                    <td>{layer.drivers.bots.toLocaleString()}</td>
+                    <td />
+                    <td />
+                  </tr>
+                  <tr className="hud-sub" title="Players a person drives in a browser — you included">
+                    <td>· people</td>
+                    <td>{layer.drivers.people.toLocaleString()}</td>
+                    <td />
+                    <td />
+                  </tr>
+                </>
+              )}
+            </Fragment>
           ))}
           <tr>
             <td>Attack lines</td>

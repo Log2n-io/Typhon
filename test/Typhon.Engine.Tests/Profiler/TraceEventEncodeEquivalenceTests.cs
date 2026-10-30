@@ -1696,6 +1696,33 @@ public class TraceEventEncodeEquivalenceTests
     }
 
     [Test]
+    public void SchedulerSuccessorDispatchEvent_StructEncode_MatchesCodec()
+    {
+        var ev = new SchedulerSuccessorDispatchEvent
+        {
+            Header = new TraceSpanHeader
+            {
+                ThreadSlot = ThreadSlot,
+                StartTimestamp = StartTs,
+                SpanId = SpanId,
+                ParentSpanId = ParentSpanId,
+                TraceIdHi = TraceIdHi,
+                TraceIdLo = TraceIdLo,
+            },
+            CompletingSysIdx = 0x1200,
+            SuccIdx = 0x1300,
+            Outcome = 0x42,
+        };
+
+        Span<byte> bufStruct = stackalloc byte[256];
+        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
+
+        // 58 B = 12 common + 25 span + 16 trace context + u16 + u16 + u8; kind 78 = 0x4E.
+        var golden = Convert.FromHexString("3A004E0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F000120013" + "42");
+        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
+    }
+
+    [Test]
     public void SchedulerGraphBuildEvent_StructEncode_MatchesCodec()
     {
         var ev = new SchedulerGraphBuildEvent

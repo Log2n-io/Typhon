@@ -90,7 +90,7 @@ public static class CharacterStore
         byte chosen = 0;
         using (var read = dbe.CreateQuickTransaction())
         {
-            using var accounts = read.For<AccountArch>();
+            var accounts = read.For<AccountArch>();
             if (accounts.TryOpen(account, out var entity))
             {
                 chosen = entity.Read(AccountArch.Identity).Outfit;
@@ -101,7 +101,6 @@ public static class CharacterStore
         {
             Account = account,
             Name = (String64)(displayName ?? string.Empty),
-            Credits = StartingCredits,
             LastPosition = spawn,
             LastRealm = realm,
             Outfit = TatooineData.OutfitFor(account, chosen),
@@ -111,7 +110,7 @@ public static class CharacterStore
         try
         {
             using var tx = dbe.CreateQuickTransaction();
-            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(fresh));
+            character = tx.Spawn<CharacterArch>(CharacterArch.Profile.Set(fresh), CharacterArch.Progress.Set(CharacterProgress.Start));
             tx.Commit();
             profile = fresh;
             return true;
@@ -153,7 +152,7 @@ public static class CharacterStore
         ArgumentNullException.ThrowIfNull(dbe);
 
         using var tx = dbe.CreateQuickTransaction();
-        using var characters = tx.For<CharacterArch>();
+        var characters = tx.For<CharacterArch>();
         if (!characters.TryOpenMut(character, out var entity))
         {
             return false;
@@ -171,13 +170,6 @@ public static class CharacterStore
         tx.Commit();
         return true;
     }
-
-    /// <summary>What a character starts with.</summary>
-    /// <remarks>
-    /// A number rather than zero so the crafting loop ([12](../../../../claude/design/SwgTatooine/design/economy-loop.md)) has something
-    /// to work with on a fresh character, and small enough that it is not the economy.
-    /// </remarks>
-    public const long StartingCredits = 1_000;
 
     /// <summary>
     /// The account id as the account index's key.

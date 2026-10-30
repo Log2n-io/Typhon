@@ -178,6 +178,19 @@ export function createChunkCache(budgetBytes: number = DEFAULT_BUDGET, opfsStore
   };
 }
 
+/**
+ * Seeds the persistent slot → name / kind maps from the capture's thread table (cache v19), so every lane is named from the start rather than once the
+ * chunk holding its ThreadInfo record happens to load. A ThreadInfo seen in a chunk later still overwrites, as it does today.
+ */
+export function seedThreadNames(cache: ChunkCacheState, threads: readonly { slot: number | string; name?: string | null; kind: number | string }[] | null | undefined): void {
+  if (!threads) return;
+  for (const t of threads) {
+    const slot = Number(t.slot);
+    if (t.name) cache.threadNames.set(slot, t.name);
+    cache.threadKinds.set(slot, Number(t.kind));
+  }
+}
+
 /** How many adjacent chunks on each side of the visible range to speculatively load when stationary. Keeps panning smooth. */
 export const DEFAULT_PREFETCH_CHUNKS = 2;
 

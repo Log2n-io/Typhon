@@ -79,6 +79,13 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 15150 + skipPercent, [skipPercent, 0],
             nameof(PushOracleTests), worldObserver: world, bigWorld: true, frameBytes: 512);
 
+        // A World fill paced by what it will enter owes little of its own, so the World arm's world walks: its movers' updates are what the frame binds.
+        // Owed enters are carried by the Sphere arm and by PushWorldChurnTests (a fill of its own pace under events, a world spawned at once).
+        if (world)
+        {
+            oracle.Workload.WalkStrideM = 1.5f;
+        }
+
         for (var i = 0; i < GateTicks; i++)
         {
             oracle.Step();
@@ -638,38 +645,31 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         var found = false;
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (cluster.GetEntityId(slot).RawValue != entity.RawValue)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (cluster.GetEntityId(slot).RawValue != entity.RawValue)
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
 #pragma warning disable TYPHON009
-                    var ai = cluster.GetSpan(ProjCreature.Ai);
+                var ai = cluster.GetSpan(ProjCreature.Ai);
 #pragma warning restore TYPHON009
-                    ai[slot].Level = level;
-                    cluster.MarkDirty(ProjCreature.Ai);
-                    if (x.HasValue)
-                    {
-                        cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(x.Value));
-                    }
-
-                    harness.Subscriptions.Commands.Replicate(in cluster, slot);
-                    found = true;
+                ai[slot].Level = level;
+                cluster.MarkDirty(ProjCreature.Ai);
+                if (x.HasValue)
+                {
+                    cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(x.Value));
                 }
+
+                harness.Subscriptions.Commands.Replicate(in cluster, slot);
+                found = true;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { useNavHistoryStore, type NavEntry } from '../useNavHistoryStore';
 import { useSelectedResourceStore, type SelectedResource } from '../useSelectedResourceStore';
 import { useProfilerViewStore } from '../useProfilerViewStore';
-import { registerAnimateViewport } from '@/shell/commands/profilerCommands';
+import { registerAnimateViewport, registerTimeAreaScroll } from '@/shell/commands/profilerCommands';
 import type { ResourceNodeDto } from '@/api/generated/model/resourceNodeDto';
 
 const makeRaw = (id: string): ResourceNodeDto => ({
@@ -327,6 +327,29 @@ describe('useNavHistoryStore — restore dispatches to selection store', () => {
       expect(animateCalls).toBe(0); // ratio fallback = 1, below the threshold → snap.
     } finally {
       registerAnimateViewport(null);
+    }
+  });
+});
+
+describe('useNavHistoryStore — the time area scroll a request-flow jump recorded (#1517)', () => {
+  it('Back and Forward restore the vertical scroll an entry carries, and leave it alone when it carries none', () => {
+    const scrolls: number[] = [];
+    registerTimeAreaScroll((y) => scrolls.push(y));
+    try {
+      const at = (startUs: number, scrollY?: number): NavEntry => ({
+        kind: 'profiler-selected', selection: null, viewRange: { startUs, endUs: startUs + 100 }, timestamp: 0, scrollY,
+      });
+      const nav = useNavHistoryStore.getState();
+      nav.push(at(0));
+      nav.push(at(0, 40));
+      nav.push(at(500, 900));
+
+      useNavHistoryStore.getState().back();
+      useNavHistoryStore.getState().back();
+      useNavHistoryStore.getState().forward();
+      expect(scrolls).toEqual([40, 40]); // the first entry carries none, so stepping onto it scrolled nothing
+    } finally {
+      registerTimeAreaScroll(null);
     }
   });
 });

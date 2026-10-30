@@ -25,6 +25,8 @@
     <ProjectReference Include="..\..\..\src\Typhon.Subscriptions.AspNetCore\Typhon.Subscriptions.AspNetCore.csproj" />
     <ProjectReference Include="..\..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
     <ProjectReference Include="..\..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
+    <!-- Ties each HTTP request to the engine work it causes, in the Workbench (#1517). Registers nothing unless the profiler's correlation switch is on. -->
+    <ProjectReference Include="..\..\..\src\Typhon.Profiler.AspNetCore\Typhon.Profiler.AspNetCore.csproj" />
     <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.9" />
     <ProjectReference Include="..\..\..\src\Typhon.Analyzers\Typhon.Analyzers.csproj"

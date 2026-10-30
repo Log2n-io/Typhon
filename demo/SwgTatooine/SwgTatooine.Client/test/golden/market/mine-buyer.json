@@ -1,0 +1,21 @@
+{
+  "listed": [],
+  "reserved": [
+    {
+      "id": "65549",
+      "template": 8,
+      "city": 1,
+      "cityName": "Mos Eisley",
+      "realm": 0,
+      "item": "mat_hide",
+      "name": "Hide",
+      "category": "material",
+      "mk": 3,
+      "qty": 3,
+      "unit": 20,
+      "state": "sold",
+      "closedTick": 41
+    }
+  ],
+  "caps": { "listings": 20, "reserved": 20 }
+}

@@ -218,32 +218,25 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
     {
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (onlySlot >= 0 && slot != onlySlot)
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    if (onlySlot >= 0 && slot != onlySlot)
-                    {
-                        // Moving ONE occupant is what leaves the source cluster alive: a cluster the last entity leaves is drained and its block released, so
-                        // a test that moved everything could never look at the slot the entity left.
-                        continue;
-                    }
-
-                    cluster.WriteSpatial(
-                        ProjCreature.Bounds,
-                        slot,
-                        new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x + 1f, MaxY = y + 1f }, Speed = 1f });
+                    // Moving ONE occupant is what leaves the source cluster alive: a cluster the last entity leaves is drained and its block released, so
+                    // a test that moved everything could never look at the slot the entity left.
+                    continue;
                 }
+
+                cluster.WriteSpatial(
+                    ProjCreature.Bounds,
+                    slot,
+                    new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x + 1f, MaxY = y + 1f }, Speed = 1f });
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

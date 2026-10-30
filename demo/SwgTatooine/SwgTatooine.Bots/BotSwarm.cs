@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -100,6 +101,71 @@ public sealed class BotSwarmOptions
     /// </remarks>
     public bool Brain { get; init; }
 
+    /// <summary>
+    /// How often a thinking bot tips a named player standing near it, seconds — each bot on its own jittered period, half to one and a half times
+    /// this (economy-foundation.md E0-11). 0, the default, never tips: a tip is a ledger row, so a run with tips is a different workload.
+    /// </summary>
+    public double TipSeconds { get; init; }
+
+    /// <summary>
+    /// Whether a thinking bot takes missions at the terminals it visits (lair-objectives.md B-1). On by default with <c>--brain</c>; <c>--no-missions</c>
+    /// keeps a measurement run's workload what it was — a bot served the measurement profile never sees a lair, and would ride out to stand there.
+    /// </summary>
+    public bool Missions { get; init; } = true;
+
+    /// <summary>
+    /// Whether a thinking bot trades at the bazaar (bazaar.md § 8): on by default with <c>--brain</c>; <c>--no-market</c> is the A/B arm, whose bots
+    /// stand at a bazaar as they always did and lose what a full inventory cannot hold.
+    /// </summary>
+    public bool Market { get; init; } = true;
+
+    /// <summary>The load test's city by name (<c>--market-rush</c>, bazaar.md § 8), or null: every thinking bot goes there and does nothing but trade.</summary>
+    public string MarketRush { get; init; }
+
+    /// <summary>The listings the rush's sellers keep on the board between them.</summary>
+    public int MarketRushListings { get; init; } = 100;
+
+    /// <summary><see cref="MarketRush"/> as a region — its index plus one — or 0 when it names no city.</summary>
+    public int MarketRushRegion => RegionOf(MarketRush);
+
+    /// <summary>The rush's sellers: one bot in ten, at least one.</summary>
+    public int MarketRushSellers => Math.Max(1, Count / 10);
+
+    /// <summary>Told each bazaar buy a bot sees collected — its index and the listing — for the rush's win log (BZ-17, BZ-18). Null logs nothing.</summary>
+    public Action<int, ulong> OnMarketWin { get; init; }
+
+    /// <summary>
+    /// The city a share of the thinking bots live in, by name (<see cref="BotMap.Cities"/>); null or unknown for none. They go there and stay: their
+    /// errands, doors, hunts and missions start and end in it, and they never travel to another city (Loïc, 2026-10-26: a crowded Port Sable).
+    /// </summary>
+    public string HomeCity { get; init; } = "Port Sable";
+
+    /// <summary>The share of <see cref="Count"/> that lives in <see cref="HomeCity"/>.</summary>
+    public double HomeShare { get; init; } = 0.5;
+
+    /// <summary>The most bots that live there, whatever the count: 8 000 bots put 500 there, not 4 000.</summary>
+    public int HomeMax { get; init; } = 500;
+
+    /// <summary>How many bots live in <see cref="HomeCity"/>: the first ones by index, <c>min(Count × HomeShare, HomeMax)</c>.</summary>
+    public int HomeBots => HomeRegion == 0 ? 0 : Math.Min((int)Math.Floor(Count * Math.Clamp(HomeShare, 0d, 1d)), Math.Max(0, HomeMax));
+
+    /// <summary><see cref="HomeCity"/> as a region — its index plus one — or 0 when it names no city.</summary>
+    public int HomeRegion => RegionOf(HomeCity);
+
+    /// <summary>A city's region by name — its index plus one — or 0 for a name that is no city.</summary>
+    public static int RegionOf(string city)
+    {
+        for (var i = 0; i < BotMap.Cities.Length; i++)
+        {
+            if (string.Equals(BotMap.Cities[i].Name, city, StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1;
+            }
+        }
+
+        return 0;
+    }
+
     /// <summary>How far a camera travels per second along its orbit, in metres.</summary>
     public double CameraSpeedMps { get; init; } = 12;
 
@@ -181,6 +247,15 @@ public sealed class BotSwarmOptions
     /// five minutes wondering why the population will not move.
     /// </remarks>
     public Action<string> OnNote { get; init; }
+
+    /// <summary>
+    /// The dashboard the thinking bots report to (bot-telemetry.md): <c>POST {Dashboard}bots/report</c> every few seconds, with the fleet's statistics and
+    /// the traced bots' decisions. Null, the default, reports nothing and traces nothing.
+    /// </summary>
+    public Uri Dashboard { get; init; }
+
+    /// <summary>How many bots are traced when <see cref="Dashboard"/> is set; 0 is one in a hundred, at least 10 and at most 50.</summary>
+    public int TraceBots { get; init; }
 }
 
 /// <summary>
@@ -205,7 +280,7 @@ public sealed class BotSwarmOptions
 /// interest sets broad and the per-session sets genuinely different.
 /// </para>
 /// </remarks>
-public sealed class BotSwarm : IAsyncDisposable
+public sealed partial class BotSwarm : IAsyncDisposable
 {
     private readonly BotSwarmOptions _options;
 
@@ -244,6 +319,26 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <summary>The server's combat stance command; a bot hunts with the pistol, the one stance that reaches from <c>BotBrain.StrikeM</c>.</summary>
     private const string SetStanceCommand = "SetStance";
 
+    /// <summary>The economy's player-to-player transfer (economy-foundation.md E0-7).</summary>
+    private const string GiveCreditsCommand = "GiveCredits";
+
+    /// <summary>A mission taken at a terminal, and one given up (lair-objectives.md B-1, B-4).</summary>
+    private const string TakeMissionCommand = "TakeMission";
+
+    private const string AbandonMissionCommand = "AbandonMission";
+
+    /// <summary>How near the bot an offer is taken from: a terminal's reach (<c>TatooineData.MissionTerminalReachM</c>).</summary>
+    private const float OfferReachM = 6f;
+
+    /// <summary>How near the journal's point a lair in view is taken for the mission's own.</summary>
+    private const float MissionLairMatchM = 30f;
+
+    /// <summary>How near a bot looks for somebody to tip, metres: inside the server's 20 m, since the bot reads a position a little old.</summary>
+    private const float TipReachM = 15f;
+
+    /// <summary>The most one bot tip gives: small, so a fleet's tips churn the ledger without draining anybody's 1 000 credits.</summary>
+    private const int MaxBotTip = 50;
+
     /// <summary><c>Stances.Pistol</c> on the server.</summary>
     private const double PistolStance = 3.0;
 
@@ -252,6 +347,11 @@ public sealed class BotSwarm : IAsyncDisposable
     /// reads it. Null until loaded, and for good when the server publishes none: the brains then travel and hunt as they always did.
     /// </summary>
     private BotAssets _assets;
+
+    /// <summary>
+    /// Every facility in the world (<c>GET /swg/facilities</c>), read once per fleet; null when the server lists none — the brains then learn by looking.
+    /// </summary>
+    private List<ListedFacility> _facilities;
 
     /// <summary>Bots driven concurrently within one tick.</summary>
     /// <remarks>
@@ -850,7 +950,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
             asked += Volatile.Read(ref bot.ToursAsked);
             switches += Volatile.Read(ref bot.RealmSwitches);
-            news += bot.News.Count;
+            news += bot.Heard.News;
 
             // <b>LIVE sessions only, which is the whole point of the number.</b> A bot whose link died keeps its store, and its
             // store keeps the last realm it was told about, so counting every store counted the dead: a panel showing
@@ -862,6 +962,25 @@ public sealed class BotSwarm : IAsyncDisposable
         return (asked, switches, news, inRealm);
     }
 
+    /// <summary>The bots that live in the home city, and how many of them stood in it at their last decision.</summary>
+    public (int Living, int There) Homes()
+    {
+        var living = 0;
+        var there = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null || !bot.HasHome)
+            {
+                continue;
+            }
+
+            living++;
+            there += Volatile.Read(ref bot.AtHome) ? 1 : 0;
+        }
+
+        return (living, there);
+    }
+
     /// <summary>Movement intents this fleet has sent, so a run can prove its population was walking rather than standing.</summary>
     /// <returns>The count.</returns>
     /// <remarks>
@@ -869,6 +988,73 @@ public sealed class BotSwarm : IAsyncDisposable
     /// of a thousand bound avatars that sent not one intent, and the only way to notice was to look at the world in a browser. A
     /// number here, next to the sessions, makes "they are standing still" a thing the report says rather than a thing you see.
     /// </remarks>
+
+    /// <summary>The missions the thinking bots asked for, took (their journal said so), completed (paid) and cancelled.</summary>
+    /// <returns>The four counts, over the fleet.</returns>
+    public (long Asked, long Taken, long Completed, long Cancelled) Missions()
+    {
+        long asked = 0;
+        long taken = 0;
+        long completed = 0;
+        long cancelled = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            asked += Volatile.Read(ref bot.MissionTakesSent);
+            taken += Volatile.Read(ref bot.MissionsTaken);
+            completed += Volatile.Read(ref bot.MissionsCompleted);
+            cancelled += Volatile.Read(ref bot.MissionsCancelled);
+        }
+
+        return (asked, taken, completed, cancelled);
+    }
+
+    /// <summary>The thinking bots' inventories (inventory-loot.md § 7): loot rows their reads met, units they lost to a full inventory, stacks held.</summary>
+    /// <returns>The three counts, over the fleet.</returns>
+    public (long LootRows, long UnitsLost, long Stacks) Items()
+    {
+        long rows = 0;
+        long lost = 0;
+        long stacks = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            rows += Volatile.Read(ref bot.LootRowsSeen);
+            lost += Volatile.Read(ref bot.ItemsLost);
+            stacks += Volatile.Read(ref bot.Stacks);
+        }
+
+        return (rows, lost, stacks);
+    }
+
+    /// <summary>The tips the thinking bots sent, and the times a tip was due with nobody named within reach.</summary>
+    /// <returns>Both counts, over the fleet.</returns>
+    public (long Sent, long NobodyNear) Tips()
+    {
+        long sent = 0;
+        long nobody = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            sent += Volatile.Read(ref bot.TipsSent);
+            nobody += Volatile.Read(ref bot.TipsNobodyNear);
+        }
+
+        return (sent, nobody);
+    }
+
     public long IntentsSent()
     {
         long sent = 0;
@@ -883,6 +1069,42 @@ public sealed class BotSwarm : IAsyncDisposable
         }
 
         return sent;
+    }
+
+    /// <summary>The highest content level a creature has (content-levels.md): the server's <c>ContentLevels.MaxLevel</c>.</summary>
+    public const int MaxCreatureLevel = 50;
+
+    /// <summary>The median level of the creatures the fleet began hunting, or 0 when it hunted none (or the server sends no level).</summary>
+    public int HuntedLevelMedian()
+    {
+        var byLevel = new long[MaxCreatureLevel + 1];
+        long total = 0;
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            for (var level = 1; level <= MaxCreatureLevel; level++)
+            {
+                var n = Interlocked.Read(ref bot.HuntsByLevel[level]);
+                byLevel[level] += n;
+                total += n;
+            }
+        }
+
+        long seen = 0;
+        for (var level = 1; level <= MaxCreatureLevel; level++)
+        {
+            seen += byLevel[level];
+            if (total > 0 && seen * 2 >= total)
+            {
+                return level;
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>What the brains decided, which is the only evidence a thinking run produces that a wandering one does not.</summary>
@@ -925,16 +1147,19 @@ public sealed class BotSwarm : IAsyncDisposable
         return (boardings, hunts, portsMax, canFly, creatures);
     }
 
-    /// <summary>What the brains did with the cities, summed over the fleet: swoop asks, doors crossed, terminals used, walks searched.</summary>
-    public (long Mounts, long Doors, long Used, long Paths) Errands()
+    /// <summary>
+    /// What the brains did with the cities, summed over the fleet: swoop asks, doors crossed, terminals used, walks searched, ports walked out of — and
+    /// how many stand inside a port's walls now with no flight to take there.
+    /// </summary>
+    public (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) Errands()
     {
-        (long Mounts, long Doors, long Used, long Paths) sum = default;
+        (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) sum = default;
         foreach (var bot in Bots)
         {
             if (bot != null)
             {
                 var e = bot.Errands();
-                sum = (sum.Mounts + e.Mounts, sum.Doors + e.Doors, sum.Used + e.Used, sum.Paths + e.Paths);
+                sum = (sum.Mounts + e.Mounts, sum.Doors + e.Doors, sum.Used + e.Used, sum.Paths + e.Paths, sum.Ports + e.Ports, sum.InPort + e.InPort);
             }
         }
 
@@ -1046,6 +1271,18 @@ public sealed class BotSwarm : IAsyncDisposable
                 Console.WriteLine(_assets == null
                     ? "  brain: the server publishes no asset set; bots walk straight lines and enter no building"
                     : $"  brain: {_assets.Count} structure assets read; bots walk round buildings, through doors and to terminals");
+                try
+                {
+                    _facilities = await FacilityMap.LoadAsync(http, server, ct).ConfigureAwait(false);
+                    Console.WriteLine(_facilities == null
+                        ? "  brain: the server lists no facilities; bots learn them by looking"
+                        : $"  brain: {_facilities.Count} facilities listed; a bot's nearest terminal is the nearest that exists");
+                }
+                catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
+                    or InvalidOperationException or FormatException)
+                {
+                    Console.WriteLine($"  !! brain: the facility list could not be read ({e.Message}); bots learn them by looking");
+                }
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
                 or InvalidOperationException or FormatException)
@@ -1060,6 +1297,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
         // The server's own close reasons, polled rather than inferred from close codes. See PollServerStatsAsync.
         _statsPoller = Task.Run(() => PollServerStatsAsync(_stopping.Token), CancellationToken.None);
+        StartTelemetry();
 
         await _settled.Task.WaitAsync(ct).ConfigureAwait(false);
         return BotCount;
@@ -1120,6 +1358,11 @@ public sealed class BotSwarm : IAsyncDisposable
         var nextDue = TimeSpan.Zero;
         var stalls = 0;
 
+        // How long a round that opened nothing, or only churned, waits before the next (#1532): StalledPoll doubled per such round in a row, to 64 s,
+        // with up to half again of jitter, and back to nothing once a round adds sessions. A server that sheds logins while it recovers is given time
+        // rather than asked again every two seconds by the whole fleet.
+        var backoff = new RampBackoff(StalledPoll, maxShift: 5, seed: Environment.ProcessId);
+
         // <b>Rounds that replaced sessions without gaining any, which is a different failure from a round that opened nothing.</b>
         // Retirement turns a permanent loss into a retry, and a retry against a condition that is not going to change turns into a
         // hot loop: measured with the server's hot spinners disabled, every handshake died on arrival and the fleet replaced 21 665
@@ -1178,7 +1421,7 @@ public sealed class BotSwarm : IAsyncDisposable
                     }
 
                     nextDue = clock.Elapsed;
-                    await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                    await Task.Delay(backoff.Next(), ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -1200,7 +1443,7 @@ public sealed class BotSwarm : IAsyncDisposable
                     }
 
                     nextDue = clock.Elapsed;
-                    await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                    await Task.Delay(backoff.Next(), ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -1232,6 +1475,10 @@ public sealed class BotSwarm : IAsyncDisposable
                 // A ramp that stops making progress is settled too, or StartAsync would wait forever for sessions the server is
                 // refusing — which is exactly what a full session table does.
                 stalls = added > 0 ? 0 : stalls + 1;
+                if (added > 0 && BotCount > liveBefore)
+                {
+                    backoff.Reset();
+                }
 
                 // <b>NET progress, not sessions opened.</b> A round that opens 250 and loses 250 has opened a chunk and gained
                 // nothing, and at the connect pacing it will do it again in a second and a half, forever. Three such rounds and the
@@ -1260,7 +1507,7 @@ public sealed class BotSwarm : IAsyncDisposable
                         // Re-based, because the slow poll owns the cadence while the fleet is churning; the connect deadline is
                         // picked up again by the round that finally gains ground.
                         nextDue = clock.Elapsed;
-                        await Task.Delay(StalledPoll, ct).ConfigureAwait(false);
+                        await Task.Delay(backoff.Next(), ct).ConfigureAwait(false);
                         continue;
                     }
 
@@ -1294,7 +1541,7 @@ public sealed class BotSwarm : IAsyncDisposable
             // otherwise retried ten times a second forever, which turns a refusal into a load test of its own. The slow poll still
             // notices when the operator lowers the target or the server recovers.
             nextDue = clock.Elapsed;
-            await Task.Delay(stalls >= 3 ? StalledPoll : IdlePoll, ct).ConfigureAwait(false);
+            await Task.Delay(stalls >= 3 ? backoff.Next() : IdlePoll, ct).ConfigureAwait(false);
         }
     }
 
@@ -1559,6 +1806,7 @@ public sealed class BotSwarm : IAsyncDisposable
     private bool AppendOne(Bot bot)
     {
         bot.WatchRealm();
+        bot.WatchMarket();
 
         // After the handshake, because the token arrives in WELCOME: asking before the connect would persist the token the LAST
         // run was given, which is the one that has just been spent.
@@ -1689,7 +1937,7 @@ public sealed class BotSwarm : IAsyncDisposable
     /// </remarks>
     private async Task<Bot> OpenOneAsync(int index, CancellationToken ct)
     {
-        var bot = new Bot(index, _options, _assets);
+        var bot = new Bot(index, _options, _assets, _facilities);
         bot.Client.Disconnected += (code, _) => Note(code, bot.Client.CloseDetail);
 
         // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
@@ -1758,7 +2006,7 @@ public sealed class BotSwarm : IAsyncDisposable
 
         // Both, and the reconciler first: it is the one that opens sockets, so letting it run while the bots are being closed would
         // race a new session into an array the teardown has already walked.
-        foreach (var task in new[] { _reconciler, _driver, _pinger, _statsPoller })
+        foreach (var task in new[] { _reconciler, _driver, _pinger, _statsPoller, _reporter })
         {
             if (task == null)
             {
@@ -2142,44 +2390,8 @@ public sealed class BotSwarm : IAsyncDisposable
         }
     }
 
-    /// <summary>Counts the <c>RealmNews</c> events a session hears; every other event is dropped. On the session's receive loop.</summary>
-    private sealed class NewsCounter : IEventHandler
-    {
-        private long _count;
-
-        public long Count => Volatile.Read(ref _count);
-
-        public void Event(MessagePlan type)
-        {
-            if (type.Name == "RealmNews")
-            {
-                Interlocked.Increment(ref _count);
-            }
-        }
-
-        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
-        {
-        }
-
-        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
-        {
-        }
-
-        public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
-        {
-        }
-
-        public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
-        {
-        }
-
-        public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
-        {
-        }
-    }
-
     /// <summary>One scripted camera: a client, an orbit centre and a phase.</summary>
-    private sealed class Bot
+    private sealed partial class Bot
     {
         private readonly double _centreX;
         private readonly double _centreY;
@@ -2200,16 +2412,85 @@ public sealed class BotSwarm : IAsyncDisposable
 
         public long HuntsStarted;
 
+        /// <summary>Hunts begun, by the level of the creature hunted (index 0: a server that sends no level).</summary>
+        public readonly long[] HuntsByLevel = new long[MaxCreatureLevel + 1];
+
+        /// <summary>
+        /// Missions (lair-objectives.md): takes sent, missions its journal listed for the first time, completions it stated, cancels sent.
+        /// </summary>
+        public long MissionTakesSent;
+
+        public long MissionsTaken;
+        public long MissionsCompleted;
+        public long MissionsCancelled;
+
+        /// <summary>The journal as last read: what the brain is told about the mission it holds.</summary>
+        private volatile MissionView _missions = MissionView.None;
+
+        // Read like a browser's: GET /swg/missions with the bot's own token whenever the body's owner field `journal` moves.
+        private static readonly HttpClient JournalHttp = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+        /// <summary>How long a first failed owner read waits before it is asked again, from when it ended: three seconds at the usual 4 Hz, doubled per
+        /// failure in a row (<see cref="OwnerFieldPoll"/>).</summary>
+        private const long OwnerReadRetryTicks = 12;
+        private readonly Uri _missionsUri;
+        private readonly string _token;
+        private readonly OwnerFieldPoll _journalPoll;
+        private bool _journalPrimed;
+
+        /// <summary>
+        /// The inventory (inventory-loot.md § 7): loot rows its reads met for the first time, units its lost notes named, and its stacks at the last read.
+        /// </summary>
+        public long LootRowsSeen;
+
+        public long ItemsLost;
+        public int Stacks;
+
+        // Read like a browser's: GET /swg/inventory with the bot's own token whenever the body's owner field `items` moves. Looting needs no command: a
+        // kill or a broken lair already drops into the killer's inventory.
+        private readonly Uri _inventoryUri;
+        private readonly OwnerFieldPoll _itemsPoll;
+        private InventoryView _inventory = InventoryView.None;
+        private bool _itemsPrimed;
+        private readonly bool _takesMissions;
+        private long _stanceAskedAt = long.MinValue / 2;
+
+        /// <summary>The target last named, and when: an attack re-names it only when it changes, or every two seconds in case the server let it go.</summary>
+        private uint _targetNamed;
+        private long _targetNamedAt = long.MinValue / 2;
+        private readonly HashSet<string> _missionsSeen = [];
+        private readonly HashSet<string> _completedSeen = [];
+
+        /// <summary>Whether this bot lives in the home city, and whether it stood in it at its last decision.</summary>
+        public bool HasHome => _brain != null && _brain.HomeRegion != 0;
+
+        public bool AtHome;
+
+        /// <summary>Tips sent, and tips due with nobody named within reach.</summary>
+        public long TipsSent;
+
+        public long TipsNobodyNear;
+
+        /// <summary>The tip period in ticks, 0 for none; the tick the next one is due; and the bot's own stream for its jitter and amounts.</summary>
+        private readonly long _tipEveryTicks;
+
+        private readonly long _ticksPerSecond;
+        private long _nextTipTick;
+        private uint _tipRandom;
+
         /// <summary>The most creatures this bot has ever had in view at once, so an empty sky can be told from a blind scan.</summary>
         public int CreaturesSeenMax;
 
-        /// <summary>How many shuttleports this brain has learned: 2 is the fewest that lets it fly anywhere.</summary>
+        /// <summary>How many cities' shuttleports this brain knows, listed or seen: 2 is the fewest that lets it fly anywhere.</summary>
         /// <returns>The count.</returns>
-        public int PortsKnown() => _brain?.Facilities.Count ?? 0;
+        /// <remarks>It counted every facility the map held — bazaars and terminals too — and with the server's list, every one in the world.</remarks>
+        public int PortsKnown() => _brain?.Facilities.Regions(Routing.ShuttleportKind) ?? 0;
 
-        /// <summary>What this bot's brain did with the city: swoop asks, doors crossed, terminals used, walks searched.</summary>
-        public (long Mounts, long Doors, long Used, long Paths) Errands() =>
-            _brain == null ? default : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned);
+        /// <summary>What this bot's brain did with the city: swoop asks, doors crossed, terminals used, walks searched, ports walked out of.</summary>
+        public (long Mounts, long Doors, long Used, long Paths, long Ports, long InPort) Errands() =>
+            _brain == null
+                ? default
+                : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned, _brain.PortsLeft, _brain.InPort ? 1 : 0);
 
         /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
         private readonly BotBrain _brain;
@@ -2220,9 +2501,9 @@ public sealed class BotSwarm : IAsyncDisposable
         private static readonly int TraceIndex = int.TryParse(Environment.GetEnvironmentVariable("SWG_BOT_TRACE"), out var i) ? i : -1;
 
         private static readonly bool TraceAll = Environment.GetEnvironmentVariable("SWG_BOT_TRACE") == "all";
-        public readonly NewsCounter News = new();
+        public readonly BotEvents Heard = new();
 
-        public Bot(int index, BotSwarmOptions options, BotAssets assets = null)
+        public Bot(int index, BotSwarmOptions options, BotAssets assets = null, IReadOnlyList<ListedFacility> facilities = null)
         {
             // Deterministic from the index, so a run is reproducible and two bots are never in the same place. The golden ratio keeps successive angles from
             // clustering, which a plain index × constant does not.
@@ -2236,13 +2517,40 @@ public sealed class BotSwarm : IAsyncDisposable
             // the first turn is staggered too: every avatar turning on one tick would be N commands in a single server tick, which is
             // the mistake the planet tour already staggers to avoid.
             _wander = (uint)((index * 2654435761u) | 1u);
+            _journalPoll = new OwnerFieldPoll("journal", OwnerReadRetryTicks, index);
+            _itemsPoll = new OwnerFieldPoll("items", OwnerReadRetryTicks, index);
+            _minePoll = new OwnerFieldPoll("items", OwnerReadRetryTicks, index);
             if (options.Brain)
             {
                 // Its own stream, from its own index, for the reason the wanderer's is: a run has to reproduce, and a thousand bots
                 // sharing one stream would decide in lockstep. A different multiplier from the wanderer's so a bot's course and its
                 // choices are not the same sequence read twice.
-                _brain = new BotBrain(BotMap.Cities, (uint)((index * 2246822519u) | 1u), options.TickHz, assets);
+                // The first bots by index live in the home city; the index is the account's, so a bot keeps its home across runs.
+                _brain = new BotBrain(
+                    BotMap.Cities,
+                    (uint)((index * 2246822519u) | 1u),
+                    options.TickHz,
+                    assets,
+                    index < options.HomeBots ? options.HomeRegion : 0);
+                if (facilities != null)
+                {
+                    _brain.Facilities.Seed(facilities);
+                }
+
                 _eyes = new Perception();
+                _ticksPerSecond = Math.Max(1, options.TickHz);
+                _tipEveryTicks = (long)Math.Round(options.TipSeconds * _ticksPerSecond);
+                _tipRandom = (uint)((index * 3266489917u) | 1u);
+                _nextTipTick = NextTipDelay();
+                _token = options.TokenFor?.Invoke(index);
+                _missionsUri = BotProvisioner.AuthBaseFrom(options.Endpoint) is { } server ? new Uri(server, "swg/missions") : null;
+                _inventoryUri = _missionsUri == null ? null : new Uri(_missionsUri, "inventory");
+
+                // A bot that cannot read its journal never learns it holds one: it would take a mission at every visit and never go and do it.
+                _takesMissions = options.Missions && _missionsUri != null && !string.IsNullOrEmpty(_token);
+                _brain.TakesMissions = _takesMissions;
+                SetUpMarket(index, options);
+                TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
 
@@ -2274,7 +2582,7 @@ public sealed class BotSwarm : IAsyncDisposable
                 // STATS is opt-in per session (W23): a server emits the block only to a client that asked for it, so a load generator that does not ask
                 // reports the run with every server number reading zero — which is what the first AC-1 run did.
                 Caps = Capabilities.Stats,
-                Events = News,
+                Events = Heard,
             });
         }
 
@@ -2397,13 +2705,43 @@ public sealed class BotSwarm : IAsyncDisposable
             }
 
             var world = _eyes.Read(Client.Store, _brain.Facilities);
+
+            // Its character's level, off the wire, bounds what it hunts and which offer it prefers (character-level.md § 9; the rule is the brain's).
+            if (world.Level > 0)
+            {
+                _brain.CombatLevel = world.Level;
+            }
+
             if (world.NearestCreature != 0)
             {
                 CreaturesSeenMax = Math.Max(CreaturesSeenMax, 1);
             }
 
+            // The mission held, as the journal last said, and its lair as the bot sees it once near (lair-objectives.md B-2, B-3).
+            PollJournal(tick);
+            PollInventory(tick);
+            PollMine(tick);
+            var missions = _missions;
+            world = WithMarket(world) with
+            {
+                MissionsHeld = missions.Held,
+                HasMissionLair = missions.LairKnown,
+                MissionLairX = missions.LairX,
+                MissionLairZ = missions.LairZ,
+            };
+            if (missions.LairKnown && world.HasBody && Routing.Distance(world.X, world.Z, missions.LairX, missions.LairZ) <= BotBrain.NoticeM * 2)
+            {
+                var lair = _eyes.LairAt(Client.Store, missions.LairX, missions.LairZ, MissionLairMatchM, out var guards);
+                world = world with { MissionLair = lair, MissionLairGuards = guards };
+            }
+
             var before = _brain.Goal;
             var intent = _brain.Decide(in world, tick);
+            if (_brain.HomeRegion != 0 && world.HasBody)
+            {
+                Volatile.Write(ref AtHome, world.Realm == 0 ? _brain.RegionAt(world.X, world.Z) == _brain.HomeRegion : AtHome);
+            }
+            Watch(tick, in world, intent);
             if (TraceAll || Index == TraceIndex)
             {
                 // A brain is read from what it did, tick by tick: one bot's decisions, to stdout, when SWG_BOT_TRACE names its index.
@@ -2433,15 +2771,20 @@ public sealed class BotSwarm : IAsyncDisposable
             if (_brain.Goal == Goal.Hunting && before != Goal.Hunting)
             {
                 HuntsStarted++;
+                Interlocked.Increment(ref HuntsByLevel[Math.Clamp(world.NearestCreatureLevel, 0, MaxCreatureLevel)]);
+            }
 
-                // A target is fought only in a stance, and a mount or a door drops it, so each hunt draws the pistol again: one command per hunt, not per
-                // target re-named. A server without the command is one where a target alone is a fight.
-                if (Client.Plan.CommandByName(SetStanceCommand) != null)
-                {
-                    await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(PistolStance) }, ct)
-                        .ConfigureAwait(false);
-                    IntentsSent++;
-                }
+            // A target is fought only in a stance, and a swoop, a door, a flight or a clone puts it away — the ride out to a mission's lair did, every time,
+            // and the bot then named its target for minutes without a shot fired (2026-10-26). So the stance is read, not remembered: drawn whenever the bot
+            // is about to attack without it. A server without the command is one where a target alone is a fight.
+            // Not while still mounted — the swoop puts it away again — and once per two seconds, the time its replication takes to come back.
+            if (intent.Kind == IntentKind.Attack && world.Stance != (int)PistolStance && !world.Mounted && tick - _stanceAskedAt >= 8
+                && Client.Plan.CommandByName(SetStanceCommand) != null)
+            {
+                _stanceAskedAt = tick;
+                await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(PistolStance) }, ct)
+                    .ConfigureAwait(false);
+                IntentsSent++;
             }
 
             switch (intent.Kind)
@@ -2462,11 +2805,34 @@ public sealed class BotSwarm : IAsyncDisposable
                     break;
 
                 case IntentKind.Attack when Client.Plan.CommandByName(SetTargetCommand) != null:
-                    await Client.SendCommandAsync(
-                        SetTargetCommand,
-                        new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
-                        ct).ConfigureAwait(false);
-                    IntentsSent++;
+                    if (intent.NetId != _targetNamed || tick - _targetNamedAt >= 8)
+                    {
+                        _targetNamed = intent.NetId;
+                        _targetNamedAt = tick;
+                        await Client.SendCommandAsync(
+                            SetTargetCommand,
+                            new RecordValues { ["netId"] = FieldValue.Of((double)intent.NetId) },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                    }
+
+                    // The motion the attack carries — towards, stand, or away (BotBrain.Engage). Without it the body ran on with its last MoveDir.
+                    if (Client.Plan.CommandByName(MoveDirCommand) != null)
+                    {
+                        await Client.SendCommandAsync(
+                            MoveDirCommand,
+                            new RecordValues
+                            {
+                                ["heading"] = FieldValue.Of((double)intent.Heading),
+                                ["speedClass"] = FieldValue.Of((double)intent.SpeedClass),
+                                ["changePhase"] = FieldValue.Of(0.0),
+                                ["boost"] = FieldValue.Of(1.0),
+                                ["throttle"] = FieldValue.Of(0.0),
+                            },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                    }
+
                     break;
 
                 case IntentKind.MoveTo when Client.Plan.CommandByName(MoveToCommand) != null:
@@ -2496,9 +2862,235 @@ public sealed class BotSwarm : IAsyncDisposable
                     BoardingsAsked++;
                     break;
 
+                case IntentKind.TakeMission when _takesMissions && Client.Plan.CommandByName(TakeMissionCommand) != null:
+                    // The offer whose lair is nearest, of those listed at the terminal it stands at: what a person picks from the sorted list.
+                    var offer = _eyes.BestOffer(Client.Store, world.X, world.Z, OfferReachM, out var serial, _brain.MaxLevel);
+                    if (offer != 0)
+                    {
+                        await Client.SendCommandAsync(
+                            TakeMissionCommand,
+                            new RecordValues { ["offer"] = FieldValue.Of((double)offer), ["serial"] = FieldValue.Of((double)serial) },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                        MissionTakesSent++;
+                    }
+
+                    break;
+
+                case IntentKind.Trade:
+                    // At a bazaar: the market read and planned off the driver, the plan sent below at the commands' rate (BotSwarm.Market.cs).
+                    BeginTrade(tick, intent.Region);
+                    break;
+
+                case IntentKind.AbandonMission when Client.Plan.CommandByName(AbandonMissionCommand) != null:
+                    if (missions.FirstId != 0)
+                    {
+                        await Client.SendCommandAsync(
+                            AbandonMissionCommand,
+                            new RecordValues { ["mission"] = FieldValue.OfUInt64(missions.FirstId) },
+                            ct).ConfigureAwait(false);
+                        IntentsSent++;
+                        MissionsCancelled++;
+                    }
+
+                    break;
+
                 default:
                     break;   // nothing to say this tick, which is what idling and waiting look like on the wire
             }
+
+            await SendMarketAsync(tick, ct).ConfigureAwait(false);
+            await TipAsync(tick, world, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Reads the journal when the body's <c>journal</c> owner field moved since the last read — the browser's pattern (missions.md § 4) — or a failed
+        /// read is due again. One read at a time; its answer lands in <see cref="_missions"/>.
+        /// </summary>
+        private void PollJournal(long tick)
+        {
+            var self = Client.Store?.Self;
+            if (_missionsUri == null || string.IsNullOrEmpty(_token) || self == null)
+            {
+                return;
+            }
+
+            if (_journalPoll.TryBegin(_journalPoll.Revision(self), tick))
+            {
+                _ = ReadJournalAsync(tick);
+            }
+        }
+
+        // Bot ticks since a read started: when it ended, for its back-off.
+        private long TicksSince(long started) => (long)(Stopwatch.GetElapsedTime(started).TotalSeconds * _ticksPerSecond);
+
+        private async Task ReadJournalAsync(long tick)
+        {
+            var started = Stopwatch.GetTimestamp();
+            var ok = false;
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, _missionsUri);
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _token);
+                using var response = await JournalHttp.SendAsync(request).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+
+                // The first read only learns what was already there — a mission held from an earlier run, completions the server still remembers — so
+                // this run's counts are this run's (review, 2026-10-26).
+                var view = MissionView.Parse(
+                    await response.Content.ReadAsStringAsync().ConfigureAwait(false),
+                    _missionsSeen,
+                    _completedSeen,
+                    count: _journalPrimed,
+                    out var taken,
+                    out var completed);
+                _journalPrimed = true;
+                Interlocked.Add(ref MissionsTaken, taken);
+                Interlocked.Add(ref MissionsCompleted, completed);
+                _missions = view;
+                ok = true;
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException)
+            {
+                // Asked again after the poll's back-off, counted from now.
+            }
+            finally
+            {
+                _journalPoll.End(ok, tick + TicksSince(started));
+            }
+        }
+
+        /// <summary>
+        /// Reads the inventory when the body's <c>items</c> owner field moved since the last read — the browser's pattern (inventory-loot.md § 7) — or a
+        /// failed read is due again: the load a browser puts on the server, which is the point of parity. One read at a time.
+        /// </summary>
+        private void PollInventory(long tick)
+        {
+            TakeNotices();
+            var self = Client.Store?.Self;
+            if (_inventoryUri == null || string.IsNullOrEmpty(_token) || self == null)
+            {
+                return;
+            }
+
+            if (_itemsPoll.TryBegin(_itemsPoll.Revision(self), tick))
+            {
+                _ = ReadInventoryAsync(tick);
+            }
+        }
+
+        /// <summary>
+        /// The notices the session heard since the last tick (<see cref="BotEvents"/>): a drop into this bot counts as loot, and a bazaar buy collected
+        /// is a listing won. What the browser's chat says, told by the server as it happens: the ledger is never read (Loïc, 2026-10-29).
+        /// </summary>
+        private void TakeNotices()
+        {
+            List<WonListing> won = null;
+            while (Heard.Notices.TryDequeue(out var n))
+            {
+                if (!n.Items || !n.Incoming)
+                {
+                    continue;
+                }
+
+                if (n.Kind is "kill" or "lair" or "mission")
+                {
+                    Interlocked.Increment(ref LootRowsSeen);
+                }
+                else if (n.Kind == "buy")
+                {
+                    (won ??= []).Add(new WonListing((ulong)n.Ref, n.Template, MarketCatalog.AssetOf(n.Template), n.Mk, n.Count));
+                }
+            }
+
+            if (won != null)
+            {
+                SawWins(won);
+            }
+        }
+
+        private async Task ReadInventoryAsync(long tick)
+        {
+            var started = Stopwatch.GetTimestamp();
+            var ok = false;
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, _inventoryUri);
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _token);
+                using var response = await JournalHttp.SendAsync(request).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+
+                // The first read only learns what was already there — rows and losses of an earlier run — so this run's counts are this run's.
+                var held = new List<HeldStack>();
+                var view = InventoryView.Parse(
+                    await response.Content.ReadAsStringAsync().ConfigureAwait(false),
+                    _inventory,
+                    count: _itemsPrimed,
+                    out var lost,
+                    held);
+                SawInventory(held);
+                _itemsPrimed = true;
+                _inventory = view;
+                Interlocked.Add(ref ItemsLost, lost);
+                Volatile.Write(ref Stacks, view.Stacks);
+                ok = true;
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException or OverflowException)
+            {
+                // Asked again after the poll's back-off, counted from now.
+            }
+            finally
+            {
+                _itemsPoll.End(ok, tick + TicksSince(started));
+            }
+        }
+
+        /// <summary>
+        /// A tip when one is due (E0-11): a few credits to the nearest named player within <see cref="TipReachM"/>, through the command a browser's
+        /// <c>/tip</c> sends. Nobody near puts it off a second rather than a whole period, so a bot walking into a crowd tips soon after.
+        /// </summary>
+        private async Task TipAsync(long tick, Perceived world, CancellationToken ct)
+        {
+            if (_tipEveryTicks == 0 || tick < _nextTipTick || !world.HasBody || Client.Plan.CommandByName(GiveCreditsCommand) == null)
+            {
+                return;
+            }
+
+            var target = _eyes.NearestNamedPlayer(Client.Store, world.X, world.Z, TipReachM);
+            if (target == 0)
+            {
+                TipsNobodyNear++;
+                _nextTipTick = tick + _ticksPerSecond;
+                return;
+            }
+
+            var amount = 1 + (int)(NextTipRandom() % MaxBotTip);
+            await Client.SendCommandAsync(
+                GiveCreditsCommand,
+                new RecordValues { ["target"] = FieldValue.Of((double)target), ["amount"] = FieldValue.Of((double)amount) },
+                ct).ConfigureAwait(false);
+            TipsSent++;
+            _nextTipTick = tick + NextTipDelay();
+        }
+
+        /// <summary>Half to one and a half periods, from the bot's own stream: a fleet started together does not tip in step.</summary>
+        private long NextTipDelay() => _tipEveryTicks == 0 ? 0 : (_tipEveryTicks / 2) + (long)(NextTipRandom() % (ulong)Math.Max(1, _tipEveryTicks));
+
+        private ulong NextTipRandom()
+        {
+            // xorshift32, the wanderer's generator.
+            _tipRandom ^= _tipRandom << 13;
+            _tipRandom ^= _tipRandom >> 17;
+            _tipRandom ^= _tipRandom << 5;
+            return _tipRandom;
         }
 
         public async Task SendRegionAsync(long tick, BotSwarmOptions options, CancellationToken ct)
@@ -2533,5 +3125,59 @@ public sealed class BotSwarm : IAsyncDisposable
 
             await Client.SendCommandAsync(BuiltInCommands.ClientRegion, values, ct).ConfigureAwait(false);
         }
+    }
+}
+
+/// <summary>What a bot's journal last said about the mission it holds (lair-objectives.md B-2).</summary>
+/// <param name="Held">How many it holds.</param>
+/// <param name="LairKnown">Whether the first one's lair has a position: it does not while being drawn or moved.</param>
+/// <param name="LairX">Its lair, east.</param>
+/// <param name="LairZ">Its lair, north.</param>
+/// <param name="FirstId">Its id, for a cancel; 0 for none.</param>
+public sealed record MissionView(int Held, bool LairKnown, float LairX, float LairZ, ulong FirstId)
+{
+    public static MissionView None { get; } = new(0, false, 0f, 0f, 0);
+
+    /// <summary>
+    /// Reads a <c>GET /swg/missions</c> answer: the first mission held and its lair, and — added to <paramref name="seen"/> and <paramref name="done"/> —
+    /// the missions and completions not met before.
+    /// </summary>
+    /// <param name="json">The answer.</param>
+    /// <param name="seen">Mission ids met so far.</param>
+    /// <param name="done">Completion ids met so far.</param>
+    /// <param name="count">Whether new ids count: false on the first read, which only learns what was already there.</param>
+    /// <param name="taken">Missions met for the first time, when counted.</param>
+    /// <param name="completed">Completions met for the first time, when counted.</param>
+    /// <returns>What the brain is told.</returns>
+    public static MissionView Parse(string json, HashSet<string> seen, HashSet<string> done, bool count, out int taken, out int completed)
+    {
+        taken = 0;
+        completed = 0;
+        using var doc = JsonDocument.Parse(json);
+        var held = 0;
+        var view = None;
+        foreach (var m in doc.RootElement.GetProperty("missions").EnumerateArray())
+        {
+            var id = m.GetProperty("id").GetString() ?? "0";
+            taken += seen.Add(id) && count ? 1 : 0;
+            if (held++ == 0)
+            {
+                var lair = m.GetProperty("lair");
+                var raw = ulong.Parse(id, CultureInfo.InvariantCulture);
+                view = lair.ValueKind == JsonValueKind.Object
+                    ? new MissionView(1, true, lair.GetProperty("x").GetSingle(), lair.GetProperty("z").GetSingle(), raw)
+                    : new MissionView(1, false, 0f, 0f, raw);
+            }
+        }
+
+        foreach (var c in doc.RootElement.GetProperty("completed").EnumerateArray())
+        {
+            if (c.GetProperty("id").GetString() is { } id)
+            {
+                completed += done.Add(id) && count ? 1 : 0;
+            }
+        }
+
+        return view with { Held = held };
     }
 }

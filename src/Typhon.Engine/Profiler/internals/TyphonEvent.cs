@@ -350,12 +350,12 @@ internal static partial class TyphonEvent
         // Phase 5 wire-additive: always set OptDirtyBit so the trailing 1-byte dirty flag is encoded.
         const byte optMask = PageCacheEventCodec.OptDirtyBit;
         var size = PageCacheEventCodec.ComputeSize(TraceEventKind.PageEvicted, traceIdHi != 0 || traceIdLo != 0, optMask);
-        if (slot.Buffer.TryReserve(size, out var dst))
+        if (TryReserveOnChain(slot, size, (byte)TraceEventKind.PageEvicted, out var dst, out var ring))
         {
             // Zero-duration marker: end == start. PageCacheEventCodec writes the duration as (end - start), so duration lands at 0.
             PageCacheEventCodec.Encode(dst, startTs, TraceEventKind.PageEvicted, (byte)slotIdx, startTs,
                 spanId, parentSpanId, traceIdHi, traceIdLo, evictedFilePageIndex, 0, optMask, out _, dirtyBit);
-            slot.Buffer.Publish();
+            ring.Publish();
         }
 
         // Restore TLS immediately — this is a zero-duration marker, not a nestable scope.
@@ -397,14 +397,14 @@ internal static partial class TyphonEvent
 
         var slot = ThreadSlotRegistry.GetSlot(slotIdx);
         var size = PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheDiskReadCompleted, false, 0);
-        if (!slot.Buffer.TryReserve(size, out var dst))
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.PageCacheDiskReadCompleted, out var dst, out var ring))
         {
             return;
         }
 
         PageCacheEventCodec.Encode(dst, completionTimestamp, TraceEventKind.PageCacheDiskReadCompleted, (byte)slotIdx, beginTimestamp,
             spanId, 0, 0, 0, filePageIndex, 0, 0, out _);
-        slot.Buffer.Publish();
+        ring.Publish();
     }
 
     /// <summary>
@@ -436,14 +436,14 @@ internal static partial class TyphonEvent
 
         var slot = ThreadSlotRegistry.GetSlot(slotIdx);
         var size = PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheDiskWriteCompleted, false, 0);
-        if (!slot.Buffer.TryReserve(size, out var dst))
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.PageCacheDiskWriteCompleted, out var dst, out var ring))
         {
             return;
         }
 
         PageCacheEventCodec.Encode(dst, completionTimestamp, TraceEventKind.PageCacheDiskWriteCompleted, (byte)slotIdx, beginTimestamp,
             spanId, 0, 0, 0, filePageIndex, 0, 0, out _);
-        slot.Buffer.Publish();
+        ring.Publish();
     }
 
     /// <summary>
@@ -479,7 +479,7 @@ internal static partial class TyphonEvent
 
         var slot = ThreadSlotRegistry.GetSlot(slotIdx);
         var size = PageCacheEventCodec.ComputeSize(TraceEventKind.PageCacheFlushCompleted, false, 0);
-        if (!slot.Buffer.TryReserve(size, out var dst))
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.PageCacheFlushCompleted, out var dst, out var ring))
         {
             return;
         }
@@ -487,7 +487,7 @@ internal static partial class TyphonEvent
         // Flush convention: pageCount lives in the primary "filePageIndex" slot; the optional PageCount slot is unused (optMask=0).
         PageCacheEventCodec.Encode(dst, completionTimestamp, TraceEventKind.PageCacheFlushCompleted, (byte)slotIdx, beginTimestamp,
             spanId, 0, 0, 0, pageCount, 0, 0, out _);
-        slot.Buffer.Publish();
+        ring.Publish();
     }
 
     // EmitSchedulerChunk and EmitSchedulerSystemArchetype are now generator-emitted via the
@@ -605,15 +605,15 @@ internal static partial class TyphonEvent
             return;
         }
 
-        var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;
-        if (ring == null)
+        var slot = ThreadSlotRegistry.GetSlot(slotIdx);
+        if (slot.ChainTail == null)
         {
             Interlocked.Increment(ref SSnapshotSkippedNullRing);
             return;
         }
 
         var size = PerTickSnapshotEventCodec.ComputeSize(values);
-        if (!ring.TryReserve(size, out var dst))
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.PerTickSnapshot, out var dst, out var ring))
         {
             Interlocked.Increment(ref SSnapshotSkippedRingFull);
             return;
@@ -781,14 +781,8 @@ internal static partial class TyphonEvent
         }
 
         var slot = ThreadSlotRegistry.GetSlot(slotIdx);
-        var ring = slot.Buffer;
-        if (ring == null)
-        {
-            return;
-        }
-
         var size = SchedulerMetronomeEventCodec.ComputeSizeWait(false);
-        if (!ring.TryReserve(size, out var dst))
+        if (!TryReserveOnChain(slot, size, (byte)TraceEventKind.SchedulerMetronomeWait, out var dst, out var ring))
         {
             return;
         }
@@ -854,10 +848,9 @@ internal static partial class TyphonEvent
         var startTs = _txLifecycleStartTs;
         var slotIdx = _txLifecycleSlotIdx;
         var slot = ThreadSlotRegistry.GetSlot(slotIdx);
-        var ring = slot.Buffer;
         var hasTC = _txLifecycleTraceIdHi != 0 || _txLifecycleTraceIdLo != 0;
         var size = RuntimeEventCodec.ComputeSizeLifecycle(hasTC);
-        if (ring != null && ring.TryReserve(size, out var dst))
+        if (TryReserveOnChain(slot, size, (byte)TraceEventKind.RuntimeTransactionLifecycle, out var dst, out var ring))
         {
             var durationTicks = endTs - startTs;
             var txDurUs = (uint)Math.Min((durationTicks * 1_000_000L) / Stopwatch.Frequency, uint.MaxValue);
@@ -916,8 +909,7 @@ internal static partial class TyphonEvent
             return;
         }
 
-        var ring = ThreadSlotRegistry.GetSlot(slotIdx).Buffer;
-        if (ring == null || !ring.TryReserve(QueueTickEndCodec.Size, out var dst))
+        if (!TryReserveOnChain(ThreadSlotRegistry.GetSlot(slotIdx), QueueTickEndCodec.Size, (byte)TraceEventKind.QueueTickEnd, out var dst, out var ring))
         {
             return;
         }

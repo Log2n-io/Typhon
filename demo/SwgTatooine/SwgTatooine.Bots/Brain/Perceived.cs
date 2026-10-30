@@ -55,6 +55,9 @@ public readonly struct Perceived
     /// <summary>How far that creature is, metres.</summary>
     public float NearestCreatureM { get; init; }
 
+    /// <summary>That creature's level, 1-50 (content-levels.md), whatever it is; 0 from a server that does not send one.</summary>
+    public int NearestCreatureLevel { get; init; }
+
     /// <summary>Whether a <c>BoardShuttle</c> this bot sent was refused in the frame just applied.</summary>
     /// <remarks>
     /// <b>The server's answer, read rather than guessed at.</b> A boarding is the one decision here the server can
@@ -78,6 +81,42 @@ public readonly struct Perceived
 
     /// <summary>Whether the body is riding its swoop: the server's replicated <c>mounted</c>, the only authority on it.</summary>
     public bool Mounted { get; init; }
+
+    /// <summary>
+    /// The body's replicated combat stance (<c>stance</c>): 0 none, 3 the pistol. A swoop, a door, a flight and a clone all put the weapon away, so a fight
+    /// reads it rather than remembering having drawn one.
+    /// </summary>
+    public int Stance { get; init; }
+
+    /// <summary>The body's combat level (<c>level</c>), 1-50; 0 before it arrives. What it hunts is bounded by it (<c>Perception.CombatLevel</c>, character-level.md § 9).</summary>
+    public int Level { get; init; }
+
+    /// <summary>Missions its character holds, as the journal (<c>GET /swg/missions</c>) last said; 0 for none.</summary>
+    public int MissionsHeld { get; init; }
+
+    /// <summary>Whether the journal gave the held mission's lair a position: false while it is being drawn or moved.</summary>
+    public bool HasMissionLair { get; init; }
+
+    /// <summary>Where the held mission's lair stands, east.</summary>
+    public float MissionLairX { get; init; }
+
+    /// <summary>Where the held mission's lair stands, north.</summary>
+    public float MissionLairZ { get; init; }
+
+    /// <summary>The held mission's lair as the bot sees it — the lair in view standing on the journal's point — or 0 while it is out of view.</summary>
+    public uint MissionLair { get; init; }
+
+    /// <summary>That lair's occupants still standing (its replicated <c>guards</c>): it cannot be hurt until they are down.</summary>
+    public int MissionLairGuards { get; init; }
+
+    /// <summary>Stacks its inventory holds, as <c>GET /swg/inventory</c> last said (inventory-loot.md § 7); 0 before the first read.</summary>
+    public int InventoryStacks { get; init; }
+
+    /// <summary>Bazaar goods reserved for it — bought elsewhere, or a listing returned — as <c>GET /swg/market/mine</c> last said (bazaar.md § 5).</summary>
+    public int Reserved { get; init; }
+
+    /// <summary>Whether its trade at the bazaar is still being read or sent (bazaar.md § 8): the bot stands at the terminal until it is done.</summary>
+    public bool Trading { get; init; }
 
     /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
     public IStructureView Structures { get; init; }

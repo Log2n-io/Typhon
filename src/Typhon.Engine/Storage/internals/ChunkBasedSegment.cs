@@ -1550,7 +1550,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// <summary>
     /// Create an ChunkAccessor using the stored PagedMMF and EpochManager references.
     /// </summary>
-    [AllowCopy]
     [return: TransfersOwnership]
     internal ChunkAccessor<TStore> CreateChunkAccessor(ChangeSet changeSet = null) => new(this, _store, _epochManager, changeSet);
 
@@ -1560,7 +1559,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// <see cref="ChunkAccessor{TStore}"/>, scan mode. An epoch-tagged accessor would keep every page the scan touched until the caller's scope ends,
     /// which a transaction holds until it is disposed.
     /// </summary>
-    [AllowCopy]
     [return: TransfersOwnership]
     internal ChunkAccessor<TStore> CreateScanAccessor() => new(this, _store, _epochManager, null, scan: true);
 
@@ -1588,7 +1586,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// On cache miss: disposes old, creates new.
     /// Must be paired with <see cref="ReturnWarmAccessor"/> in a finally block.
     /// </summary>
-    [AllowCopy]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ref ChunkAccessor<TStore> RentWarmAccessor(ChangeSet changeSet = null)
     {
@@ -1747,7 +1744,6 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         internal static WarmSiblingAccessorCache Instance => _instance ??= new();
     }
 
-    [AllowCopy]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ref ChunkAccessor<TStore> RentWarmSiblingAccessor(ChangeSet changeSet = null)
     {

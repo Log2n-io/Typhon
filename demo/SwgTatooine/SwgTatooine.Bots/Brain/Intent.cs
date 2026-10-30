@@ -32,6 +32,18 @@ public enum IntentKind
 
     /// <summary>Get on the swoop, or off it (<c>SetMount</c>): the browser's 1 key.</summary>
     Mount,
+
+    /// <summary>Take a mission listed at the terminal the bot stands at (<c>TakeMission</c>): the swarm names the offer, the one whose lair is nearest.</summary>
+    TakeMission,
+
+    /// <summary>Cancel the mission held (<c>AbandonMission</c>): the swarm names it, from the journal.</summary>
+    AbandonMission,
+
+    /// <summary>
+    /// Trade at the bazaar terminal it stands at (bazaar.md § 8): the swarm reads the market and sends the plan — collect, list, vendor, buy — as the
+    /// commands a browser's bazaar panel sends. <see cref="Intent.Region"/> is the bazaar's city, as a region.
+    /// </summary>
+    Trade,
 }
 
 /// <summary>One decision.</summary>
@@ -72,10 +84,27 @@ public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedC
     /// <returns>The intent.</returns>
     public static Intent Move(float heading, byte speedClass) => new(IntentKind.Move, heading, speedClass, 0, 0);
 
-    /// <summary>Attack an entity, or 0 to stop attacking.</summary>
+    /// <summary>Attack an entity, or 0 to stop attacking, and move while doing it: on a heading at a speed class, or stand (class 0).</summary>
+    /// <remarks>
+    /// <b>The motion travels with the target.</b> Naming a target moves nothing, and the body keeps the last <c>MoveDir</c> it was given: an attack that
+    /// carried no motion left a bot running on through its target and back, all fight long (Loïc, 2026-10-26). So every attack says how to move too.
+    /// </remarks>
     /// <param name="netId">The target.</param>
+    /// <param name="heading">Radians, when <paramref name="speedClass"/> is not 0.</param>
+    /// <param name="speedClass">A class the server grants, or 0 to stand.</param>
     /// <returns>The intent.</returns>
-    public static Intent Attack(uint netId) => new(IntentKind.Attack, 0f, 0, netId, 0);
+    public static Intent Attack(uint netId, float heading = 0f, byte speedClass = 0) => new(IntentKind.Attack, heading, speedClass, netId, 0);
+
+    /// <summary>Take a mission at the terminal it stands at.</summary>
+    public static Intent TakeMission => new(IntentKind.TakeMission, 0f, 0, 0, 0);
+
+    /// <summary>Cancel the mission held.</summary>
+    public static Intent AbandonMission => new(IntentKind.AbandonMission, 0f, 0, 0, 0);
+
+    /// <summary>Trade at the bazaar it stands at.</summary>
+    /// <param name="region">The bazaar's city, as a city plus one: the city a browse reads and a buy is collected in.</param>
+    /// <returns>The intent.</returns>
+    public static Intent Trade(int region) => new(IntentKind.Trade, 0f, 0, 0, region);
 
     /// <summary>Queue for a shuttle to a region's city.</summary>
     /// <param name="region">The destination, as a city plus one.</param>

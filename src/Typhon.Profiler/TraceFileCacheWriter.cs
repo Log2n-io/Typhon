@@ -328,6 +328,34 @@ public sealed class TraceFileCacheWriter : IDisposable
         stream.Write(span);
     }
 
+    /// <summary>
+    /// Write the v19 thread table — count u16 + entries of (u8 slot, u8 kind, shortString name). A name longer than the short string's 255 bytes is cut
+    /// on a character boundary. Used by <see cref="CacheSectionId.ThreadTable"/>.
+    /// </summary>
+    public void WriteThreadTable(IReadOnlyList<ThreadTableEntry> threads)
+    {
+        ThrowIfNoSection();
+        if (_currentSection != CacheSectionId.ThreadTable)
+        {
+            throw new InvalidOperationException($"WriteThreadTable only valid within the ThreadTable section; current is {_currentSection}.");
+        }
+
+        var count = Math.Min(threads?.Count ?? 0, ushort.MaxValue);
+        Span<byte> u16Buf = stackalloc byte[2];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(u16Buf, (ushort)count);
+        _stream.Write(u16Buf);
+        Span<byte> name = stackalloc byte[byte.MaxValue];
+        for (var i = 0; i < count; i++)
+        {
+            var t = threads![i];
+            _stream.WriteByte(t.Slot);
+            _stream.WriteByte((byte)t.Kind);
+            System.Text.Unicode.Utf8.FromUtf16(t.Name ?? string.Empty, name, out _, out var written);
+            _stream.WriteByte((byte)written);
+            _stream.Write(name[..written]);
+        }
+    }
+
     private void WriteShortString(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value ?? string.Empty);

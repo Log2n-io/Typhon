@@ -34,6 +34,16 @@ public sealed partial class TatooineSim
         // fault, and the moment to say so is before a session can connect and be served a world with no geometry.
         var assets = OpenAssetOrigin();
         var shapes = _shapes;
+        // Read through the field at each request: the bridge is made by StartReplication, below.
+        EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
+        EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
+        EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        // Before the runtime starts: the facilities never move, and a spatial archetype is read off the tick only while nothing ticks.
+        FacilityEndpoints.Json = FacilityEndpoints.Build(Dbe);
+        TatooineHost.DashboardPort = _config.DashboardPort;
+        Console.WriteLine($"progression: XP table from the model, CL 50 at {Progression.MaxXp:N0} XP; --xp-rate {_config.XpRatePercent} %");
+        // Before StartReplication, which wires the tick abort and the storage health to it.
+        Guard = ServerGuard.ForServer(TimeSpan.FromSeconds(_config.StopDeadlineS), TimeSpan.FromSeconds(_config.WedgeS));
         StartReplication(shapes);
         try
         {
@@ -41,7 +51,7 @@ public sealed partial class TatooineSim
                 .ServeAsync(
                     _runtime, port, clientRoot, origins, RealmDirectoryJson(), RealmInventoryJson, bindAddress, _config.AuthBurst, _config.AuthRefillMs,
                     _config.OriginSecret, _config.AuthLocalOnly, _config.TlsChainPath, _config.TlsKeyPath, _config.TlsPort, _config.RedirectPort,
-                    assets, shapes, _config.WorldEdgeM * 0.5)
+                    assets, shapes, _config.WorldEdgeM * 0.5, () => _bridge?.MarketBoard ?? MarketSnapshot.Empty, Guard)
                 .ConfigureAwait(false);
         }
         finally
@@ -52,8 +62,20 @@ public sealed partial class TatooineSim
             // population, so it is the only place its counters mean anything -- and a run that has to be killed to
             // end still gets to say what it measured.
             PrintProximityReport();
+            Console.WriteLine($"  economy: {_bridge?.EconomyCountersJson() ?? "{}"}");
+            Console.WriteLine($"  items: {_bridge?.ItemCountersJson() ?? "{}"}");
+            Console.WriteLine($"  market: {_bridge?.MarketCountersJson() ?? "{}"}");
+            Console.WriteLine($"  crowd: {_bridge?.CrowdCountersJson() ?? "{}"}");
+            Console.WriteLine($"  progression: queue overflow kills-xp {KillXpOverflow}, kills-loot {KillLootOverflow}, progress {ProgressOverflow}");
+            EconomyEndpoints.CountersJson = null;
+            EconomyEndpoints.CrowdJson = null;
+            EconomyEndpoints.DemoJson = null;
+            FacilityEndpoints.Json = null;
         }
     }
+
+    /// <summary>What stops and sheds this served world when the engine is in trouble (#1532); <see langword="null"/> before <see cref="ServeAsync"/>.</summary>
+    internal ServerGuard Guard { get; private set; }
 
     /// <summary>
     /// The runtime this simulation is ticking, once <see cref="StartReplication"/> or <see cref="Run"/> has started one.
@@ -192,6 +214,9 @@ public sealed partial class TatooineSim
                 // Required once a group set is declared, and it is an allocation rather than a ceiling: every session holds this many keys and cursors per
                 // set whether it meets a city or not. See TatooineReplication.MaxCityGroupsPerSession for why four.
                 MaxGroupsPerSession = TatooineReplication.MaxCityGroupsPerSession,
+
+                // --enter-budget: 0 keeps the engine's default; set, it also moves the owed cap (4 x) the whole-world god camera's fill runs into.
+                EnterBudgetPerFrame = _config.EnterBudgetPerFrame > 0 ? _config.EnterBudgetPerFrame : new SubscriptionsOptions().EnterBudgetPerFrame,
             },
         });
 
@@ -250,10 +275,25 @@ public sealed partial class TatooineSim
                 CrashArtefactPath = WriteCrashArtefact(
                     $"tick aborted: {outcome.Reason} in system '{outcome.FailedSystemName}'", outcome.FailedSystemException, outcome.TickNumber);
             }
+
+            // Then STOP (#1532): a server that stops ticking but keeps serving HTTP and accepting logins is the worst of both — on 2026-10-28 it did so for
+            // 50 minutes on 20+ cores. A world whose tick aborted is in a state nobody has reasoned about; the honest answer is to end the process, with
+            // the artefact written and the sessions told, and to say so in its exit code.
+            Guard?.Stop($"tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");
         };
+
+        // The engine's storage health drives the shedding (#1532): Overloaded or Starved refuses new logins, sessions and database reads until it recovers.
+        if (Guard != null)
+        {
+            var guard = Guard;
+            Dbe.StorageHealthChanged += (_, e) => guard.OnStorageHealth(e.Current);
+        }
 
         TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();
+
+        // A tick that stands still stops the server, as an aborted one does: it is the same fault seen from outside (#1532, 2026-10-29).
+        Guard?.WatchTick(() => _runtime.CurrentTickNumber);
 
         // The catalog every client negotiates against, by its hash: two builds that print the same one serve the same wire (AC-25 compares the attribute
         // declarations against the builder ones this way).
@@ -274,9 +314,8 @@ public sealed partial class TatooineSim
         {
             PasswordHash.Iterations = _config.AuthIterations;
             Console.WriteLine(
-                $"  !! password hashing LOWERED to {_config.AuthIterations:N0} iterations from the default "
-                + $"{PasswordHash.DefaultIterations:N0}. Cheaper to attack offline if the hash table ever leaks — "
-                + "acceptable for throwaway accounts, not for real credentials. Existing accounts keep their own work factor.");
+                $"  !! password hashing set to {_config.AuthIterations:N0} iterations instead of the default "
+                + $"{PasswordHash.DefaultIterations:N0}. Existing accounts are re-hashed at it on their next login.");
         }
         else
         {

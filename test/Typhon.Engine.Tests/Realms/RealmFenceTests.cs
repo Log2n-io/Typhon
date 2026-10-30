@@ -103,23 +103,16 @@ class RealmFenceTests : TestBase<RealmFenceTests>
             using (var rtx = dbe.CreateQuickTransaction())
             {
                 var reader = rtx.For<RealmUnit>();
-                try
+                foreach (var cluster in reader.GetClusterEnumerator())
                 {
-                    foreach (var cluster in reader.GetClusterEnumerator())
+                    var occupied = cluster.OccupancyBits;
+                    while (occupied != 0)
                     {
-                        var occupied = cluster.OccupancyBits;
-                        while (occupied != 0)
-                        {
-                            var slot = BitOperations.TrailingZeroCount(occupied);
-                            occupied &= occupied - 1;
-                            var v = cluster.GetReadOnly(RealmUnit.Pos, slot);
-                            moves.Add((cluster.GetEntityId(slot), v.Realm, v.Tag));
-                        }
+                        var slot = BitOperations.TrailingZeroCount(occupied);
+                        occupied &= occupied - 1;
+                        var v = cluster.GetReadOnly(RealmUnit.Pos, slot);
+                        moves.Add((cluster.GetEntityId(slot), v.Realm, v.Tag));
                     }
-                }
-                finally
-                {
-                    reader.Dispose();
                 }
             }
 
@@ -138,24 +131,17 @@ class RealmFenceTests : TestBase<RealmFenceTests>
 
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<RealmUnit>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var bits = cluster.OccupancyBits;
+            while (bits != 0)
             {
-                var bits = cluster.OccupancyBits;
-                while (bits != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(bits);
-                    bits &= bits - 1;
-                    var current = cluster.GetReadOnly(RealmUnit.Pos, slot);
-                    var realm = rotate ? (ushort)((current.Realm + 1) % RealmCount) : current.Realm;
-                    cluster.WriteSpatial(RealmUnit.Pos, slot, current with { Bounds = BoxOf(round, current.Tag), Realm = realm });
-                }
+                var slot = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                var current = cluster.GetReadOnly(RealmUnit.Pos, slot);
+                var realm = rotate ? (ushort)((current.Realm + 1) % RealmCount) : current.Realm;
+                cluster.WriteSpatial(RealmUnit.Pos, slot, current with { Bounds = BoxOf(round, current.Tag), Realm = realm });
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();
@@ -510,25 +496,18 @@ class RealmFenceTests : TestBase<RealmFenceTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var reader = tx.For<RealmUnit>();
-            try
+            foreach (var cluster in reader.GetClusterEnumerator())
             {
-                foreach (var cluster in reader.GetClusterEnumerator())
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
                 {
-                    var bits = cluster.OccupancyBits;
-                    while (bits != 0)
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    if (cluster.GetReadOnly(RealmUnit.Pos, slot).Realm == 2)
                     {
-                        var slot = BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        if (cluster.GetReadOnly(RealmUnit.Pos, slot).Realm == 2)
-                        {
-                            realm2.Add(cluster.GetEntityId(slot));
-                        }
+                        realm2.Add(cluster.GetEntityId(slot));
                     }
                 }
-            }
-            finally
-            {
-                reader.Dispose();
             }
 
             foreach (var id in realm2)
@@ -702,25 +681,18 @@ class RealmFenceTests : TestBase<RealmFenceTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<RealmUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
                 {
-                    var bits = cluster.OccupancyBits;
-                    while (bits != 0)
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    if (cluster.GetReadOnly(RealmUnit.Pos, slot).Realm == 2)
                     {
-                        var slot = BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        if (cluster.GetReadOnly(RealmUnit.Pos, slot).Realm == 2)
-                        {
-                            realm2.Add(cluster.GetEntityId(slot));
-                        }
+                        realm2.Add(cluster.GetEntityId(slot));
                     }
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
         }
 
@@ -780,36 +752,29 @@ class RealmFenceTests : TestBase<RealmFenceTests>
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<RealmUnit>();
-            try
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                foreach (var cluster in accessor.GetClusterEnumerator())
+                var chunk = cluster.ChunkId;
+                var realm = cs.ClusterRealmMap[chunk];
+                var cellKey = cs.ClusterCellMap[chunk];
+                var grid = dbe.RealmTable.Get(realm).Grid;
+                var margin = grid.Config.CellSize * grid.Config.MigrationHysteresisRatio;
+                var bits = cluster.OccupancyBits;
+                while (bits != 0)
                 {
-                    var chunk = cluster.ChunkId;
-                    var realm = cs.ClusterRealmMap[chunk];
-                    var cellKey = cs.ClusterCellMap[chunk];
-                    var grid = dbe.RealmTable.Get(realm).Grid;
-                    var margin = grid.Config.CellSize * grid.Config.MigrationHysteresisRatio;
-                    var bits = cluster.OccupancyBits;
-                    while (bits != 0)
-                    {
-                        var slot = BitOperations.TrailingZeroCount(bits);
-                        bits &= bits - 1;
-                        var v = cluster.GetReadOnly(RealmUnit.Pos, slot);
-                        Assert.That(v.Realm, Is.EqualTo(realm), $"an entity of realm {v.Realm} sits in a realm-{realm} cluster, {context}");
-                        var cx = (v.Bounds.MinX + v.Bounds.MaxX) * 0.5;
-                        var cy = (v.Bounds.MinY + v.Bounds.MaxY) * 0.5;
-                        grid.CellOrigin(cellKey, out var ox, out var oy, out _);
-                        var inCell = cx >= ox - margin && cx <= ox + grid.Config.CellSize + margin && cy >= oy - margin
-                            && cy <= oy + grid.Config.CellSize + margin;
-                        Assert.That(inCell, Is.True, $"entity {v.Tag} of realm {realm} at ({cx}, {cy}) is filed in cell {cellKey} at ({ox}, {oy}), {context}");
-                        perRealmCellCounts[(realm, cellKey)] = perRealmCellCounts.GetValueOrDefault((realm, cellKey)) + 1;
-                        seen[realm]++;
-                    }
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    bits &= bits - 1;
+                    var v = cluster.GetReadOnly(RealmUnit.Pos, slot);
+                    Assert.That(v.Realm, Is.EqualTo(realm), $"an entity of realm {v.Realm} sits in a realm-{realm} cluster, {context}");
+                    var cx = (v.Bounds.MinX + v.Bounds.MaxX) * 0.5;
+                    var cy = (v.Bounds.MinY + v.Bounds.MaxY) * 0.5;
+                    grid.CellOrigin(cellKey, out var ox, out var oy, out _);
+                    var inCell = cx >= ox - margin && cx <= ox + grid.Config.CellSize + margin && cy >= oy - margin
+                        && cy <= oy + grid.Config.CellSize + margin;
+                    Assert.That(inCell, Is.True, $"entity {v.Tag} of realm {realm} at ({cx}, {cy}) is filed in cell {cellKey} at ({ox}, {oy}), {context}");
+                    perRealmCellCounts[(realm, cellKey)] = perRealmCellCounts.GetValueOrDefault((realm, cellKey)) + 1;
+                    seen[realm]++;
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
             }
         }
 

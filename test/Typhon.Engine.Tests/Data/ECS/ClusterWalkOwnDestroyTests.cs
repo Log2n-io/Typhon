@@ -430,7 +430,6 @@ class ClusterWalkOwnDestroyTests : TestBase<ClusterWalkOwnDestroyTests>
                             picked.Add(cluster.GetEntityId(BitOperations.TrailingZeroCount(bits)));
                         }
                     }
-                    accessor.Dispose();
 
                     yielded = picked.Count;
                     walkedVictim = picked.Contains(victim);
@@ -723,26 +722,19 @@ class ClusterWalkOwnDestroyTests : TestBase<ClusterWalkOwnDestroyTests>
         where TArch : class
     {
         var accessor = walker.For<TArch>();
-        try
+        using var e = accessor.GetClusterEnumerator();
+        Assert.That(e.MoveNext(), Is.True, "precondition: a cluster to walk");
+        var cluster = e.Current;
+        var occupancy = cluster.OccupancyBits;
+        var slot = BitOperations.TrailingZeroCount(occupancy);
+        var before = cluster.GetEntityId(slot);
+        using (var destroyer = dbe.CreateQuickTransaction())
         {
-            var e = accessor.GetClusterEnumerator();
-            Assert.That(e.MoveNext(), Is.True, "precondition: a cluster to walk");
-            var cluster = e.Current;
-            var occupancy = cluster.OccupancyBits;
-            var slot = BitOperations.TrailingZeroCount(occupancy);
-            var before = cluster.GetEntityId(slot);
-            using (var destroyer = dbe.CreateQuickTransaction())
-            {
-                destroyer.Destroy(before);
-                Assert.That(destroyer.Commit(), Is.True);
-            }
+            destroyer.Destroy(before);
+            Assert.That(destroyer.Commit(), Is.True);
+        }
 
-            return (occupancy, slot, before, cluster.GetEntityId(slot));
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
+        return (occupancy, slot, before, cluster.GetEntityId(slot));
     }
 
     /// <summary>#1496, through <c>tx.ClusterSpatialQuery</c>: the same staged window, every query shape, the radius batch included.</summary>
@@ -948,38 +940,31 @@ class ClusterWalkOwnDestroyTests : TestBase<ClusterWalkOwnDestroyTests>
         Exception single = null;
         Exception batch = null;
         var accessor = tx.For<TArch>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            if (cluster.ChunkId != chunk)
             {
-                if (cluster.ChunkId != chunk)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    cluster.Set(comp, slot, new OwnWalkSv { Value = -1 });
-                }
-                catch (Exception ex)
-                {
-                    single = ex;
-                }
-
-                try
-                {
-                    var values = new OwnWalkSv[64];
-                    cluster.Set(comp, 1UL << slot, values);
-                }
-                catch (Exception ex)
-                {
-                    batch = ex;
-                }
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            try
+            {
+                cluster.Set(comp, slot, new OwnWalkSv { Value = -1 });
+            }
+            catch (Exception ex)
+            {
+                single = ex;
+            }
+
+            try
+            {
+                var values = new OwnWalkSv[64];
+                cluster.Set(comp, 1UL << slot, values);
+            }
+            catch (Exception ex)
+            {
+                batch = ex;
+            }
         }
 
         return (single, batch);
@@ -990,27 +975,20 @@ class ClusterWalkOwnDestroyTests : TestBase<ClusterWalkOwnDestroyTests>
     {
         var visible = 0UL;
         var accessor = tx.For<TArch>();
-        try
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            if (cluster.ChunkId != chunk)
             {
-                if (cluster.ChunkId != chunk)
-                {
-                    continue;
-                }
-
-                visible = cluster.OccupancyBits;
-                var span = cluster.GetSpan(comp);
-                for (var i = 0; i < span.Length; i++)
-                {
-                    span[i].Pad = 7;
-                }
-                cluster.MarkDirty(comp);
+                continue;
             }
-        }
-        finally
-        {
-            accessor.Dispose();
+
+            visible = cluster.OccupancyBits;
+            var span = cluster.GetSpan(comp);
+            for (var i = 0; i < span.Length; i++)
+            {
+                span[i].Pad = 7;
+            }
+            cluster.MarkDirty(comp);
         }
 
         return visible;
@@ -1394,45 +1372,38 @@ class ClusterWalkOwnDestroyTests : TestBase<ClusterWalkOwnDestroyTests>
             var state = tx.DBE._archetypeStates[ArchetypeRegistry.GetMetadata<TArch>().ArchetypeId].ClusterState;
             var activeIds = state.ReadActiveClusterList(out var activeCount);
             var accessor = tx.For<TArch>();
-            try
+            var e = entry switch
             {
-                var e = entry switch
+                Entry.ArchetypeAccessorAll => accessor.GetClusterEnumerator(),
+                Entry.ArchetypeAccessorRange => accessor.GetClusterEnumerator(0, activeCount),
+                Entry.ArchetypeAccessorIds => accessor.GetClusterEnumerator(activeIds, 0, activeCount),
+                Entry.ArchetypeAccessorRealm => accessor.GetClusterEnumerator(RealmId.Default),
+                Entry.EntityAccessorAll => tx.GetClusterEnumerator<TArch>(),
+                Entry.EntityAccessorRange => tx.GetClusterEnumerator<TArch>(0, activeCount),
+                Entry.EntityAccessorIds => tx.GetClusterEnumerator<TArch>(activeIds, 0, activeCount),
+                Entry.EntityAccessorRealm => tx.GetClusterEnumerator<TArch>(RealmId.Default),
+                _ => throw new ArgumentOutOfRangeException(nameof(entry)),
+            };
+            foreach (var cluster in e)
+            {
+                var chunk = cluster.ChunkId;
+                result.Visited.Add(chunk);
+                var occupancy = cluster.OccupancyBits;
+                result.Occupancy[chunk] = occupancy;
+                result.LiveCount[chunk] = cluster.LiveCount;
+                for (var bits = occupancy; bits != 0; bits &= bits - 1)
                 {
-                    Entry.ArchetypeAccessorAll => accessor.GetClusterEnumerator(),
-                    Entry.ArchetypeAccessorRange => accessor.GetClusterEnumerator(0, activeCount),
-                    Entry.ArchetypeAccessorIds => accessor.GetClusterEnumerator(activeIds, 0, activeCount),
-                    Entry.ArchetypeAccessorRealm => accessor.GetClusterEnumerator(RealmId.Default),
-                    Entry.EntityAccessorAll => tx.GetClusterEnumerator<TArch>(),
-                    Entry.EntityAccessorRange => tx.GetClusterEnumerator<TArch>(0, activeCount),
-                    Entry.EntityAccessorIds => tx.GetClusterEnumerator<TArch>(activeIds, 0, activeCount),
-                    Entry.EntityAccessorRealm => tx.GetClusterEnumerator<TArch>(RealmId.Default),
-                    _ => throw new ArgumentOutOfRangeException(nameof(entry)),
-                };
-                foreach (var cluster in e)
-                {
-                    var chunk = cluster.ChunkId;
-                    result.Visited.Add(chunk);
-                    var occupancy = cluster.OccupancyBits;
-                    result.Occupancy[chunk] = occupancy;
-                    result.LiveCount[chunk] = cluster.LiveCount;
-                    for (var bits = occupancy; bits != 0; bits &= bits - 1)
-                    {
-                        var slot = BitOperations.TrailingZeroCount(bits);
-                        var id = cluster.GetEntityId(slot);
-                        result.ByOccupancy.Add(id);
-                        result.ChunkOf[id] = chunk;
-                        result.SlotOf[id] = slot;
-                    }
-
-                    for (var bits = cluster.ActiveBits(0); bits != 0; bits &= bits - 1)
-                    {
-                        result.ByActive.Add(cluster.GetEntityId(BitOperations.TrailingZeroCount(bits)));
-                    }
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    var id = cluster.GetEntityId(slot);
+                    result.ByOccupancy.Add(id);
+                    result.ChunkOf[id] = chunk;
+                    result.SlotOf[id] = slot;
                 }
-            }
-            finally
-            {
-                accessor.Dispose();
+
+                for (var bits = cluster.ActiveBits(0); bits != 0; bits &= bits - 1)
+                {
+                    result.ByActive.Add(cluster.GetEntityId(BitOperations.TrailingZeroCount(bits)));
+                }
             }
 
             return result;

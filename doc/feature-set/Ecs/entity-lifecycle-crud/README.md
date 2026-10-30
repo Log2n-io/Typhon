@@ -102,7 +102,8 @@ dtx.Commit();
   (`tx.For<TArch>()`) — has the same five: `Open`/`OpenMut` throw on a missing or invisible entity,
   `TryOpen`/`TryOpenMut` return `false`, `IsAlive` is the existence probe. `BulkLoadSession` exposes the `Mut` pair.
   `ArchetypeAccessor` treats its transaction's pending destroys as missing, like the transaction does, but does not
-  see the transaction's own spawns: they are not in the EntityMap until commit.
+  see the transaction's own spawns: they are not in the EntityMap until commit. It holds no page of its own and needs no
+  `Dispose`: its lookups go through its transaction's caches, released when the transaction is.
 - `OpenMut`/`TryOpenMut` run the transaction's mutation check first, found or not: on a read-only or finished
   transaction they throw.
 - `EntityRef` and `EntityRefMut` are `ref struct`s — stack-only, cannot escape their creating accessor/transaction,

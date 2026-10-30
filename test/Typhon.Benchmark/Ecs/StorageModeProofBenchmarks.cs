@@ -89,7 +89,6 @@ public class StorageModeProofBenchmarks : IDisposable
                 sum += positions[idx].X;
             }
         }
-        accessor.Dispose();
         return sum;
     }
 
@@ -111,7 +110,6 @@ public class StorageModeProofBenchmarks : IDisposable
                 sum += data[idx].Value;
             }
         }
-        accessor.Dispose();
         return sum;
     }
 
@@ -136,7 +134,6 @@ public class StorageModeProofBenchmarks : IDisposable
                 sum += healths[idx].Current;
             }
         }
-        accessor.Dispose();
         return sum;
     }
 
@@ -157,7 +154,6 @@ public class StorageModeProofBenchmarks : IDisposable
                 positions[idx].X += 1f;
             }
         }
-        accessor.Dispose();
         tx.Rollback();
     }
 
@@ -178,7 +174,6 @@ public class StorageModeProofBenchmarks : IDisposable
                 data[idx].Value += 1;
             }
         }
-        accessor.Dispose();
         tx.Rollback();
     }
 

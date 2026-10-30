@@ -1,0 +1,111 @@
+:root {
+    --bg: #14181d;
+    --card: #1d232a;
+    --line: #2c3540;
+    --text: #e7ecf1;
+    --muted: #8b97a5;
+    --accent: #f0b84a;
+    --good: #6fcf8a;
+    --bad: #ff7a6b;
+    color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+}
+
+.top h1 { margin: 0; font-size: 20px; color: var(--accent); }
+
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.up { background: var(--good); box-shadow: 0 0 6px var(--good); }
+.dot.down { background: var(--bad); }
+
+.muted { color: var(--muted); }
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 14px;
+    padding: 16px 20px;
+}
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    min-width: 0;
+}
+
+.card h2 { margin: 0 0 10px; font-size: 15px; color: var(--accent); }
+.card h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+
+.kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+}
+
+.kpi { background: rgba(255, 255, 255, .03); border-radius: 6px; padding: 6px 8px; }
+.kpi .value { font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .label { font-size: 11px; color: var(--muted); }
+.kpi.alarm .value { color: var(--bad); }
+
+.spark { margin-top: 10px; }
+.spark svg { width: 100%; height: 40px; display: block; background: rgba(255, 255, 255, .02); border-radius: 4px; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.spark span { font-size: 11px; }
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+td, th { padding: 2px 6px; text-align: left; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.num { text-align: right; }
+
+.bars td:first-child { width: 38%; white-space: nowrap; }
+.bars td.num { width: 18%; }
+.bar div { height: 8px; background: var(--accent); border-radius: 4px; opacity: .8; }
+
+.ledger tr:nth-child(even) td { background: rgba(255, 255, 255, .02); }
+
+.badge { padding: 1px 8px; border-radius: 10px; font-size: 12px; margin-right: 6px; }
+.badge.ok { background: rgba(111, 207, 138, .15); color: var(--good); }
+.badge.bad { background: rgba(255, 122, 107, .15); color: var(--bad); }
+
+.violations { color: var(--bad); font-size: 12px; }
+
+/* The bot page (bot-telemetry.md). */
+.links { margin-left: auto; }
+.links a { color: var(--accent); text-decoration: none; }
+.links a:hover { text-decoration: underline; }
+.small { font-size: 11px; }
+.card.wide { grid-column: 1 / -1; }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
+.traced tr { cursor: pointer; }
+.traced tr:hover td { background: rgba(255, 255, 255, .05); }
+.traced tr.selected td { background: rgba(240, 184, 74, .12); }
+.trail { width: 100%; max-width: 420px; aspect-ratio: 1; display: block; background: rgba(255, 255, 255, .02); border-radius: 4px; }
+.trail line { stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.timeline { font-size: 12px; }
+.timeline td:first-child { width: 70px; white-space: nowrap; color: var(--muted); }
+.timeline td:nth-child(2) { width: 50px; color: var(--muted); }
+.timeline tr.goal td:last-child { color: var(--accent); }
+.timeline tr.reversal td:last-child { color: var(--bad); }
+
+/* "Watch this bot" (bot-telemetry.md § 7). */
+button.watch { font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 3px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
+button.watch:hover { background: rgba(240, 184, 74, .15); }
+h2 button.watch { margin-left: 8px; vertical-align: middle; }

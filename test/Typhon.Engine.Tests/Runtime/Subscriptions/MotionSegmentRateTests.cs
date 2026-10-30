@@ -156,41 +156,34 @@ unsafe class MotionSegmentRateTests : TestBase<MotionSegmentRateTests>
 
         using var tx = harness.Engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
-        try
+        var index = 0;
+        foreach (var cluster in accessor.GetClusterEnumerator())
         {
-            var index = 0;
-            foreach (var cluster in accessor.GetClusterEnumerator())
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
             {
-                var occupancy = cluster.OccupancyBits;
-                while (occupancy != 0)
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+
+                var originX = 100f + (index * 3f);
+                const float originY = 100f;
+                index++;
+
+                var (dx, dy) = leg switch
                 {
-                    var slot = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
+                    0 => (along, 0d),
+                    1 => (50 * step, along),
+                    2 => ((50 * step) - along, 50 * step),
+                    _ => (0d, (50 * step) - along),
+                };
 
-                    var originX = 100f + (index * 3f);
-                    const float originY = 100f;
-                    index++;
-
-                    var (dx, dy) = leg switch
-                    {
-                        0 => (along, 0d),
-                        1 => (50 * step, along),
-                        2 => ((50 * step) - along, 50 * step),
-                        _ => (0d, (50 * step) - along),
-                    };
-
-                    var x = (float)(originX + dx);
-                    var y = (float)(originY + dy);
-                    cluster.WriteSpatial(
-                        ProjCreature.Bounds,
-                        slot,
-                        new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x + 1f, MaxY = y + 1f }, Speed = (float)SpeedMps });
-                }
+                var x = (float)(originX + dx);
+                var y = (float)(originY + dy);
+                cluster.WriteSpatial(
+                    ProjCreature.Bounds,
+                    slot,
+                    new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x + 1f, MaxY = y + 1f }, Speed = (float)SpeedMps });
             }
-        }
-        finally
-        {
-            accessor.Dispose();
         }
 
         tx.Commit();

@@ -103,7 +103,8 @@ public sealed class AppendOnlyChunkSink : ICacheChunkSink
         IReadOnlyList<PostTickSummary> postTickSummaries,
         IReadOnlyDictionary<ushort, string> queueIdToName,
         IReadOnlyList<SystemArchetypeTouchSummary> systemArchetypeTouches,
-        IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns) =>
+        IReadOnlyList<EntityLifecycleRun> entityLifecycleRuns,
+        IReadOnlyList<ThreadTableEntry> threads) =>
         throw new NotSupportedException("AppendOnlyChunkSink does not support a trailer (live mode keeps metadata in memory).");
 
     /// <summary>Flushes the stream a final time and, if this sink owns it, disposes it. Idempotent; never throws.</summary>
