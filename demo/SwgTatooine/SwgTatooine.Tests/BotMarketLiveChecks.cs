@@ -56,7 +56,8 @@ internal sealed class BotMarketLiveChecks : ServedChecks
             dir = dir.Parent;
         }
 
-        Assert.That(dir, Is.Not.Null, "the premise: the published assets of this checkout");
+        // Not in the repository (built by the asset pipeline): a checkout without them, CI among them, cannot stage this check — as LootTableChecks.
+        Assume.That(dir, Is.Not.Null, "no built asset set (SwgTatooine.Assets/build/assets) in this checkout");
         return Path.Combine(dir.FullName, "demo", "SwgTatooine", "SwgTatooine.Assets", "build", "assets");
     }
 
