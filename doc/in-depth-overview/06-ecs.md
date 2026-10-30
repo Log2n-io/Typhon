@@ -207,7 +207,7 @@ For parallel query systems that read at a single frozen MVCC snapshot across man
 ```csharp
 var pta = new PointInTimeAccessor();
 pta.Attach(dbe, workerCount);     // allocates fresh TSN, resets per-worker accessors
-// dispatch parallel work — each worker uses pta.GetAccessor(workerId).Open(...)
+// dispatch parallel work — each worker: using var lease = pta.Enter(workerId); lease.Accessor.Open(...)
 ```
 
 - One per-worker `EntityAccessor` is stored in a flat `EntityAccessor[]` indexed by `workerId` — no per-entity dictionary lookup.
@@ -449,7 +449,7 @@ var pos = a.Read(Ant.Position);
 // Read (parallel system)
 var pta = new PointInTimeAccessor();
 pta.Attach(dbe, workerCount: 8);
-// dispatch — each worker uses pta.GetAccessor(workerId)
+// dispatch — each worker: using var lease = pta.Enter(workerId); // access via lease.Accessor
 
 // Iterate clusters (high density, full scan)
 foreach (var cluster in accessor.GetClusterEnumerator<Ant>())

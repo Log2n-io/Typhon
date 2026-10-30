@@ -46,7 +46,7 @@ while (clusters.MoveNext())
         positions[idx].X += movements[idx].VX * ctx.DeltaTime;
         positions[idx].Y += movements[idx].VY * ctx.DeltaTime;
     }
-    clusters.MarkCurrentDirty(); // required: flags the writes for WAL/checkpoint — the cluster path skips dirty tracking otherwise
+    clusters.MarkCurrentDirty(); // required for WAL records and change detection — without it the write survives the next checkpoint but is absent from the WAL
 }
 
 // Random single-entity access — same archetype, same API, transparently cluster-backed.
@@ -60,7 +60,7 @@ entity.Set(Ant.Position, pos);
 
 - **Cluster size is auto-computed, not chosen by the caller**: N ∈ [8, 64] is picked per archetype to maximize entities-per-page; iteration code is identical for every N.
 - **Every archetype is cluster-backed, and there is no opt-out**: eligibility is unconditional, the pure-`Versioned` archetype included — a cluster stores the `Versioned` HEAD in the slot and keeps the revision chain separate, exactly as it does for a mixed archetype. Being unconditional is what makes exactly one spatial index possible; an opt-out would keep a second index home alive for every consumer to branch on.
-- **Direct `GetSpan`/`Get` writes bypass dirty tracking**: call `MarkCurrentDirty()` (whole cluster) or `MarkSlotDirty(slot)` (single entity) after writing, or the change never reaches the WAL/checkpoint.
+- **Direct `GetSpan`/`Get` writes bypass WAL-record emission and change detection**: call `MarkCurrentDirty()` (whole cluster) or `MarkSlotDirty(slot)` (single entity) after writing, or the change will not appear in the WAL and will be invisible to reactive systems and ChangeFilter. The page is recorded for the next checkpoint automatically (#1531), so the write survives a checkpoint; it is not crash-safe in the gap between checkpoints without a WAL record.
 - **A `SingleVersion` or `Transient` component with an `[Index]` field has no writable span**: `GetSpan`/`Get` throw on it, in every build (a write through memory handed out records no old key, so the index could never follow it). Write it per entity with `ClusterRef.Set(comp, slot, value)`, which records the old keys and marks the entity dirty in the same call, or a cluster's worth at once with `ClusterRef.Set(comp, slotMask, values)` (values indexed by slot; the bookkeeping is paid once per cluster); read it with `GetReadOnlySpan`. A write whose value keeps every indexed key records nothing for the index, so rewriting an indexed component's other fields costs little. A `WriteSpatial` that changes an indexed field of the spatial component does the same bookkeeping. `Set` refuses what an in-place store cannot do — a `Versioned` component, one that defaults to the Commit discipline, a `SingleVersion` component in a transaction running under it (all three: `OpenMut(...).Set(...)`), the spatial component (`WriteSpatial`) and the realm key. Writing `Versioned` components through `GetSpan` is rejected under strict mode (`CheckConfig.Enabled`, an `InvalidOperationException`) — use `OpenMut(...).Set(...)` for those, which still goes through the revision chain.
 - **Measured impact** (100K entities, 2-component archetype): per-entity cost 134 ns → ~2.7 ns (~50x), tick time ~10x, working set 19.2 MB → 2.5 MB (L3 → L2).
 - **Random access stays correct, not just fast**: MVCC visibility (`BornTSN`/`DiedTSN`), B+Tree/spatial indexes, and `EnabledBits` are all maintained per entity; `Open`/`OpenMut` need no code changes to benefit.
