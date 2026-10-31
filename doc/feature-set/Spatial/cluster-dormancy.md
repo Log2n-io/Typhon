@@ -80,7 +80,7 @@ schedule.QuerySystem("IdleDrift", ctx =>
 
 ## 🧪 Tests
 
-- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`/`SleepingClusterSkippedInDispatch`, deferred `WakeRequest_Transition`/`DuplicateWakeDeduplication`, `HeartbeatWake`, `SetDirty_WakesSleepingCluster` vs `WriteSpatial` not waking, cluster-removal count bookkeeping
+- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`/`SleepingClusterSkippedInDispatch`, deferred `WakeRequest_Transition`/`DuplicateWakeDeduplication`, `HeartbeatWake`, `SetDirty_WakesSleepingCluster`, `WriteSpatial_WakesASleepingCluster`, cluster-removal count bookkeeping
 
 ## 🔗 Related
 

@@ -62,18 +62,19 @@ arbitrary game code.
   while the sleeping count is zero, for every system, every tick.
 - **Filters both tier-filtered and unfiltered systems** — a `SimTier.All` system still skips sleeping
   clusters; dormancy is not a tier-only mechanism.
-- **Activity means a dirty write, not a spatial-only write** — a field written exclusively through the
-  zero-copy spatial-update path does not mark the cluster dirty, so it neither resets the sleep counter
-  nor wakes a sleeping cluster on its own.
-- **Two wake triggers only**: a dirty write and the heartbeat timer. Proximity-based wake and
-  tier-promotion wake are not implemented — a sleeping cluster promoted to `Tier0` stays asleep, excluded
-  from dispatch, until a write or heartbeat wakes it.
+- **Activity is any write — dirty-path or spatial-path** — `ClusterRef.WriteSpatial` raises no dirty
+  bit, but calls `NoteSpatialWrite`, which records the cluster so the fence resets its sleep counter and
+  enqueues a wake request when the cluster is `Sleeping`. A cluster moved only by `WriteSpatial` stays
+  awake and wakes when sleeping; it will not sleep while its entities move.
+- **Two wake triggers only**: a write (dirty or spatial) and the heartbeat timer. Proximity-based wake
+  and tier-promotion wake are not implemented — a sleeping cluster promoted to `Tier0` stays asleep,
+  excluded from dispatch, until a write or heartbeat wakes it.
 - **No public per-archetype configuration API yet** — see Usage above; `ClusterSleepState` is the only
   public surface today.
 
 ## 🧪 Tests
 
-- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`, `SleepingClusterSkippedInDispatch`, `WakeRequest_Transition`, `HeartbeatWake`, `NoOverhead_WhenNoSleeping`, `SleepCounterReset_OnWrite`
+- [DormancyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DormancyTests.cs) — `SleepAfterThreshold`, `SleepingClusterSkippedInDispatch`, `WakeRequest_Transition`, `HeartbeatWake`, `NoOverhead_WhenNoSleeping`, `SleepCounterReset_OnWrite`, `WriteSpatial_WakesASleepingCluster`
 
 ## 🔗 Related
 
