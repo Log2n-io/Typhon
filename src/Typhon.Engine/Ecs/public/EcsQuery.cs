@@ -421,8 +421,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Filter entities by a component field predicate. Evaluated per-entity during broad scan via <see cref="EntityAccessor.Open(EntityId)"/> +
-    /// <see cref="EntityRef.TryRead{T}(out T)"/>. Multiple Where calls chain as AND (each must pass).
+    /// Filter entities by a component field predicate. Evaluated per entity on what the broad scan collected, via <see cref="EntityAccessor.Open(EntityId)"/> +
+    /// <see cref="EntityRef.TryRead{T}(out T)"/>: the scan itself still visits every entity first. Multiple Where calls chain as AND (each must pass).
     /// </summary>
     /// <remarks>Targeted scan (index-first) is not yet available — always uses broad scan.</remarks>
     /// <remarks>

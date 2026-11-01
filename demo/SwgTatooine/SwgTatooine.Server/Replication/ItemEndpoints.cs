@@ -323,7 +323,7 @@ public static class ItemEndpoints
     public static ItemAuditResult Audit(DatabaseEngine dbe)
     {
         ArgumentNullException.ThrowIfNull(dbe);
-        using var tx = dbe.CreateQuickTransaction();
+        using var tx = dbe.CreateReadOnlyTransaction();
         return Audit(dbe, tx);
     }
 

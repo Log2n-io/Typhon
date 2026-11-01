@@ -79,7 +79,7 @@ internal sealed class HugeAuditChecks : ServedChecks
         Assert.That(outcome, Is.EqualTo("ok"));
     }
 
-    /// <summary>As the endpoint runs it: <c>CreateQuickTransaction</c>, an index walk of the whole ledger.</summary>
+    /// <summary>As the endpoint runs it: an index walk of the whole ledger.</summary>
     [Test]
     public void TheEconomyAudit_AsShipped()
     {
@@ -97,15 +97,15 @@ internal sealed class HugeAuditChecks : ServedChecks
         Measure(sim, "item audit, as shipped", () => ItemEndpoints.Audit(sim.Dbe).Entries);
     }
 
-    /// <summary>The same audit, through a read-only transaction: the one thing it would take to change the shipped code.</summary>
+    /// <summary>The same audit through a read-write transaction, which an engine walk must survive as well: this is what died of the slot-reference leak.</summary>
     [Test]
-    public void TheItemAudit_ThroughAReadOnlyTransaction()
+    public void TheItemAudit_ThroughAReadWriteTransaction()
     {
         using var sim = Start();
         LoadItemLedger(sim);
-        Measure(sim, "item audit, read-only transaction", () =>
+        Measure(sim, "item audit, read-write transaction", () =>
         {
-            using var tx = sim.Dbe.CreateReadOnlyTransaction();
+            using var tx = sim.Dbe.CreateQuickTransaction();
             return ItemEndpoints.Audit(sim.Dbe, tx).Entries;
         });
     }

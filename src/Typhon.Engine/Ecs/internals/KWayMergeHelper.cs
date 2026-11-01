@@ -160,8 +160,9 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _evaluators = evaluators,
             _compOffset = componentSlot >= 0 ? layout.ComponentOffset(componentSlot) : 0,
             _compSize = componentSlot >= 0 ? layout.ComponentSize(componentSlot) : 0,
-            _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(),
-            _indexAccessor = tree.Segment.CreateChunkAccessor(),
+            // EP-02: a merge reads its whole range, however large, and keeps no address past the call that read it.
+            _clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor(),
+            _indexAccessor = tree.Segment.CreateScanAccessor(),
             _hasAccessors = true,
             _orderedKeys = ArrayPool<long>.Shared.Rent(InitialPageCapacity),
             _locations = ArrayPool<int>.Shared.Rent(InitialPageCapacity),

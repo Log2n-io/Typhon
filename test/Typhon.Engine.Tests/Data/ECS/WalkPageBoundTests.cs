@@ -24,6 +24,71 @@ unsafe struct WbVersioned
     public fixed byte Payload[108];
 }
 
+[Component("Typhon.Test.WalkBound.Child", 1, StorageMode = StorageMode.Versioned)]
+struct WbChild
+{
+    [Index(AllowMultiple = true), ForeignKey(typeof(WbVersioned))]
+    public long ParentId;
+}
+
+[Archetype]
+class WbChildArch : Archetype<WbChildArch>
+{
+    public static readonly Comp<WbChild> Row = Register<WbChild>();
+}
+
+[Component("Typhon.Test.WalkBound.Plain", 1, StorageMode = StorageMode.SingleVersion)]
+unsafe struct WbPlain
+{
+    public int Value;
+    public fixed byte Payload[108];
+}
+
+[Archetype]
+class WbPlainArch : Archetype<WbPlainArch>
+{
+    public static readonly Comp<WbPlain> Row = Register<WbPlain>();
+}
+
+[Component("Typhon.Test.WalkBound.Multi", 1, StorageMode = StorageMode.Versioned)]
+unsafe struct WbMulti
+{
+    [Index(AllowMultiple = true)]
+    public int Group;
+
+    public fixed byte Payload[60];
+}
+
+[Archetype]
+class WbMultiArch : Archetype<WbMultiArch>
+{
+    public static readonly Comp<WbMulti> Row = Register<WbMulti>();
+}
+
+[Archetype]
+class WbMultiOtherArch : Archetype<WbMultiOtherArch>
+{
+    public static readonly Comp<WbMulti> Row = Register<WbMulti>();
+}
+
+[Component("Typhon.Test.WalkBound.Spatial", 1, StorageMode = StorageMode.SingleVersion)]
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+struct WbSpatial
+{
+    [Field]
+    [SpatialIndex]
+    public AABB3F Bounds;
+
+    [Field]
+    public long Seq;
+}
+
+[Archetype]
+class WbSpatialArch : Archetype<WbSpatialArch>
+{
+    public static readonly Comp<WbSpatial> Row = Register<WbSpatial>();
+}
+
 [Archetype]
 class WbSingleArch : Archetype<WbSingleArch>
 {
@@ -62,6 +127,9 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<WbSingle>();
         dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.RegisterComponentFromAccessor<WbPlain>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
         dbe.InitializeArchetypes();
         Spawn(dbe, storage, 0, Entities);
         var state = storage == Storage.Single
@@ -234,6 +302,9 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<WbSingle>();
         dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.RegisterComponentFromAccessor<WbPlain>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
         dbe.InitializeArchetypes();
         Spawn(dbe, Storage.Versioned, 0, Batch);
 
@@ -289,6 +360,270 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
 
         Assert.That(refreshes, Is.GreaterThanOrEqualTo(ids.Count / EntityAccessor.EpochRefreshInterval - 1), "the destroys ran under one epoch");
         Assert.That(tx.Commit(), Is.True);
+    }
+
+    public enum ClusterWalk
+    {
+        ReadOnlyTransaction,
+        ReadWriteTransaction,
+        PointInTimeLease,
+    }
+
+    /// <summary>
+    /// A cluster walk tagged every page and never moved its epoch: it died at one cache of rows, whichever way it was entered. Its window now holds what it
+    /// reads, as a query's scan does, so the bound is the same on a lease, which never refreshes.
+    /// </summary>
+    [TestCase(ClusterWalk.ReadOnlyTransaction)]
+    [TestCase(ClusterWalk.ReadWriteTransaction)]
+    [TestCase(ClusterWalk.PointInTimeLease)]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void AClusterWalkOverAWholeArchetype_HoldsABoundedSetOfPages(ClusterWalk how)
+    {
+        var dbe = Build(Storage.Single);
+        var rows = 0;
+        if (how == ClusterWalk.PointInTimeLease)
+        {
+            using var pta = PointInTimeAccessor.Create(dbe);
+            using var lease = pta.Enter(0);
+            using var clusters = lease.Accessor.GetClusterEnumerator<WbSingleArch>();
+            while (clusters.MoveNext())
+            {
+                rows += System.Numerics.BitOperations.PopCount(clusters.Current.OccupancyBits);
+            }
+
+            Assert.That(rows, Is.EqualTo(Entities));
+            Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the lease kept the pages it read epoch-held");
+            return;
+        }
+
+        using var tx = how == ClusterWalk.ReadOnlyTransaction ? dbe.CreateReadOnlyTransaction() : dbe.CreateQuickTransaction();
+        using (var clusters = tx.GetClusterEnumerator<WbSingleArch>())
+        {
+            while (clusters.MoveNext())
+            {
+                rows += System.Numerics.BitOperations.PopCount(clusters.Current.OccupancyBits);
+            }
+        }
+
+        Assert.That(rows, Is.EqualTo(Entities));
+        Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the walk kept the pages it read epoch-held for the transaction");
+    }
+
+    /// <summary>
+    /// A transaction's long cluster walk moves its epoch at its yield points (#1364): held, it keeps every page another thread tags meanwhile. A write through a
+    /// ClusterRef is recorded before the step that yields, so it reaches the page's write record whatever the epoch did.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [NonParallelizable] // LongWalkClusters, ScanYieldProbe and the refresh interval are process-wide
+    [VerifiesRule("EP-02")]
+    public void ALongClusterWalk_MovesItsEpoch_AndKeepsTheWritesItMade()
+    {
+        var dbe = Build(Storage.Single);
+        for (var first = 0; first < Entities; first += Batch)
+        {
+            using var spawn = dbe.CreateQuickTransaction();
+            for (var i = 0; i < Batch; i++)
+            {
+                var row = new WbPlain { Value = first + i };
+                spawn.Spawn<WbPlainArch>(WbPlainArch.Row.Set(in row));
+            }
+
+            spawn.Commit();
+        }
+
+        var longWalk = EntityAccessor.LongWalkClusters;
+        var interval = EntityAccessor.ScanEpochRefreshInterval;
+        var yields = 0;
+        EntityAccessor.LongWalkClusters = 0;
+        EntityAccessor.ScanEpochRefreshInterval = System.TimeSpan.Zero;
+        EntityAccessor.ScanYieldProbe = () => yields++;
+        try
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var pinned = dbe.EpochManager.CurrentThreadPinnedEpoch;
+            using (var clusters = tx.GetClusterEnumerator<WbPlainArch>())
+            {
+                while (clusters.MoveNext())
+                {
+                    var cluster = clusters.Current;
+                    var rows = cluster.GetSpan(WbPlainArch.Row);
+                    var bits = cluster.OccupancyBits;
+                    while (bits != 0)
+                    {
+                        var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        bits &= bits - 1;
+                        rows[slot].Value = -1 - rows[slot].Value;
+                    }
+
+                    clusters.MarkCurrentDirty();
+                }
+            }
+
+            Assert.That(yields, Is.GreaterThan(1), "premise: the walk reached its yield points");
+            Assert.That(dbe.EpochManager.CurrentThreadPinnedEpoch, Is.GreaterThan(pinned), "the walk ran under one epoch");
+            tx.Commit();
+        }
+        finally
+        {
+            EntityAccessor.LongWalkClusters = longWalk;
+            EntityAccessor.ScanEpochRefreshInterval = interval;
+            EntityAccessor.ScanYieldProbe = null;
+        }
+
+        dbe.ForceCheckpoint();
+        Assert.That(dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages left the cache, so what follows is read back");
+
+        using var read = dbe.CreateReadOnlyTransaction();
+        long sum = 0;
+        var seen = 0;
+        foreach (var e in read.Query<WbPlainArch>())
+        {
+            sum += e.Read(WbPlainArch.Row).Value;
+            seen++;
+        }
+
+        Assert.That(seen, Is.EqualTo(Entities));
+        Assert.That(sum, Is.EqualTo(-(long)Entities * (Entities + 1) / 2), "every write of the walk reached the page");
+    }
+
+    /// <summary>
+    /// An ordered query's merge read its streams through accessors that tagged every page, under live cursors no refresh can move: a whole archetype, or a
+    /// deep Skip, died before its first row.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void AnOrderedQueryOverAWholeArchetype_HoldsABoundedSetOfPages(bool deepSkip)
+    {
+        var dbe = Build(Storage.Single);
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var query = tx.Query<WbSingleArch>().WhereField<WbSingle>(x => x.Key >= 0).OrderByField<WbSingle, int>(x => x.Key);
+        var rows = deepSkip ? query.Skip(Entities - 50).Take(50).ExecuteOrdered() : query.ExecuteOrdered();
+
+        Assert.That(rows, Has.Count.EqualTo(deepSkip ? 50 : Entities));
+        Assert.That(tx.Open(rows[0]).Read(WbSingleArch.Row).Key, Is.EqualTo(deepSkip ? Entities - 50 : 0), "in key order, from the right row");
+        Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the merge kept the pages it read epoch-held for the transaction");
+    }
+
+    /// <summary>
+    /// An index on near-distinct keys has one value buffer per key, and each buffer's reader tagged the pages it read. Two archetypes holding the component
+    /// read their trees whole inside <c>EnumerateIndex</c>, with no walk to refresh for them: the call died before it returned.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void AnIndexOverTwoArchetypes_OfNearDistinctKeys_HoldsABoundedSetOfPages()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
+        dbe.InitializeArchetypes();
+        for (var first = 0; first < Entities; first += Batch)
+        {
+            using var spawn = dbe.CreateQuickTransaction();
+            for (var i = first; i < first + Batch; i++)
+            {
+                var row = new WbMulti { Group = i / 2 };   // two values per key: a buffer each
+                if ((i & 1) == 0)
+                {
+                    spawn.Spawn<WbMultiArch>(WbMultiArch.Row.Set(in row));
+                }
+                else
+                {
+                    spawn.Spawn<WbMultiOtherArch>(WbMultiOtherArch.Row.Set(in row));
+                }
+            }
+
+            spawn.Commit();
+        }
+
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var rows = 0;
+        using (var walk = tx.EnumerateIndex<WbMulti, int>(dbe.GetIndexRef<WbMulti, int>(x => x.Group), int.MinValue, int.MaxValue))
+        {
+            Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "reading the two trees kept their buffers epoch-held");
+            while (walk.MoveNext())
+            {
+                rows++;
+            }
+        }
+
+        Assert.That(rows, Is.EqualTo(Entities));
+    }
+
+    /// <summary>A spatial query over the whole world walks every cluster in a window that tagged each page: it died before its first row.</summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void ASpatialQueryOverTheWholeWorld_HoldsABoundedSetOfPages(bool count)
+    {
+        const float extent = 2_000f;
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSpatial>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new System.Numerics.Vector2(-extent, -extent), new System.Numerics.Vector2(extent, extent), cellSize: 100));
+        dbe.InitializeArchetypes();
+        var rand = new System.Random(17);
+        for (var first = 0; first < Entities; first += Batch)
+        {
+            using var spawn = dbe.CreateQuickTransaction();
+            for (var i = first; i < first + Batch; i++)
+            {
+                var x = (float)(rand.NextDouble() * 1.9 - 0.95) * extent;
+                var y = (float)(rand.NextDouble() * 1.9 - 0.95) * extent;
+                var row = new WbSpatial { Seq = i, Bounds = new AABB3F { MinX = x, MinY = y, MinZ = 0, MaxX = x + 1, MaxY = y + 1, MaxZ = 1 } };
+                spawn.Spawn<WbSpatialArch>(WbSpatialArch.Row.Set(in row));
+            }
+
+            spawn.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+        var clusterPages = dbe._archetypeStates[Archetype<WbSpatialArch>.Metadata.ArchetypeId].ClusterState.ClusterSegment.Length;
+        Assert.That(clusterPages, Is.GreaterThan(HeldPagesBound), "premise: the walk spans more pages than the bound");
+
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var query = tx.Query<WbSpatialArch>().WhereInAABB<WbSpatial>(-extent, -extent, -1, extent, extent, 2);
+        var rows = count ? query.Count() : query.Execute().Count;
+
+        Assert.That(rows, Is.EqualTo(Entities));
+        Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the query kept the clusters it read epoch-held for the transaction");
+    }
+
+    /// <summary>
+    /// A navigation walks every target's entity map, then looks each target's sources up. Both tagged what they read, and a whole archetype of targets
+    /// filled a 64 MiB cache before the first row.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void ANavigationOverAWholeArchetype_HoldsABoundedSetOfPages()
+    {
+        var dbe = Build(Storage.Versioned);
+        var parents = new List<EntityId>();
+        using (var read = dbe.CreateReadOnlyTransaction())
+        {
+            parents.AddRange(read.Query<WbVersionedArch>().Execute());
+        }
+
+        using (var write = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < parents.Count; i += 100)
+            {
+                var child = new WbChild { ParentId = (long)parents[i].RawValue };
+                write.Spawn<WbChildArch>(WbChildArch.Row.Set(in child));
+            }
+
+            write.Commit();
+        }
+
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var found = tx.Query<WbChildArch>().NavigateField<WbChild, WbVersioned>(c => c.ParentId).Where((c, p) => p.Key >= 0).Count();
+
+        Assert.That(found, Is.EqualTo(Entities / 100));
+        Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the navigation kept the pages it read epoch-held for the transaction");
     }
 
     /// <summary>

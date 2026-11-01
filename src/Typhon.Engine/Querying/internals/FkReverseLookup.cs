@@ -261,7 +261,7 @@ internal static unsafe class FkReverseLookup
         }
 
         var layout = clusterState.Layout;
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();   // EP-02: one per target, over a whole archetype of targets
 
         // A SingleVersion slot is re-checked against the target by ProcessClusterLocation; these are what it needs to do it.
         var fkInSlot = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[componentSlot].StorageMode == StorageMode.SingleVersion;

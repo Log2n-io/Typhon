@@ -77,7 +77,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             }
 
             using var scanGuard = EpochGuard.Enter(_sourceTable.DBE.EpochManager);
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateScanAccessor();   // EP-02: a whole map, however large
             var collector = new SourceCollector
             {
                 RoutingId = _sourceTable.DBE.RoutingIdOf(meta),
@@ -85,8 +85,14 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                 Tx = tx,
                 Map = engineState.EntityMap,
             };
-            engineState.EntityMap.ForEachEntry(ref accessor, ref collector);
-            accessor.Dispose();
+            try
+            {
+                engineState.EntityMap.ForEachEntry(ref accessor, ref collector, tx.BeginScanYield());
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
         }
     }
 
@@ -107,9 +113,19 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             var entityId = new EntityId(key, RoutingId);
             var sourcePK = (long)entityId.RawValue;
 
-            if (View.EvaluateFullPredicate(sourcePK, Tx))
+            // Point reads through the transaction's accessors, whose addresses only the epoch holds: a back-pressure wait inside them must not move it (EP-02).
+            var refreshable = PagedMMF.RefreshableWaitDepth;
+            PagedMMF.RefreshableWaitDepth = 0;
+            try
             {
-                View.AddEntityDirect(sourcePK);
+                if (View.EvaluateFullPredicate(sourcePK, Tx))
+                {
+                    View.AddEntityDirect(sourcePK);
+                }
+            }
+            finally
+            {
+                PagedMMF.RefreshableWaitDepth = refreshable;
             }
 
             return true;

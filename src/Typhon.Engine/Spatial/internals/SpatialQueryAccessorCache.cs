@@ -262,7 +262,7 @@ internal sealed class SpatialQueryAccessorCache
 
     private static Entry Fill(Entry entry, ChunkBasedSegment<PersistentStore> segment)
     {
-        entry.Accessor = segment.CreateChunkAccessor();
+        entry.Accessor = segment.CreateScanAccessor();   // EP-02: a wide query walks a world's clusters; the window's pin is all its one-address rule ever relied on
         entry.Segment = segment;
         return entry;
     }

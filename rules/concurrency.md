@@ -333,6 +333,14 @@ lock ordering and deadlock prevention are still to come.
             it the moment it leaves the window. It marks the page recently used, as the epoch path does, so the change is only in what holds the
             page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
             positioning faults: a window's pins are slot references, and nothing else releases them
+  invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator, on a transaction or a lease alike; a ClusterRef is valid for
+            its step, EP-03, and MoveNext records a page handed out before it moves), an ordered query's merge streams (ArchetypeSortedStream, tree and
+            clusters), a spatial query's cluster window (SpatialQueryAccessorCache), a navigation's entity-map walk and its FK reverse lookup, and an
+            AllowMultiple key's value buffer (GetBufferReadOnlyAccessor without an accessor, which leaves an empty chunk linked: it writes nothing)
+  invariant a transaction's cluster walk of LongWalkClusters or more yields at every 64th cluster, and its back-pressure wait moves the epoch; a PTA worker's
+            does not (EntityAccessor.NoteEntityOpen): a lease holds a bounded set of its own pages, and what other threads tag for as long as it lasts
+  note an ordered query's merge and a spatial query have no yield point: each holds a bounded set of its own pages and its epoch for the length of the call,
+       so what other threads tag meanwhile stays protected until it returns
   invariant AcquirePageForRead pins by SlotRefCount, taken under the slot's StateSyncRoot after re-checking that the slot still holds the
             page and is ready (PS-15). TryAcquire withdraws "ready", re-checks SlotRefCount and reclaims under the same lock, so a pin never
             lands on a slot being reclaimed. It never tags AccessEpoch, and bumps the clock counter only for a query (warm): a structural scan
@@ -427,7 +435,8 @@ lock ordering and deadlock prevention are still to come.
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
-         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
+         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, ClusterEnumerator, ArchetypeSortedStream, SpatialQueryAccessorCache,
+         NavigationView.PopulateFromEntityMaps, FkReverseLookup, EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
          Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, Transaction.Dispose, UowRegistry.TryClaimFreeSlot,
          PagedMMF.RestartForLockWithin, PagedMMF.OpenRestartAllowed, Transaction.EcsVersionedCopyOnWrite, RevisionEnumerator,
          ComponentRevisionManager.AddCompRev,
@@ -462,9 +471,7 @@ lock ordering and deadlock prevention are still to come.
         outside recovery keeps its pages resident by its ChangeSet's marks until its next release point: a transaction's epoch refresh (every
         128 operations), PREPARE's component pass (every 1 024 entries), the publish, a failed commit's rollback and the frees of the reset after it,
         between entries under pressure (#831). Each also gives back what the windows deferred: kept, a rollback of 4M updates held the whole cache
-        by slot reference, and a free left under one pin timed out of Dispose, which replaced the commit's own refusal. The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted, nor are three query reads that still
-        epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
-        `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
+        by slot reference, and a free left under one pin timed out of Dispose, which replaced the commit's own refusal. The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted
   verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and
             the chain walk complete inside
             one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
