@@ -333,8 +333,9 @@ lock ordering and deadlock prevention are still to come.
             it the moment it leaves the window. It marks the page recently used, as the epoch path does, so the change is only in what holds the
             page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
             positioning faults: a window's pins are slot references, and nothing else releases them
-  invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator, on a transaction or a lease alike; a ClusterRef is valid for
-            its step, EP-03, and MoveNext records a page handed out before it moves), an ordered query's merge streams (ArchetypeSortedStream, tree and
+  invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator: a transaction's, and any of LongWalkClusters or more; a
+            shorter walk on a lease is bounded by the lease; a ClusterRef is valid for its step, EP-03, and MoveNext records a page handed out before it
+            moves), an ordered query's merge streams (ArchetypeSortedStream, tree and
             clusters), a spatial query's cluster window (SpatialQueryAccessorCache), a navigation's entity-map walk and its FK reverse lookup, and an
             AllowMultiple key's value buffer (GetBufferReadOnlyAccessor without an accessor; an empty chunk it unlinks, it writes under the page's latch)
   invariant a transaction's cluster walk of LongWalkClusters or more yields at every 64th cluster, and its back-pressure wait moves the epoch; a PTA worker's
@@ -360,7 +361,8 @@ lock ordering and deadlock prevention are still to come.
   invariant a B+Tree range cursor reads no node across a move of its thread's epoch (BTree.RangeEnumerator.MoveNext, EpochManager.ThreadRefreshCount):
             a node stays unreclaimed for the pin it was read under, not for the cursor that stands on it, and a recycled node restarts at version 4, so
             at the version the cursor remembers another node validates and the scan reads its entries, silently (a walk lost every key from 4 000 up
-            in BTreeRangeScanRestartTests). A cursor whose thread refreshed finds its place again from its last key, one descent per refresh. So an
+            in BTreeRangeScanRestartTests). A cursor whose thread refreshed, in a tree that retired a leaf since it last looked (BTree._leafRetirements, counted
+            before the retire stamp is read), finds its place again from its last key. So an
             index enumerator's own refresh (Transaction.IndexEntityEnumerator, the walk has no other point to make it at) is safe under its live
             cursor, and under any other this thread holds; the other per-operation refreshes still wait for no cursor to be live
   invariant a back-pressure wait inside such a walk moves the waiting thread's epoch, with its warm accessors' (#1230): PagedMMF.RefreshableWaitDepth,

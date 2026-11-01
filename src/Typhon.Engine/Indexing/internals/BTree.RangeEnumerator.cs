@@ -62,6 +62,9 @@ internal abstract partial class BTree<TKey, TStore>
         /// </summary>
         private int _refreshesSeen;
 
+        /// <summary>The tree's leaf retirements when the cursor last positioned itself: none since, and its leaf is still the tree's whatever the epoch did.</summary>
+        private int _retirementsSeen;
+
         /// <summary>True once the range is finished; further calls return false without touching the tree.</summary>
         private bool _finished;
 
@@ -87,6 +90,7 @@ internal abstract partial class BTree<TKey, TStore>
             _disposed = false;
             _countedLive = false;
             _refreshesSeen = EpochManager.ThreadRefreshCount;
+            _retirementsSeen = Volatile.Read(ref tree._leafRetirements);
 
             try
             {
@@ -126,6 +130,7 @@ internal abstract partial class BTree<TKey, TStore>
             _disposed = false;
             _countedLive = false;
             _refreshesSeen = EpochManager.ThreadRefreshCount;
+            _retirementsSeen = Volatile.Read(ref tree._leafRetirements);
             _currentIndex = -1;
             _nodeItemCount = 0;
             _leafVersion = 0;
@@ -316,7 +321,7 @@ internal abstract partial class BTree<TKey, TStore>
         /// A cursor standing on a leaf across a move of its thread's epoch stands on nothing. The leaf is protected from reclaim by the pin the cursor read it
         /// under, not by the cursor: moved, a merge can retire the leaf and a reclaim free it, and a new node restarts its version where a new node does, so a
         /// node at the version the cursor remembers validates and the scan reads another node's entries, silently. So the place is found again from the last
-        /// key, which costs one descent per refresh: 128 rows, or 8 under pressure.
+        /// key, one descent, when the epoch moved and the tree has retired a leaf since the cursor last looked: a tree that lost none has lost nothing.
         /// </para>
         /// </remarks>
         public bool MoveNext()
@@ -478,6 +483,13 @@ internal abstract partial class BTree<TKey, TStore>
         private bool ResumeAfterRefresh()
         {
             _refreshesSeen = EpochManager.ThreadRefreshCount;
+            var retirements = Volatile.Read(ref _tree._leafRetirements);
+            if (retirements == _retirementsSeen)
+            {
+                return true;
+            }
+
+            _retirementsSeen = retirements;
             return _finished || !_currentNode.IsValid || Reposition();
         }
 

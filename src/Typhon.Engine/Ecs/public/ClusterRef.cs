@@ -1737,11 +1737,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
-        if (segment != null)
-        {
-            result._accessor = segment.CreateScanAccessor();   // EP-02; a ClusterRef is valid for its step (EP-03)
-            result._hasPersistentAccessor = true;
-        }
         if (transientSegment != null)
         {
             result._transientAccessor = transientSegment.CreateChunkAccessor();
@@ -1753,7 +1748,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = -1;
         result._endIndex = count;
-        result.ArmLongWalk(owner, count);
+        result.OpenWindow(segment, owner, count);
         return result;
     }
 
@@ -1770,11 +1765,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
-        if (segment != null)
-        {
-            result._accessor = segment.CreateScanAccessor();   // EP-02; a ClusterRef is valid for its step (EP-03)
-            result._hasPersistentAccessor = true;
-        }
         if (transientSegment != null)
         {
             result._transientAccessor = transientSegment.CreateChunkAccessor();
@@ -1786,7 +1776,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = startIndex - 1;
         result._endIndex = Math.Min(endIndex, count);
-        result.ArmLongWalk(owner, result._endIndex - startIndex);
+        result.OpenWindow(segment, owner, result._endIndex - startIndex);
         return result;
     }
 
@@ -1804,11 +1794,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
-        if (segment != null)
-        {
-            result._accessor = segment.CreateScanAccessor();   // EP-02; a ClusterRef is valid for its step (EP-03)
-            result._hasPersistentAccessor = true;
-        }
         if (transientSegment != null)
         {
             result._transientAccessor = transientSegment.CreateChunkAccessor();
@@ -1817,13 +1802,25 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = clusterIds;
         result._index = startIndex - 1;
         result._endIndex = endIndex;
-        result.ArmLongWalk(owner, endIndex - startIndex);
+        result.OpenWindow(segment, owner, endIndex - startIndex);
         return result;
     }
 
-    private void ArmLongWalk(EntityAccessor owner, int clusters)
+    /// <summary>
+    /// A transaction's walk and any walk of <see cref="EntityAccessor.LongWalkClusters"/> or more read through a scan accessor (EP-02). A shorter one on a lease
+    /// does not: the lease bounds what it tags, ends its pin, and this is the runtime's hottest read, where a scan accessor's page miss costs 20 % of the walk.
+    /// </summary>
+    private void OpenWindow(ChunkBasedSegment<PersistentStore> segment, EntityAccessor owner, int clusters)
     {
-        if (owner is Transaction && clusters >= EntityAccessor.LongWalkClusters)
+        var isTransaction = owner is Transaction;
+        var isLong = clusters >= EntityAccessor.LongWalkClusters;
+        if (segment != null)
+        {
+            _accessor = isTransaction || isLong ? segment.CreateScanAccessor() : segment.CreateChunkAccessor();
+            _hasPersistentAccessor = true;
+        }
+
+        if (isTransaction && isLong)
         {
             _longWalk = true;
             _yieldedAt = Stopwatch.GetTimestamp();

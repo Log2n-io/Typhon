@@ -378,6 +378,7 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     [TestCase(ClusterWalk.ReadWriteTransaction)]
     [TestCase(ClusterWalk.PointInTimeLease)]
     [CancelAfter(60_000)]
+    [NonParallelizable] // LongWalkClusters is process-wide
     [VerifiesRule("EP-02")]
     public void AClusterWalkOverAWholeArchetype_HoldsABoundedSetOfPages(ClusterWalk how)
     {
@@ -385,12 +386,21 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         var rows = 0;
         if (how == ClusterWalk.PointInTimeLease)
         {
-            using var pta = PointInTimeAccessor.Create(dbe);
-            using var lease = pta.Enter(0);
-            using var clusters = lease.Accessor.GetClusterEnumerator<WbSingleArch>();
-            while (clusters.MoveNext())
+            var longWalk = EntityAccessor.LongWalkClusters;
+            EntityAccessor.LongWalkClusters = 0;   // this archetype's walk is short of the threshold, under which a lease's own end bounds it
+            try
             {
-                rows += System.Numerics.BitOperations.PopCount(clusters.Current.OccupancyBits);
+                using var pta = PointInTimeAccessor.Create(dbe);
+                using var lease = pta.Enter(0);
+                using var clusters = lease.Accessor.GetClusterEnumerator<WbSingleArch>();
+                while (clusters.MoveNext())
+                {
+                    rows += System.Numerics.BitOperations.PopCount(clusters.Current.OccupancyBits);
+                }
+            }
+            finally
+            {
+                EntityAccessor.LongWalkClusters = longWalk;
             }
 
             Assert.That(rows, Is.EqualTo(Entities));

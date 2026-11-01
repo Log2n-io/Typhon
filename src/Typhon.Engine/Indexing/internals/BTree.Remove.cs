@@ -772,6 +772,12 @@ internal abstract partial class BTree<TKey, TStore>
         var merged = node.RemoveLeaf(ref args, ref relatives, ref accessor);
 
         // Phase 2.5: Mark obsolete merged leaf + unlock leaf neighbors + leaf (version bumped by WriteUnlock)
+        if (merged)
+        {
+            // Before the stamp: a cursor that refreshed and saw no retirement then holds a pin at or below it, and the leaf stays unreclaimed for it.
+            Interlocked.Increment(ref _leafRetirements);
+        }
+
         var retireEpoch = _segment.Store.EpochManager.GlobalEpoch;
         if (merged)
         {
