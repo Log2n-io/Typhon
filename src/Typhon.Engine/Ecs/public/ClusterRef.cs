@@ -1727,7 +1727,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     // costs every other worker, and its pin lasts one lease (EntityAccessor.NoteEntityOpen).
     private const int ClusterYieldInterval = 64;
     private bool _longWalk;
-    private Action _scanYield;
+    private long _yieldedAt;
 
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment = null, EntityAccessor owner = null)
@@ -1739,7 +1739,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         };
         if (segment != null)
         {
-            result._accessor = segment.CreateScanAccessor();   // EP-02: a walk of any length; a ClusterRef is valid for its step (EP-03)
+            result._accessor = segment.CreateScanAccessor();   // EP-02; a ClusterRef is valid for its step (EP-03)
             result._hasPersistentAccessor = true;
         }
         if (transientSegment != null)
@@ -1753,7 +1753,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = -1;
         result._endIndex = count;
-        result._longWalk = IsLongWalk(owner, count);
+        result.ArmLongWalk(owner, count);
         return result;
     }
 
@@ -1772,7 +1772,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         };
         if (segment != null)
         {
-            result._accessor = segment.CreateScanAccessor();   // EP-02: a walk of any length; a ClusterRef is valid for its step (EP-03)
+            result._accessor = segment.CreateScanAccessor();   // EP-02; a ClusterRef is valid for its step (EP-03)
             result._hasPersistentAccessor = true;
         }
         if (transientSegment != null)
@@ -1786,7 +1786,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = startIndex - 1;
         result._endIndex = Math.Min(endIndex, count);
-        result._longWalk = IsLongWalk(owner, result._endIndex - startIndex);
+        result.ArmLongWalk(owner, result._endIndex - startIndex);
         return result;
     }
 
@@ -1806,7 +1806,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         };
         if (segment != null)
         {
-            result._accessor = segment.CreateScanAccessor();   // EP-02: a walk of any length; a ClusterRef is valid for its step (EP-03)
+            result._accessor = segment.CreateScanAccessor();   // EP-02; a ClusterRef is valid for its step (EP-03)
             result._hasPersistentAccessor = true;
         }
         if (transientSegment != null)
@@ -1817,11 +1817,18 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = clusterIds;
         result._index = startIndex - 1;
         result._endIndex = endIndex;
-        result._longWalk = IsLongWalk(owner, endIndex - startIndex);
+        result.ArmLongWalk(owner, endIndex - startIndex);
         return result;
     }
 
-    private static bool IsLongWalk(EntityAccessor owner, int clusters) => owner is Transaction && clusters >= EntityAccessor.LongWalkClusters;
+    private void ArmLongWalk(EntityAccessor owner, int clusters)
+    {
+        if (owner is Transaction && clusters >= EntityAccessor.LongWalkClusters)
+        {
+            _longWalk = true;
+            _yieldedAt = Stopwatch.GetTimestamp();
+        }
+    }
 
     /// <summary>An enumerator over a (list, count) pair its caller read once, under the list's own protocol: a realm's cluster list (Realms).</summary>
     internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeMetadata meta, ArchetypeClusterState state, int[] clusterIds, int count,
@@ -1891,7 +1898,9 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         while (++_index < _endIndex)
         {
             var chunkId = _clusterIds[_index];
-            var basePtr = _longWalk ? ClusterOfLongWalk(chunkId) : _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
+            var basePtr = _longWalk ? ClusterOfLongWalk(chunkId)
+                : _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId)
+                : _transientAccessor.GetChunkAddress(chunkId);
             // CLUSTERWALK-04. Per cluster, not once per walk: a destroy made mid-walk hides its entity from every later cluster.
             var raw = _ownDestroys.ReadOccupancy(chunkId, basePtr, _state, out var pendingDeaths);
             var occupancy = _ownDestroys.Apply(chunkId, raw, basePtr, _state, pendingDeaths);
@@ -1914,8 +1923,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     {
         if ((_index & (ClusterYieldInterval - 1)) == ClusterYieldInterval - 1)
         {
-            _scanYield ??= _owner.BeginScanYield();
-            _scanYield();
+            _owner.YieldDuringWalk(ref _yieldedAt);
         }
 
         if (!_hasPersistentAccessor)

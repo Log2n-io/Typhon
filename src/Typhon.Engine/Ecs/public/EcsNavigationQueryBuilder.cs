@@ -153,6 +153,8 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
 
         public bool Process(long sourcePK, ArchetypeMetadata meta)
         {
+            Tx.NoteEntityOpen();   // EP-03: a target's sources are unbounded, and between two the lookup holds no address
+
             // Mask is catalog-space; `meta` is already the owning archetype, so no routing-id translation is needed here.
             if (!Query.MaskTestPublic(meta.ArchetypeId))
             {

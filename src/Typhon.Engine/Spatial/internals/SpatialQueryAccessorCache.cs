@@ -6,21 +6,21 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Per-thread warm <see cref="ChunkAccessor{TStore}"/>s for the cluster spatial query: one entry per cluster segment in use, kept across queries.
+/// Per-thread warm scan <see cref="ChunkAccessor{TStore}"/>s for the cluster spatial query: one entry per cluster segment in use, kept across queries.
 /// </summary>
 /// <remarks>
 /// <para><b>Why.</b> A query that builds its own accessor starts with an empty 32-slot page window, so every page it touches takes the slow path —
-/// <c>LoadAndGet</c> → <c>RequestPageEpoch</c> (an <c>AccessEpoch</c> compare-and-swap) plus an interlocked <c>SlotRefCount</c> increment, undone by an
-/// interlocked decrement in <c>Dispose</c> — on page records every worker shares. Measured on the SWG demo at x16: 5.3 page loads per query, about 100 ns
+/// <c>LoadAndGet</c> → <c>AcquirePageForRead</c>, a pin taken under the slot's lock, undone by an interlocked decrement in <c>Dispose</c> — on page records
+/// every worker shares. Measured on the SWG demo at x16: 5.3 page loads per query, about 100 ns
 /// each. A worker's consecutive queries are spatially close, so a window kept across them is served from the MRU or SIMD path.</para>
 /// <para><b>Why an entry outlives the epoch it was filled in.</b> A slot pins its page with <c>SlotRefCount</c>, and a page is evicted only at
-/// <c>SlotRefCount == 0</c> (overview/03-storage.md, eviction predicate), so a slot's address stays valid whatever the epoch. The epoch tag protects only
-/// pages nobody pins. The B+Tree's warm accessor drops its window on an epoch change; this cache must not, because the global epoch advances on every
-/// outermost scope exit and a game typically opens one scope per actor.</para>
+/// <c>SlotRefCount == 0</c> (overview/03-storage.md, eviction predicate), so a slot's address stays valid whatever the epoch. The B+Tree's warm accessor drops
+/// its window on an epoch change; this cache must not, because the global epoch advances on every outermost scope exit and a game typically opens one scope per
+/// actor.</para>
 /// <para><b>What an address from a warm window is good for: until the next <c>GetChunkAddress</c> on that window.</b> A slot evicted from the window drops
-/// its pin at once (the standalone path), and a page an earlier query loaded carries an old <c>AccessEpoch</c>, so after that neither a pin nor the caller's
-/// epoch protects it. <c>ChunkAccessor</c>'s "valid for the enclosing EpochGuard" does not hold for these accessors. The enumerator never keeps an address
-/// past its next cluster open.</para>
+/// its pin at once, and a scan accessor tags nothing with the epoch (EP-02), so after that nothing protects the page. The enumerator never keeps an
+/// address past
+/// its next cluster open.</para>
 /// <para><b>Nesting and copies.</b> A query that finds its segment's entry rented takes another entry, so two live queries never share a window. A return must
 /// carry the token its rent stamped, and bumps it (SQ-05's pattern): <c>GetEnumerator()</c> copies the enumerator, and neither a stale copy's return nor its
 /// continued use may reach a window that has been handed back — the enumerator checks the token before each use.</para>
@@ -262,7 +262,7 @@ internal sealed class SpatialQueryAccessorCache
 
     private static Entry Fill(Entry entry, ChunkBasedSegment<PersistentStore> segment)
     {
-        entry.Accessor = segment.CreateScanAccessor();   // EP-02: a wide query walks a world's clusters; the window's pin is all its one-address rule ever relied on
+        entry.Accessor = segment.CreateScanAccessor();   // EP-02: a wide query walks a world's clusters, and one address at a time is all it keeps
         entry.Segment = segment;
         return entry;
     }

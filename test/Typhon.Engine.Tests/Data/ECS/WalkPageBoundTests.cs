@@ -250,7 +250,8 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         }
 
         Assert.That(rows, Is.EqualTo(Entities));
-        Assert.That(refreshes, Is.GreaterThanOrEqualTo(Entities / EntityAccessor.EpochRefreshInterval - 1), $"premise: the walk refreshed (pressure {pressureBefore})");
+        Assert.That(refreshes, Is.GreaterThanOrEqualTo(Entities / EntityAccessor.EpochRefreshInterval - 1),
+            $"premise: the walk refreshed (pressure {pressureBefore})");
     }
 
     /// <summary>
@@ -411,7 +412,8 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     }
 
     /// <summary>
-    /// A transaction's long cluster walk moves its epoch at its yield points (#1364): held, it keeps every page another thread tags meanwhile. A write through a
+    /// A transaction's long cluster walk moves its epoch at its yield points (#1364): held, it keeps every page another thread tags meanwhile. A write
+    /// through a
     /// ClusterRef is recorded before the step that yields, so it reaches the page's write record whatever the epoch did.
     /// </summary>
     [Test]
@@ -563,7 +565,8 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         const float extent = 2_000f;
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<WbSpatial>();
-        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new System.Numerics.Vector2(-extent, -extent), new System.Numerics.Vector2(extent, extent), cellSize: 100));
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new System.Numerics.Vector2(-extent, -extent), new System.Numerics.Vector2(extent, extent),
+            cellSize: 100));
         dbe.InitializeArchetypes();
         var rand = new System.Random(17);
         for (var first = 0; first < Entities; first += Batch)
@@ -590,6 +593,83 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
 
         Assert.That(rows, Is.EqualTo(Entities));
         Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the query kept the clusters it read epoch-held for the transaction");
+    }
+
+    /// <summary>
+    /// A cluster walk runs its caller's code between steps, and that code can run scans, each of which restarts the transaction's yield clock. On the
+    /// transaction's clock the walk then never saw a millisecond pass, and never moved its epoch.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [NonParallelizable] // LongWalkClusters is process-wide
+    [VerifiesRule("EP-02")]
+    public void ALongClusterWalk_KeepsItsOwnYieldClock()
+    {
+        var dbe = Build(Storage.Single);
+        var longWalk = EntityAccessor.LongWalkClusters;
+        EntityAccessor.LongWalkClusters = 0;
+        try
+        {
+            using var tx = dbe.CreateReadOnlyTransaction();
+            var pinned = dbe.EpochManager.CurrentThreadPinnedEpoch;
+            using var clusters = tx.GetClusterEnumerator<WbSingleArch>();
+            while (clusters.MoveNext())
+            {
+                var until = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 20_000;
+                while (System.Diagnostics.Stopwatch.GetTimestamp() < until)
+                {
+                }
+
+                tx.BeginScanYield();   // what a query in the loop's body does
+            }
+
+            Assert.That(dbe.EpochManager.CurrentThreadPinnedEpoch, Is.GreaterThan(pinned), "the walk ran under one epoch");
+        }
+        finally
+        {
+            EntityAccessor.LongWalkClusters = longWalk;
+        }
+    }
+
+    /// <summary>
+    /// A target's sources are unbounded. The lookup kept its cursor open across them, so no read an action made could refresh, and each record it checked was
+    /// tagged: one target with more sources than the cache holds pages filled it.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void ANavigationToOneTargetWithManySources_HoldsABoundedSetOfPages()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSingle>();
+        dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.InitializeArchetypes();
+        EntityId parent;
+        using (var write = dbe.CreateQuickTransaction())
+        {
+            var row = new WbVersioned { Key = 1 };
+            parent = write.Spawn<WbVersionedArch>(WbVersionedArch.Row.Set(in row));
+            write.Commit();
+        }
+
+        for (var first = 0; first < Entities; first += Batch)
+        {
+            using var write = dbe.CreateQuickTransaction();
+            for (var i = 0; i < Batch; i++)
+            {
+                var child = new WbChild { ParentId = (long)parent.RawValue };
+                write.Spawn<WbChildArch>(WbChildArch.Row.Set(in child));
+            }
+
+            write.Commit();
+        }
+
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var found = tx.Query<WbChildArch>().NavigateField<WbChild, WbVersioned>(c => c.ParentId).Where((c, p) => c.ParentId != 0 && p.Key == 1).Count();
+
+        Assert.That(found, Is.EqualTo(Entities));
+        Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the lookup kept the records it read epoch-held for the transaction");
     }
 
     /// <summary>
@@ -627,8 +707,10 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     }
 
     /// <summary>
-    /// A commit of more destroys than the cache holds pages is refused in PREPARE, under marks that fill the cache, and all it undoes and ends needs pages too: the
-    /// undo ran out of slots with the whole cache under its own marks, out of Dispose, which replaced the refusal with a timeout. A commit that fits ends cleanly.
+    /// A commit of more destroys than the cache holds pages is refused in PREPARE, under marks that fill the cache, and all it undoes and ends needs pages
+    /// too: the
+    /// undo ran out of slots with the whole cache under its own marks, out of Dispose, which replaced the refusal with a timeout. A commit that fits ends
+    /// cleanly.
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
@@ -698,7 +780,8 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         }
         else
         {
-            Assert.Throws<TransactionExceedsPageCacheException>(() => tx.Commit(), "premise: the commit does not fit, and its own refusal is what the caller sees");
+            Assert.Throws<TransactionExceedsPageCacheException>(() => tx.Commit(),
+                "premise: the commit does not fit, and its own refusal is what the caller sees");
         }
 
         Assert.DoesNotThrow(tx.Dispose, "the rollback reached the end (the using disposes it again, a no-op)");

@@ -6,7 +6,8 @@ namespace Typhon.Engine;
 /// <summary>
 /// Page cache allocation timed out: no slot became evictable within the back-pressure timeout. The counts say what held them — pages owed a write (the
 /// checkpoint behind the writers), pages under dirty marks (write sets still in flight), pages open enumerators hold in their windows, pages only an epoch
-/// pin keeps — and the message names the dominant one. Transient: it clears once that holder lets go, but it also means the work exceeded what the cache and the disk could absorb in time.
+/// pin keeps — and the message names the dominant one. Transient: it clears once that holder lets go, but it also means the work exceeded what the cache
+/// and the disk could absorb in time.
 /// </summary>
 [PublicAPI]
 public class PageCacheBackpressureTimeoutException : TyphonTimeoutException

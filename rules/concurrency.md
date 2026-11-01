@@ -336,11 +336,12 @@ lock ordering and deadlock prevention are still to come.
   invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator, on a transaction or a lease alike; a ClusterRef is valid for
             its step, EP-03, and MoveNext records a page handed out before it moves), an ordered query's merge streams (ArchetypeSortedStream, tree and
             clusters), a spatial query's cluster window (SpatialQueryAccessorCache), a navigation's entity-map walk and its FK reverse lookup, and an
-            AllowMultiple key's value buffer (GetBufferReadOnlyAccessor without an accessor, which leaves an empty chunk linked: it writes nothing)
+            AllowMultiple key's value buffer (GetBufferReadOnlyAccessor without an accessor; an empty chunk it unlinks, it writes under the page's latch)
   invariant a transaction's cluster walk of LongWalkClusters or more yields at every 64th cluster, and its back-pressure wait moves the epoch; a PTA worker's
             does not (EntityAccessor.NoteEntityOpen): a lease holds a bounded set of its own pages, and what other threads tag for as long as it lasts
   note an ordered query's merge and a spatial query have no yield point: each holds a bounded set of its own pages and its epoch for the length of the call,
-       so what other threads tag meanwhile stays protected until it returns
+       so what other threads tag meanwhile stays protected until it returns. A merge's own opens can still refresh it: its parked leaf is then found again
+       (LeafPageCursorState.RefreshesSeen), as a range cursor's is
   invariant AcquirePageForRead pins by SlotRefCount, taken under the slot's StateSyncRoot after re-checking that the slot still holds the
             page and is ready (PS-15). TryAcquire withdraws "ready", re-checks SlotRefCount and reclaims under the same lock, so a pin never
             lands on a slot being reclaimed. It never tags AccessEpoch, and bumps the clock counter only for a query (warm): a structural scan
@@ -427,15 +428,16 @@ lock ordering and deadlock prevention are still to come.
             or more epochs behind, and the engine stopped (CommitPublishIncompleteException) in two of six storms; refreshed and restarted, in
             none of six. A write past its first latch still waits with its pin (about 17 % of the publish's rounds, measured)
   invariant the rollback of a commit that failed before its append moves its epoch between its entries while the cache is under pressure, as the
-            publish does (Transaction.RefreshBetweenCommitSteps): the spawns it un-places (UnplaceSpawns), the revisions it voids (RollbackComponent)
-            and the spawned chunks the dispose frees (CleanupEcsState). An entry keeps nothing it read for the next. Held for the whole rollback, the
+            publish does (Transaction.RefreshBetweenCommitSteps): the spawns it un-places (UnplaceSpawns), the revisions it voids (RollbackComponent),
+            the pending deaths it clears (UnmarkDestroysPending) and the spawned chunks and copy-on-write chunks the dispose frees (CleanupEcsState); and
+            a unit of work gives its marks back before its registry write, which needs a page (UnitOfWork.Dispose). An entry keeps nothing it read for the next. Held for the whole rollback, the
             failed commit's pin kept the cache its commit had filled, so the rollback met the same wall and so did the dispose's retry (#831). The
             placement before the append does NOT move its epoch, on purpose: its pin makes an oversized commit meet the wall in PREPARE, where it is
             refused (PS-22); moved on, the commit reached its publish, which keeps every mark it takes, and stopped the engine (AP-03)
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
-         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, ClusterEnumerator, ArchetypeSortedStream, SpatialQueryAccessorCache,
+         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, LeafPageCursorState, Transaction.UnmarkDestroysPending, UnitOfWork.Dispose, ClusterEnumerator, ArchetypeSortedStream, SpatialQueryAccessorCache,
          NavigationView.PopulateFromEntityMaps, FkReverseLookup, EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
          Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, Transaction.Dispose, UowRegistry.TryClaimFreeSlot,
          PagedMMF.RestartForLockWithin, PagedMMF.OpenRestartAllowed, Transaction.EcsVersionedCopyOnWrite, RevisionEnumerator,

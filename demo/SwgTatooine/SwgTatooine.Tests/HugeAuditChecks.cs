@@ -7,7 +7,8 @@ using Typhon.Engine;
 namespace SwgTatooine.Tests;
 
 /// <summary>
-/// The real audits, unchanged, against ledgers far larger than the page cache. The dashboard keeps them off (<c>SWG_DASH_CONSISTENCY</c>) because of what they do
+/// The real audits, unchanged, against ledgers far larger than the page cache. The dashboard keeps them off (<c>SWG_DASH_CONSISTENCY</c>) because of what
+/// they do
 /// to a grown server; these say what that is. The rows are a clean ledger's shape, not a valid one: the audits' verdicts do not matter here, only their walks.
 /// </summary>
 [Category("Manual")]
@@ -52,7 +53,8 @@ internal sealed class HugeAuditChecks : ServedChecks
             using var s = sim.Dbe.BeginBulkLoad(new BulkLoadOptions { CheckpointTimeout = TimeSpan.FromMinutes(30) });
             for (var i = first; i < Math.Min(first + SessionRows, Rows); i++)
             {
-                var row = new ItemLedgerEntry { Seq = i + 1, WorldTick = i, From = 1000 + i % 2, To = 1001 - i % 2, FromStack = 2000 + i % 2, ToStack = 2001 - i % 2, Count = 1 };
+                var row = new ItemLedgerEntry { Seq = i + 1, WorldTick = i, From = 1000 + i % 2, To = 1001 - i % 2, FromStack = 2000 + i % 2,
+                    ToStack = 2001 - i % 2, Count = 1 };
                 s.Spawn<ItemLedgerArch>(ItemLedgerArch.Entry.Set(in row));
             }
 
@@ -97,7 +99,8 @@ internal sealed class HugeAuditChecks : ServedChecks
         Measure(sim, "item audit, as shipped", () => ItemEndpoints.Audit(sim.Dbe).Entries);
     }
 
-    /// <summary>The same audit through a read-write transaction, which an engine walk must survive as well: this is what died of the slot-reference leak.</summary>
+    /// <summary>The same audit through a read-write transaction, which an engine walk must survive as well: this is what died of the slot-reference
+    /// leak.</summary>
     [Test]
     public void TheItemAudit_ThroughAReadWriteTransaction()
     {

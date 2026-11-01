@@ -1043,8 +1043,8 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     public VariableSizedBufferAccessor<T, TStore> GetReadOnlyAccessor(int bufferId) => new(this, bufferId);
 
     /// <summary>
-    /// A reader for a walk of many buffers (EP-02): its window pins the pages it holds, nothing tags them, and it leaves an empty chunk linked for a writer's
-    /// reader to unlink. Its elements are valid until its next <see cref="VariableSizedBufferAccessor{T,TStore}.NextChunk"/>.
+    /// A reader for a walk of many buffers (EP-02): its window pins the pages it holds and nothing tags them. Its elements are valid until its next
+    /// <see cref="VariableSizedBufferAccessor{T,TStore}.NextChunk"/>. An empty chunk it unlinks, it writes under that page's latch, as any reader does.
     /// </summary>
     internal VariableSizedBufferAccessor<T, TStore> GetScanAccessor(int bufferId) => new(this, bufferId, null, scan: true);
     public VariableSizedBufferAccessor<T, TStore> GetAccessor(int bufferId, ChangeSet changeSet) => new(this, bufferId, changeSet);
@@ -1175,7 +1175,6 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
     private unsafe byte* _elementAddr;
     private int _elementCount;
-    private readonly bool _scan;
 
     public bool IsValid => _rootChunkId != 0;
     public unsafe ReadOnlySpan<T> ReadOnlyElements => _elementAddr==null ? default : new(_elementAddr, _elementCount);
@@ -1217,7 +1216,6 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
     unsafe internal VariableSizedBufferAccessor(VariableSizedBufferSegment<T, TStore> owner, int rootChunkId, ChangeSet changeSet, bool scan)
     {
-        _scan = scan;
         _owner = owner;
         _segment = owner.Segment;
         _rootHeaderTotalSize = owner.RootHeaderTotalSize;
@@ -1304,9 +1302,9 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
 
             // Try to promote the Buffer from read to read/write because we need to make changes. Once, with no wait: a promotion waits for the other
             // shared holders to leave, and two readers at an empty chunk each waited for the other, out to the lock timeout (#1290). The unlink is
-            // housekeeping: with another reader on the buffer, it is left to a later one. A scan reader always leaves it: it writes through no pin of its own.
+            // housekeeping: with another reader on the buffer, it is left to a later one.
             var wcPromote = WaitContext.FromTimeout(TimeSpan.Zero);
-            if (!_scan && rootChunk.Lock.TryPromoteToExclusiveAccess(ref wcPromote))
+            if (rootChunk.Lock.TryPromoteToExclusiveAccess(ref wcPromote))
             {
                 // Every exit releases what it took: a fetch below can throw (a page-cache back-pressure timeout), and a throw left both pages latched for
                 // good — the checkpoint skips a latched page — and the buffer's lock exclusive, which Dispose's shared exit does not release.

@@ -523,9 +523,10 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// Evict a slot: flush dirty state and handle page protection counters.
     /// <para>
     /// <b>Transaction path</b> (ChangeSet present): SlotRefCount and ACW decrements are deferred to
-    /// <see cref="ChangeSet.DeferEviction"/> because <see cref="EntityAccessor.FlushAndRefreshEpoch"/> can
-    /// advance the epoch while callers still hold raw <c>byte*</c> or <c>ref T</c> pointers to evicted
-    /// pages. SlotRefCount &gt; 0 prevents <see cref="PagedMMF.TryAcquire"/> from reusing the memory page.
+    /// <see cref="ChangeSet.DeferEviction"/>, so an address read from a slot this eviction takes stays valid until the next epoch refresh, which drains them
+    /// with the rest (<see cref="EntityAccessor.FlushAndRefreshEpoch"/>). SlotRefCount &gt; 0 prevents <see cref="PagedMMF.TryAcquire"/> from reusing the
+    /// memory
+    /// page until then. No address outlives a refresh (EP-03).
     /// </para>
     /// <para>
     /// <b>Standalone path</b> (no ChangeSet): SlotRefCount is decremented immediately. Without a

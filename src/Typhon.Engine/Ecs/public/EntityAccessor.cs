@@ -536,15 +536,22 @@ public partial class EntityAccessor : IDisposable
         return _scanYield ??= YieldDuringScan;
     }
 
-    private void YieldDuringScan()
+    private void YieldDuringScan() => YieldDuringWalk(ref _scanRefreshedAt);
+
+    /// <summary>
+    /// A yield point of a walk that keeps its own clock in <paramref name="refreshedAt"/>: one driven by its caller, whose loop body can run scans of its
+    /// own, each
+    /// of which restarts the transaction's clock in <see cref="BeginScanYield"/>, and at a millisecond apart would keep the walk from ever refreshing.
+    /// </summary>
+    internal void YieldDuringWalk(ref long refreshedAt)
     {
         if (LiveIndexCursors == 0)
         {
             var now = Stopwatch.GetTimestamp();
-            if (Stopwatch.GetElapsedTime(_scanRefreshedAt, now) >= ScanEpochRefreshInterval)
+            if (Stopwatch.GetElapsedTime(refreshedAt, now) >= ScanEpochRefreshInterval)
             {
                 FlushAndRefreshEpoch();
-                _scanRefreshedAt = Stopwatch.GetTimestamp();
+                refreshedAt = Stopwatch.GetTimestamp();
             }
         }
 

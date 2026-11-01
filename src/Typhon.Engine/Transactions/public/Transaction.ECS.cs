@@ -5263,7 +5263,8 @@ public unsafe partial class Transaction
                     state.ClusterState?.AddPendingDeath(marked, -1);
                 }
 
-                // The undo of a refused commit gives back what it holds, or it meets the wall that refused it. Never the pass itself: moved in PREPARE, a commit
+                // The undo of a refused commit gives back what it holds, or it meets the wall that refused it. Never the pass itself: moved in PREPARE, a
+                // commit
                 // past the limit reaches its append, and its publish fails where it cannot be undone (#831).
                 if (!pending)
                 {

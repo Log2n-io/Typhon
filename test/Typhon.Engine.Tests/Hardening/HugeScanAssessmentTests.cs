@@ -175,7 +175,6 @@ public unsafe class HugeScanAssessmentTests
     private static readonly long CacheMiB = long.TryParse(Environment.GetEnvironmentVariable("TYPHON_HS_CACHE_MIB"), out var c) ? c : 64;
     private static readonly bool Live = Environment.GetEnvironmentVariable("TYPHON_HS_LIVE") == "1";
     private static readonly bool Prefill = Environment.GetEnvironmentVariable("TYPHON_HS_PREFILL") == "1";
-    private static readonly int Policy = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_HS_POLICY"), out var policy) ? policy : 0;
     private static string RunDb => Environment.GetEnvironmentVariable("TYPHON_HS_DB") ?? Path.Combine(Dir, "base", "hs.typhon");
 
     private static DatabaseEngine Open(long cacheMiB) =>
@@ -354,7 +353,8 @@ public unsafe class HugeScanAssessmentTests
         }
     }
 
-    private sealed record Scenario(string Name, Action<Ctx> Run, bool NeedsIds = false, bool ChecksEveryRow = true, long ExpectedRows = -1, bool Writes = false);
+    private sealed record Scenario(string Name, Action<Ctx> Run, bool NeedsIds = false, bool ChecksEveryRow = true, long ExpectedRows = -1,
+        bool Writes = false);
 
     /// <summary>One archetype's scenarios: the same walks over a Versioned and a SingleVersion component, whose page costs differ.</summary>
     private sealed class Family<TArch, TRow> where TArch : Archetype<TArch> where TRow : unmanaged
@@ -529,7 +529,8 @@ public unsafe class HugeScanAssessmentTests
                 }
             }, NeedsIds: true, ChecksEveryRow: false);
 
-            // The leak's three arms: the same walk read-only (IndexUnique), read-write, and read-write after one entity open gave the transaction a ComponentInfo.
+            // The leak's three arms: the same walk read-only (IndexUnique), read-write, and read-write after one entity open gave the transaction a
+            // ComponentInfo.
             yield return new Scenario($"IndexUniqueRw_{Tag}", ctx =>
             {
                 using var tx = ctx.Dbe.CreateQuickTransaction();
@@ -775,7 +776,8 @@ public unsafe class HugeScanAssessmentTests
         Tag = "Ver", IdsName = "ver", Comp = HsVerArch.Row, Seq = v => v.Seq,
         WithValue = (v, value) => { v.Value = value; return v; },
         MakeRow = seq => new HsVersioned { Seq = seq, Group = GroupOf(seq), Value = 7, Shuffled = ShuffledOf(seq) },
-        SeqKey = v => v.Seq, GroupKey = v => v.Group, ShuffledKey = v => v.Shuffled, Half = v => v.Group < 500, SeqAll = v => v.Seq >= 0, ShuffledAll = v => v.Shuffled >= 0,
+        SeqKey = v => v.Seq, GroupKey = v => v.Group, ShuffledKey = v => v.Shuffled, Half = v => v.Group < 500, SeqAll = v => v.Seq >= 0,
+            ShuffledAll = v => v.Shuffled >= 0,
         Broad = v => v.Group >= 0, Selective = v => v.Group == 7, HalfLambda = v => (v.Seq & 1) == 0,
     };
 
@@ -784,7 +786,8 @@ public unsafe class HugeScanAssessmentTests
         Tag = "Sv", IdsName = "sv", Comp = HsSvArch.Row, Seq = v => v.Seq,
         WithValue = (v, value) => { v.Value = value; return v; },
         MakeRow = seq => new HsSingle { Seq = seq, Group = GroupOf(seq), Value = 7, Shuffled = ShuffledOf(seq) },
-        SeqKey = v => v.Seq, GroupKey = v => v.Group, ShuffledKey = v => v.Shuffled, Half = v => v.Group < 500, SeqAll = v => v.Seq >= 0, ShuffledAll = v => v.Shuffled >= 0,
+        SeqKey = v => v.Seq, GroupKey = v => v.Group, ShuffledKey = v => v.Shuffled, Half = v => v.Group < 500, SeqAll = v => v.Seq >= 0,
+            ShuffledAll = v => v.Shuffled >= 0,
         Broad = v => v.Group >= 0, Selective = v => v.Group == 7, HalfLambda = v => (v.Seq & 1) == 0,
     };
 
@@ -1232,21 +1235,7 @@ public unsafe class HugeScanAssessmentTests
         {
             try
             {
-                // The throwaway eviction experiment's hook, when the engine carries it: everything this thread does is one operation, past N/16 loads a walk.
-                var allowance = typeof(PagedMMF).GetField("WalkAllowance", BindingFlags.Static | BindingFlags.NonPublic);
-                if (Policy >= 2)
-                {
-                    allowance?.SetValue(null, cachePages / 16);
-                }
-
-                try
-                {
-                    scenario.Run(ctx);
-                }
-                finally
-                {
-                    allowance?.SetValue(null, 0);
-                }
+                scenario.Run(ctx);
             }
             catch (Exception e)
             {
@@ -1287,7 +1276,8 @@ public unsafe class HugeScanAssessmentTests
 
         Report(new
         {
-            scenario = name, live = Live, cacheMiB = CacheMiB, policy = Policy, prefill = Prefill, note = ctx.Note, rows, openMs, outcome = failure ?? "ok", stack = failureStack, census, health,
+            scenario = name, live = Live, cacheMiB = CacheMiB, prefill = Prefill, note = ctx.Note, rows, openMs, outcome = failure ?? "ok",
+                stack = failureStack, census, health,
             visited = ctx.Visited, scanMs, usPerRow = ctx.Visited == 0 ? 0 : scanMs * 1000 / ctx.Visited,
             diskReads, diskWrites, backpressureRounds = rounds, reserveDraws = draws, allocMiB = alloc / (1024.0 * 1024), walDeltaMiB = wal / (1024.0 * 1024),
             peakEpochPages = peaks.Epoch, peakSlotRefPages = peaks.SlotRef, peakDirtyPages = peaks.Dirty, cachePages,
@@ -1299,7 +1289,8 @@ public unsafe class HugeScanAssessmentTests
             writerLoads = traffic?.WriterLoads, readerLoads = traffic?.ReaderLoads,
         });
 
-        TestContext.Progress.WriteLine($"{name}: {failure ?? "ok"} {scanMs:F0} ms, {ctx.Visited:N0} rows, {diskReads:N0} reads, epoch peak {peaks.Epoch}, hot {hotSurvival:P0}");
+        TestContext.Progress.WriteLine($"{name}: {failure ?? "ok"} {scanMs:F0} ms, {ctx.Visited:N0} rows, {diskReads:N0} "
+            + $"reads, epoch peak {peaks.Epoch}, hot {hotSurvival:P0}");
 
         // Assert before Dispose, which on a wedged engine may not return: the row above is already written.
         Assert.Multiple(() =>

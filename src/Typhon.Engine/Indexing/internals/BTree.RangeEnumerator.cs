@@ -57,7 +57,8 @@ internal abstract partial class BTree<TKey, TStore>
         private bool _hasLastKey;
 
         /// <summary>
-        /// <see cref="EpochManager.ThreadRefreshCount"/> when the cursor last stood on a leaf: the pin that leaf is protected by is that one, and only that one.
+        /// <see cref="EpochManager.ThreadRefreshCount"/> when the cursor last stood on a leaf: the pin that leaf is protected by is that one, and only
+        /// that one.
         /// </summary>
         private int _refreshesSeen;
 
@@ -192,7 +193,8 @@ internal abstract partial class BTree<TKey, TStore>
             }
         }
 
-        /// <summary>An unbounded scan's start: the head of the leaf chain, the head read again rather than answered for when it is replaced or stays locked.</summary>
+        /// <summary>An unbounded scan's start: the head of the leaf chain, the head read again rather than answered for when it is replaced or stays
+        /// locked.</summary>
         private bool PositionAtHead()
         {
             _currentIndex = -1;
@@ -470,7 +472,8 @@ internal abstract partial class BTree<TKey, TStore>
             return Reposition();
         }
 
-        /// <summary>The thread's epoch moved since the cursor read its leaf: the leaf is no longer the cursor's to read. Out of line: once per refresh.</summary>
+        /// <summary>The thread's epoch moved since the cursor read its leaf: the leaf is no longer the cursor's to read. Out of line: once per
+        /// refresh.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         private bool ResumeAfterRefresh()
         {
