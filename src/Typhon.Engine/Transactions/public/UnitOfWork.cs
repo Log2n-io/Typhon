@@ -282,6 +282,9 @@ public sealed class UnitOfWork : IDisposable
             // shared ChangeSet so it will be included in whatever flush path runs next.
             if (_uowId != 0)
             {
+                // The marks first: a commit larger than the cache, refused or not, can end with all of it under them, and the registry write needs a page. They
+                // hold nothing the pages' write debt does not (PS-10).
+                ChangeSet?.ReleaseDirtyMarks();
                 _dbe.UowRegistry.Release(_uowId, ChangeSet);
             }
 

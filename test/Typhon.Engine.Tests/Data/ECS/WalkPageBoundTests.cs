@@ -627,6 +627,46 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     }
 
     /// <summary>
+    /// A commit of more destroys than the cache holds pages is refused in PREPARE, under marks that fill the cache, and all it undoes and ends needs pages too: the
+    /// undo ran out of slots with the whole cache under its own marks, out of Dispose, which replaced the refusal with a timeout. A commit that fits ends cleanly.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void ACommitOfMoreDestroysThanTheCacheHolds_EndsItsUnitOfWork()
+    {
+        var dbe = Build(Storage.Single);
+        var ids = new List<EntityId>();
+        using (var read = dbe.CreateReadOnlyTransaction())
+        {
+            ids.AddRange(read.Query<WbSingleArch>().Execute());
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var id in ids)
+            {
+                tx.Destroy(id);
+            }
+
+            var committed = false;
+            try
+            {
+                committed = tx.Commit();
+            }
+            catch (TransactionExceedsPageCacheException)
+            {
+                // Refused: the caller's exception, and the undo below must not replace it.
+            }
+
+            Assert.DoesNotThrow(tx.Dispose, "ending it must not fail for want of a page its own marks hold");
+            using var after = dbe.CreateReadOnlyTransaction();
+            Assert.That(after.Query<WbSingleArch>().Count(), Is.EqualTo(committed ? 0 : Entities), "all of the commit, or none of it");
+        }
+    }
+
+    /// <summary>
     /// A rollback frees a copy-on-write chunk per update, and each free reads its page. Its epoch never moved and its accessors' deferred releases were never
     /// drained, so 4M updates in one transaction ended in a back-pressure timeout out of Dispose, which replaced the commit's own refusal.
     /// </summary>
