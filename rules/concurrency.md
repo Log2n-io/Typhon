@@ -345,6 +345,12 @@ lock ordering and deadlock prevention are still to come.
             boundary (EP-03) — and the epoch is refreshed at most every millisecond, never under a live index cursor. Held for the whole walk, the
             reader's epoch kept every page the writers tagged meanwhile protected: at 12M entities a count stalled every writer with the cache
             epoch-held and nothing dirty
+  invariant a B+Tree range cursor reads no node across a move of its thread's epoch (BTree.RangeEnumerator.MoveNext, EpochManager.ThreadRefreshCount):
+            a node stays unreclaimed for the pin it was read under, not for the cursor that stands on it, and a recycled node restarts at version 4, so
+            at the version the cursor remembers another node validates and the scan reads its entries, silently (a walk lost every key from 4 000 up
+            in BTreeRangeScanRestartTests). A cursor whose thread refreshed finds its place again from its last key, one descent per refresh. So an
+            index enumerator's own refresh (Transaction.IndexEntityEnumerator, the walk has no other point to make it at) is safe under its live
+            cursor, and under any other this thread holds; the other per-operation refreshes still wait for no cursor to be live
   invariant a back-pressure wait inside such a walk moves the waiting thread's epoch, with its warm accessors' (#1230): PagedMMF.RefreshableWaitDepth,
             entered by the walks a query passes a yield point to. Every page such a walk holds is a scan accessor's slot-reference pin, so the epoch
             protects none of them; left at the minimum, it protected every page every other thread tagged while it waited, until nothing could be
@@ -418,7 +424,7 @@ lock ordering and deadlock prevention are still to come.
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
-         EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
+         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
          Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, Transaction.Dispose, UowRegistry.TryClaimFreeSlot,
          PagedMMF.RestartForLockWithin, PagedMMF.OpenRestartAllowed, Transaction.EcsVersionedCopyOnWrite, RevisionEnumerator,
          ComponentRevisionManager.AddCompRev,
@@ -518,7 +524,11 @@ lock ordering and deadlock prevention are still to come.
             until its enumerator's next MoveNext or Dispose; the enumerator's own accessor holds the current page for that long. Under
             strict mode (CheckConfig.Enabled) a ClusterRef used after its step throws, from every data member
   invariant so the epoch may be refreshed at any call boundary: a transaction refreshes it every 128 entity opens
-            (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns and every 128 enumerated entities. Its
+            (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns, every 128 destroys, every 128 index lookups and every
+            128 index entries examined, whether the snapshot sees them or not: a walk of rows newer than its snapshot reads the same pages and emits
+            nothing. The count of a lookup is the transaction's, since each lookup is a new enumerator, and a refresh gives back what the
+            transaction's accessors deferred, whichever of them left the page: drained through its opened entities alone, a walk that opened none
+            kept every page it left slot-referenced until its enumerator's Dispose. Its
             pinned set is then bounded by what it touched since the last refresh, not by everything it read. A PTA worker accessor is
             refreshed once per system instead (PointInTimeAccessor.FlushWorker), which also releases its cluster cache: a refresh
             increments the global epoch, which sends every other thread's warm B+Tree accessor down its cold path, so what a worker's

@@ -1092,6 +1092,7 @@ public unsafe partial class Transaction
         AssertThreadAffinity();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
+        CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. DestroyInternal is engine-internal (cascade traversal + tombstone marking).
@@ -1138,6 +1139,7 @@ public unsafe partial class Transaction
         AssertThreadAffinity();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
+        CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
         scope.Tsn = TSN;

@@ -752,6 +752,7 @@ public unsafe partial class Transaction : EntityAccessor
     {
         AssertThreadAffinity();
         indexRef.Validate();
+        NoteEntityOpen();   // a lookup is an operation: the enumerator's own count starts again with each one, and a loop of them never reached a refresh
 
         var ct = indexRef.Table;
 
@@ -1300,7 +1301,7 @@ public unsafe partial class Transaction : EntityAccessor
                 if (_side != null && _side.TryPeek(out var sideKey) && (!_hasPending || comparer.Compare(sideKey, _pendingKey) <= 0))
                 {
                     _currentComponentSpan = _side.Take(out _currentPK, out _currentKey);
-                    CountEmitted();
+                    CountExamined();
                     return true;
                 }
 
@@ -1310,16 +1311,20 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 _hasPending = false;
-                if (TryResolve(_pendingKey, _pendingLocation, _pendingSource, recordBuf))
+                var resolved = TryResolve(_pendingKey, _pendingLocation, _pendingSource, recordBuf);
+                CountExamined();
+                if (resolved)
                 {
-                    CountEmitted();
                     return true;
                 }
             }
         }
 
-        /// <summary>EP-03: every EpochRefreshInterval entities, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230).</summary>
-        private void CountEmitted()
+        /// <summary>
+        /// EP-03: every EpochRefreshInterval entries, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230). Entries examined, not
+        /// rows emitted: a row the snapshot cannot see costs the walk the same pages. The cursor of this walk is live: it finds its place again (EP-02).
+        /// </summary>
+        private void CountExamined()
         {
             if ((++_entityCount & (PressuredEpochRefreshInterval - 1)) == 0
                 && ((_entityCount & (EpochRefreshInterval - 1)) == 0 || _tx.DBE.MMF.UnderPressure))

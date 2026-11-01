@@ -411,6 +411,7 @@ public partial class EntityAccessor : IDisposable
     private protected void FlushAndRefreshEpoch()
     {
         CommitAccessorChanges();
+        _changeSet?.FlushDeferredEvictions();   // the ChangeSet's, whoever deferred them: an enumerator's accessors are in no entity's component info
         _changeSet?.ReleaseDirtyMarks();
         var newEpoch = _epochManager.RefreshScope();
         ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(newEpoch);
@@ -494,10 +495,11 @@ public partial class EntityAccessor : IDisposable
     }
 
     /// <summary>
-    /// B+Tree range cursors live on this thread (<c>BTree.RangeEnumerator</c>). While one is, no per-operation refresh moves the thread's epoch: the cursor
-    /// keeps its current node across calls, and retired nodes are reclaimed once the minimum active epoch has passed them (<c>BTree.DeferredReclaim</c>)
-    /// — a refresh under a live cursor could let its node be reused while it still reads it. An open made inside such a scan (an FK reverse lookup's
-    /// per-entity action) therefore waits for the scan to end; the count stays at the threshold, so the refresh happens at the first operation after.
+    /// B+Tree range cursors live on this thread (<c>BTree.RangeEnumerator</c>). While one is, no per-operation refresh moves the thread's epoch: a refresh
+    /// costs each live cursor a descent, since retired nodes are reclaimed once the minimum active epoch has passed them (<c>BTree.DeferredReclaim</c>) and
+    /// a cursor finds its place again rather than read a node its pin no longer protects. An open made inside such a scan (an FK reverse lookup's per-entity
+    /// action) therefore waits for the scan to end; the count stays at the threshold, so the refresh happens at the first operation after. The one refresh
+    /// made under a live cursor is the index enumerator's own, whose walk has no other point to make it at.
     /// </summary>
     /// <remarks>A cursor disposed twice (a <c>foreach</c> over a <c>using</c> copy) would decrement twice, so the decrement clamps at zero.</remarks>
     [ThreadStatic]

@@ -4,6 +4,7 @@
 #pragma warning disable 1591
 
 using JetBrains.Annotations;
+using System;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -100,6 +101,13 @@ public sealed class EpochManager : ResourceNode, IMetricSource
     }
 
     /// <summary>
+    /// How many times this thread has moved its pin. A B+Tree cursor compares it on every step: what it stands on is protected by the pin it was read under,
+    /// and a moved pin protects it no longer, so the cursor finds its place again before it reads (EP-02).
+    /// </summary>
+    [ThreadStatic]
+    internal static int ThreadRefreshCount;
+
+    /// <summary>
     /// Advance the current thread's pinned epoch without unpinning.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -108,6 +116,7 @@ public sealed class EpochManager : ResourceNode, IMetricSource
         var oldEpoch = _globalEpoch;
         var newEpoch = Interlocked.Increment(ref _globalEpoch);
         _registry.RefreshPinnedEpoch(newEpoch);
+        ThreadRefreshCount++;
         TyphonEvent.EmitConcurrencyEpochRefresh((uint)oldEpoch, (uint)newEpoch);
         return newEpoch;
     }
