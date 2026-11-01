@@ -6169,6 +6169,7 @@ public unsafe partial class Transaction
                         {
                             // CC-aware free: release the cloned ComponentCollection buffer of the rolled-back COW chunk (the committed head keeps its own).
                             DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId, neverCommitted: true);
+                            RefreshBetweenCommitSteps();   // the free tags the pages it reads: 4M of them, under this one pin, was a timeout out of Dispose
                         }
                     }
                 }

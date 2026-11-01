@@ -1223,6 +1223,7 @@ public unsafe class HugeScanAssessmentTests
         var walBefore = dbe.GetWalTotalBytes();
 
         string failure = null;
+        string failureStack = null;
         string census = null;
         var sw = Stopwatch.StartNew();
         double scanMs;
@@ -1250,6 +1251,7 @@ public unsafe class HugeScanAssessmentTests
             catch (Exception e)
             {
                 failure = $"{e.GetType().Name}: {e.Message}";
+                failureStack = e.StackTrace;
                 census = dbe.MMF.DescribeEvictionBlockers();
             }
 
@@ -1285,7 +1287,7 @@ public unsafe class HugeScanAssessmentTests
 
         Report(new
         {
-            scenario = name, live = Live, cacheMiB = CacheMiB, policy = Policy, prefill = Prefill, note = ctx.Note, rows, openMs, outcome = failure ?? "ok", census, health,
+            scenario = name, live = Live, cacheMiB = CacheMiB, policy = Policy, prefill = Prefill, note = ctx.Note, rows, openMs, outcome = failure ?? "ok", stack = failureStack, census, health,
             visited = ctx.Visited, scanMs, usPerRow = ctx.Visited == 0 ? 0 : scanMs * 1000 / ctx.Visited,
             diskReads, diskWrites, backpressureRounds = rounds, reserveDraws = draws, allocMiB = alloc / (1024.0 * 1024), walDeltaMiB = wal / (1024.0 * 1024),
             peakEpochPages = peaks.Epoch, peakSlotRefPages = peaks.SlotRef, peakDirtyPages = peaks.Dirty, cachePages,

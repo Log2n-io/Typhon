@@ -345,6 +345,9 @@ lock ordering and deadlock prevention are still to come.
             boundary (EP-03) — and the epoch is refreshed at most every millisecond, never under a live index cursor. Held for the whole walk, the
             reader's epoch kept every page the writers tagged meanwhile protected: at 12M entities a count stalled every writer with the cache
             epoch-held and nothing dirty
+  invariant a page cache miss takes the slot after the previous file page's, to write the two in one run, only when the clock would give that slot up
+            itself (counter 0): TryAcquire does not read the counter, so a sequential walk took a page at counter 5 in no lap (ADR-007,
+            WholeSegmentScanTests.ASequentialMiss_LeavesAHotPageInTheNextSlot)
   invariant a B+Tree range cursor reads no node across a move of its thread's epoch (BTree.RangeEnumerator.MoveNext, EpochManager.ThreadRefreshCount):
             a node stays unreclaimed for the pin it was read under, not for the cursor that stands on it, and a recycled node restarts at version 4, so
             at the version the cursor remembers another node validates and the scan reads its entries, silently (a walk lost every key from 4 000 up
@@ -457,8 +460,9 @@ lock ordering and deadlock prevention are still to come.
             reduce files a cluster's stray slots through an epoch-tagged accessor of its own: one page per cluster that has strays
   note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
         outside recovery keeps its pages resident by its ChangeSet's marks until its next release point: a transaction's epoch refresh (every
-        128 operations), PREPARE's component pass (every 1 024 entries), the publish and a failed commit's rollback between entries under
-        pressure (#831). The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted, nor are three query reads that still
+        128 operations), PREPARE's component pass (every 1 024 entries), the publish, a failed commit's rollback and the frees of the reset after it,
+        between entries under pressure (#831). Each also gives back what the windows deferred: kept, a rollback of 4M updates held the whole cache
+        by slot reference, and a free left under one pin timed out of Dispose, which replaced the commit's own refusal. The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted, nor are three query reads that still
         epoch-tag what they touch: an `OrderBy` merge's streams (KWayMergeHelper), the spatial cluster walk (AabbClusterEnumerator) and an
         `AllowMultiple` key's VSBS buffer (RangeEnumerator, through GetBufferReadOnlyAccessor, which keeps chunk addresses across loads)
   verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and

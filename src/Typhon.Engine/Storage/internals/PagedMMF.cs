@@ -2299,12 +2299,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // If we already have a MemPage fetch for the FilePage just before the one we allocate, then we try to take the MemPage that follows
             // We request FilePage 123, there's a FilePage 122 allocated to MemPage 34, then we try to allocate 35 for 123, which will allow, if needed,
             //  one file write operation for both pages
+            // Only a slot the clock would take itself (ADR-007): TryAcquire does not read the counter, so this took a page at counter 5 in no lap at all, and
+            // every sequential walk went through the hot pages beside it.
             if (!forced && filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
             {
                 memPageIndex = prevMemPageIndex + 1;
                 pi = Slot(memPageIndex);
                 evictedFilePageIndex = pi.FilePageIndex;
-                if (TryAcquire(memPageIndex, minActiveEpoch))
+                if (pi.ClockSweepCounter == 0 && TryAcquire(memPageIndex, minActiveEpoch))
                 {
                     found = true;
                 }
@@ -3638,7 +3640,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         BackpressureTimeoutObserverForTests?.Invoke(this);
         var census = CountUnevictablePages();
         ThrowHelper.ThrowPageCacheBackpressureTimeout(census.Debt, census.EpochHeld, waited, EpochManager?.ActiveSlotCount ?? 0,
-            EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0, census.Marked, census.EpochOnly);
+            EpochManager != null ? EpochManager.GlobalEpoch - EpochManager.MinActiveEpoch : 0, census.Marked, census.EpochOnly, census.SlotRef);
     }
 
     /// <summary>

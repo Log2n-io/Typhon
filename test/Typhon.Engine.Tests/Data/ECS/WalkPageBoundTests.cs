@@ -290,4 +290,52 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         Assert.That(refreshes, Is.GreaterThanOrEqualTo(ids.Count / EntityAccessor.EpochRefreshInterval - 1), "the destroys ran under one epoch");
         Assert.That(tx.Commit(), Is.True);
     }
+
+    /// <summary>
+    /// A rollback frees a copy-on-write chunk per update, and each free reads its page. Its epoch never moved and its accessors' deferred releases were never
+    /// drained, so 4M updates in one transaction ended in a back-pressure timeout out of Dispose, which replaced the commit's own refusal.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void ARollbackOfMoreUpdatesThanTheCacheHolds_Completes(bool explicitRollback)
+    {
+        var dbe = Build(Storage.Versioned);
+        var ids = new List<EntityId>();
+        using (var read = dbe.CreateReadOnlyTransaction())
+        {
+            ids.AddRange(read.Query<WbVersionedArch>().Execute());
+        }
+
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in ids)
+        {
+            var row = tx.Open(id).Read(WbVersionedArch.Row);
+            row.Key = -row.Key - 1;
+            tx.OpenMut(id).Set(WbVersionedArch.Row, row);
+        }
+
+        if (explicitRollback)
+        {
+            Assert.That(tx.Rollback(), Is.True);
+        }
+        else
+        {
+            Assert.Throws<TransactionExceedsPageCacheException>(() => tx.Commit(), "premise: the commit does not fit, and its own refusal is what the caller sees");
+        }
+
+        Assert.DoesNotThrow(tx.Dispose, "the rollback reached the end (the using disposes it again, a no-op)");
+
+        using var after = dbe.CreateReadOnlyTransaction();
+        var seen = 0;
+        using var walk = after.EnumerateIndex<WbVersioned, int>(dbe.GetIndexRef<WbVersioned, int>(x => x.Key), 0, int.MaxValue);
+        while (walk.MoveNext())
+        {
+            seen++;
+        }
+
+        Assert.That(seen, Is.EqualTo(Entities), "every row kept its committed key");
+    }
 }

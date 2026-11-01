@@ -2918,6 +2918,7 @@ public unsafe partial class Transaction : EntityAccessor
             && EntityAccessor.LiveIndexCursors == 0)
         {
             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+            _changeSet?.FlushDeferredEvictions();   // the windows' releases: kept, a rollback of 4M entries held the whole cache by slot reference
             _changeSet?.ReleaseDirtyMarks();
             Interlocked.Increment(ref PagedMMF.PublishStepRefreshes);
         }

@@ -231,5 +231,12 @@ class EpochRefreshCadenceTests : TestBase<EpochRefreshCadenceTests>
 
         var epochOnly = new PageCacheBackpressureTimeoutException(40, 8100, TimeSpan.FromSeconds(5), 33, 1180, 20, 8000);
         Assert.That(epochOnly.Message, Does.Contain("epoch-only: 8000").And.Contain("working set larger than the cache"));
+
+        // A leak of slot references read "epoch-protected: 2" and was taken for an epoch problem, comment included.
+        var slotReferenced = new PageCacheBackpressureTimeoutException(0, 2, TimeSpan.FromSeconds(5), 11, 0, 0, 0, 8192);
+        Assert.That(slotReferenced.Message, Does.Contain("slot-referenced: 8192").And.Contain("Mostly slot-referenced"));
+        Assert.That(slotReferenced.Message, Does.Not.Contain("working set"), "mostly slot-referenced: open readers, not the epoch");
+        Assert.That(slotReferenced.SlotReferencedCount, Is.EqualTo(8192));
+        Assert.That(epochHeld.SlotReferencedCount, Is.EqualTo(-1), "not captured");
     }
 }
