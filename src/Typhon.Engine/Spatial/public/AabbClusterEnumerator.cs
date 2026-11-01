@@ -91,6 +91,7 @@ public unsafe ref struct AabbClusterEnumerator
     private SpatialQueryAccessorCache.Entry _warmEntry;
     private int _warmToken;
     private ref ChunkAccessor<PersistentStore> _warm;
+    private int _clustersOpened;   // through the rent: at LongWalkClusters the query moves to the entry's scan window (EP-02)
 
     /// <summary>
     /// When set, <see cref="NextCluster"/> names the next admitted cluster without opening its page.
@@ -660,7 +661,7 @@ public unsafe ref struct AabbClusterEnumerator
     {
         ThrowIfRentStale();
         EnsureAccessor();
-        return _warm.GetChunkAddress(chunkId);
+        return Open(chunkId);
     }
 
     /// <summary>Byte offset of the spatial field's column from a cluster's base.</summary>
@@ -1204,7 +1205,7 @@ public unsafe ref struct AabbClusterEnumerator
                     }
 
                     EnsureAccessor();
-                    _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
+                    _currentClusterBase = Open(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
                     OpenOccupancy();
                     return true;
@@ -1233,7 +1234,7 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 EnsureAccessor();
-                _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
+                _currentClusterBase = Open(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
                 OpenOccupancy();
                 return true;
@@ -1289,7 +1290,7 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 EnsureAccessor();
-                _currentClusterBase = _warm.GetChunkAddress(chunkId);
+                _currentClusterBase = Open(chunkId);
                 _currentClusterChunkId = chunkId;
                 OpenOccupancy();
                 return true;
@@ -1422,7 +1423,7 @@ public unsafe ref struct AabbClusterEnumerator
             }
 
             EnsureAccessor();
-            _currentClusterBase = _warm.GetChunkAddress(chunkId);
+            _currentClusterBase = Open(chunkId);
             _currentClusterChunkId = chunkId;
             OpenOccupancy();
             return true;
@@ -1504,6 +1505,26 @@ public unsafe ref struct AabbClusterEnumerator
         {
             RentAccessor();
         }
+    }
+
+    /// <summary>A cluster's base, through the window this query is on. Good until the next call.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private byte* Open(int chunkId)
+    {
+        if (++_clustersOpened == EntityAccessor.LongWalkClusters)
+        {
+            MoveToScanWindow();
+        }
+
+        return _warm.GetChunkAddress(chunkId);
+    }
+
+    /// <summary>A wide query leaves the warm window, which tags what it loads, for one that tags nothing. Once a query, and out of line.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void MoveToScanWindow()
+    {
+        _warmEntry.OpenScanWindow();
+        _warm = ref _warmEntry.ScanWindow;
     }
 
     /// <summary>

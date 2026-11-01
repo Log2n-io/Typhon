@@ -27,8 +27,10 @@ namespace Typhon.Engine.Internals;
 /// <para>Pages are protected from eviction by their epoch tag, not by ref-counting.
 /// Dirty tracking uses a bitmask flushed to <see cref="ChangeSet"/> via
 /// <see cref="ChangeSet.AddByMemPageIndex"/>.</para>
-/// <para><b>Scan mode</b> (<see cref="ChunkBasedSegment{TStore}.CreateScanAccessor"/>, EP-02): a read-only accessor for a scan whose length grows with
-/// the data. It pins the pages in its window by <c>SlotRefCount</c> only and never tags them with the caller's epoch, so a page that leaves the window
+/// <para><b>Scan mode</b> (<see cref="ChunkBasedSegment{TStore}.CreateScanAccessor"/>, EP-02): an accessor for a scan whose length grows with the data. It
+/// marks nothing dirty and takes no ChangeSet: what is written under one is recorded by its writer (a ClusterRef's page on leaving it, a buffer reader's
+/// unlink under the page latch). It pins the pages in its window by <c>SlotRefCount</c> only and never tags them with the caller's epoch, so a page that
+/// leaves the window
 /// is evictable at once: the scan holds at most <see cref="Capacity"/> pages, where an epoch-tagged one holds every page it ever touched until the
 /// caller's scope ends. The price is the pointer contract: an address it returns stays valid only until this accessor's next window miss, not for the
 /// whole epoch scope. The clock hand may reclaim any slot but the most recently used one, so one miss can release the page of any earlier address: use
@@ -105,7 +107,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         set
         {
-            Debug.Assert(!_scan || value == null, "a scan accessor is read-only: it never carries a ChangeSet");
+            Debug.Assert(!_scan || value == null, "a scan accessor never carries a ChangeSet");
             _changeSet = value;
         }
     }
@@ -131,7 +133,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     internal ChunkAccessor(ChunkBasedSegment<TStore> segment, TStore store, EpochManager epochManager, ChangeSet changeSet = null, bool scan = false)
     {
         Debug.Assert(epochManager.IsCurrentThreadInScope, "ChunkAccessor must be created inside an epoch scope");
-        Debug.Assert(!scan || changeSet == null, "a scan accessor only reads");
+        Debug.Assert(!scan || changeSet == null, "a scan accessor marks nothing: it carries no ChangeSet");
         _scan = scan;
         _segment = segment;
         _store = store;
@@ -180,7 +182,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void MarkSlotDirty(int slot)
     {
-        Debug.Assert(!_scan, "a scan accessor only reads: a write through it would outlive the window's pin");
+        Debug.Assert(!_scan, "a scan accessor marks nothing dirty: its writer records what it wrote while the window holds the page");
         var mask = 1u << slot;
         if ((_dirtyFlags & mask) == 0)
         {

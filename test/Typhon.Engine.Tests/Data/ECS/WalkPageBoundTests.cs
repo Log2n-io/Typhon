@@ -569,6 +569,7 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     [TestCase(false)]
     [TestCase(true)]
     [CancelAfter(60_000)]
+    [NonParallelizable] // LongWalkClusters is process-wide
     [VerifiesRule("EP-02")]
     public void ASpatialQueryOverTheWholeWorld_HoldsABoundedSetOfPages(bool count)
     {
@@ -597,12 +598,20 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         var clusterPages = dbe._archetypeStates[Archetype<WbSpatialArch>.Metadata.ArchetypeId].ClusterState.ClusterSegment.Length;
         Assert.That(clusterPages, Is.GreaterThan(HeldPagesBound), "premise: the walk spans more pages than the bound");
 
-        using var tx = dbe.CreateReadOnlyTransaction();
-        var query = tx.Query<WbSpatialArch>().WhereInAABB<WbSpatial>(-extent, -extent, -1, extent, extent, 2);
-        var rows = count ? query.Count() : query.Execute().Count;
-
-        Assert.That(rows, Is.EqualTo(Entities));
-        Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the query kept the clusters it read epoch-held for the transaction");
+        var longWalk = EntityAccessor.LongWalkClusters;
+        EntityAccessor.LongWalkClusters = 256;   // this world is short of the threshold: what is asserted is the move to the scan window
+        try
+        {
+            using var tx = dbe.CreateReadOnlyTransaction();
+            var query = tx.Query<WbSpatialArch>().WhereInAABB<WbSpatial>(-extent, -extent, -1, extent, extent, 2);
+            var rows = count ? query.Count() : query.Execute().Count;
+            Assert.That(rows, Is.EqualTo(Entities));
+            Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the query kept the clusters it read epoch-held for the transaction");
+        }
+        finally
+        {
+            EntityAccessor.LongWalkClusters = longWalk;
+        }
     }
 
     /// <summary>
@@ -680,6 +689,70 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
 
         Assert.That(found, Is.EqualTo(Entities));
         Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the lookup kept the records it read epoch-held for the transaction");
+    }
+
+    /// <summary>
+    /// A view's refresh re-evaluates every source of a target that changed, one read each, and nothing counted them: the same target over the same sources as
+    /// the query above, through the other door.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void ANavigationViewRefresh_OfOneTargetWithManySources_HoldsABoundedSetOfPages()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSingle>();
+        dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.InitializeArchetypes();
+        EntityId parent;
+        using (var write = dbe.CreateQuickTransaction())
+        {
+            var row = new WbVersioned { Key = 1 };
+            parent = write.Spawn<WbVersionedArch>(WbVersionedArch.Row.Set(in row));
+            write.Commit();
+        }
+
+        for (var first = 0; first < Entities; first += Batch)
+        {
+            using var write = dbe.CreateQuickTransaction();
+            for (var i = 0; i < Batch; i++)
+            {
+                var child = new WbChild { ParentId = (long)parent.RawValue };
+                write.Spawn<WbChildArch>(WbChildArch.Row.Set(in child));
+            }
+
+            write.Commit();
+        }
+
+        ViewBase view;
+        using (var tx = dbe.CreateReadOnlyTransaction())
+        {
+            view = tx.Query<WbChildArch>().NavigateField<WbChild, WbVersioned>(c => c.ParentId).Where((c, p) => c.ParentId != 0 && p.Key == 1).ToView();
+        }
+
+        using (view)
+        {
+            using (var settle = dbe.CreateReadOnlyTransaction())
+            {
+                ((NavigationView<WbChild, WbVersioned>)view).Refresh(settle);
+            }
+
+            Assert.That(view.Count, Is.EqualTo(Entities), "premise: every child is in the view");
+            using (var write = dbe.CreateQuickTransaction())
+            {
+                var row = write.Open(parent).Read(WbVersionedArch.Row);
+                row.Key = 2;
+                write.OpenMut(parent).Set(WbVersionedArch.Row, row);
+                write.Commit();
+            }
+
+            using var tx = dbe.CreateReadOnlyTransaction();
+            ((NavigationView<WbChild, WbVersioned>)view).Refresh(tx);
+
+            Assert.That(view.Count, Is.Zero, "premise: the refresh took every child out");
+            Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the refresh kept the records it read epoch-held for the transaction");
+        }
     }
 
     /// <summary>

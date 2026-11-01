@@ -62,7 +62,9 @@ internal abstract partial class BTree<TKey, TStore>
         /// </summary>
         private int _refreshesSeen;
 
-        /// <summary>The tree's leaf retirements when the cursor last positioned itself: none since, and its leaf is still the tree's whatever the epoch did.</summary>
+        /// <summary>
+        /// The tree's leaf retirements when the cursor last positioned itself: none since, and its leaf is still the tree's whatever the epoch did.
+        /// </summary>
         private int _retirementsSeen;
 
         /// <summary>True once the range is finished; further calls return false without touching the tree.</summary>
@@ -482,15 +484,17 @@ internal abstract partial class BTree<TKey, TStore>
         [MethodImpl(MethodImplOptions.NoInlining)]
         private bool ResumeAfterRefresh()
         {
-            _refreshesSeen = EpochManager.ThreadRefreshCount;
+            // Marked caught up only once it is: a re-seek that throws (a back-pressure timeout, transient) must run again if the caller retries.
+            var refreshes = EpochManager.ThreadRefreshCount;
             var retirements = Volatile.Read(ref _tree._leafRetirements);
-            if (retirements == _retirementsSeen)
+            if (retirements != _retirementsSeen && !_finished && _currentNode.IsValid && !Reposition())
             {
-                return true;
+                return false;
             }
 
+            _refreshesSeen = refreshes;
             _retirementsSeen = retirements;
-            return _finished || !_currentNode.IsValid || Reposition();
+            return true;
         }
 
         private bool Reposition()

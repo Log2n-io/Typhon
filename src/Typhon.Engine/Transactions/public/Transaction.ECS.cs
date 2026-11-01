@@ -618,6 +618,7 @@ public unsafe partial class Transaction
             // Epoch refresh every 128 entities to avoid holding epoch too long
             if ((n & 127) == 127)
             {
+                _changeSet?.FlushDeferredEvictions();   // what the windows let go of: no address outlives this entity
                 _epochManager.RefreshScope();
             }
         }
@@ -691,6 +692,7 @@ public unsafe partial class Transaction
 
             if ((n & 127) == 127)
             {
+                _changeSet?.FlushDeferredEvictions();   // what the windows let go of: no address outlives this entity
                 _epochManager.RefreshScope();
             }
         }
@@ -823,6 +825,7 @@ public unsafe partial class Transaction
 
             if ((n & 127) == 127)
             {
+                _changeSet?.FlushDeferredEvictions();   // what the windows let go of: no address outlives this entity
                 _epochManager.RefreshScope();
             }
         }
@@ -1325,6 +1328,12 @@ public unsafe partial class Transaction
             var childIds = FindCascadeChildren(childMeta, target, id);
             foreach (var childId in childIds)
             {
+                // EP-03: up to MaxCascadeEntities children from one Destroy; the ids are a list, and PREPARE's walk must not move its epoch (#831)
+                if (!_resolvingCascadesAtCommit)
+                {
+                    CheckEpochRefresh();
+                }
+
                 DestroyInternal(childId, depth + 1, ref cascadeCount);
             }
         }

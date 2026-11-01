@@ -6,21 +6,24 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Per-thread warm scan <see cref="ChunkAccessor{TStore}"/>s for the cluster spatial query: one entry per cluster segment in use, kept across queries.
+/// Per-thread warm <see cref="ChunkAccessor{TStore}"/>s for the cluster spatial query: one entry per cluster segment in use, kept across queries.
 /// </summary>
 /// <remarks>
 /// <para><b>Why.</b> A query that builds its own accessor starts with an empty 32-slot page window, so every page it touches takes the slow path —
-/// <c>LoadAndGet</c> → <c>AcquirePageForRead</c>, a pin taken under the slot's lock, undone by an interlocked decrement in <c>Dispose</c> — on page records
-/// every worker shares. Measured on the SWG demo at x16: 5.3 page loads per query, about 100 ns
+/// <c>LoadAndGet</c> → <c>RequestPageEpoch</c> (an <c>AccessEpoch</c> compare-and-swap) plus an interlocked <c>SlotRefCount</c> increment, undone by an
+/// interlocked decrement in <c>Dispose</c> — on page records every worker shares. Measured on the SWG demo at x16: 5.3 page loads per query, about 100 ns
 /// each. A worker's consecutive queries are spatially close, so a window kept across them is served from the MRU or SIMD path.</para>
 /// <para><b>Why an entry outlives the epoch it was filled in.</b> A slot pins its page with <c>SlotRefCount</c>, and a page is evicted only at
 /// <c>SlotRefCount == 0</c> (overview/03-storage.md, eviction predicate), so a slot's address stays valid whatever the epoch. The B+Tree's warm accessor drops
 /// its window on an epoch change; this cache must not, because the global epoch advances on every outermost scope exit and a game typically opens one scope per
 /// actor.</para>
 /// <para><b>What an address from a warm window is good for: until the next <c>GetChunkAddress</c> on that window.</b> A slot evicted from the window drops
-/// its pin at once, and a scan accessor tags nothing with the epoch (EP-02), so after that nothing protects the page. The enumerator never keeps an
-/// address past
-/// its next cluster open.</para>
+/// its pin at once (the standalone path), and a page an earlier query loaded carries an old <c>AccessEpoch</c>, so after that neither a pin nor the caller's
+/// epoch protects it. <c>ChunkAccessor</c>'s "valid for the enclosing EpochGuard" does not hold for these accessors. The enumerator never keeps an address
+/// past its next cluster open.</para>
+/// <para><b>A wide query.</b> The window tags what it loads, which a query near an actor can afford and a query over the world cannot: past
+/// <see cref="EntityAccessor.LongWalkClusters"/> clusters a query moves to the entry's scan window, which tags nothing (EP-02), and the return disposes it. Reading every
+/// query through a scan window costs a small one up to 15 %: a scan accessor's page miss is the dearer one.</para>
 /// <para><b>Nesting and copies.</b> A query that finds its segment's entry rented takes another entry, so two live queries never share a window. A return must
 /// carry the token its rent stamped, and bumps it (SQ-05's pattern): <c>GetEnumerator()</c> copies the enumerator, and neither a stale copy's return nor its
 /// continued use may reach a window that has been handed back — the enumerator checks the token before each use.</para>
@@ -47,7 +50,11 @@ internal sealed class SpatialQueryAccessorCache
     {
 #pragma warning disable TYPHON005 // Released by the cache (Release, an overflow's return) or by the finalizer below, never by an owner's Dispose
         internal ChunkAccessor<PersistentStore> Accessor;
+
+        /// <summary>A wide query's window (<see cref="EntityAccessor.LongWalkClusters"/>): open only while the query that opened it holds the rent.</summary>
+        internal ChunkAccessor<PersistentStore> ScanWindow;
 #pragma warning restore TYPHON005
+        internal bool ScanWindowOpen;
         internal ChunkBasedSegment<PersistentStore> Segment;
 
         /// <summary>
@@ -71,8 +78,28 @@ internal sealed class SpatialQueryAccessorCache
         /// <summary>The managed id of the thread whose cache made this entry, the only thread that rents it: its slot in a query tally (SO-02).</summary>
         internal int ThreadId;
 
-        /// <summary>Releases the window's pins once nothing references the entry: its thread died, or an overflow rent was never returned.</summary>
-        ~Entry() => Accessor.Dispose();
+        /// <summary>Opens the scan window on the rented segment. Inside the query's epoch scope, like any accessor creation.</summary>
+        internal void OpenScanWindow()
+        {
+            ScanWindow = Segment.CreateScanAccessor();
+            ScanWindowOpen = true;
+        }
+
+        internal void CloseScanWindow()
+        {
+            if (ScanWindowOpen)
+            {
+                ScanWindowOpen = false;
+                ScanWindow.Dispose();
+            }
+        }
+
+        /// <summary>Releases the windows' pins once nothing references the entry: its thread died, or an overflow rent was never returned.</summary>
+        ~Entry()
+        {
+            Accessor.Dispose();
+            CloseScanWindow();
+        }
     }
 
     [ThreadStatic]
@@ -166,6 +193,7 @@ internal sealed class SpatialQueryAccessorCache
         }
 
         entry.Token++;
+        entry.CloseScanWindow();
         if (!entry.Pooled)
         {
             entry.Accessor.Dispose();
@@ -262,7 +290,7 @@ internal sealed class SpatialQueryAccessorCache
 
     private static Entry Fill(Entry entry, ChunkBasedSegment<PersistentStore> segment)
     {
-        entry.Accessor = segment.CreateScanAccessor();   // EP-02: a wide query walks a world's clusters, and one address at a time is all it keeps
+        entry.Accessor = segment.CreateChunkAccessor();
         entry.Segment = segment;
         return entry;
     }

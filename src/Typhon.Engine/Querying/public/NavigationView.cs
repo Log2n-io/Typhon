@@ -113,19 +113,9 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             var entityId = new EntityId(key, RoutingId);
             var sourcePK = (long)entityId.RawValue;
 
-            // Point reads through the transaction's accessors, whose addresses only the epoch holds: a back-pressure wait inside them must not move it (EP-02).
-            var refreshable = PagedMMF.RefreshableWaitDepth;
-            PagedMMF.RefreshableWaitDepth = 0;
-            try
+            if (View.EvaluateFullPredicate(sourcePK, Tx))   // TryReadCommitted zeroes RefreshableWaitDepth for its reads (EP-02)
             {
-                if (View.EvaluateFullPredicate(sourcePK, Tx))
-                {
-                    View.AddEntityDirect(sourcePK);
-                }
-            }
-            finally
-            {
-                PagedMMF.RefreshableWaitDepth = refreshable;
+                View.AddEntityDirect(sourcePK);
             }
 
             return true;
@@ -505,6 +495,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
         public bool Process(long sourcePK, ArchetypeMetadata meta)
         {
+            Tx.NoteEntityOpen();   // EP-03: a target's sources are unbounded, and between two the lookup holds no address
             var wasInView = View._entityIds.Contains(sourcePK);
             var shouldBeInView = TargetPasses && View.EvaluateSourcePredicates(sourcePK, Tx);
             View.ApplyDelta(sourcePK, wasInView, shouldBeInView);

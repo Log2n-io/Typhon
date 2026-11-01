@@ -2910,11 +2910,13 @@ public unsafe partial class Transaction : EntityAccessor
     /// (AP-03); the marks kept the publish's whole write set resident, and a publish larger than the cache — 10 000 updates of a component with three
     /// indexes into 8 MiB, 300 000 into 256 MiB — waited out its bound and stopped the engine. Every entry would bump the global epoch 1.3 million times a
     /// storm, each one sending every other thread's warm accessors down their cold path. Never under a live index cursor of this thread's (#1199): a
-    /// commit made inside an index scan.
+    /// commit made inside an index scan. A quarter of the cache under this commit's own marks counts as pressure: an entry that meets a full cache cannot step
+    /// out to give them back, and a publish that waits on its own marks stops the engine (30 000 destroys into 2 MiB, one run in three).
     /// </summary>
     private void RefreshBetweenCommitSteps()
     {
-        if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0 && _dbe.MMF.UnderPressure
+        if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0
+            && (_dbe.MMF.UnderPressure || (_changeSet != null && _changeSet.MarkedPageCount >= _dbe.MMF.CacheSlotCount / 4))
             && EntityAccessor.LiveIndexCursors == 0)
         {
             ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());

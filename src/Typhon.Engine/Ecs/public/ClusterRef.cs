@@ -1807,8 +1807,9 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     }
 
     /// <summary>
-    /// A transaction's walk and any walk of <see cref="EntityAccessor.LongWalkClusters"/> or more read through a scan accessor (EP-02). A shorter one on a lease
-    /// does not: the lease bounds what it tags, ends its pin, and this is the runtime's hottest read, where a scan accessor's page miss costs 20 % of the walk.
+    /// A transaction's walk and any walk of <see cref="EntityAccessor.LongWalkClusters"/> or more read through a scan accessor (EP-02). A shorter one on a
+    /// lease does not: the lease bounds what it tags, ends its pin, and this is the runtime's hottest read, where a scan accessor's page miss costs 20 % of
+    /// the walk.
     /// </summary>
     private void OpenWindow(ChunkBasedSegment<PersistentStore> segment, EntityAccessor owner, int clusters)
     {

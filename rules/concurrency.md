@@ -336,8 +336,9 @@ lock ordering and deadlock prevention are still to come.
   invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator: a transaction's, and any of LongWalkClusters or more; a
             shorter walk on a lease is bounded by the lease; a ClusterRef is valid for its step, EP-03, and MoveNext records a page handed out before it
             moves), an ordered query's merge streams (ArchetypeSortedStream, tree and
-            clusters), a spatial query's cluster window (SpatialQueryAccessorCache), a navigation's entity-map walk and its FK reverse lookup, and an
-            AllowMultiple key's value buffer (GetBufferReadOnlyAccessor without an accessor; an empty chunk it unlinks, it writes under the page's latch)
+            clusters), a spatial query past LongWalkClusters (SpatialQueryAccessorCache), a navigation's entity-map walk and its FK reverse lookup, and an
+            AllowMultiple key's value buffer in a walk (GetBufferReadOnlyAccessor without an accessor; an empty chunk it unlinks, it writes under the page's
+            latch). A point read of one key keeps the regular reader: TryGetMultiple's cost is the key's own length
   invariant a transaction's cluster walk of LongWalkClusters or more yields at every 64th cluster, and its back-pressure wait moves the epoch; a PTA worker's
             does not (EntityAccessor.NoteEntityOpen): a lease holds a bounded set of its own pages, and what other threads tag for as long as it lasts
   note an ordered query's merge and a spatial query have no yield point: each holds a bounded set of its own pages and its epoch for the length of the call,
@@ -474,7 +475,8 @@ lock ordering and deadlock prevention are still to come.
   note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
         outside recovery keeps its pages resident by its ChangeSet's marks until its next release point: a transaction's epoch refresh (every
         128 operations), PREPARE's component pass (every 1 024 entries), the publish, a failed commit's rollback and the frees of the reset after it,
-        between entries under pressure (#831). Each also gives back what the windows deferred: kept, a rollback of 4M updates held the whole cache
+        between entries under pressure (#831), or once a quarter of the cache is under the commit's own marks: an entry that meets a full cache cannot step
+        out to give them back, and a publish waiting on its own marks stops the engine. Each also gives back what the windows deferred: kept, a rollback of 4M updates held the whole cache
         by slot reference, and a free left under one pin timed out of Dispose, which replaced the commit's own refusal. The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted
   verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and
             the chain walk complete inside

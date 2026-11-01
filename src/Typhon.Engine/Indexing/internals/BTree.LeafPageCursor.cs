@@ -152,11 +152,13 @@ internal abstract partial class BTree<TKey, TStore>
         else if (state.RefreshesSeen != EpochManager.ThreadRefreshCount)
         {
             // Between two fills a merge can read its own spawns' keys through the transaction, whose opens refresh: the parked leaf is the cursor's no longer.
-            state.RefreshesSeen = EpochManager.ThreadRefreshCount;
+            var refreshes = EpochManager.ThreadRefreshCount;
             if (!Redescend(ref state, minKey, maxKey, ref accessor))
             {
                 return 0;
             }
+
+            state.RefreshesSeen = refreshes;   // after: a descent that throws must run again if the caller retries
         }
 
         // ONE leaf per fill, and the loop below only ever moves on from a leaf that gave nothing.
