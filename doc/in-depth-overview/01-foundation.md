@@ -287,7 +287,7 @@ All collections live under [`Foundation/Collections/internals/`](https://github.
 | `PagedHashMap<…>` / `PagedHashMapBase<TStore>` | Hash map backed by Typhon's paged store ([02-storage](02-storage.md)) | Persistent in-DB hash maps (component fields, indexes) |
 | `RawValueHashMap` + `IRawValueUpdater` | Hash map where values are raw byte ranges with custom update logic | Specialized internal use |
 
-`HashMap<T>` uses POH (Pinned Object Heap) allocation + software prefetch on resize, backward-shift deletion to avoid tombstones, 0.75 max load factor. `Capacity` is rounded up to a power of two.
+`HashMap<T>` uses an ordinary managed `byte[]` backing store reached through `ref`s (the earlier Pinned Object Heap path and its software prefetch on resize were removed when the raw-pointer path was replaced — `HashMap.cs:17-20, 381`), backward-shift deletion to avoid tombstones, 0.75 max load factor. `Capacity` is rounded up to a power of two.
 
 ### Concurrent containers
 

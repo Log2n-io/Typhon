@@ -306,7 +306,7 @@ Recovery runs only after an unclean close (the `CleanShutdown` flag was absent a
 | Phase | What it does |
 |---|---|
 | 1 — Discover | Enumerate WAL segment files. |
-| 2 — Scan | Read chunks; collect committed-UoW info + TickFence / ClusterTickFence lists. Stop at first truncation. |
+| 2 — Scan | Read chunks; collect committed-UoW info + TickFence / ClusterTickFence lists. Stop at first truncation or segment-chain break (missing segment, damaged header). |
 | 3 — Cross-reference | Promote WAL-confirmed UoWs to `WalDurable`; `VoidRemainingPending()` voids any `Pending` left (crash before commit). |
 | 6 — TickFence replay | Apply `TickFence` (per-SV-table) and `ClusterTickFence` (per-archetype) entries — SingleVersion / cluster state that has no per-record WAL trail. |
 | 7 — Finalize | Emit stats. |
@@ -318,8 +318,9 @@ Recovery runs only after an unclean close (the `CleanShutdown` flag was absent a
 [`RecoveryDriver.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecoveryDriver.cs) (`Run(walIO, walDir, dbe, checkpointLsn)`) runs **after** archetype initialization and owns the logical-record apply:
 
 ```
-SCAN          read segments in LSN order; CRC-chain-check every chunk; truncate at first mismatch (LOG-03);
-              skip non-Transaction chunks; index each logical record (no payload copy)
+SCAN          read segments in LSN order; CRC-chain-check every chunk; stop at first mismatch (LOG-03) or
+              segment-chain break (MissingSegment/DamagedHeader); skip non-Transaction chunks;
+              index each logical record (no payload copy)
 COMMIT FATE   committedTx = { tsn | a record with the TxCommit flag for tsn is in the valid prefix }   (LOG-04)
 APPLY         strict ascending LSN (AP-11), idempotent (AP-12), via RecoveryApplier through the engine's
               own write primitives — Spawn (spawn-if-absent) / Destroy (destroy-if-present) /
@@ -351,7 +352,7 @@ During the crash path the engine stays in `RecoveryOnly` through apply, since th
 
 ### Recovery metrics
 
-`RecoveryDriver` returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`, `StoppedAtCorruption`) — every field is test-asserted. `StoppedAtCorruption` is a diagnostic flag that distinguishes "scan ran out of segments" from "scan stopped at a LOG-03 / REC-01 corruption boundary"; the stop itself is unconditional regardless of which case fired. The segment scan returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field is never populated).
+`RecoveryDriver` returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`, `StoppedAtCorruption`) — every field is test-asserted. `StoppedAtCorruption` is a diagnostic flag that distinguishes "scan ran out of segments" from "scan stopped at a LOG-03 / REC-01 corruption boundary"; the stop itself is unconditional regardless of which case fired. The segment scan returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`, `RecordsReplayed`, `TickFenceEntriesReplayed`, `Break` (a `WalRecoveryBreak` enum distinguishing `Crc`/`DamagedHeader`/`MissingSegment`), `FirstDroppedSegmentId`; its `FpiRecordsApplied` field is never populated).
 
 ---
 
