@@ -101,6 +101,42 @@ sealed class WholeSegmentScanTests
         Assert.That(segment.Length, Is.EqualTo(length), "found, not grown past");
     }
 
+    /// <summary>
+    /// A miss takes the slot after the previous file page's, to write the two in one run, and that shortcut used to ignore the clock: a sequential walk took a
+    /// page at the top of the clock in no lap, whichever hot page it passed. The slot goes only when the clock would give it up.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-02")]
+    public void ASequentialMiss_LeavesAHotPageInTheNextSlot()
+    {
+        BuildChunkSegment("ep02_gate");
+        using var provider = ReopenSmall("ep02_gate");
+        using var scope = provider.CreateScope();
+        var pmmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        // Two unrelated pages side by side in the cache: the second the hot one, the first the walk's.
+        const int walked = 40, hot = 90;
+        Assert.That(pmmf.AcquirePageForRead(walked, out var walkedSlot), Is.True);
+        pmmf.ReleasePageForRead(walkedSlot);
+        Assert.That(pmmf.AcquirePageForRead(hot, out var hotSlot), Is.True);
+        Assert.That(hotSlot, Is.EqualTo(walkedSlot + 1), "premise: the clock gave them consecutive slots");
+        pmmf.ReleasePageForRead(hotSlot);
+        for (var i = 0; i < 5; i++)
+        {
+            Assert.That(pmmf.AcquirePageForRead(hot, out var again, warm: true), Is.True);
+            pmmf.ReleasePageForRead(again);
+        }
+
+        Assert.That(pmmf.AcquirePageForRead(walked + 1, out var next), Is.True);
+        pmmf.ReleasePageForRead(next);
+        Assert.That(next, Is.Not.EqualTo(hotSlot), "the walk's next page took the hot page's slot");
+
+        Assert.That(pmmf.AcquirePageForRead(hot, out var stillThere), Is.True);
+        pmmf.ReleasePageForRead(stillThere);
+        Assert.That(stillThere, Is.EqualTo(hotSlot), "the hot page left the cache");
+    }
+
     /// <summary>The integrity check's walk of a segment's forward chain, on a segment larger than the cache, inside one epoch scope.</summary>
     [Test]
     [CancelAfter(60_000)]

@@ -57,6 +57,9 @@ internal sealed unsafe class WalSegmentReader : IDisposable
     /// <summary>True if a CRC chain break was detected during iteration (indicates crash truncation).</summary>
     public bool WasTruncated { get; private set; }
 
+    /// <summary>The highest LSN any frame read so far in this segment declares; 0 before the first.</summary>
+    internal long HighestFrameLsn { get; private set; }
+
     /// <summary>The LSN of the last successfully validated chunk.</summary>
     public long LastValidLSN { get; private set; }
 
@@ -175,6 +178,7 @@ internal sealed unsafe class WalSegmentReader : IDisposable
         _isFirstChunk = true;
         _lastFooterCrc = 0;
         WasTruncated = false;
+        HighestFrameLsn = 0;
         LastValidLSN = 0;
         RecordsRead = 0;
 
@@ -270,6 +274,7 @@ internal sealed unsafe class WalSegmentReader : IDisposable
             LastValidLSN = Unsafe.As<byte, long>(ref Data[bodyStart]);
         }
 
+        HighestFrameLsn = Math.Max(HighestFrameLsn, FrameLastLsn);
         RecordsRead++;
         _recordsRemainingInFrame--;
 

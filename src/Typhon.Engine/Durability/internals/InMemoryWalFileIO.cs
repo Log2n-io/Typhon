@@ -1,6 +1,7 @@
 using JetBrains.Annotations;
 using Microsoft.Win32.SafeHandles;
 using System;
+using System.IO;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -190,6 +191,16 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
 
     /// <inheritdoc />
     public void Delete(string path) => Segments.TryRemove(NormalizePath(path), out _);
+
+    /// <inheritdoc />
+    public void RetireSegment(string path)
+    {
+        var key = NormalizePath(path);
+        if (Segments.TryRemove(key, out var segment))
+        {
+            Segments[Path.ChangeExtension(key, ".dropped")] = segment;
+        }
+    }
 
     /// <inheritdoc />
     public void Dispose()

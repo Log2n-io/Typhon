@@ -421,8 +421,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Filter entities by a component field predicate. Evaluated per-entity during broad scan via <see cref="EntityAccessor.Open(EntityId)"/> +
-    /// <see cref="EntityRef.TryRead{T}(out T)"/>. Multiple Where calls chain as AND (each must pass).
+    /// Filter entities by a component field predicate. Evaluated per entity on what the broad scan collected, via <see cref="EntityAccessor.Open(EntityId)"/> +
+    /// <see cref="EntityRef.TryRead{T}(out T)"/>: the scan itself still visits every entity first. Multiple Where calls chain as AND (each must pass).
     /// </summary>
     /// <remarks>Targeted scan (index-first) is not yet available — always uses broad scan.</remarks>
     /// <remarks>
@@ -1410,6 +1410,22 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var sparseZero = false;
         try
         {
+            // Every archetype the engine has first: a cache that fits a merge of all of them, the usual case, costs this query no count.
+            var windowSlots = KWayMergeState.WindowSlots(_tx.DBE.OwnArchetypes().Length, dbe.MMF.CacheSlotCount);
+            if (windowSlots < ChunkAccessor<PersistentStore>.MaxWindowSlots)
+            {
+                var mergeArchetypes = 0;
+                foreach (var meta in _tx.DBE.OwnArchetypes())
+                {
+                    if (MaskTest(meta.ArchetypeId) && meta.HasClusterIndexes)
+                    {
+                        mergeArchetypes++;
+                    }
+                }
+
+                windowSlots = KWayMergeState.WindowSlots(mergeArchetypes, dbe.MMF.CacheSlotCount);
+            }
+
             // Open a sorted stream for each matching cluster archetype
             foreach (var meta in _tx.DBE.OwnArchetypes())
             {
@@ -1542,7 +1558,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // (skip+take) was the bound on how much each stream drained EAGERLY, and it is what made an ordered Take cost K times what it emitted.
                 // QFENCE-01: the stream re-checks the entities written since the last fence against these evaluators — see ArchetypeSortedStream.
                 streams[streamCount++] = ArchetypeSortedStream.Create(field.Index, keyType, scanMin, scanMax, descending, clusterState, clusterState.Layout,
-                    evaluators, matchSlot.Slot, gate, snapshot);
+                    evaluators, matchSlot.Slot, gate, snapshot, windowSlots);
                 if (_tx.PendingSpawns is { Count: > 0 })
                 {
                     (ownSpawnSources ??= []).Add((meta, matchSlot.Slot, field.FieldOffset, keyType));
@@ -3685,6 +3701,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     continue;
                 }
+
+                tx.NoteEntityOpen();   // EP-03: an archetype's walk is an operation, here and in a loop of queries; between two the query holds no address
 
                 var meta = ArchetypeRegistry.GetMetadata((ushort)cs.ArchetypeId);
                 var visGated = meta.VersionedSlotMask != 0;

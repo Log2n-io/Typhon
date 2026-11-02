@@ -81,7 +81,7 @@ internal sealed unsafe class FkSnapshot : IDisposable
                         FieldOffset = cs.IndexSlots[ixSlot].Fields[fkFieldOrdinal].FieldOffset,
                         VersionedIndex = layout.SlotToVersionedIndex != null ? layout.SlotToVersionedIndex[componentSlot] : -1,
                     },
-                    Map = es.EntityMap.Segment.CreateChunkAccessor(),
+                    Map = es.EntityMap.Segment.CreateScanAccessor(),   // EP-02: a record per source, and a target's sources are unbounded
                 };
                 _entries[i] = entry;
                 entry.Side = IndexSnapshotSide<long>.Create(tx, [entry.Source], long.MinValue, long.MaxValue, out entry.Mark, includeOwn: includeOwn);

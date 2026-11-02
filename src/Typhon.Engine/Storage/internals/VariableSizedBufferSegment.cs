@@ -1041,6 +1041,12 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     }
 
     public VariableSizedBufferAccessor<T, TStore> GetReadOnlyAccessor(int bufferId) => new(this, bufferId);
+
+    /// <summary>
+    /// A reader for a walk of many buffers (EP-02): its window pins the pages it holds and nothing tags them. Its elements are valid until its next
+    /// <see cref="VariableSizedBufferAccessor{T,TStore}.NextChunk"/>. An empty chunk it unlinks, it writes under that page's latch, as any reader does.
+    /// </summary>
+    internal VariableSizedBufferAccessor<T, TStore> GetScanAccessor(int bufferId) => new(this, bufferId, null, scan: true);
     public VariableSizedBufferAccessor<T, TStore> GetAccessor(int bufferId, ChangeSet changeSet) => new(this, bufferId, changeSet);
 
     /// <summary>
@@ -1203,7 +1209,12 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         }
     }
 
-    unsafe public VariableSizedBufferAccessor(VariableSizedBufferSegment<T, TStore> owner, int rootChunkId, ChangeSet changeSet = null)
+    unsafe public VariableSizedBufferAccessor(VariableSizedBufferSegment<T, TStore> owner, int rootChunkId, ChangeSet changeSet = null) :
+        this(owner, rootChunkId, changeSet, false)
+    {
+    }
+
+    unsafe internal VariableSizedBufferAccessor(VariableSizedBufferSegment<T, TStore> owner, int rootChunkId, ChangeSet changeSet, bool scan)
     {
         _owner = owner;
         _segment = owner.Segment;
@@ -1217,7 +1228,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
             return;
         }
 
-        _accessor = _segment.CreateChunkAccessor(changeSet);
+        _accessor = scan ? _segment.CreateScanAccessor() : _segment.CreateChunkAccessor(changeSet);
 
         // The root's address is kept for the reader's life — its lock, its capture ticket's slot — so its slot stays in the window, which keeps the page
         // in the cache. The epoch did not: an unlatch of the page by any thread clears its tag (PS-03), and once the window let go of the page it could

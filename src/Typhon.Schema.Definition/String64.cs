@@ -108,7 +108,7 @@ public struct QuaternionD
     public double W;
 }
 
-/// <summary>Marker type for a variable-length string field (<see cref="FieldType.String"/>); its payload lives in the component's variable-size buffer, not inline.</summary>
+/// <summary>Reserved for a variable-length string field. It has no storage yet, so a component cannot declare one: registration refuses the field.</summary>
 public struct VarString
 {
 

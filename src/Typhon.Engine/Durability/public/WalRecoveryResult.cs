@@ -2,12 +2,34 @@ using JetBrains.Annotations;
 
 namespace Typhon.Engine;
 
+/// <summary>How a WAL scan stopped short of the end of the log.</summary>
+public enum WalRecoveryBreak
+{
+    /// <summary>It did not.</summary>
+    None,
+
+    /// <summary>A frame or chunk failed validation.</summary>
+    Crc,
+
+    /// <summary>A file with no valid header lies below a segment that has one.</summary>
+    DamagedHeader,
+
+    /// <summary>The LSN chain has a hole: a segment is gone.</summary>
+    MissingSegment,
+}
+
 /// <summary>
 /// Result of a WAL crash recovery operation.
 /// </summary>
 [PublicAPI]
 public struct WalRecoveryResult
 {
+    /// <summary>Where the log broke, if it did: recovery stops there (LOG-03).</summary>
+    public WalRecoveryBreak Break;
+
+    /// <summary>The first segment left out of recovery with a valid header, set aside by the open (WR-01); 0 for none.</summary>
+    public long FirstDroppedSegmentId;
+
     /// <summary>Number of WAL segment files scanned.</summary>
     public int SegmentsScanned;
 

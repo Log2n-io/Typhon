@@ -73,7 +73,7 @@ using (var tx = dbe.CreateQuickTransaction())
 
 > 💡 **`Deferred` and `GroupCommit` commit at the same speed** — both just append to the WAL buffer (~1–2 µs) and return. They differ only in *when* that buffer is flushed to disk, i.e. how much you can lose. `Immediate` is the one that pays a real latency cost, because `Commit()` blocks on the fsync.
 
-> 💡 **Why expose this at all?** Durability is a cost you should choose per workload, not have forced on you. A bulk world-load wants `Deferred` — flush once at the end. A game tick wants `GroupCommit` — microsecond commits, at most a few milliseconds of loss if the process dies. A financial-style write wants `Immediate` — never acknowledge a commit that isn't on disk. Same API, three points on the safety/latency curve.
+> 💡 **Why expose this at all?** Durability is a cost you should choose per workload, not have forced on you. A bulk world-load wants `Deferred` — flush once at the end. A game tick wants `Deferred` — one explicit `Flush()` at the tick boundary puts all tick work in a single durability cycle, with ≤1-tick loss (this is exactly what the runtime does). A financial-style write wants `Immediate` — never acknowledge a commit that isn't on disk. Same API, three points on the safety/latency curve.
 
 `Commit()` returning does **not** by itself mean "on disk" — that's what the mode controls. Under `Immediate`, a returned `Commit` *is* durable; under the others, durability lands later (or on flush).
 

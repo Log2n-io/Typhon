@@ -113,6 +113,8 @@ internal sealed class WalTailView : IWalFileIO
 
     public void Delete(string path) => throw new NotSupportedException("A tail view is read-only.");
 
+    public void RetireSegment(string path) => throw new NotSupportedException();
+
     public void Dispose()
     {
     }

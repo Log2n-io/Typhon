@@ -83,7 +83,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
                 }
 
                 using var scanGuard = EpochGuard.Enter(_tx.DBE.EpochManager);
-                var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+                var accessor = engineState.EntityMap.Segment.CreateScanAccessor();   // EP-02: a whole map, however large
                 var collector = new TargetCollector
                 {
                     RoutingId = _tx.DBE.RoutingIdOf(meta),
@@ -92,8 +92,14 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
                     Cards = _tx.DBE.CommitCards,
                     Map = engineState.EntityMap,
                 };
-                engineState.EntityMap.ForEachEntry(ref accessor, ref collector);
-                accessor.Dispose();
+                try
+                {
+                    engineState.EntityMap.ForEachEntry(ref accessor, ref collector, _tx.BeginScanYield());
+                }
+                finally
+                {
+                    accessor.Dispose();
+                }
             }
         }
 
@@ -115,6 +121,8 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         {
             foreach (var targetPK in targetPKs)
             {
+                _tx.NoteEntityOpen();   // EP-03: a lookup per target of a whole archetype; between two the query holds no address
+
                 // Evaluate target predicates
                 if (targetEvals.Length > 0 && !PipelineExecutor.EvaluateFilters<TTarget>(targetEvals, _tx, targetPK))
                 {
@@ -145,6 +153,8 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
 
         public bool Process(long sourcePK, ArchetypeMetadata meta)
         {
+            Tx.NoteEntityOpen();   // EP-03: a target's sources are unbounded, and between two the lookup holds no address
+
             // Mask is catalog-space; `meta` is already the owning archetype, so no routing-id translation is needed here.
             if (!Query.MaskTestPublic(meta.ArchetypeId))
             {

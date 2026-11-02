@@ -1723,6 +1723,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private ulong _occupancy;
     // The current cluster's base, stored by its ClusterRef when it handed out writable page memory (GetSpan, Get); recorded on leaving it (#1531).
     private nint _handedOutPage;
+    // A transaction's walk of at least LongWalkClusters clusters: it yields its epoch every ClusterYieldInterval clusters. Never a PTA worker's: a refresh
+    // costs every other worker, and its pin lasts one lease (EntityAccessor.NoteEntityOpen).
+    private const int ClusterYieldInterval = 64;
+    private bool _longWalk;
+    private long _yieldedAt;
 
     internal static ClusterEnumerator<TArch> Create(ArchetypeClusterState state, ArchetypeMetadata meta,
         ChunkBasedSegment<PersistentStore> segment, ChunkBasedSegment<TransientStore> transientSegment = null, EntityAccessor owner = null)
@@ -1732,11 +1737,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
-        if (segment != null)
-        {
-            result._accessor = segment.CreateChunkAccessor();
-            result._hasPersistentAccessor = true;
-        }
         if (transientSegment != null)
         {
             result._transientAccessor = transientSegment.CreateChunkAccessor();
@@ -1748,6 +1748,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = -1;
         result._endIndex = count;
+        result.OpenWindow(segment, owner, count);
         return result;
     }
 
@@ -1764,11 +1765,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
-        if (segment != null)
-        {
-            result._accessor = segment.CreateChunkAccessor();
-            result._hasPersistentAccessor = true;
-        }
         if (transientSegment != null)
         {
             result._transientAccessor = transientSegment.CreateChunkAccessor();
@@ -1780,6 +1776,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = state.ReadActiveClusterList(out var count);
         result._index = startIndex - 1;
         result._endIndex = Math.Min(endIndex, count);
+        result.OpenWindow(segment, owner, result._endIndex - startIndex);
         return result;
     }
 
@@ -1797,11 +1794,6 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
-        if (segment != null)
-        {
-            result._accessor = segment.CreateChunkAccessor();
-            result._hasPersistentAccessor = true;
-        }
         if (transientSegment != null)
         {
             result._transientAccessor = transientSegment.CreateChunkAccessor();
@@ -1810,7 +1802,35 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._clusterIds = clusterIds;
         result._index = startIndex - 1;
         result._endIndex = endIndex;
+        result.OpenWindow(segment, owner, endIndex - startIndex);
         return result;
+    }
+
+    /// <summary>
+    /// A transaction's walk and any walk of <see cref="EntityAccessor.LongWalkClusters"/> or more read through a scan accessor (EP-02). A shorter one on a
+    /// lease does not: the lease bounds what it tags, ends its pin, and this is the runtime's hottest read, where a scan accessor's page miss costs 20 % of
+    /// the walk.
+    /// </summary>
+    private void OpenWindow(ChunkBasedSegment<PersistentStore> segment, EntityAccessor owner, int clusters)
+    {
+        var isTransaction = owner is Transaction;
+        if (isTransaction)
+        {
+            owner.NoteEntityOpen();   // EP-03: a walk is an operation: a loop of short ones reaches no yield, and never moved the epoch
+        }
+
+        var isLong = clusters >= EntityAccessor.LongWalkClusters;
+        if (segment != null)
+        {
+            _accessor = isTransaction || isLong ? segment.CreateScanAccessor() : segment.CreateChunkAccessor();
+            _hasPersistentAccessor = true;
+        }
+
+        if (isTransaction && isLong)
+        {
+            _longWalk = true;
+            _yieldedAt = Stopwatch.GetTimestamp();
+        }
     }
 
     /// <summary>An enumerator over a (list, count) pair its caller read once, under the list's own protocol: a realm's cluster list (Realms).</summary>
@@ -1881,7 +1901,9 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         while (++_index < _endIndex)
         {
             var chunkId = _clusterIds[_index];
-            var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
+            var basePtr = _longWalk ? ClusterOfLongWalk(chunkId)
+                : _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId)
+                : _transientAccessor.GetChunkAddress(chunkId);
             // CLUSTERWALK-04. Per cluster, not once per walk: a destroy made mid-walk hides its entity from every later cluster.
             var raw = _ownDestroys.ReadOccupancy(chunkId, basePtr, _state, out var pendingDeaths);
             var occupancy = _ownDestroys.Apply(chunkId, raw, basePtr, _state, pendingDeaths);
@@ -1892,6 +1914,35 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// The next cluster of a transaction's long walk, whose step is a call boundary (EP-03) and whose window pins only its own pages: its epoch moves here, as
+    /// the SoA scan's does (#1364), and a back-pressure wait for this page moves it too (#1230). Held for the whole walk, the epoch kept every page any other
+    /// thread tagged meanwhile.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private byte* ClusterOfLongWalk(int chunkId)
+    {
+        if ((_index & (ClusterYieldInterval - 1)) == ClusterYieldInterval - 1)
+        {
+            _owner.YieldDuringWalk(ref _yieldedAt);
+        }
+
+        if (!_hasPersistentAccessor)
+        {
+            return _transientAccessor.GetChunkAddress(chunkId);
+        }
+
+        PagedMMF.RefreshableWaitDepth++;
+        try
+        {
+            return _accessor.GetChunkAddress(chunkId);
+        }
+        finally
+        {
+            PagedMMF.RefreshableWaitDepth--;
+        }
     }
 
     /// <summary>

@@ -333,6 +333,31 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     internal bool TornGrowRepaired { get; private set; }
 
     /// <summary>
+    /// Counts the allocation bits of every page, against the allocated count: what the integrity audit compares (#1381). False when the count or the segment's length
+    /// moved during the walk: a free or an allocation between the two reads, which says nothing about their agreement.
+    /// </summary>
+    internal bool TryCountAllocatedBits(out int bits, out int counter)
+    {
+        counter = Volatile.Read(ref _allocatedCount);
+        var length = Length;
+        bits = 0;
+        for (var i = 0; i < length; i++)
+        {
+            var page = AcquirePageForRead(i, out var memPageIndex);
+            try
+            {
+                bits += CountAllocatedBits(page.MetadataReadOnly<long>(), i == 0 ? _bitmapLongsRoot : _bitmapLongsOther, i == 0 ? _rootChunkCount : _otherChunkCount);
+            }
+            finally
+            {
+                ReleasePageForRead(memPageIndex);
+            }
+        }
+
+        return counter == Volatile.Read(ref _allocatedCount) && length == Length;
+    }
+
+    /// <summary>
     /// Rebuilds the allocator from the chunk bitmaps, the source of truth: reads every page. Checks each page's forward link against the directory as the
     /// page goes by, at no extra read.
     /// </summary>
@@ -1153,13 +1178,21 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// Frees <paramref name="chunkId"/> — at once, or, quarantined (<see cref="QuarantineFrees"/>) and once the engine is open, when a checkpoint has made its
     /// reuse safe; it stays allocated until then.
     /// </summary>
-    public void FreeChunk(int chunkId)
+    public void FreeChunk(int chunkId) => FreeChunk(chunkId, false);
+
+    /// <summary>
+    /// <see cref="FreeChunk(int)"/> for a pass that frees as many chunks as the data holds under one epoch scope (EP-02): the bitmap page is pinned and
+    /// released, not tagged, so the pass holds one page at a time. The pin takes the slot's lock: for a reclamation, not the hot paths.
+    /// </summary>
+    internal void FreeChunkReleasingPage(int chunkId) => FreeChunk(chunkId, true);
+
+    private void FreeChunk(int chunkId, bool releasePage)
     {
         Debug.Assert(!PagedMMF.IndexRestartArmed, "a restartable B+Tree write frees a chunk: a restart would replay the free (#1382, EP-02)");
         if (_freeQuarantine != null && chunkId != 0 && _quarantineOwner.FreeQuarantineEnabled)
         {
             // A chunk already free, or already held, is a second free: counted, as the bitmap counts it below.
-            if (!IsChunkAllocated(chunkId) || !_freeQuarantine.Add(chunkId))
+            if (!(releasePage ? IsChunkAllocatedUnpinned(chunkId) : IsChunkAllocated(chunkId)) || !_freeQuarantine.Add(chunkId))
             {
                 Interlocked.Increment(ref DoubleFreeCount);
                 return;
@@ -1169,10 +1202,10 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
             return;
         }
 
-        FreeChunkNow(chunkId);
+        FreeChunkNow(chunkId, releasePage);
     }
 
-    private void FreeChunkNow(int chunkId)
+    private void FreeChunkNow(int chunkId, bool releasePage = false)
     {
         // Chunk 0 is reserved (e.g., meta for paged hash maps). Refuse to free it — freeing would give its page room again and AllocateChunk would hand
         // it out, causing every caller to clobber the meta chunk.
@@ -1182,11 +1215,27 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         }
 
         var (pageIndex, chunkInPage) = GetChunkLocation(chunkId);
+        if (!releasePage)
+        {
+            ClearChunkBit(GetPage(pageIndex, _store.EpochManager.GlobalEpoch, out var taggedPage), taggedPage, pageIndex, chunkInPage);
+            return;
+        }
+
+        var page = AcquirePageForRead(pageIndex, out var memPageIdx);
+        try
+        {
+            ClearChunkBit(page, memPageIdx, pageIndex, chunkInPage);
+        }
+        finally
+        {
+            ReleasePageForRead(memPageIdx);
+        }
+    }
+
+    private void ClearChunkBit(PageAccessor page, int memPageIdx, int pageIndex, int chunkInPage)
+    {
         var wordIndex = chunkInPage >> 6;
         var mask = 1L << (chunkInPage & 0x3F);
-
-        var epoch = _store.EpochManager.GlobalEpoch;
-        var page = GetPage(pageIndex, epoch, out var memPageIdx);
         var metadata = page.Metadata<long>();
 
         var prev = Interlocked.And(ref metadata[wordIndex], ~mask);
@@ -1561,6 +1610,12 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// </summary>
     [return: TransfersOwnership]
     internal ChunkAccessor<TStore> CreateScanAccessor() => new(this, _store, _epochManager, null, scan: true);
+
+    /// <summary>
+    /// <see cref="CreateScanAccessor()"/> over a narrower window, a power of two of at least 2: for a caller holding many at once, whose windows together
+    /// must stay well inside the cache (<see cref="KWayMergeState.WindowSlots"/>).
+    /// </summary>
+    internal ChunkAccessor<TStore> CreateScanAccessor(int windowSlots) => new(this, _store, _epochManager, null, scan: true, windowSlots);
 
     /// <summary>
     /// Single-entry thread-local cache for warm <see cref="ChunkAccessor{TStore}"/> reuse.

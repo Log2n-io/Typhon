@@ -24,6 +24,12 @@ namespace Typhon.Engine.Internals;
 internal interface IWalFileIO : IDisposable
 {
     /// <summary>
+    /// Sets a segment aside: out of every later scan, its bytes kept for a manual salvage (WR-01). Throws when it cannot: a damaged segment left in place reads as
+    /// the log's continuation to the next crash.
+    /// </summary>
+    void RetireSegment(string path);
+
+    /// <summary>
     /// Opens a WAL segment file with O_DIRECT semantics and optional FUA (Force Unit Access).
     /// </summary>
     /// <param name="path">File path for the segment.</param>

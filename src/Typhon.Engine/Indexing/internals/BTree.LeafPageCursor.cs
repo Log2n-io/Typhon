@@ -37,6 +37,12 @@ internal struct LeafPageCursorState
     /// <summary>Chunk id of the leaf the cursor is standing on, or 0 before the first fill.</summary>
     public int NodeChunkId;
 
+    /// <summary>
+    /// <see cref="EpochManager.ThreadRefreshCount"/> at the last fill. <see cref="NodeChunkId"/> names a leaf for the pin it was read under: moved, the
+    /// leaf may be retired and its chunk another node's, at a version that validates (EP-02).
+    /// </summary>
+    public int RefreshesSeen;
+
     /// <summary>Sibling links captured from the same validated snapshot as the entries — never re-read from a leaf whose version has since moved.</summary>
     public int NextChunkId;
 
@@ -130,6 +136,7 @@ internal abstract partial class BTree<TKey, TStore>
                 return 0;
             }
 
+            var refreshesAtDescent = EpochManager.ThreadRefreshCount;   // before: a wait in the descent can move the pin
             var startLeaf = FindLeaf(state.Reverse ? maxKey : minKey, out _, ref accessor);
             if (!startLeaf.IsValid)
             {
@@ -140,6 +147,18 @@ internal abstract partial class BTree<TKey, TStore>
             state.NodeChunkId = startLeaf.ChunkId;
             state.LeafScanHint = 0;
             state.Opened = true;
+            state.RefreshesSeen = refreshesAtDescent;
+        }
+        else if (state.RefreshesSeen != EpochManager.ThreadRefreshCount)
+        {
+            // Between two fills a merge can read its own spawns' keys through the transaction, whose opens refresh: the parked leaf is the cursor's no longer.
+            var refreshes = EpochManager.ThreadRefreshCount;
+            if (!Redescend(ref state, minKey, maxKey, ref accessor))
+            {
+                return 0;
+            }
+
+            state.RefreshesSeen = refreshes;   // after: a descent that throws must run again if the caller retries
         }
 
         // ONE leaf per fill, and the loop below only ever moves on from a leaf that gave nothing.

@@ -85,6 +85,7 @@ System.Exception
    │  └─ BulkLoadCheckpointTimeoutException (BulkSessionId, Timeout)
    ├─ ResourceExhaustedException            (direct subclass; IsTransient => true)
    ├─ UniqueConstraintViolationException    (parameterless ctor only — currently)
+   ├─ ForeignKeyViolationException          (Child, Parent, ParentDying; IsTransient => ParentDying)
    ├─ SchemaValidationException             (Diff: SchemaDiff)
    ├─ SchemaMigrationException              (ComponentName, IReadOnlyList<MigrationFailure>)
    ├─ SchemaDowngradeException              (ComponentName, PersistedRevision, RuntimeRevision)
@@ -157,6 +158,12 @@ Things that go wrong below the commit boundary.
 
 Thrown when an insert / update would create a duplicate key in a unique secondary index. **Parameterless constructor only** at present — there's no `IndexName` / `Key` / `EntityId` payload yet. Adding context properties is on the roadmap; for now the call site is responsible for logging the context.
 
+### Index — `ForeignKeyViolationException`
+
+[`Errors/public/ForeignKeyViolationException.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/ForeignKeyViolationException.cs)
+
+Thrown at commit when a component write carries a cascade FK field pointing at a destroyed parent, or at a parent another committing transaction is destroying. Carries `Child` (the entity being committed), `Parent` (the target parent), and `ParentDying` (true when the parent's destroy was still in-flight — it may abort). **`IsTransient => ParentDying`**: when `ParentDying` is true the parent destroy may still abort, so a retry is appropriate; once it commits the retry is refused for good (not transient). The transaction stays open after the throw, to be fixed or rolled back.
+
 ### Schema family
 
 Three exceptions, all direct subclasses of `TyphonException`:
@@ -187,7 +194,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 | 1xxx | Transaction | `TransactionTimeout = 1002`, `SnapshotExpired = 1003` |
 | 2xxx | Storage | `DataCorruption = 2003`, `StorageCapacityExceeded = 2004`, `PageChecksumMismatch = 2005`, `PageCacheBackpressureTimeout = 2006`, `DatabaseLocked = 2007`, `InvalidDatabaseBundle = 2008`, `PageCacheAllocationFailed = 2009` |
 | 3xxx | Schema / Component | `SchemaValidation = 3001`, `SchemaMigration = 3002` |
-| 4xxx | Index | `UniqueConstraintViolation = 4001` |
+| 4xxx | Index | `UniqueConstraintViolation = 4001`, `ForeignKeyViolation = 4002` |
 | 5xxx | Query | (reserved) |
 | 6xxx | Resource | `ResourceExhausted = 6001`, `LockTimeout = 6003` |
 | 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004`, `BulkSessionAlreadyActive = 7005`, `BulkSessionClosed = 7006`, `BulkLoadCheckpointTimeout = 7007`, `CommitDurabilityUncertain = 7008` |

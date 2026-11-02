@@ -92,7 +92,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // One bit per cluster — see ClusterVisitSet. The frustum case is why it exists: its result sets are large enough for a per-entity rescan of the
         // whole buffer to dominate the query.
         var visited = ClusterVisitSet.Rent(aabbs.Length);
-        var accessor = ClusterSegment.CreateChunkAccessor();
+        var window = SpatialQueryAccessorCache.Instance.Rent(ClusterSegment, out var windowToken);   // as the box and radius queries: EP-02
         try
         {
             for (int cz = cellMinZ; cz <= cellMaxZ && count < results.Length; cz++)
@@ -134,9 +134,9 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                         ShiftPlanes(planes, shifted, planeCount, dim, originX, originY, is3D ? originZ : 0d);
 
-                        FrustumScanHalf(slot, isStatic: false, ref accessor, shifted, planes, planeCount, dim, is3D, categoryMask, box, aabbs,
+                        FrustumScanHalf(slot, isStatic: false, window, shifted, planes, planeCount, dim, is3D, categoryMask, box, aabbs,
                             ref visited, results, ref count);
-                        FrustumScanHalf(slot, isStatic: true, ref accessor, shifted, planes, planeCount, dim, is3D, categoryMask, box, aabbs,
+                        FrustumScanHalf(slot, isStatic: true, window, shifted, planes, planeCount, dim, is3D, categoryMask, box, aabbs,
                             ref visited, results, ref count);
                     }
                 }
@@ -163,13 +163,13 @@ internal sealed unsafe partial class ArchetypeClusterState
                     continue;
                 }
 
-                FrustumScanCluster(escaped.ChunkIds[e], ref accessor, planes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results, ref count);
+                FrustumScanCluster(escaped.ChunkIds[e], window, planes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results, ref count);
             }
         }
         finally
         {
             visited.Dispose();
-            accessor.Dispose();
+            SpatialQueryAccessorCache.Return(window, windowToken);
         }
 
         return count;
@@ -198,7 +198,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    private void FrustumScanHalf(PerCellSpatialSlot slot, bool isStatic, ref ChunkAccessor<PersistentStore> accessor,
+    private void FrustumScanHalf(PerCellSpatialSlot slot, bool isStatic, SpatialQueryAccessorCache.Entry window,
         ReadOnlySpan<double> cellPlanes, ReadOnlySpan<double> worldPlanes, int planeCount, int dim, bool is3D, uint categoryMask, Span<double> box,
         ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited, Span<long> results, ref int count)
     {
@@ -212,7 +212,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             foreach (var hit in tree.QueryFrustum(treePlanes, planeCount))
             {
-                FrustumScanCluster((int)hit.PayloadId, ref accessor, worldPlanes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results,
+                FrustumScanCluster((int)hit.PayloadId, window, worldPlanes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results,
                     ref count);
                 if (count == results.Length)
                 {
@@ -245,7 +245,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 continue;
             }
 
-            FrustumScanCluster(linear.ClusterIds[i], ref accessor, worldPlanes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results,
+            FrustumScanCluster(linear.ClusterIds[i], window, worldPlanes, planeCount, dim, is3D, categoryMask, aabbs, ref visited, results,
                 ref count);
         }
     }
@@ -268,7 +268,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    private void FrustumScanCluster(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, ReadOnlySpan<double> worldPlanes,
+    private void FrustumScanCluster(int clusterChunkId, SpatialQueryAccessorCache.Entry window, ReadOnlySpan<double> worldPlanes,
         int planeCount, int dim, bool is3D, uint categoryMask, ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited, Span<long> results, ref int count)
     {
         if ((uint)clusterChunkId >= (uint)aabbs.Length)
@@ -291,7 +291,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         int compSize = Layout.ComponentSize(ss.Slot);
         int fieldOffset = ss.FieldOffset;
 
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
+        byte* clusterBase = window.OpenCluster(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
 
         // RM-04: a slot whose realm key names another realm (changed this tick, moved at the next fence) is not this realm's.

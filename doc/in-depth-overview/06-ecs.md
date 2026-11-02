@@ -207,7 +207,7 @@ For parallel query systems that read at a single frozen MVCC snapshot across man
 ```csharp
 var pta = new PointInTimeAccessor();
 pta.Attach(dbe, workerCount);     // allocates fresh TSN, resets per-worker accessors
-// dispatch parallel work — each worker uses pta.GetAccessor(workerId).Open(...)
+// dispatch parallel work — each worker: using var lease = pta.Enter(workerId); lease.Accessor.Open(...)
 ```
 
 - One per-worker `EntityAccessor` is stored in a flat `EntityAccessor[]` indexed by `workerId` — no per-entity dictionary lookup.
@@ -297,7 +297,7 @@ foreach (var cluster in accessor.GetClusterEnumerator<Ant>())
 }
 ```
 
-The TZCNT loop walks only live slots — branch-free, very fast. `OccupancyBits` is a 64-bit mask at offset 0 of the cluster chunk; `EnabledBits(slot)` masks for component-disabled entities; `ActiveBits(slot) = OccupancyBits & EnabledBits(slot)` is the common case.
+The TZCNT loop walks only live slots — branch-free, very fast. `OccupancyBits` is the occupied-slot mask pre-computed by the enumerator's `MoveNext`; when walking through a transaction it has that transaction's own pending destroys filtered out (CLUSTERWALK-04), so the loop never yields an entity the caller already destroyed. The raw committed word at offset 0 of the cluster chunk is `RawOccupancy`. `EnabledBits(slot)` masks for component-disabled entities; `ActiveBits(slot) = OccupancyBits & EnabledBits(slot)` is the common case.
 
 Every archetype is cluster-backed: `IsClusterEligible` on `ArchetypeMetadata` is unconditionally true, so all entity storage is `ClusterRef`-accessible.
 
@@ -449,7 +449,7 @@ var pos = a.Read(Ant.Position);
 // Read (parallel system)
 var pta = new PointInTimeAccessor();
 pta.Attach(dbe, workerCount: 8);
-// dispatch — each worker uses pta.GetAccessor(workerId)
+// dispatch — each worker: using var lease = pta.Enter(workerId); // access via lease.Accessor
 
 // Iterate clusters (high density, full scan)
 foreach (var cluster in accessor.GetClusterEnumerator<Ant>())

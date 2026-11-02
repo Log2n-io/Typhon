@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
@@ -55,6 +56,23 @@ internal abstract partial class BTree<TKey, TStore>
 
         private bool _hasLastKey;
 
+        /// <summary>
+        /// <see cref="EpochManager.ThreadRefreshCount"/> when the cursor last stood on a leaf: the pin that leaf is protected by is that one, and only
+        /// that one.
+        /// </summary>
+        private int _refreshesSeen;
+
+        /// <summary>
+        /// The tree's leaf retirements when the cursor last positioned itself: none since, and its leaf is still the tree's whatever the epoch did.
+        /// </summary>
+        private int _retirementsSeen;
+
+        /// <summary>
+        /// A re-seek began and has not landed: it threw (a back-pressure timeout, transient), with the cursor between leaves. If the caller retries, the
+        /// next step seeks again before it reads anything.
+        /// </summary>
+        private bool _repositioning;
+
         /// <summary>True once the range is finished; further calls return false without touching the tree.</summary>
         private bool _finished;
 
@@ -79,20 +97,13 @@ internal abstract partial class BTree<TKey, TStore>
             _currentIndex = -1;
             _disposed = false;
             _countedLive = false;
+            _refreshesSeen = EpochManager.ThreadRefreshCount;
+            _retirementsSeen = Volatile.Read(ref tree._leafRetirements);
 
             try
             {
-                // The head leaf write-locked past the spin limit, or replaced: read the head again rather than answer for an empty leaf.
-                for (var attempt = 0; _currentNode.IsValid && !TryReadLeafState(); attempt++)
+                if (!PositionAtHead())
                 {
-                    CountRestartOrThrow(attempt, default, "the first leaf");
-                    _currentNode = tree._linkList;
-                }
-
-                if (!_currentNode.IsValid)
-                {
-                    _nodeItemCount = 0;
-                    _leafVersion = 0;
                     _finished = true;
                 }
             }
@@ -126,6 +137,8 @@ internal abstract partial class BTree<TKey, TStore>
             _finished = false;
             _disposed = false;
             _countedLive = false;
+            _refreshesSeen = EpochManager.ThreadRefreshCount;
+            _retirementsSeen = Volatile.Read(ref tree._leafRetirements);
             _currentIndex = -1;
             _nodeItemCount = 0;
             _leafVersion = 0;
@@ -191,6 +204,28 @@ internal abstract partial class BTree<TKey, TStore>
 
                 CountRestartOrThrow(attempt, key, "the leaf its key routes to");
             }
+        }
+
+        /// <summary>An unbounded scan's start: the head of the leaf chain, the head read again rather than answered for when it is replaced or stays
+        /// locked.</summary>
+        private bool PositionAtHead()
+        {
+            _currentIndex = -1;
+            _currentNode = _tree._linkList;
+            for (var attempt = 0; _currentNode.IsValid && !TryReadLeafState(); attempt++)
+            {
+                CountRestartOrThrow(attempt, default, "the first leaf");
+                _currentNode = _tree._linkList;
+            }
+
+            if (!_currentNode.IsValid)
+            {
+                _nodeItemCount = 0;
+                _leafVersion = 0;
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -275,6 +310,9 @@ internal abstract partial class BTree<TKey, TStore>
         /// <summary>Gets the current key-value item: the row <see cref="MoveNext"/> validated, not a re-read of the leaf.</summary>
         public KeyValueItem Current => _current;
 
+        /// <summary>The leaf the cursor stands on (tests).</summary>
+        internal NodeWrapper CurrentLeaf => _currentNode;
+
         /// <summary>Advances to the next entry in iteration order, traversing leaf nodes as needed.</summary>
         /// <remarks>
         /// <para>
@@ -287,9 +325,20 @@ internal abstract partial class BTree<TKey, TStore>
         /// re-emitted everything already handed out from it: measured at 18 899 keys returned from a 4 500-entry tree under a writer touching the cursor's
         /// leaf every eight steps.
         /// </para>
+        /// <para>
+        /// A cursor standing on a leaf across a move of its thread's epoch stands on nothing. The leaf is protected from reclaim by the pin the cursor read it
+        /// under, not by the cursor: moved, a merge can retire the leaf and a reclaim free it, and a new node restarts its version where a new node does, so a
+        /// node at the version the cursor remembers validates and the scan reads another node's entries, silently. So the place is found again from the last
+        /// key, one descent, when the epoch moved and the tree has retired a leaf since the cursor last looked: a tree that lost none has lost nothing.
+        /// </para>
         /// </remarks>
         public bool MoveNext()
         {
+            if ((_refreshesSeen != EpochManager.ThreadRefreshCount || _repositioning) && !ResumeAfterRefresh())
+            {
+                return false;
+            }
+
             while (true)
             {
                 if (_finished || !_currentNode.IsValid)
@@ -433,15 +482,41 @@ internal abstract partial class BTree<TKey, TStore>
                 _span.RestartCount++;
             }
 
-            // Asking the tree where the key lives NOW is what makes this correct under a split, a merge or a reclaim alike — the cursor's own leaf may no
-            // longer answer for it, or may no longer exist. Nothing emitted yet: resume AT the seek key; otherwise strictly past the last key emitted.
-            if (!Position(_hasLastKey ? _lastKey : _seekKey, _hasLastKey))
+            return Reposition();
+        }
+
+        /// <summary>The thread's epoch moved since the cursor read its leaf: the leaf is no longer the cursor's to read. Out of line: once per
+        /// refresh.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private bool ResumeAfterRefresh()
+        {
+            // Marked caught up only once it is: a re-seek that throws (a back-pressure timeout, transient) must run again if the caller retries.
+            var refreshes = EpochManager.ThreadRefreshCount;
+            var retirements = Volatile.Read(ref _tree._leafRetirements);
+            if ((_repositioning || (retirements != _retirementsSeen && !_finished && _currentNode.IsValid)) && !Reposition())
             {
-                _finished = true;
                 return false;
             }
 
+            _refreshesSeen = refreshes;
+            _retirementsSeen = retirements;
             return true;
+        }
+
+        private bool Reposition()
+        {
+            // Asking the tree where the key lives NOW is what makes this correct under a split, a merge or a reclaim alike — the cursor's own leaf may no
+            // longer answer for it, or may no longer exist. Nothing emitted yet: resume AT the seek key, or at the head of a scan that has none; otherwise
+            // strictly past the last key emitted.
+            _repositioning = true;
+            var positioned = !_bounded && !_hasLastKey ? PositionAtHead() : Position(_hasLastKey ? _lastKey : _seekKey, _hasLastKey);
+            _repositioning = false;
+            if (!positioned)
+            {
+                _finished = true;
+            }
+
+            return positioned;
         }
 
         /// <summary>Releases the chunk accessor.</summary>

@@ -225,7 +225,7 @@ public class DatabaseDefinitions
     private static void ThrowUnmappableField(Type componentType, string fieldName, Type fieldType) =>
         throw new InvalidOperationException(
             $"Component '{componentType.Name}' field '{fieldName}' has type '{fieldType.Name}', which has no schema field type. Use one of the supported "
-            + "types (the primitives, String64 / String1024 / VarString / Variant, the Point / Quaternion / AABB / BSphere families, a nested [Component] "
+            + "types (the primitives, String64 / String1024 / Variant, the Point / Quaternion / AABB / BSphere families, a nested [Component] "
             + "struct, ComponentCollection<T>, EntityId, or EntityLink<T> for a typed entity reference). A field with no schema type was previously dropped "
             + "silently, which left it invisible to the Workbench, un-indexable and absent from replication.");
 

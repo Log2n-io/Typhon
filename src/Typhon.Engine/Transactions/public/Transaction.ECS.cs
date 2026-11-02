@@ -615,14 +615,37 @@ public unsafe partial class Transaction
 
             _spawnedEntities.Add(entry);
 
-            // Epoch refresh every 128 entities to avoid holding epoch too long
-            if ((n & 127) == 127)
-            {
-                _epochManager.RefreshScope();
-            }
+            RefreshBetweenBatchWrites();
         }
 
         CheckEpochRefresh();
+    }
+
+    /// <summary>
+    /// Every 128 writes of a spawn batch, whichever of its entry points wrote them: the content chunks' marks go back with the epoch, or a batch larger than the
+    /// cache fills it with them before the call returns. Under a live index cursor of this thread's only the epoch stays: the marks and the windows' releases
+    /// depend on no cursor (<see cref="RefreshBetweenCommitSteps"/>). Holds no address across the call: each write resolves its own.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RefreshBetweenBatchWrites()
+    {
+        if ((++_batchWriteCount & 127) == 0)
+        {
+            GiveBackBatchWrites();
+        }
+    }
+
+    private void GiveBackBatchWrites()
+    {
+        if (LiveIndexCursors == 0)
+        {
+            FlushAndRefreshEpoch();
+        }
+        else
+        {
+            _changeSet?.FlushDeferredEvictions();
+            _changeSet?.ReleaseDirtyMarks();
+        }
     }
 
     /// <summary>
@@ -689,10 +712,6 @@ public unsafe partial class Transaction
                 entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
             }
 
-            if ((n & 127) == 127)
-            {
-                _epochManager.RefreshScope();
-            }
         }
 
         CheckEpochRefresh();
@@ -743,6 +762,7 @@ public unsafe partial class Transaction
 
             Unsafe.AsRef<T>(ptr + overhead) = values[i];
             entry.EnabledBits |= bitMask;
+            RefreshBetweenBatchWrites();
         }
     }
 
@@ -821,10 +841,6 @@ public unsafe partial class Transaction
                 entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
             }
 
-            if ((n & 127) == 127)
-            {
-                _epochManager.RefreshScope();
-            }
         }
 
         CheckEpochRefresh();
@@ -889,6 +905,7 @@ public unsafe partial class Transaction
         var size = Math.Min(value.DataSize, table.ComponentStorageSize);
         value.Payload[..size].CopyTo(new Span<byte>(ptr + table.ComponentOverhead, size));
         entry.EnabledBits |= (ushort)(1 << slot);
+        RefreshBetweenBatchWrites();
     }
 
     /// <summary>
@@ -1092,6 +1109,7 @@ public unsafe partial class Transaction
         AssertThreadAffinity();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
+        CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. DestroyInternal is engine-internal (cascade traversal + tombstone marking).
@@ -1138,6 +1156,7 @@ public unsafe partial class Transaction
         AssertThreadAffinity();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
+        CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
         scope.Tsn = TSN;
@@ -1323,6 +1342,12 @@ public unsafe partial class Transaction
             var childIds = FindCascadeChildren(childMeta, target, id);
             foreach (var childId in childIds)
             {
+                // EP-03: up to MaxCascadeEntities children from one Destroy; the ids are a list, and PREPARE's walk must not move its epoch (#831)
+                if (!_resolvingCascadesAtCommit)
+                {
+                    CheckEpochRefresh();
+                }
+
                 DestroyInternal(childId, depth + 1, ref cascadeCount);
             }
         }
@@ -5260,6 +5285,13 @@ public unsafe partial class Transaction
                 {
                     state.ClusterState?.AddPendingDeath(marked, -1);
                 }
+
+                // The undo of a refused commit gives back what it holds, or it meets the wall that refused it. Never the pass itself: moved in PREPARE, a
+                // commit past the limit reaches its append, and its publish fails where it cannot be undone (#831).
+                if (!pending)
+                {
+                    RefreshBetweenCommitSteps();
+                }
             }
         }
         finally
@@ -6167,6 +6199,7 @@ public unsafe partial class Transaction
                         {
                             // CC-aware free: release the cloned ComponentCollection buffer of the rolled-back COW chunk (the committed head keeps its own).
                             DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId, neverCommitted: true);
+                            RefreshBetweenCommitSteps();   // the free tags the pages it reads: 4M of them, under this one pin, was a timeout out of Dispose
                         }
                     }
                 }

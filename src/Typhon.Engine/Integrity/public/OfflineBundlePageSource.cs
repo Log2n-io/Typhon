@@ -198,7 +198,7 @@ public sealed class OfflineBundlePageSource : IPageSource
             return [];
         }
 
-        var files = Directory.GetFiles(walDir);
+        var files = Directory.GetFiles(walDir, "*.wal");   // a `.dropped` file left the log at a crash open (WR-01)
         Array.Sort(files, StringComparer.Ordinal);
         var refs = new List<WalSegmentRef>(files.Length);
         for (var i = 0; i < files.Length; i++)

@@ -183,8 +183,7 @@ public enum StorageIntegrityIssueKind : byte
     ChainDirectoryMismatch,
 
     /// <summary>
-    /// <see cref="ChunkBasedSegment{TStore}"/>'s computed capacity (<c>ChunkCapacity</c>) ≠ <c>AllocatedChunkCount + FreeChunkCount</c>. The segment's
-    /// allocated count desynced from the chunk-occupancy bitmaps on its pages.
+    /// A <see cref="ChunkBasedSegment{TStore}"/>'s allocated count disagrees with the bits set on its pages, the segment holding still for the count.
     /// </summary>
     ChunkSegmentCapacity,
 
@@ -218,8 +217,8 @@ public readonly record struct StorageIntegrityIssue(StorageIntegrityIssueKind Ki
 /// should care about — every individual issue is reported with enough context to localise the cause without re-running the audit.
 /// </summary>
 /// <remarks>
-/// The audit reads only in-memory structures (occupancy bitmap, segment registry, page headers via the page cache). It is safe to call at any time and
-/// incurs no data-page I/O beyond touching the segment's chain headers.
+/// The audit reads the occupancy bitmap, the segment registry, and every page of every chunk segment through the page cache, so it costs a walk of the
+/// database and may load pages. It is safe on a live engine, not on a hot path.
 /// </remarks>
 [PublicAPI]
 public sealed class StorageIntegrityReport
@@ -245,6 +244,9 @@ public sealed class StorageIntegrityReport
     /// looked at nothing".
     /// </summary>
     public int VisibilitySummaryClustersChecked { get; init; }
+
+    /// <summary>Chunk segments whose allocated count kept moving through three counts of their bits, so nothing could be said of them.</summary>
+    public int ChunkSegmentsUnsettled { get; init; }
 
     /// <summary><c>true</c> when <see cref="Issues"/> is empty.</summary>
     public bool IsHealthy => Issues.Count == 0;

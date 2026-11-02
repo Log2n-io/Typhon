@@ -381,7 +381,7 @@ below names the invariant that proves it.
             slot of a cluster the ordered side stream read. Mutants: the fill reading every slot, no stamp re-read after the HEAD copy, the merge's
             check by cluster, a migration not carrying the slot stamp, the selective scan not re-testing changed entities, an update or a destroy not
             stamping its slot (QueryIndexPathSnapshotTests), the side stream dropping only its matching rows — each red. Under load: QueryStressOracleTests
-            ...UnderConcurrentChurnAndTierMoves, quarantined on #1381 (#1369/#1370, which it exposed, are VIS-08's slot index lock)
+            ...UnderConcurrentChurnAndTierMoves (#1369/#1370, which it exposed, are VIS-08's slot index lock)
 
 ### VIS-13: An index read at a snapshot answers what the snapshot holds, as the snapshot's queries do `[fatal]` `[silent]`
   invariant ∀ index read R of transaction t at snapshot S over keys [a, b] — `Transaction.EnumerateIndex`, the FK reverse lookup of a navigation and

@@ -363,6 +363,49 @@ public class WalWriterTests : AllocatorTestBase
         }
     }
 
+    /// <summary>
+    /// A drain of abandoned claims alone has no high LSN. Rotated on it, the segment was sealed at LSN 0: the next checkpoint reclaimed it with its records
+    /// unconsolidated, and the next segment's header named none of them.
+    /// </summary>
+    [Test]
+    [CancelAfter(5000)]
+    [VerifiesRule("WR-01")]
+    public void ARotationOnAbandonedClaimsAlone_SealsAtTheLastRecord()
+    {
+        const int Frame = 32 * 1024;
+
+        var (buffer, writer, segMgr) = CreateWriterPipeline(bufferCapacity: 256 * 1024);
+        try
+        {
+            writer.Start();
+            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(4));
+            var claim = buffer.TryClaim(64, 1, ref ctx);
+            buffer.Publish(ref claim);
+            var spin = new SpinWait();
+            while (writer.DurableLsn == 0)
+            {
+                spin.SpinOnce(-1);
+            }
+
+            var lastRecord = writer.DurableLsn;
+            while (segMgr.SealedSegmentCount == 0)
+            {
+                var abandoned = buffer.TryClaim(Frame, 1, ref ctx);
+                Assert.That(abandoned.IsValid, Is.True, "precondition: the frame fits the commit buffer");
+                buffer.AbandonClaim(ref abandoned);
+            }
+
+            Assert.That(segMgr.SealedSegments()[0].LastLsn, Is.EqualTo(lastRecord));
+            Assert.That(segMgr.ActiveSegment.FirstLSN, Is.EqualTo(lastRecord + 1));
+        }
+        finally
+        {
+            writer.Dispose();
+            buffer.Dispose();
+            segMgr.Dispose();
+        }
+    }
+
     /// <summary>Companion to the above: a final batch that FITS the staging buffer still drains through the original path.</summary>
     [Test]
     [CancelAfter(5000)]
@@ -680,6 +723,8 @@ public class WalWriterTests : AllocatorTestBase
         public bool Exists(string path) => inner.Exists(path);
 
         public void Delete(string path) => inner.Delete(path);
+
+        public void RetireSegment(string path) => inner.RetireSegment(path);
 
         public IReadOnlyList<string> EnumerateSegmentPaths(string directory) => inner.EnumerateSegmentPaths(directory);
 

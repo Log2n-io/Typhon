@@ -1202,7 +1202,7 @@ internal class L32MultipleBTree<TKey, TStore> : L32BTree<TKey, TStore> where TSt
 
         public override int Append(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.AddElement(bufferId, value, ref bufferAccessor);
         public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId, ref ChunkAccessor<TStore> accessor) => _valueStore.GetReadOnlyAccessor(bufferId);
-        public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId) => _valueStore.GetReadOnlyAccessor(bufferId);
+        public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId) => _valueStore.GetScanAccessor(bufferId);
 
         public override int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.AllocateBuffer(ref bufferAccessor);
         public override int BufferChunksNeededToAppend(int bufferId, ref ChunkAccessor<TStore> bufferAccessor)

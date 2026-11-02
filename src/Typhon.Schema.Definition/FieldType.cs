@@ -46,7 +46,7 @@ public enum FieldType
     String64    = 8,
     /// <summary>Fixed 1024-byte inline UTF-8 string (<see cref="T:Typhon.Schema.Definition.String1024"/>).</summary>
     String1024  = 9,
-    /// <summary>Variable-length string with a 32-byte inline handle; the payload spills to the variable-size buffer (<see cref="VarString"/>).</summary>
+    /// <summary>A <see cref="Variant"/> holding a string; reserved for a variable-length string field, which has no storage yet: no field declares it.</summary>
     String      = 10,
     /// <summary>Self-describing value stored as a <see cref="T:Typhon.Schema.Definition.Variant"/> — a <see cref="T:Typhon.Schema.Definition.String64"/> of the form <c>"tt:data"</c>.</summary>
     Variant     = String64 | 11,            // Use the Variant type, a String64 of the form "tt:data" storing data of a given type
@@ -143,7 +143,6 @@ public static class DatabaseSchemaExtensions
         if (t == typeof(String64)) return (FieldType.String64, FieldType.None);
         if (t == typeof(Variant)) return (FieldType.Variant, FieldType.None);
         if (t == typeof(String1024)) return (FieldType.String1024, FieldType.None);
-        if (t == typeof(VarString)) return (FieldType.String, FieldType.None);
 
         if (t == typeof(Point2F)) return (FieldType.Point2F, FieldType.None);
         if (t == typeof(Point3F)) return (FieldType.Point3F, FieldType.None);

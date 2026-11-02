@@ -165,6 +165,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Test seam: called with each drained id its seal CAS took, before the eviction pass. Null in production.</summary>
     internal Action<int> DrainAfterSealProbe;
 
+    /// <summary>Test seam: invoked with each cluster the reclamation has freed.</summary>
+    internal Action<int> DrainAfterFreeProbe;
+
     /// <summary>Clusters the last reclamation freed.</summary>
     internal int LastTickClustersReclaimed;
 
@@ -1522,21 +1525,26 @@ internal sealed unsafe partial class ArchetypeClusterState
         var reclaimed = 0;
 
         // `using`: an accessor left undisposed keeps an ActiveChunkWriter on every page it dirtied, and CP-11 then skips that page in every checkpoint for good
-        // (#817, CP-13). The reads here do not dirty: a page about to be freed has nothing to write.
-        using var clusterAccessor = hasCluster ? ClusterSegment.CreateChunkAccessor() : default;
+        // (#817, CP-13). The reads here do not dirty: a page about to be freed has nothing to write. A scan accessor (EP-02): a pass reads as many clusters as
+        // the commits since the last one emptied, and one epoch scope that tagged them filled the cache and timed out the fence, or the close.
+        using var clusterAccessor = hasCluster ? ClusterSegment.CreateScanAccessor() : default;
         using var transientAccessor = hasCluster ? default : TransientSegment.CreateChunkAccessor();
         var evicted = false;
         var retiring = -1;   // index in sealedIds of the id the final loop is working on
         var completed = false;
+        var record = 0;      // the record the first loop is on
+        var deciding = 0;    // that record's id, until the loop has decided it
         try
         {
             var fullMask = Layout.FullMask;
             var sealedClaims = SealedClaims;
-            for (var i = 0; i < count; i++)
+            for (; record < count; record++)
             {
+                deciding = 0;
+
                 // An appender increments the count before it ensures its block, so under an EW-01 violation a reserved index can name a block the table read
                 // above does not hold yet: that record is lost (a leak), never a throw.
-                var b = i >> DrainBlockShift;
+                var b = record >> DrainBlockShift;
                 var block = b < table.Length ? Volatile.Read(ref table[b]) : null;
                 if (block == null)
                 {
@@ -1544,7 +1552,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     continue;
                 }
 
-                ref var entry = ref block[i & (DrainBlockSize - 1)];
+                ref var entry = ref block[record & (DrainBlockSize - 1)];
                 var chunkId = Volatile.Read(ref entry);
                 entry = 0;
                 if (chunkId <= 0 || chunkId >= capacity)
@@ -1561,6 +1569,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     continue;
                 }
 
+                deciding = chunkId;
                 var clusterBase = hasCluster ? clusterAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
                 ref var occupancy = ref *(ulong*)clusterBase;
                 if ((Volatile.Read(ref occupancy) & fullMask) != 0)
@@ -1586,6 +1595,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                 markWord |= markBit;
                 sealedIds[sealedCount++] = chunkId;
+                deciding = 0;
                 DrainAfterSealProbe?.Invoke(chunkId);
             }
 
@@ -1647,9 +1657,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                     FinaliseEmptyClusterCellState(SpatialOfCluster(id).Grid, id);
                     RetireClusterId(id);   // the id is about to be recyclable — clears every side table that must not outlive it, the seal included
-                    ClusterSegment?.FreeChunk(id);
+                    ClusterSegment?.FreeChunkReleasingPage(id);   // the bitmap's on the cluster's own page: tagged, the pass kept every page it freed from
                     TransientSegment?.FreeChunk(id);
                     reclaimed++;
+                    DrainAfterFreeProbe?.Invoke(id);
                 }
             }
 
@@ -1678,6 +1689,29 @@ internal sealed unsafe partial class ArchetypeClusterState
                     }
 
                     RecordClusterDrain(id);
+                }
+
+                // The records not reached, the count having gone to zero before the first was read: put back, or those clusters stayed listed until the next
+                // open. An append lands at or below the record being read, which is consumed by then: nothing here overwrites one still to come.
+                if (deciding != 0)
+                {
+                    RecordClusterDrain(deciding);
+                }
+
+                for (var r = record + 1; r < count; r++)
+                {
+                    var b = r >> DrainBlockShift;
+                    var block = b < table.Length ? Volatile.Read(ref table[b]) : null;
+                    if (block != null)
+                    {
+                        ref var entry = ref block[r & (DrainBlockSize - 1)];
+                        var chunkId = Volatile.Read(ref entry);
+                        entry = 0;
+                        if (chunkId > 0 && chunkId < capacity)
+                        {
+                            RecordClusterDrain(chunkId);
+                        }
+                    }
                 }
             }
 
@@ -10679,12 +10713,17 @@ internal sealed unsafe partial class ArchetypeClusterState
         FenceIndexedFieldCount = fenceIndexedFields;
         SvShadowBitmap = svIndexed != 0 && transientIndexed != 0 ? new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64)) : null;
 
-        // The flattened (slot, field) map the tick fence's IndexMassUpdate phase stages against. Persistent slots only: the migration path that produces the
-        // staged entries writes IndexSlots and nothing else (DatabaseEngine.ClusterMigration.cs, the `hasIdxAccessor && IndexSlots != null` block).
+        // The flattened (slot, field) map the tick fence's IndexMassUpdate phase stages against: persistent fields first, then Transient, the order migration
+        // walks them in (DatabaseEngine.StageMigrantIndexEntries).
         var fieldCount = 0;
         for (var s = 0; s < IndexSlots.Length; s++)
         {
             fieldCount += IndexSlots[s].Fields?.Length ?? 0;
+        }
+
+        for (var s = 0; TransientIndexSlots != null && s < TransientIndexSlots.Length; s++)
+        {
+            fieldCount += TransientIndexSlots[s].Fields?.Length ?? 0;
         }
 
         var fieldRefs = new IndexUpdateStaging.FieldRef[fieldCount];
@@ -10694,7 +10733,16 @@ internal sealed unsafe partial class ArchetypeClusterState
             var fields = IndexSlots[s].Fields;
             for (var f = 0; f < (fields?.Length ?? 0); f++)
             {
-                fieldRefs[fid++] = new IndexUpdateStaging.FieldRef(s, f);
+                fieldRefs[fid++] = new IndexUpdateStaging.FieldRef(s, f, false);
+            }
+        }
+
+        for (var s = 0; TransientIndexSlots != null && s < TransientIndexSlots.Length; s++)
+        {
+            var fields = TransientIndexSlots[s].Fields;
+            for (var f = 0; f < (fields?.Length ?? 0); f++)
+            {
+                fieldRefs[fid++] = new IndexUpdateStaging.FieldRef(s, f, true);
             }
         }
 

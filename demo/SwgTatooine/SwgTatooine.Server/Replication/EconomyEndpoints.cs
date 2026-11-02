@@ -266,7 +266,7 @@ public static class EconomyEndpoints
         var lastTick = long.MinValue;
         var missionsPaid = new HashSet<long>();
         var listingsSold = new HashSet<long>();
-        using var tx = dbe.CreateQuickTransaction();
+        using var tx = dbe.CreateReadOnlyTransaction();   // it only reads, and a whole ledger's walk has no business carrying a write set
         using (var rows = tx.EnumerateIndex<LedgerEntry, long>(ix.BySeq, long.MinValue, long.MaxValue))
         {
             while (rows.MoveNext())

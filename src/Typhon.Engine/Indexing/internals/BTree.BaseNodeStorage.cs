@@ -74,7 +74,10 @@ internal abstract partial class BTree<TKey, TStore>
         public abstract int Append(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor);
         public abstract void Insert(NodeWrapper node, int index, KeyValueItem item, ref ChunkAccessor<TStore> accessor);
         public abstract int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor);
+        /// <summary>One key's buffer for a point read (TryGetMultiple): a regular reader, which tags the chain it reads under the caller's epoch.</summary>
         public abstract VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId, ref ChunkAccessor<TStore> accessor);
+
+        /// <summary>A buffer for a walk of many keys: a scan reader, which holds its window and tags nothing (EP-02).</summary>
         public abstract VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId);
         public abstract int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor);
 

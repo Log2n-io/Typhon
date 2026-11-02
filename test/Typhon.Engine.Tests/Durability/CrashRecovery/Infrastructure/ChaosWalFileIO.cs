@@ -145,6 +145,12 @@ internal sealed class ChaosWalFileIO : IWalFileIO
         _inner.Delete(path);
     }
 
+    public void RetireSegment(string path)
+    {
+        ThrowIfCrashed();
+        _inner.RetireSegment(path);
+    }
+
     public void Dispose() => _inner.Dispose();
 
     // ── Post-crash reconstruction ────────────────────────────────────────────

@@ -557,7 +557,7 @@ public static class MarketEndpoints
     public static MarketAuditResult Audit(DatabaseEngine dbe, MarketSnapshot board)
     {
         ArgumentNullException.ThrowIfNull(dbe);
-        using var tx = dbe.CreateQuickTransaction();
+        using var tx = dbe.CreateReadOnlyTransaction();
         return Audit(dbe, board, tx);
     }
 

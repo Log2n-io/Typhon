@@ -102,7 +102,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         ReadOnlySpan<int> skip = named[..namedCount];
-        var accessor = ClusterSegment.CreateChunkAccessor();
+        var window = SpatialQueryAccessorCache.Instance.Rent(ClusterSegment, out var windowToken);   // as the box and radius queries: EP-02
         try
         {
             for (int ring = 0; ring <= maxRing; ring++)
@@ -121,7 +121,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                     int clusterChunkId = heap.Chunk[0];
                     PopMinCandidate(ref heap);
-                    ScanClusterForNearest(clusterChunkId, ref accessor, centerX, centerY, queryZ, is3D, target, results, ref resultCount, ref clustersOpened);
+                    ScanClusterForNearest(clusterChunkId, window, centerX, centerY, queryZ, is3D, target, results, ref resultCount, ref clustersOpened);
                 }
 
                 if (resultCount == target && CoveredRadiusSq(grid, ring, originCellX, originCellY, originCellZ, is3D, centerX, centerY, queryZ, reach)
@@ -133,7 +133,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            accessor.Dispose();
+            SpatialQueryAccessorCache.Return(window, windowToken);
         }
 
         // The result heap is max-at-root; the caller is promised ascending order, so drain it.
@@ -338,7 +338,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Read every occupied entity of one cluster and offer it to the result heap.</summary>
-    private void ScanClusterForNearest(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, double px, double py, double pz, bool is3D,
+    private void ScanClusterForNearest(int clusterChunkId, SpatialQueryAccessorCache.Entry window, double px, double py, double pz, bool is3D,
         int target, Span<(long entityId, double distSq)> results, ref int resultCount, ref int clustersOpened)
     {
         ref readonly var ss = ref SpatialSlot;
@@ -347,7 +347,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         int fieldOffset = ss.FieldOffset;
 
         clustersOpened++;
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
+        byte* clusterBase = window.OpenCluster(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
 
         // RM-04: a slot whose realm key names another realm (changed this tick, moved at the next fence) is not this realm's.

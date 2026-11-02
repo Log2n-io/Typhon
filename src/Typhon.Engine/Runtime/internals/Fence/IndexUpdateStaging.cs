@@ -28,10 +28,14 @@ internal sealed class IndexUpdateStaging
         public readonly int SlotIndex;
         public readonly int FieldIndex;
 
-        public FieldRef(int slotIndex, int fieldIndex)
+        /// <summary>Whether <see cref="SlotIndex"/> names a slot of <c>TransientIndexSlots</c> rather than of <c>IndexSlots</c>.</summary>
+        public readonly bool Transient;
+
+        public FieldRef(int slotIndex, int fieldIndex, bool transient)
         {
             SlotIndex = slotIndex;
             FieldIndex = fieldIndex;
+            Transient = transient;
         }
     }
 
@@ -258,7 +262,7 @@ internal sealed class IndexUpdateStaging
     /// copying it back.
     /// </para>
     /// </remarks>
-    internal byte[] MergeSortedRuns(int fieldId, int stride, BTreeBase<PersistentStore> tree, bool multi, out int byteCount)
+    internal byte[] MergeSortedRuns<TStore>(int fieldId, int stride, BTreeBase<TStore> tree, bool multi, out int byteCount) where TStore : struct, IPageStore
     {
         byteCount = StagedBytes(fieldId);
         EnsureBuffer(ref _merged[fieldId], byteCount);
