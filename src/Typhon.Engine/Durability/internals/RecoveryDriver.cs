@@ -215,6 +215,11 @@ internal sealed class RecoveryDriver
         var records = new List<Rec>();
         var committed = new Dictionary<long, long>();
 
+        // An archetype whose component set this open migrates has its window in the COMMITTED slot numbering (SCHEMA-09): each record is translated to the
+        // runtime numbering as it is built, so aggregation, IsVersionedSlot and the applier only ever see runtime slots (#1394, design 07 §7.2). Every other
+        // open pays this one flag per record.
+        var translate = dbe.TranslatesWalSlots;
+
         // #688: through the backend, so an injected WAL IO is discoverable. Same reason as WalRecovery.DiscoverSegments.
         var paths = walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         using (var reader = new WalSegmentReader(walIO))
@@ -291,6 +296,9 @@ internal sealed class RecoveryDriver
                                 continue;
                             }
 
+                            // Translated once per block, at its first entity: a block is one cluster of one archetype, so every entity shares its columns.
+                            ushort[] columnSlots = null;
+                            var columnsResolved = !translate;
                             for (var i = 0; i < block.SlotSpan; i++)
                             {
                                 if (!block.IsDirtyAt(i))
@@ -304,6 +312,12 @@ internal sealed class RecoveryDriver
                                     continue;   // unoccupied cluster slot — nothing to restore
                                 }
 
+                                if (!columnsResolved)
+                                {
+                                    columnSlots = TranslateFenceBlockColumns(dbe, in block, EntityId.FromRaw(entityKey).ArchetypeId);
+                                    columnsResolved = true;
+                                }
+
                                 for (var c = 0; c < block.ColumnCount; c++)
                                 {
                                     result.FenceBlockRecordsExpanded++;
@@ -311,7 +325,7 @@ internal sealed class RecoveryDriver
                                     {
                                         Lsn = view.Lsn, Tsn = view.Tsn, Kind = RecordKind.Slot, Op = (byte)SlotOp.Upsert,
                                         EntityId = entityKey, ArchetypeId = block.ArchetypeId,
-                                        SlotIndex = block.SlotIndexOf(c), EnabledBits = 0, IsFence = view.IsFence,
+                                        SlotIndex = columnSlots == null ? block.SlotIndexOf(c) : columnSlots[c], EnabledBits = 0, IsFence = view.IsFence,
                                         Payload = block.ValueAt(c, i).ToArray(),
                                     });
                                 }
@@ -320,11 +334,18 @@ internal sealed class RecoveryDriver
                             continue;
                         }
 
+                        var slotIndex = view.SlotIndex;
+                        var enabledBits = view.EnabledBits;
+                        if (translate)
+                        {
+                            TranslateRecord(dbe, view.Kind, view.Op, view.EntityId, view.Payload.Length, ref slotIndex, ref enabledBits);
+                        }
+
                         records.Add(new Rec
                         {
                             Lsn = view.Lsn, Tsn = view.Tsn, Kind = view.Kind, Op = view.Op,
                             EntityId = view.EntityId, ArchetypeId = view.ArchetypeId,
-                            SlotIndex = view.SlotIndex, FieldId = view.FieldId, EnabledBits = view.EnabledBits,
+                            SlotIndex = slotIndex, FieldId = view.FieldId, EnabledBits = enabledBits,
                             Index = view.Index, IsFence = view.IsFence, IsCommitDiscipline = view.IsCommittedDiscipline,
                             // CollectionDelta element bytes are copied too (#389). They used to be discarded here, one line before the switch that was
                             // documented as deferring the apply — so a CollectionDelta was gutted at SCAN, and adding an apply case alone could never have
@@ -448,6 +469,10 @@ internal sealed class RecoveryDriver
         }
 
         RefuseUnregisteredArchetypes(dbe, entities);
+        if (translate)
+        {
+            RefuseSetMigrationPopulations(dbe, entities);
+        }
 
         var sinceBatchPoint = 0;
         foreach (var (entityIdRaw, agg) in entities)
@@ -569,12 +594,15 @@ internal sealed class RecoveryDriver
     }
 
     /// <summary>
-    /// Fails the open, before any record is applied, when the window holds records of an archetype this process does not register (#1309).
+    /// Fails the open, before any record is applied, when the window holds records of an archetype this engine did not open (#1309): one this process does
+    /// not register (7012), or one the <see cref="ArchetypeSetMigrationPolicy.Refuse"/> policy left unopened because its stored set differs (7013).
     /// </summary>
     /// <remarks>
     /// Failing is the right outcome: skipping those records would lose them for good once the seal checkpoint moves CheckpointLSN past the window. What this
     /// adds is the cause — the applier used to reach the missing archetype state mid-replay and throw a NullReferenceException that named nothing — and the
-    /// guarantee that nothing was applied first, because every entity is checked before the first apply.
+    /// guarantee that nothing was applied first, because every entity is checked before the first apply. The cause is the archetype's skip reason: an
+    /// archetype the policy refused is registered, and "register that archetype" would send its host (the Workbench's settle, which then asks for the
+    /// schema it already supplied) after the wrong fix.
     /// </remarks>
     private static void RefuseUnregisteredArchetypes(DatabaseEngine dbe, Dictionary<long, EntityAgg> entities)
     {
@@ -588,23 +616,104 @@ internal sealed class RecoveryDriver
                 continue;
             }
 
-            var name = "an archetype the data file does not name";
-            if (dbe._persistedArchetypes != null)
+            var (rowName, reason, refusedByPolicy) = dbe.DescribeUnopenedArchetypeOfRouting(routing);
+            var name = rowName == null ? "an archetype the data file does not name" : $"'{rowName}'";
+            if (refusedByPolicy)
             {
-                foreach (var (persistedName, persisted) in dbe._persistedArchetypes)
-                {
-                    if (persisted.Arch.RoutingId == routing)
-                    {
-                        name = $"'{persistedName}'";
-                        break;
-                    }
-                }
+                throw new DurabilityException(TyphonErrorCode.RecoveryArchetypeSetChangeRefused,
+                    $"Crash recovery cannot replay the WAL: it holds records of {name} (routing id {routing}, entity 0x{entityIdRaw:X}), which this engine "
+                    + $"did not open: {reason}. No record was applied. Open the database with ArchetypeSetMigration = Apply (the application's build), "
+                    + "which migrates the archetype and replays its records; skipping them would lose them for good.");
             }
 
             throw new DurabilityException(TyphonErrorCode.RecoveryArchetypeNotRegistered,
-                $"Crash recovery cannot replay the WAL: it holds records of {name} (routing id {routing}, entity 0x{entityIdRaw:X}), which this process does " +
-                "not register. No record was applied. Register that archetype and open again; skipping its records would lose them for good.");
+                $"Crash recovery cannot replay the WAL: it holds records of {name} (routing id {routing}, entity 0x{entityIdRaw:X}), which this process does "
+                + "not register" + (reason == null ? string.Empty : $" ({reason})") + ". No record was applied. Register that archetype and open again; "
+                + "skipping its records would lose them for good.");
         }
+    }
+
+    /// <summary>
+    /// R7 and R12 on a crash open (design 07 §8): for every archetype whose component set this open migrates, the window's net fate per entity — a spawn
+    /// it does not destroy, a destroy of an entity it did not spawn (a spawn it destroys is neither) — handed to the engine, which refuses, before any
+    /// record is applied, a population at the end of the window that its added spatial field or realm key would place at position 0 / realm 0, or that its
+    /// added unique dense index would put on key 0. Every such archetype is checked, the ones the window does not touch included: the re-placement left
+    /// R7 and R12 to this on a crash open.
+    /// </summary>
+    private static void RefuseSetMigrationPopulations(DatabaseEngine dbe, Dictionary<long, EntityAgg> entities)
+    {
+        Dictionary<ushort, (List<long> Spawns, List<long> Destroys)> window = null;
+        foreach (var (entityIdRaw, agg) in entities)
+        {
+            var routing = agg.HasSpawn ? agg.ArchetypeId : EntityId.FromRaw(entityIdRaw).ArchetypeId;
+            if ((agg.HasSpawn && agg.HasDestroy) || !(agg.HasSpawn || agg.HasDestroy) || !dbe.MigratesSetOfRouting(routing))
+            {
+                continue;
+            }
+
+            window ??= [];
+            if (!window.TryGetValue(routing, out var w))
+            {
+                window[routing] = w = ([], []);
+            }
+
+            (agg.HasSpawn ? w.Spawns : w.Destroys).Add(entityIdRaw);
+        }
+
+        dbe.ThrowIfSetMigrationPopulationsRefused(window);
+    }
+
+    /// <summary>
+    /// Translates one record from the committed slot numbering to the runtime one, for an archetype whose component set this open migrates (design 07 §7.2):
+    /// a Slot or CollectionDelta record's slot, a Spawn or SetEnabledBits record's mask. A Slot value must have its component's committed size. A Destroy, and
+    /// every record of an archetype that does not migrate its set, is left as it is.
+    /// </summary>
+    /// <remarks>The routing id is the entity id's, which is how the applier resolves every record's archetype.</remarks>
+    internal static void TranslateRecord(DatabaseEngine dbe, RecordKind kind, byte op, long entityIdRaw, int payloadLength, ref ushort slotIndex,
+        ref ushort enabledBits)
+    {
+        var routing = EntityId.FromRaw(entityIdRaw).ArchetypeId;
+        switch (kind)
+        {
+            case RecordKind.Slot:
+                var walSlot = slotIndex;
+                if (dbe.TranslateWalSlot(routing, walSlot, out slotIndex) && op == (byte)SlotOp.Upsert)
+                {
+                    dbe.ThrowIfWalPayloadIsNotCommittedSize(routing, walSlot, payloadLength);
+                }
+
+                break;
+
+            case RecordKind.CollectionDelta:
+                dbe.TranslateWalSlot(routing, slotIndex, out slotIndex);   // the field id is the component's own: unchanged
+                break;
+
+            case RecordKind.Lifecycle when op == (byte)LifecycleOp.Spawn || op == (byte)LifecycleOp.SetEnabledBits:
+                enabledBits = dbe.TranslateWalEnabledBits(routing, enabledBits);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The runtime slot of each column of a FenceBlock record whose archetype migrates its component set, or null when it does not (the wire slots stand).
+    /// Every column's value size is checked against the committed layout once, here: all of a column's values share its size.
+    /// </summary>
+    private static ushort[] TranslateFenceBlockColumns(DatabaseEngine dbe, in RecordCodec.FenceBlockView block, ushort routing)
+    {
+        if (block.ColumnCount == 0 || !dbe.MigratesSetOfRouting(routing))
+        {
+            return null;
+        }
+
+        var slots = new ushort[block.ColumnCount];
+        for (var c = 0; c < slots.Length; c++)
+        {
+            var walSlot = block.SlotIndexOf(c);
+            dbe.TranslateWalSlot(routing, walSlot, out slots[c]);
+            dbe.ThrowIfWalPayloadIsNotCommittedSize(routing, walSlot, block.ComponentSizeOf(c));
+        }
+
+        return slots;
     }
 
     /// <summary>Whether <paramref name="slotIndex"/> of <paramref name="entityIdRaw"/>'s archetype is a Versioned component, by its table.</summary>

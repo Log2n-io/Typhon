@@ -476,21 +476,23 @@ public unsafe partial class Transaction
     {
         if (meta == null || _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
         {
-            ThrowNotSpawnable<TArch>(meta == null ? null : _dbe.SkippedArchetypeReason(meta.ArchetypeId));
+            ThrowNotSpawnable<TArch>(meta == null ? null : _dbe.SkippedArchetypeReason(meta.ArchetypeId),
+                meta == null ? null : _dbe.SupersededArchetypeMessage(meta.ArchetypeId));
         }
     }
 
     /// <summary>Out of line, so the message is not built into every inlined spawn.</summary>
     /// <typeparam name="TArch">The archetype the caller named.</typeparam>
     /// <param name="skipReason">Why InitializeArchetypes skipped it, when it did (#1071): the component that was never registered.</param>
+    /// <param name="supersededMessage">The complete refusal when a higher revision of its durable name superseded it (#1394 D3); wins over the reason.</param>
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowNotSpawnable<TArch>(string skipReason) =>
-        throw new InvalidOperationException(skipReason != null
+    private static void ThrowNotSpawnable<TArch>(string skipReason, string supersededMessage) =>
+        throw new InvalidOperationException(supersededMessage ?? (skipReason != null
             ? $"Archetype {typeof(TArch).Name} is not registered with this database, so there is nothing to spawn into: InitializeArchetypes skipped it "
               + $"because {skipReason}."
             : $"Archetype {typeof(TArch).Name} is not registered with this database, so there is nothing to spawn into. Register its components with "
-              + "DatabaseEngine.RegisterComponentFromAccessor (or RegisterComponents) and then call DatabaseEngine.InitializeArchetypes before spawning.");
+              + "DatabaseEngine.RegisterComponentFromAccessor (or RegisterComponents) and then call DatabaseEngine.InitializeArchetypes before spawning."));
 
     /// <summary>
     /// Spawns a new entity of archetype <typeparamref name="TArch"/> with the supplied initial component values.

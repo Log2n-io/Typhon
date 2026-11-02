@@ -46,6 +46,9 @@ internal sealed class ShellSession : IDisposable
 
     // State queries
     public bool IsOpen => _engine != null;
+
+    /// <summary>Whether <see cref="InitializeArchetypes"/> ran on the open engine: its archetypes are built, and any archetype-set migration applied.</summary>
+    public bool ArchetypesInitialized { get; private set; }
     public bool HasTransaction => _transaction != null;
     public bool IsDirty => _dirty;
     public string DatabaseName => _databaseName;
@@ -138,10 +141,31 @@ internal sealed class ShellSession : IDisposable
     }
 
     /// <summary>
+    /// Builds the open engine's archetypes (<see cref="DatabaseEngine.InitializeArchetypes"/>) once: the open's archetype-set migrations (#1394) and the
+    /// schema commit run here. A refusal (<see cref="ArchetypeSchemaException"/>) propagates, and the engine is then closed as a crash on dispose.
+    /// </summary>
+    public void InitializeArchetypes()
+    {
+        if (_engine == null)
+        {
+            throw new InvalidOperationException("No database is open.");
+        }
+
+        if (ArchetypesInitialized)
+        {
+            return;
+        }
+
+        _engine.InitializeArchetypes();
+        ArchetypesInitialized = true;
+    }
+
+    /// <summary>
     /// Closes the current database and releases all resources.
     /// </summary>
     public void CloseDatabase()
     {
+        ArchetypesInitialized = false;
         if (_transaction != null)
         {
             _transaction.Rollback();

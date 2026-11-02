@@ -185,11 +185,12 @@ The `FieldR1` entries for a given `ComponentR1` are stored in its `Fields` `Comp
 public struct ArchetypeR1
 {
     public String64 Name;
-    public ushort ArchetypeId;                       // per-DB archetype routing id (16-bit, engine-assigned, re-matched by Name on reopen)
+    public ushort ArchetypeId;                       // per-process catalog id (informational; identity is Name)
+    public ushort RoutingId;                         // per-DB routing id (16-bit, engine-assigned, re-matched by Name on reopen)
     public ushort ParentArchetypeId;                 // 0xFFFF = no parent
     public byte ComponentCount;
     public int Revision;                             // archetype schema revision
-    public ComponentCollection<String64> ComponentNames;
+    public ComponentCollection<String64> ComponentNames;  // component names in slot order: what slots are matched by
     public int EntityMapSPI;                         // EntityMap root page (0 = rebuild)
     public int ClusterSegmentSPI;                    // cluster storage root (0 = none)
     public long NextEntityKey;                       // resume counter on reopen
@@ -298,19 +299,54 @@ The `SchemaValidationMode` enum is set per registration call (default `Enforce`)
 | `Enforce` | Look for a registered migration chain; if none, throw `SchemaValidationException(diff)`. |
 | `Skip` | Bypass validation entirely. **UNSAFE** — corruption is the caller's problem. |
 
-Three exceptions live in [14-errors](14-errors.md):
+Four exceptions live in [14-errors](14-errors.md):
 
 | Exception | When |
 |---|---|
 | `SchemaValidationException` | Breaking changes with no registered migration chain (and `Enforce` mode). Carries the full `SchemaDiff`. |
 | `SchemaMigrationException` | One or more entities failed during a user-driven migration. Carries `IReadOnlyList<MigrationFailure>`. |
 | `SchemaDowngradeException` | Persisted revision > runtime revision — the DB was written by a newer app version. Refuses to open. |
+| `ArchetypeSchemaException` | An archetype's stored component set cannot be opened under the declared one (see [Archetype component-set evolution](#archetype-component-set-evolution)), thrown by `InitializeArchetypes` before any byte of the archetype moves. Carries the archetype's name and an `ArchetypeSchemaErrorKind`; derives from `InvalidOperationException`. |
 
 `SchemaDowngrade` reuses the `TyphonErrorCode.SchemaValidation` error code intentionally.
 
 ### Migration progress
 
 A long migration over millions of entities is observable. `RaiseMigrationProgress` fires `MigrationProgressEventArgs` with the current `MigrationPhase` (`Analyzing` / `AllocatingSegments` / `MigratingEntities` / `RecreatingRevisionChain` / `BuildingNewIndexes` / `UpdatingMetadata` / `Flushing` / `Complete`), entity counters, and percent complete. Subscribe via `DatabaseEngine.MigrationProgress`.
+
+### Archetype component-set evolution
+
+[`Ecs/public/DatabaseEngine.ArchetypeSetMigration.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.ArchetypeSetMigration.cs), [`Schema/internals/ArchetypeSetDiff.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/internals/ArchetypeSetDiff.cs) — user guide: [Archetype Component-Set Evolution](../feature-set/Schema/archetype-set-evolution.md)
+
+Components migrate field by field at registration; an archetype's **component set** — which components, in which slot order — is checked and migrated by `InitializeArchetypes`.
+
+- **Slots are matched by component name.** Each `ArchetypeR1` row stores its components' names in slot order (`ComponentNames`), and every runtime slot reads the stored slot holding the same name, resolved through the rename journal — so a component renamed with `[Component(PreviousName = ...)]` keeps its data, and a reorder is safe. Before this, only the count and the revision were compared, and a swapped `Register<T>()` at the same count opened reading the wrong columns.
+- **A set change needs a revision increase.** Adding, inserting or reordering components requires a higher `[Archetype(Revision)]` (or a higher revision on the ancestor archetype whose set changed); without one the open is refused. A lower declared revision than the stored one is a downgrade and is refused. A revision bump with an unchanged set, or stored names that predate a component rename, rewrite the row alone — no entity moves.
+- **An added component is absent** on every existing entity, exactly as for a spawn that did not supply it: a Versioned one has no value until `Enable(comp, value)`, a SingleVersion one reads zero, a Transient one is disabled. There is no default and no backfill.
+- **Removing a component is refused** — it would delete data, and the opt-in for it is a follow-up (#1561). Declare the component again, or recreate the database.
+- **One archetype per durable name.** Two classes may declare the same `[Archetype(Name = ...)]` at different revisions (old and new declarations side by side): the highest revision is opened, the others are skipped with a warning logged once. Two at the same revision refuse the open.
+- **Placement keeps the old topology.** Every entity is re-placed into the new cluster geometry in its old (cluster, slot) order, from the pre-migration cluster loaded at the geometry the persisted catalog records. A non-spatial archetype is packed densely. A spatial one closes a cluster only where the home — realm and cell — changes, so no cluster mixes two homes and the first tick fence after the migration moves nothing. At every rebuild (migration or plain reopen), a cluster's cell is the cell holding the centre of the box of its entities' centres, falling back to whichever of that cell, the first entity's cell and the median cell leaves the fewest strays when entities moved after the last fence. The same placement serves field migrations.
+- **Crash recovery.** A WAL window written before the migration is in the stored slot numbering; the replay translates every record (slot values, collections, spawn and enabled masks) to the new numbering before applying it. The new archetype row commits in the same single meta flip as component migrations: a crash before it leaves the pre-migration file, and the next open migrates again.
+
+The migration is chosen by `DatabaseEngineOptions.ArchetypeSetMigration`:
+
+| `ArchetypeSetMigrationPolicy` | Effect |
+|---|---|
+| `Apply` (default) | Migrate at open. |
+| `Refuse` | Leave the file untouched: an archetype that would migrate — or whose declared set the build refuses — is skipped and listed in `DatabaseEngine.RefusedArchetypeSetChanges` (`ArchetypeSetChange`: name, revisions, kind, what changed); the rest of the database opens. Inspectors use it — the Workbench opens every database this way. A crash open under `Refuse` whose WAL holds records of a skipped archetype fails before applying anything, with error 7013 (`RecoveryArchetypeSetChangeRefused`): open with `Apply` to migrate and recover it. |
+
+`ArchetypeSchemaException` refuses the open — under `Refuse` too, for what concerns more than one archetype — when:
+
+- the set or its order changed without a revision increase, or the stored revision is higher than the declared one;
+- a stored component is no longer declared;
+- the stored component list is missing, unreadable or inconsistent with the row, or names a component the catalog has no row for;
+- two classes of one durable name are declared at the same revision;
+- a component changes layout while an archetype holding it is not opened by this process (its cluster would stay at the old size);
+- an added component carries a unique, non-sparse index while the archetype holds more than one entity (every entity would share key 0), or carries the spatial field or the realm key of a populated archetype (every entity would land at position 0, or in realm 0) — on a crash open, counted over the population at the end of the WAL window;
+- an added Versioned component already has revision chains for this archetype, left by an earlier build that removed it;
+- the pre-migration cluster or entity map cannot be loaded, or the stored layout does not match what the cluster was written at.
+
+Each message names the archetype and the remedy, and nothing of the archetype is modified. After the open, `DatabaseEngine.LastOpenArchetypeSetMigrations` lists every set migration as an `ArchetypeSetMigrationReport` (name, from/to revision, what changed, entities migrated, elapsed ms); the schema history records one row per archetype with `Target = Archetype`.
 
 ---
 
@@ -420,4 +456,4 @@ Two static utilities open a temporary engine read-only:
 - [01-foundation §9](01-foundation.md) — sibling `Typhon.Schema.Definition` types (`String64`, `Variant`, `PackedDateTime`, spatial primitives, `StorageMode`)
 - [06-ecs](06-ecs.md) — archetypes are the runtime consumers of `DBComponentDefinition`s
 - [11-durability](11-durability.md) — schema bootstrap completes before WAL recovery begins; recovery needs schema to deserialize records
-- [14-errors](14-errors.md) — `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`
+- [14-errors](14-errors.md) — `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`, `ArchetypeSchemaException`

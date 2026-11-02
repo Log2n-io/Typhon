@@ -174,14 +174,7 @@ public sealed class EngineLifecycle : IDisposable
                         opts.DatabaseCacheSize = pageCacheBytes;
                     }
                 })
-                .AddDatabaseEngine(engineOpts =>
-                {
-                    engineOpts.Wal = new WalWriterOptions
-                    {
-                        // WalDirectory left null — the engine derives {bundle}/wal inside the .typhon bundle.
-                        UseFUA = false
-                    };
-                });
+                .AddDatabaseEngine(ConfigureEngineOptions);
 
             // Open-time instrumentation (#diagnose-open): bracket the three synchronous open phases so a slow open is
             // fully attributed in the log. Engine construction includes the system-schema load + WAL recovery (the
@@ -269,24 +262,13 @@ public sealed class EngineLifecycle : IDisposable
             var crashPathWithoutSchema = !initializeArchetypes && engine.CrashRecoveryAtOpen;
             if (!crashPathWithoutSchema)
             {
-                try
-                {
-                    var initStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                    engine.InitializeArchetypes();
-                    initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
-                }
-                catch (Exception initEx)
-                {
-                    initFailure = initEx;
-                    diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
-                        ComponentName: "(InitializeArchetypes)",
-                        Kind: "archetype_init_failed",
-                        Detail: initEx.ToString())];
-                    if (state == SchemaCompatibility.State.Ready)
-                    {
-                        state = SchemaCompatibility.State.MigrationRequired;
-                    }
-                }
+                // Archetypes whose stored component set differs from the loaded assembly's were skipped, not migrated (D4): each is reported, whether the
+                // open completed or threw, and a failure leads the diagnostics.
+                var initStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                var initialized = SchemaCompatibility.InitializeArchetypes(engine, new SchemaCompatibility.Result(state, diagnostics, loaded), out initFailure);
+                initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
+                state = initialized.State;
+                diagnostics = initialized.Diagnostics;
             }
 
             // Any manifest assembly we couldn't locate → surface it as a diagnostic and a non-Ready state so the UI banner names the missing assembly
@@ -348,6 +330,21 @@ public sealed class EngineLifecycle : IDisposable
             }
             throw new WorkbenchException(400, "engine_open_failed", $"Failed to open database: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// The engine options every Workbench session opens with. An inspector never rewrites the file it inspects: an archetype whose stored component set
+    /// differs from the loaded assembly's is skipped and reported, not migrated (#1394, design 07 D4 — a dated clarification of ADR-055, whose
+    /// migrate-on-open concerns components, not archetype sets).
+    /// </summary>
+    internal static void ConfigureEngineOptions(DatabaseEngineOptions engineOpts)
+    {
+        engineOpts.Wal = new WalWriterOptions
+        {
+            // WalDirectory left null — the engine derives {bundle}/wal inside the .typhon bundle.
+            UseFUA = false
+        };
+        engineOpts.ArchetypeSetMigration = ArchetypeSetMigrationPolicy.Refuse;
     }
 
     /// <summary>

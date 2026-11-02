@@ -52,7 +52,7 @@ class EvoDiskWalV2Arch : Archetype<EvoDiskWalV2Arch>
 /// <c>continue</c>d past the only pass that re-places the entities. Every entity of the archetype was lost, and the whole storage-mode matrix passed anyway.
 /// <para>
 /// Since #1143 the flag (<c>CrashRecoveryAtOpen</c>) is set only after an unclean close, so a clean migrating reopen no longer reaches that branch at all:
-/// the crash-plus-migration shape the fix guards (<c>!HasMigratedSlot</c>) is exercised by the unclean-close variant.
+/// the crash-plus-migration shape the fix guards (<c>!IsMigratingArchetype</c>) is exercised by the unclean-close variant.
 /// </para>
 /// </remarks>
 class SchemaEvolutionDiskWalTests : TestBase<SchemaEvolutionDiskWalTests>

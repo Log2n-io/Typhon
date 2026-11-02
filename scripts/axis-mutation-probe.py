@@ -88,12 +88,15 @@ MUTATIONS = [
             "entity N reads entity 0's bytes. A fixture that migrates ONE entity cannot see this — with one entity the "
             "only correct source slot IS 0, which makes the placement half of the re-cluster a tautology. "
             "SchemaEvolutionStorageModeTests migrates a single entity per test and stays green; the covering array's "
-            "cells migrate 200 across more than one cluster and do not."
+            "cells migrate 200 across more than one cluster and do not. One StorageMode test, "
+            "Migration_KeepsAVersionedComponentsEnabledState_PresentDisabledAndAbsent, migrates three entities and does catch "
+            "it (measured 2026-11-02, #1394), so it is left out of the control."
         ),
         path="src/Typhon.Engine/Ecs/public/DatabaseEngine.cs",
-        find="var src = oldChunkBase + oldLayout.ComponentOffset(slot) + oldPos.SlotIndex * oldLayout.ComponentSize(slot);",
-        replace="var src = oldChunkBase + oldLayout.ComponentOffset(slot) + 0 * oldLayout.ComponentSize(slot);",
-        filter="FullyQualifiedName~SchemaEvolutionMatrixTests|FullyQualifiedName~SchemaEvolutionStorageModeTests",
+        find="var src = oldChunkBase + oldLayout.ComponentOffset(o) + oldSlotIndex * oldLayout.ComponentSize(o);",
+        replace="var src = oldChunkBase + oldLayout.ComponentOffset(o) + 0 * oldLayout.ComponentSize(o);",
+        filter=("FullyQualifiedName~SchemaEvolutionMatrixTests|(FullyQualifiedName~SchemaEvolutionStorageModeTests"
+                "&Name!=Migration_KeepsAVersionedComponentsEnabledState_PresentDisabledAndAbsent)"),
         must_fail=["SchemaEvolutionMatrixTests"],
         must_pass=["SchemaEvolutionStorageModeTests"],
     ),

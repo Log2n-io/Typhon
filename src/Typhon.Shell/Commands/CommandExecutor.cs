@@ -356,7 +356,8 @@ internal sealed class CommandExecutor
     {
         string dbPath = null;
 
-        while (pos < tokens.Count)
+        // The End token is not a path: read as one, a bare `migrate` on an open database closed it and reopened "".
+        while (pos < tokens.Count && tokens[pos].Kind != TokenKind.End)
         {
             if (dbPath == null)
             {
@@ -489,7 +490,50 @@ internal sealed class CommandExecutor
             result.AppendLine($"  {identicalCount} identical, {migratedCount} migrated, {newCount} new.");
         }
 
+        // The component report above reads the catalog as the open found it; building the archetypes is what commits the open's migrations — archetype
+        // sets included (#1394) — so it runs after, and its own report follows.
+        AppendArchetypeMigrationReport(result);
         return CommandResult.Markup(result.ToString().TrimEnd());
+    }
+
+    /// <summary>
+    /// Builds the archetypes of the open database (once per session) and reports each archetype whose component set the open migrated
+    /// (<see cref="DatabaseEngine.LastOpenArchetypeSetMigrations"/>), or the refusal that stopped it.
+    /// </summary>
+    private void AppendArchetypeMigrationReport(StringBuilder result)
+    {
+        result.AppendLine();
+        result.AppendLine("  [white]Archetypes[/]");
+        result.AppendLine("  [grey]══════════════════════════════════════════════════════════════════[/]");
+        var alreadyOpen = _session.ArchetypesInitialized;
+        try
+        {
+            _session.InitializeArchetypes();
+        }
+        catch (ArchetypeSchemaException ex)
+        {
+            result.AppendLine($"  [red]REFUSED[/]  {Markup.Escape(ex.Message)}");
+            return;
+        }
+
+        var migrations = _session.Engine.LastOpenArchetypeSetMigrations;
+        foreach (var m in migrations)
+        {
+            result.AppendLine($"  [green]MIGRATED[/] {Markup.Escape(m.ArchetypeName)} — rev {m.FromRevision}→{m.ToRevision}, {Markup.Escape(m.Changes)} "
+                              + $"({m.EntitiesMigrated} entities, {m.ElapsedMilliseconds:F1} ms)");
+        }
+
+        // The open skips an archetype it cannot resolve without classifying it: a set change behind an unregistered component is not migrated, and says so.
+        foreach (var s in _session.Engine.UnresolvedArchetypeSetChanges())
+        {
+            result.AppendLine($"  [yellow]SKIPPED[/]  {Markup.Escape(s.Change.ArchetypeName)} — {Markup.Escape(s.Reason)}; "
+                              + Markup.Escape(SchemaCommandExecutor.DescribeSkippedChange(s.Change)));
+        }
+
+        result.AppendLine("  [grey]══════════════════════════════════════════════════════════════════[/]");
+        result.AppendLine(migrations.Count == 0
+            ? alreadyOpen ? "  Archetypes were already open in this session." : "  [green]No archetype set changed.[/]"
+            : $"  [green]{migrations.Count} archetype set(s) migrated.[/]");
     }
 
     // ── Schema Commands ────────────────────────────────────────

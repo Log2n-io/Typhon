@@ -729,6 +729,13 @@ internal sealed unsafe class SpatialGrid
         (uint)(int)Math.Floor((world - origin) * _config.InverseCellSize) >= (uint)dim;
 
     /// <summary>
+    /// The centre of an f32 AABB axis, summed in double: the one expression every reader of an AABB2F/AABB3F centre uses (<see cref="ReadSpatialCenter3D"/>,
+    /// the rebuild's single-walk centre box), so no two of them can file an entity within half an ULP of a cell boundary in different cells.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double AabbCentre(float min, float max) => ((double)min + max) * 0.5d;
+
+    /// <summary>
     /// Extract a centre point from a spatial field pointer. Supports all eight tiers since #914; the 2D variants report <c>posZ = 0</c>, which places them
     /// in the grid's first Z plane — the plane a flat world consists entirely of.
     /// </summary>
@@ -758,8 +765,8 @@ internal sealed unsafe class SpatialGrid
                 // ClusterRef.ApplySpatialWrite, which computes the same midpoint from f64 parameters since #914. Two detectors that place the same entity
                 // by two different roundings is trap 1 of #914 in a smaller font: both would agree with themselves, every counter would balance, and an
                 // entity within half an ULP of a cell boundary would sit in different cells depending on which path last touched it.
-                posX = ((double)minX + maxX) * 0.5d;
-                posY = ((double)minY + maxY) * 0.5d;
+                posX = AabbCentre(minX, maxX);
+                posY = AabbCentre(minY, maxY);
                 posZ = 0d;
                 return;
             }
@@ -773,9 +780,9 @@ internal sealed unsafe class SpatialGrid
                 float maxY = *(float*)(fieldPtr + 4 * sizeof(float));
                 float maxZ = *(float*)(fieldPtr + 5 * sizeof(float));
                 // Double addition — see the AABB2F case for why the width here is a coherence requirement, not a rounding preference.
-                posX = ((double)minX + maxX) * 0.5d;
-                posY = ((double)minY + maxY) * 0.5d;
-                posZ = ((double)minZ + maxZ) * 0.5d;
+                posX = AabbCentre(minX, maxX);
+                posY = AabbCentre(minY, maxY);
+                posZ = AabbCentre(minZ, maxZ);
                 return;
             }
             case SpatialFieldType.BSphere2F:

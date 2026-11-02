@@ -12,6 +12,8 @@ The model from your side is deliberately simple: **change the struct** (add a fi
 
 Reopening with a changed struct and no revision bump — or with an *older* app than wrote the data — is caught, not silently accepted (`SchemaValidationException` / `SchemaDowngradeException`). Only [`Versioned`](xref:concept-storage-mode) components carry the history migration relies on.
 
+An [archetype](xref:concept-archetype)'s component set evolves the same way: add a component, bump the `[Archetype]` revision, reopen — existing entities hold the new component absent ([archetype component-set evolution](xref:feature-schema-archetype-set-evolution)).
+
 ## How it relates
 
 - **[Component](xref:concept-component)** — evolution is versioned per component, keyed on its `[Component]` revision.
