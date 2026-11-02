@@ -128,10 +128,10 @@ public static class ItemNotes
 public static class ItemEndpoints
 {
     /// <summary>The answer for an account with no character yet.</summary>
-    internal const string Empty = "{\"open\":false,\"slots\":30,\"items\":[],\"lost\":[]}";
+    internal const string Empty = "{\"open\":false,\"slots\":40,\"items\":[],\"lost\":[]}";
 
     private sealed record IndexSet(DatabaseEngine Dbe, IndexRef BySeq, IndexRef ByFrom, IndexRef ByTo, IndexRef StackByOwner, IndexRef HeadByKey,
-        IndexRef WalletByOwner, IndexRef CreditBySeq);
+        IndexRef WalletByOwner, IndexRef CreditBySeq, ushort InstanceRouting);
 
     private static IndexSet _indexes;
 
@@ -192,7 +192,8 @@ public static class ItemEndpoints
     /// </summary>
     /// <remarks>
     /// <c>id</c> is a string: a 64-bit value is past what a JavaScript number holds exactly. Every item and loss carries its <c>name</c> and
-    /// <c>category</c>. <b>No ledger rows</b>: the ledger is the operators' audit trail, never read by the game client (Loïc, 2026-10-29); a drop is told
+    /// <c>category</c>. An item with stats carries them (<c>stats</c>, by its category's meaning: <see cref="Equipment"/>); one equipped sits in slot
+    /// 101-107 (<see cref="EquipSlot"/>), out of the grid. <b>No ledger rows</b>: the ledger is the operators' audit trail, never read by the game client (Loïc, 2026-10-29); a drop is told
     /// to the session as it happens (<see cref="PlayerNotice"/>).
     /// </remarks>
     public static string InventoryJson(DatabaseEngine dbe, EntityId character)
@@ -229,8 +230,14 @@ public static class ItemEndpoints
                 .Append(",\"slot\":").Append(s.Slot);
             Item(json, in t, s.Template);
             json.Append(",\"mk\":").Append(s.Mk)
-                .Append(",\"count\":").Append(s.Count)
-                .Append('}');
+                .Append(",\"count\":").Append(s.Count);
+            var id = EntityId.FromRawValue(stacks[i].Id);
+            if (id.ArchetypeId == ix.InstanceRouting && tx.TryOpen(id, out var e))
+            {
+                Stats(json, in t, e.Read(ItemInstanceArch.Stats));
+            }
+
+            json.Append('}');
         }
 
         json.Append("],\"lost\":[");
@@ -260,6 +267,36 @@ public static class ItemEndpoints
             .Append("\",\"name\":\"").Append(known ? EconomyEndpoints.Escape(t.Name) : "Unknown")
             .Append("\",\"category\":\"").Append(known ? ItemCategory.NameOf(t.Category) : "unknown")
             .Append("\",\"template\":").Append(template);
+    }
+
+    // An instance's "stats": its lines named by its category (a weapon's damage, delay and range; an armour piece's protections), the equip slot it is worn
+    // in ("wears", so a client needs no item table), its condition, its life factor, its repairs, and who made it.
+    internal static void Stats(StringBuilder json, in ItemTemplate t, in ItemInstance s)
+    {
+        json.Append(",\"stats\":{");
+        if (t.Category == ItemCategory.Weapon)
+        {
+            json.Append("\"damage\":").Append(s.Stat0).Append(",\"delayMs\":").Append(s.Stat1).Append(",\"rangeDm\":").Append(s.Stat2).Append(',');
+        }
+        else if (t.Category == ItemCategory.Armor)
+        {
+            json.Append("\"kinetic\":").Append(s.Stat0).Append(",\"energy\":").Append(s.Stat1).Append(',');
+        }
+        else if (t.Category == ItemCategory.Part)
+        {
+            json.Append("\"grade\":").Append(s.Stat0).Append(',');
+        }
+        else if (t.Category == ItemCategory.Potion)
+        {
+            json.Append("\"potency\":").Append(s.Stat0).Append(",\"durationMs\":").Append(s.Stat1).Append(',');
+        }
+
+        json.Append("\"wears\":").Append(Equipment.SlotOf(t.Id))
+            .Append(",\"condition\":").Append(s.Condition)
+            .Append(",\"maxCondition\":").Append(s.MaxCondition)
+            .Append(",\"lifeMilli\":").Append(s.LifeMilli)
+            .Append(",\"repairs\":").Append(s.Repairs)
+            .Append(",\"crafter\":\"").Append(s.Crafter.ToString(CultureInfo.InvariantCulture)).Append("\"}");
     }
 
     /// <summary>Rows after <paramref name="after"/>, in sequence, at most <paramref name="limit"/>: <c>{"rows":[…],"next"}</c>.</summary>
@@ -341,6 +378,7 @@ public static class ItemEndpoints
         var destroyed = new Dictionary<int, long>();
         var missionTick = new Dictionary<long, long>();
         var routing = dbe.ArchetypeIdOf<ListingArch>();
+        var instanceRouting = ix.InstanceRouting;
         bool IsListing(long key) => key != 0 && EntityId.FromRawValue((ulong)key).ArchetypeId == routing;
         Func<long, bool> isListing = IsListing;   // converted once: a local function passed as a delegate allocates at every call
         var expected = 1L;
@@ -408,38 +446,63 @@ public static class ItemEndpoints
             }
         }
 
+        var escrowOf = new Dictionary<long, ItemStack>();
         foreach (var found in tx.Query<ItemStackArch>())
         {
             var s = found.Read(ItemStackArch.Stack);
             var id = unchecked((long)found.Id.RawValue);
+            var instance = found.Id.ArchetypeId == instanceRouting;
+
+            // An item with stats in escrow (crafting-build.md § 2.1): its listing's, checked against the listing below; the replay emptied it at the list row.
+            if (instance && IsListing(s.Owner))
+            {
+                if (!escrowOf.TryAdd(s.Owner, s))
+                {
+                    result.Violation($"listing {s.Owner}: holds a second instance, {id}");
+                }
+
+                continue;
+            }
+
             result.Stacks++;
             result.Units += s.Count;
             seen.Add(id);
             held[Key(s.Template, s.Mk)] = Get(held, Key(s.Template, s.Mk)) + s.Count;
 
-            // Counted apart from the slots: a stack outside the grid, or one sharing a slot, is still one of its owner's.
-            var owned = (stacksOf.TryGetValue(s.Owner, out var c) ? c : 0) + 1;
+            // Counted apart from the slots: a stack outside the grid, or one sharing a slot, is still one of its owner's. What it wears is not in the grid.
+            var equipped = instance && EquipSlot.IsEquip(s.Slot);
+            var owned = (stacksOf.TryGetValue(s.Owner, out var c) ? c : 0) + (equipped ? 0 : 1);
             stacksOf[s.Owner] = owned;
             if (owned == ItemLedger.Slots + 1)
             {
                 result.Violation($"owner {s.Owner}: more than {ItemLedger.Slots} stacks");
             }
-            if (owned == 1 && !tx.TryOpen(EntityId.FromRawValue((ulong)s.Owner), out _))
+            if (owned <= 1 && !walletOwners.Contains(s.Owner) && !tx.TryOpen(EntityId.FromRawValue((ulong)s.Owner), out _))
             {
                 result.Violation($"stack {id}: its owner {s.Owner} is not a character that exists");
             }
 
-            if (owned == 1 && !walletOwners.Contains(s.Owner))
+            if (owned <= 1 && !walletOwners.Contains(s.Owner))
             {
                 result.Violation($"stack {id}: its owner {s.Owner} has no wallet");
             }
 
-            if (s.Count is < 1 or > ItemLedger.StackMax)
+            if (s.Count is < 1 or > ItemLedger.StackMax || (instance && s.Count != 1))
             {
-                result.Violation($"stack {id}: holds {s.Count}, outside 1..{ItemLedger.StackMax}");
+                result.Violation($"stack {id}: holds {s.Count}, outside 1..{(instance ? 1 : ItemLedger.StackMax)}");
             }
 
-            if (s.Slot is < 1 or > ItemLedger.Slots)
+            if (instance != ItemCatalog.HasStats(s.Template))
+            {
+                result.Violation($"stack {id}: template {s.Template} {(instance ? "has no stats and is an instance" : "has stats and is a stack")}");
+            }
+
+            if (equipped && Equipment.SlotOf(s.Template) != s.Slot)
+            {
+                result.Violation($"stack {id}: template {s.Template} is worn in slot {Equipment.SlotOf(s.Template)}, not {s.Slot}");
+            }
+
+            if (!equipped && s.Slot is < 1 or > ItemLedger.Slots)
             {
                 result.Violation($"stack {id}: slot {s.Slot}, outside 1..{ItemLedger.Slots}");
             }
@@ -512,6 +575,23 @@ public static class ItemEndpoints
             {
                 result.Violation($"listing {id}: last moved at seq {l.LastSeq} in {l.Rows} rows, the ledger says {replayed.LastSeq} in {replayed.Rows}");
             }
+
+            // A listing of an item with stats holds its one instance in escrow, of its template and Mk; a listing of units holds none.
+            var hasEscrow = escrowOf.Remove(id, out var held1);
+            if (ItemCatalog.HasStats(l.Template) && l.Quantity > 0
+                && (!hasEscrow || held1.Template != l.Template || held1.Mk != l.Mk || held1.Count != l.Quantity))
+            {
+                result.Violation($"listing {id}: holds {l.Quantity} of {l.Template} Mk {l.Mk} and its escrow instance does not match");
+            }
+            else if (hasEscrow && (!ItemCatalog.HasStats(l.Template) || l.Quantity == 0))
+            {
+                result.Violation($"listing {id}: holds an instance it should not");
+            }
+        }
+
+        foreach (var orphan in escrowOf.Keys)
+        {
+            result.Violation($"instance owned by {orphan}: a listing that is not stored");
         }
 
         foreach (var (id, replayed) in stacks)
@@ -631,6 +711,9 @@ public static class ItemEndpoints
             case ItemMoveKind.Kill:
             case ItemMoveKind.Lair:
             case ItemMoveKind.Mission:
+            case ItemMoveKind.Standard:
+            case ItemMoveKind.Grant:
+            case ItemMoveKind.Make:
                 if (r.From != ItemLedger.World || r.To == ItemLedger.World)
                 {
                     result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from World to a character, not {r.From} to {r.To}");
@@ -653,6 +736,7 @@ public static class ItemEndpoints
 
                 break;
             case ItemMoveKind.Vendor:
+            case ItemMoveKind.Craft:
                 if (r.From == ItemLedger.World || isListing(r.From) || r.To != ItemLedger.World)
                 {
                     result.Violation($"seq {r.Seq}: a vendor row must go from a character to World, not {r.From} to {r.To}");
@@ -664,8 +748,8 @@ public static class ItemEndpoints
                 break;
         }
 
-        // Only a mission cache MINTS Mk V; units already held may be listed, bought, returned or sold to the vendor.
-        if (r.Mk == 5 && r.From == ItemLedger.World && r.Kind != ItemMoveKind.Mission)
+        // Only a mission cache MINTS Mk V — and a craft, from a Mk V core that came from one; units already held may be listed, bought, returned or sold.
+        if (r.Mk == 5 && r.From == ItemLedger.World && r.Kind is not (ItemMoveKind.Mission or ItemMoveKind.Make))
         {
             result.Violation($"seq {r.Seq}: Mk V in a {ItemMoveKind.NameOf(r.Kind)} row - only a mission cache holds Mk V");
         }
@@ -749,7 +833,8 @@ public static class ItemEndpoints
             dbe.GetIndexRef<ItemStack, long>(s => s.Owner),
             dbe.GetIndexRef<ItemLedgerHead, int>(h => h.Key),
             dbe.GetIndexRef<Wallet, long>(w => w.Owner),
-            dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq));
+            dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq),
+            dbe.ArchetypeIdOf<ItemInstanceArch>());
         Volatile.Write(ref _indexes, set);
         return set;
     }

@@ -1590,6 +1590,12 @@ public static class WorldBuilder
         {
             _index?.Bazaars.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
         }
+
+        // The workshop's stations (crafting-build.md C2), the same way.
+        if (kind == StructureKind.CraftingStation)
+        {
+            _index?.Stations.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
+        }
     }
 
     /// <summary>A point on the planet that is not inside an NPC city.</summary>

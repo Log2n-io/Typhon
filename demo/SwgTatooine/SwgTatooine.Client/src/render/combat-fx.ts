@@ -28,7 +28,7 @@ export interface CombatFxHooks {
   /** The attacker's swing, played now. */
   strike(attackerNetId: number): void;
   /** The blow arrived: the target's hit reaction and the damage number. Called once per blow, the bolt's at its impact. */
-  impact(targetNetId: number, amount: number): void;
+  impact(targetNetId: number, amount: number, crit: boolean): void;
   /** Whether this attacker shoots — a bolt flies — rather than strikes in reach. */
   ranged(attackerNetId: number): boolean;
   /** How high above its feet a body is aimed at, metres. */
@@ -86,6 +86,7 @@ interface Bolt {
   distance: number;
   target: number;
   amount: number;
+  crit: boolean;
   /** Whether its impact has been played. */
   hit: boolean;
 }
@@ -98,6 +99,7 @@ export class CombatFx {
   private readonly attackers = new Uint32Array(QUEUE);
   private readonly targets = new Uint32Array(QUEUE);
   private readonly amounts = new Uint32Array(QUEUE);
+  private readonly crits = new Uint8Array(QUEUE);
   private head = 0;
   private count = 0;
 
@@ -131,12 +133,13 @@ export class CombatFx {
   }
 
   /** A blow the server landed, from the event stream; played once render time reaches `tick`. */
-  push(tick: number, attackerNetId: number, targetNetId: number, amount: number): void {
+  push(tick: number, attackerNetId: number, targetNetId: number, amount: number, crit = false): void {
     const at = (this.head + this.count) % QUEUE;
     this.ticks[at] = tick;
     this.attackers[at] = attackerNetId;
     this.targets[at] = targetNetId;
     this.amounts[at] = amount;
+    this.crits[at] = crit ? 1 : 0;
     if (this.count < QUEUE) {
       this.count++;
     } else {
@@ -157,6 +160,7 @@ export class CombatFx {
       const attacker = this.attackers[this.head];
       const target = this.targets[this.head];
       const amount = this.amounts[this.head];
+      const crit = this.crits[this.head] !== 0;
       this.head = (this.head + 1) % QUEUE;
       this.count--;
       if (hooks === null) {
@@ -171,10 +175,10 @@ export class CombatFx {
         attacker === 0 ||
         target === 0 ||
         !hooks.ranged(attacker) ||
-        !this.fire(view, attacker, target, amount, nowS)
+        !this.fire(view, attacker, target, amount, crit, nowS)
       ) {
         if (target !== 0) {
-          hooks.impact(target, amount);
+          hooks.impact(target, amount, crit);
         }
       }
     }
@@ -185,7 +189,7 @@ export class CombatFx {
       const span = boltSpan(nowS - b.at, b.distance);
       if (span.arrived && !b.hit) {
         b.hit = true;
-        hooks?.impact(b.target, b.amount);
+        hooks?.impact(b.target, b.amount, b.crit);
       }
 
       if (span.done) {
@@ -207,7 +211,14 @@ export class CombatFx {
   }
 
   /** Fires a bolt from the shooter's muzzle at the target's aim point. False when either end is not held. */
-  private fire(view: FrameView, attacker: number, target: number, amount: number, nowS: number): boolean {
+  private fire(
+    view: FrameView,
+    attacker: number,
+    target: number,
+    amount: number,
+    crit: boolean,
+    nowS: number,
+  ): boolean {
     const world = this.world;
     const hooks = this.hooks;
     if (
@@ -248,6 +259,7 @@ export class CombatFx {
       distance,
       target,
       amount,
+      crit,
       hit: false,
     });
     return true;

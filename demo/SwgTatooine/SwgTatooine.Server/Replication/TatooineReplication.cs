@@ -317,6 +317,9 @@ public struct MarketList
 
     /// <summary>Credits per unit, 1..<see cref="TatooineData.MaxUnitPrice"/>.</summary>
     public uint UnitPrice;
+
+    /// <summary>For an item with stats, the instance's raw id as <c>/swg/inventory</c> gave it, <see cref="Quantity"/> 1; 0 for units.</summary>
+    public ulong Item;
 }
 
 /// <summary>"Take my listing off the board" — from anywhere (bazaar.md B5). Its units are reserved for the seller at its city, or delivered there.</summary>
@@ -360,6 +363,98 @@ public struct SellToVendor
 
     /// <summary>Units, 1-99.</summary>
     public byte Quantity;
+
+    /// <summary>For an item with stats, the instance's raw id as <c>/swg/inventory</c> gave it, <see cref="Quantity"/> 1; 0 for units.</summary>
+    public ulong Item;
+}
+
+/// <summary>
+/// "Sell me this standard issue" (crafting-catalog.md § 15.3): one Mk I weapon or armour piece, a typical craft, at twice its value — the ceiling. At a bazaar
+/// terminal; minted into the inventory, paid to World.
+/// </summary>
+public struct BuyStandard
+{
+    /// <summary>The item template's id: one of <see cref="Equipment.Standard"/>.</summary>
+    public ushort Template;
+
+    /// <summary>The price the buyer was shown: another is refused <see cref="TatooineReplication.MarketSold"/>, as a listing's is.</summary>
+    public uint Price;
+}
+
+/// <summary>
+/// "Wear this" (crafting-build.md C1): an item with stats from the grid into its template's slot (§ 2.2), swapped with what was worn there. Refused below the
+/// combat level its Mk needs (B3). Applied by <c>Workshop</c>.
+/// </summary>
+public struct Equip
+{
+    /// <summary>The instance's raw id, as <c>/swg/inventory</c> gave it.</summary>
+    public ulong Item;
+}
+
+/// <summary>"Take this off": what is worn in a slot (<see cref="EquipSlot"/>, 101-107) back into the lowest free grid slot. Applied by <c>Workshop</c>.</summary>
+public struct Unequip
+{
+    /// <summary>The equip slot, 101-107.</summary>
+    public byte Slot;
+}
+
+/// <summary>
+/// "Craft this" (crafting-build.md C2, crafting-catalog.md § 3.4): a schematic, its inputs chosen slot by slot, at a crafting station within reach. The
+/// inputs are consumed and the assembly rolled at once; points, an add-on and the finish follow as their own commands.
+/// </summary>
+/// <remarks>
+/// <b>The inputs, in the schematic's slot order</b>: <c>Mk0</c>… the Mk of each material or core slot (a bulk slot's 0 lets the server take the lowest
+/// that covers it), <c>Part0</c>… the parts' instance ids, a slot of n parts taking n of them.
+/// </remarks>
+public struct CraftStart
+{
+    /// <summary>The schematic's id (<see cref="Schematics"/>).</summary>
+    public ushort Schematic;
+
+    public byte Mk0;
+
+    public byte Mk1;
+
+    public byte Mk2;
+
+    public byte Mk3;
+
+    public byte Mk4;
+
+    public byte Mk5;
+
+    public ulong Part0;
+
+    public ulong Part1;
+
+    public ulong Part2;
+
+    public ulong Part3;
+
+    public ulong Part4;
+
+    public ulong Part5;
+}
+
+/// <summary>"Spend a point on this line" (§ 3.4 step 2): one roll, as a share of the gap to the line's ceiling.</summary>
+public struct CraftExperiment
+{
+    /// <summary>The line, in the schematic's order.</summary>
+    public byte Line;
+}
+
+/// <summary>"Add this add-on" (§ 3.4 step 3): one of the schematic's kind, at a Mk, from the inventory; once per craft.</summary>
+public struct CraftEnhance
+{
+    /// <summary>The add-on's Mk, 1-5.</summary>
+    public byte Mk;
+}
+
+/// <summary>"Finish it": the result minted into the inventory, the bench fee paid (§ 15.4); points not spent are lost.</summary>
+public struct CraftFinish
+{
+    /// <summary>The schematic the client believes it is finishing: another is refused <see cref="TatooineReplication.CraftNone"/>.</summary>
+    public ushort Schematic;
 }
 
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
@@ -553,6 +648,9 @@ public struct Attack
     /// a number to subtract from a health bar — the bar's new value arrives as state in the same frame.
     /// </remarks>
     public ushort Amount;
+
+    /// <summary>1 when the blow was a critical (crafting-catalog.md § 9.3): the one part of the roll a player reads, drawn larger and in its own colour.</summary>
+    public byte Crit;
 }
 
 /// <summary>
@@ -944,6 +1042,45 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a <see cref="SellToVendor"/> whose payout rounds to 0 — an item with no market value, or too few units of a cheap one.</summary>
     public const byte MarketWorthless = AckReasons.FirstApplicationReason + 35;
+
+    /// <summary><c>ACKS</c> reason: an <see cref="Equip"/> of an item not in the grid, without stats or not worn anywhere; an <see cref="Unequip"/> of an empty slot.</summary>
+    public const byte EquipNotYours = AckReasons.FirstApplicationReason + 36;
+
+    /// <summary><c>ACKS</c> reason: an <see cref="Equip"/> below the combat level the item's Mk needs, CL 10(Mk − 1) + 1 (B3).</summary>
+    public const byte EquipLevel = AckReasons.FirstApplicationReason + 37;
+
+    /// <summary><c>ACKS</c> reason: an <see cref="Unequip"/> with no free grid slot to put it in.</summary>
+    public const byte EquipNoRoom = AckReasons.FirstApplicationReason + 38;
+
+    /// <summary><c>ACKS</c> reason: an equip or unequip applied and lost with the workshop's transaction, which did not commit: nothing moved.</summary>
+    public const byte EquipFailed = AckReasons.FirstApplicationReason + 39;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="SetStance"/> that needs a weapon the player does not wear (crafting-build.md C1): the fist is always there.</summary>
+    public const byte StanceNoWeapon = AckReasons.FirstApplicationReason + 40;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftStart"/> with no crafting station within <see cref="TatooineData.StationReachM"/>.</summary>
+    public const byte CraftNotAtStation = AckReasons.FirstApplicationReason + 41;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftStart"/> while a craft is under way: finish it first.</summary>
+    public const byte CraftBusy = AckReasons.FirstApplicationReason + 42;
+
+    /// <summary><c>ACKS</c> reason: a craft step with no craft under way, or for another schematic.</summary>
+    public const byte CraftNone = AckReasons.FirstApplicationReason + 43;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftStart"/> whose inputs are not held, not of the slot's kind, or an unknown schematic; an add-on not held.</summary>
+    public const byte CraftBadInputs = AckReasons.FirstApplicationReason + 44;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftExperiment"/> with no point left or on no line; a second add-on, or one on a schematic that takes none.</summary>
+    public const byte CraftNoPoints = AckReasons.FirstApplicationReason + 45;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftFinish"/> with no room for the result.</summary>
+    public const byte CraftNoRoom = AckReasons.FirstApplicationReason + 46;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftFinish"/> whose bench fee the wallet does not cover.</summary>
+    public const byte CraftNotEnough = AckReasons.FirstApplicationReason + 47;
+
+    /// <summary><c>ACKS</c> reason: a craft step applied and lost with the workshop's transaction, which did not commit: nothing changed.</summary>
+    public const byte CraftFailed = AckReasons.FirstApplicationReason + 48;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1805,7 +1942,8 @@ public static partial class TatooineReplication
             .RouteToKnown(a => a.Attacker, a => a.Target)
             .Entity(a => a.Attacker, "attacker")
             .Entity(a => a.Target, "target")
-            .Field(a => a.Amount, Codec.U16, "amount"));
+            .Field(a => a.Amount, Codec.U16, "amount")
+            .Field(a => a.Crit, Codec.U8, "crit"));
 
         subs.Event<RealmNews>(e => e.RouteToRealm(n => new RealmId(n.Realm), subtree: true));
 
@@ -1931,7 +2069,8 @@ public static partial class TatooineReplication
             .Field(m => m.Template, Codec.VarUInt, "template")
             .Field(m => m.Mk, Codec.U8, "mk")
             .Field(m => m.Quantity, Codec.U8, "quantity")
-            .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice"));
+            .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice")
+            .Field(m => m.Item, Codec.U64, "item"));
         subs.Command<MarketCancel>(c => c
             .Rate(2, 4)
             .Roles(SessionRole.Player)
@@ -1950,7 +2089,53 @@ public static partial class TatooineReplication
             .Roles(SessionRole.Player)
             .Field(m => m.Template, Codec.VarUInt, "template")
             .Field(m => m.Mk, Codec.U8, "mk")
-            .Field(m => m.Quantity, Codec.U8, "quantity"));
+            .Field(m => m.Quantity, Codec.U8, "quantity")
+            .Field(m => m.Item, Codec.U64, "item"));
+        subs.Command<BuyStandard>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Template, Codec.VarUInt, "template")
+            .Field(m => m.Price, Codec.VarUInt, "price"));
+
+        // The workshop (crafting-build.md C1). Queued, each a move of an item; a few a second, which a person changing a set of armour does not reach.
+        subs.Command<Equip>(c => c
+            .Rate(4, 8)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item"));
+        subs.Command<Unequip>(c => c
+            .Rate(4, 8)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Slot, Codec.U8, "slot"));
+
+        // Crafting (crafting-build.md C2): a start, its points one by one, an add-on, the finish — eight points a second at most, a person clicking.
+        subs.Command<CraftStart>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Schematic, Codec.VarUInt, "schematic")
+            .Field(m => m.Mk0, Codec.U8, "mk0")
+            .Field(m => m.Mk1, Codec.U8, "mk1")
+            .Field(m => m.Mk2, Codec.U8, "mk2")
+            .Field(m => m.Mk3, Codec.U8, "mk3")
+            .Field(m => m.Mk4, Codec.U8, "mk4")
+            .Field(m => m.Mk5, Codec.U8, "mk5")
+            .Field(m => m.Part0, Codec.U64, "part0")
+            .Field(m => m.Part1, Codec.U64, "part1")
+            .Field(m => m.Part2, Codec.U64, "part2")
+            .Field(m => m.Part3, Codec.U64, "part3")
+            .Field(m => m.Part4, Codec.U64, "part4")
+            .Field(m => m.Part5, Codec.U64, "part5"));
+        subs.Command<CraftExperiment>(c => c
+            .Rate(8, 8)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Line, Codec.U8, "line"));
+        subs.Command<CraftEnhance>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Mk, Codec.U8, "mk"));
+        subs.Command<CraftFinish>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Schematic, Codec.VarUInt, "schematic"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
@@ -1996,38 +2181,54 @@ public static partial class TatooineReplication
     }
 
     /// <summary>
-    /// Everything the tick does about sessions, in one serial system: kicks, counts, profiles, possession and the clients' intents.
+    /// Everything the tick does about sessions but their intents: kicks, counts, profiles, avatars and possession. <see cref="IntentTick"/> applies the
+    /// intents, in the system ordered after this one.
     /// </summary>
     /// <param name="tick">The tick context.</param>
     /// <remarks>
     /// <para>
-    /// <b>One system, and that is a correctness requirement rather than tidiness (SWG-01).</b> Two things forced it.
+    /// <b>Session requests are safe from any system.</b> <c>SubscriptionsCommands.Session(session)</c> records into the calling system's own segment
+    /// (<c>ctx.Subscriptions</c> is its worker slot's view), and the requests apply in the order the calls were made, across segments (rule SUB-39, #1070).
+    /// Until that fix every caller shared segment 0, whose append is unsynchronized, so all session work had to be one serial system (SWG-01): the two
+    /// systems it had been split into raced on that segment. That is no longer a reason, so the intents are a system of their own again.
     /// </para>
     /// <para>
-    /// First, session requests. <c>SubscriptionsCommands.Session(session, worker)</c> appends to a per-worker segment whose append is deliberately
-    /// unsynchronized — its own remarks say two threads sharing one "loses records, duplicates them, or throws out of an <c>Array.Resize</c>" — and the
-    /// worker index cannot be passed <c>TickContext.WorkerId</c>, because that ranges over <c>[0, WorkerCount]</c> while the log is sized
-    /// <c>WorkerCount</c> (filed as #1070). So every caller uses segment 0, and segment 0 is safe only if one thread writes it. This used to be two callback
-    /// systems declared with no edge between them in one DAG phase — <c>ExecuteInline</c> runs a callback system on whichever worker reaches it, so they
-    /// could and did run concurrently, one staging <c>Profile</c> and <c>Enter</c> while the other staged <c>Control</c>.
-    /// </para>
-    /// <para>
-    /// Second, ECS writes. Applying an intent writes <c>PlayerMotion</c> and <c>PlayerControl</c>, and <c>PlayerThink</c> writes <c>PlayerMotion</c> too.
-    /// Ordering them needs them in the SAME DAG — "a cross-DAG <c>.After()</c> edge is a configuration error … access-edge derivation runs per-DAG"
-    /// (<c>overview/13-runtime.md</c>) — and DAGs within a track have no barrier between them. So this lives in the simulation's own DAG, in the
-    /// <c>Spawn</c> phase, ahead of every phase that reads what it wrote.
+    /// <b>Both systems are in the simulation's own DAG, in the <c>Input</c> phase, and that still matters.</b> Applying an intent writes
+    /// <c>PlayerMotion</c>, and <c>PlayerThink</c> writes it too. Ordering them needs them in the SAME DAG — "a cross-DAG <c>.After()</c> edge is a
+    /// configuration error … access-edge derivation runs per-DAG" (<c>overview/13-runtime.md</c>) — and DAGs within a track have no barrier between them.
     /// </para>
     /// </remarks>
     public static void SessionTick(TickContext tick)
     {
-        if (BindOpenedSessions(tick))
+        if (!BindOpenedSessions(tick))
         {
-            // A5: the session's own avatar, spawned at its character's saved position, rather than the first free player out of the
-            // pooled crowd. See TatooineReplication.Avatars.cs for why that distinction is the whole requirement.
-            BindAvatars(tick);
+            _intentsTick = -1;
+            return;
+        }
+
+        // A5: the session's own avatar, spawned at its character's saved position, rather than the first free player out of the
+        // pooled crowd. See TatooineReplication.Avatars.cs for why that distinction is the whole requirement.
+        BindAvatars(tick);
+        _intentsTick = tick.TickNumber;
+    }
+
+    /// <summary>Applies this tick's client intents, after <see cref="SessionTick"/> has bound this tick's sessions and avatars.</summary>
+    /// <param name="tick">The tick context.</param>
+    /// <remarks>
+    /// Only on a tick <see cref="SessionTick"/> went past its binding — not shutting down, replication running — as when the two were one method. That
+    /// system's own transaction has committed by now (an edge orders them), so an avatar it spawned this tick is there to steer.
+    /// </remarks>
+    public static void IntentTick(TickContext tick)
+    {
+        if (_intentsTick == tick.TickNumber)
+        {
             ApplyIntents(tick);
         }
     }
+
+    /// <summary>The last tick <see cref="SessionTick"/> bound sessions on, which is the tick <see cref="IntentTick"/> applies intents on.</summary>
+    /// <remarks>Written and read by two systems an edge orders, on the tick thread's side of that edge, so a plain field.</remarks>
+    private static long _intentsTick = -1;
 
     /// <summary>
     /// Binds every session that opens to its profile, and answers a god camera's request to look at another planet.
@@ -3124,8 +3325,7 @@ public static partial class TatooineReplication
     /// <b>Command-first, not player-first, which is a stated deviation from <c>design/SwgTatooine/03-server.md § 6</c>.</b> That section has a parallel
     /// <c>PlayerInput</c> system reading <c>Commands&lt;MoveTo&gt;().TryGetLatest(session, out cmd)</c>, which is a scan of the command buffer per player per
     /// chunk — O(players × commands) for a buffer whose length is bounded by the number of CONNECTED clients. Walking the commands and opening the one entity
-    /// each names is O(commands), and it is what makes this affordable serially, which is what the segment-0 and <c>PlayerMotion</c> hazards described on
-    /// <see cref="SessionTick"/> require. Nothing about the validation or the effect changes.
+    /// each names is O(commands), and it is what makes this affordable serially. Nothing about the validation or the effect changes.
     /// </para>
     /// <para>
     /// <b>Every intent is re-validated here, where the state it must agree with is.</b> The wire check is syntactic (a finite coordinate, a declared speed
@@ -3285,6 +3485,14 @@ public static partial class TatooineReplication
             if (stance >= Stances.Count)
             {
                 subs.Reject(command, StanceUnknown);
+                System.Threading.Interlocked.Increment(ref _stancesRefused);
+                continue;
+            }
+
+            // A stance fights with what is worn (crafting-build.md C1): the fist always, any other only with its weapon equipped.
+            if (stance != Stances.None && stance != Stances.Unarmed && player.Read(Player.Gear).Stance != stance)
+            {
+                subs.Reject(command, StanceNoWeapon);
                 System.Threading.Interlocked.Increment(ref _stancesRefused);
                 continue;
             }

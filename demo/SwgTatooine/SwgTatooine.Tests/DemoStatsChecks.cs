@@ -273,7 +273,7 @@ internal sealed class DemoStatsChecks : ServedChecks
         {
             Assert.That(faucets, Is.EqualTo(1000 + 500 + 145));
             Assert.That(sinks, Is.EqualTo(24 + 3));
-            Assert.That(byName.EnumerateObject().Select(p => p.Name), Is.EqualTo(new[] { "grant", "mission", "tip", "sale", "tax", "listfee", "vendor" }));
+            Assert.That(byName.EnumerateObject().Select(p => p.Name), Is.EqualTo(new[] { "grant", "mission", "tip", "sale", "tax", "listfee", "vendor", "standard", "fare", "bench" }));
             Assert.That(byName.GetProperty("vendor").GetInt64(), Is.EqualTo(145));
             Assert.That(byName.GetProperty("listfee").GetInt64(), Is.EqualTo(3));
             Assert.That(MarketStats.CreditKinds, Has.Length.EqualTo(TransferKind.Count - 1), "every credit kind has a flow");

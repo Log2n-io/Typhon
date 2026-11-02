@@ -318,6 +318,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
     /// <summary>The server's combat stance command; a bot hunts with the pistol, the one stance that reaches from <c>BotBrain.StrikeM</c>.</summary>
     private const string SetStanceCommand = "SetStance";
+    private const string EquipCommand = "Equip";
 
     /// <summary>The economy's player-to-player transfer (economy-foundation.md E0-7).</summary>
     private const string GiveCreditsCommand = "GiveCredits";
@@ -2407,6 +2408,9 @@ public sealed partial class BotSwarm : IAsyncDisposable
         public long RealmSwitches;
         public long IntentsSent;
 
+        /// <summary>Equip commands sent (crafting-build.md § 6): what it put on.</summary>
+        public long EquipsSent;
+
         /// <summary>Shuttle boardings this bot has asked for, and hunts it has begun: what the brain actually did.</summary>
         public long BoardingsAsked;
 
@@ -2454,6 +2458,8 @@ public sealed partial class BotSwarm : IAsyncDisposable
         private bool _itemsPrimed;
         private readonly bool _takesMissions;
         private long _stanceAskedAt = long.MinValue / 2;
+        private long _equipAskedAt = long.MinValue / 2;
+        private ulong _equipAskedItem;
 
         /// <summary>The target last named, and when: an attack re-names it only when it changes, or every two seconds in case the server let it go.</summary>
         private uint _targetNamed;
@@ -2787,6 +2793,18 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 IntentsSent++;
             }
 
+            // Wear what it holds (crafting-build.md § 6): an item with stats in the grid whose slot nothing is worn in, one every two seconds, and the
+            // same one not again before ten — the inventory read that shows it worn comes after the command.
+            if (tick - _equipAskedAt >= 8 && MarketPlan.NextToWear(_gear) is var wear && wear != 0 && (wear != _equipAskedItem || tick - _equipAskedAt >= 40)
+                && Client.Plan.CommandByName(EquipCommand) != null)
+            {
+                _equipAskedAt = tick;
+                _equipAskedItem = wear;
+                await Client.SendCommandAsync(EquipCommand, new RecordValues { ["item"] = FieldValue.OfUInt64(wear) }, ct).ConfigureAwait(false);
+                IntentsSent++;
+                EquipsSent++;
+            }
+
             switch (intent.Kind)
             {
                 case IntentKind.Move when Client.Plan.CommandByName(MoveDirCommand) != null:
@@ -3029,13 +3047,16 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
                 // The first read only learns what was already there — rows and losses of an earlier run — so this run's counts are this run's.
                 var held = new List<HeldStack>();
+                var gear = new List<GearItem>();
                 var view = InventoryView.Parse(
                     await response.Content.ReadAsStringAsync().ConfigureAwait(false),
                     _inventory,
                     count: _itemsPrimed,
                     out var lost,
-                    held);
+                    held,
+                    gear);
                 SawInventory(held);
+                _gear = gear;
                 _itemsPrimed = true;
                 _inventory = view;
                 Interlocked.Add(ref ItemsLost, lost);

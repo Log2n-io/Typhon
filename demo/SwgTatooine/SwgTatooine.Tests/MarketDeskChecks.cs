@@ -91,11 +91,15 @@ internal sealed class MarketDeskChecks : ServedChecks
         Harness.Ticks(1);
     }
 
-    /// <summary>Fills a character's free slots with one unit each of keys no case trades (crystal, gas, chemical, fiber, gland, venom; Mk I-IV), but <paramref name="leave"/>.</summary>
+    /// <summary>Fills a character's free slots with one unit each of keys no case trades (materials but hide and bone, two cores, an add-on; Mk I-IV), but <paramref name="leave"/>.</summary>
     private void Fill(TatooineSim sim, Trader t, int leave = 0)
     {
         var free = ItemLedger.Slots - Items.Stacks(sim, t.Character).Count - leave;
-        ushort[] templates = [ItemCatalog.Crystal, ItemCatalog.Gas, ItemCatalog.Chemical, ItemCatalog.Fiber, ItemCatalog.Gland, ItemCatalog.Venom, ItemCatalog.Metal, ItemCatalog.CoreRanged];
+        ushort[] templates =
+        [
+            ItemCatalog.Crystal, ItemCatalog.Gas, ItemCatalog.Chemical, ItemCatalog.Fiber, ItemCatalog.Gland, ItemCatalog.Venom, ItemCatalog.Metal,
+            ItemCatalog.CoreRanged, ItemCatalog.CoreMelee, ItemCatalog.AddonTuning,
+        ];
         var n = 0;
         foreach (var template in templates)
         {

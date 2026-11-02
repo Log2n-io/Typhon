@@ -31,8 +31,20 @@ public static class TransferKind
     /// </summary>
     public const byte Vendor = 7;
 
+    /// <summary>
+    /// Standard issue bought from the vendor (crafting-catalog.md § 15.3): the buyer pays World twice the item's value. <see cref="LedgerEntry.Ref"/> is the
+    /// template's id.
+    /// </summary>
+    public const byte Standard = 8;
+
+    /// <summary>A shuttle ticket (crafting-catalog.md § 15.4, C5): the passenger pays World <see cref="TatooineData.ShuttleFare"/>. <see cref="LedgerEntry.Ref"/> is the shuttleport's raw id.</summary>
+    public const byte Fare = 9;
+
+    /// <summary>The bench fee (crafting-catalog.md § 15.4): 3 % of a crafted item's value, the crafter to World. <see cref="LedgerEntry.Ref"/> is the craft's raw id.</summary>
+    public const byte Bench = 10;
+
     /// <summary>The first kind past the last one: what a per-kind counter is sized by.</summary>
-    public const byte Count = 8;
+    public const byte Count = 11;
 
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
@@ -44,6 +56,9 @@ public static class TransferKind
         Tax => "tax",
         ListFee => "listfee",
         Vendor => "vendor",
+        Standard => "standard",
+        Fare => "fare",
+        Bench => "bench",
         _ => "unknown",
     };
 }

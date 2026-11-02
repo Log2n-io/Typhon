@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.AspNetCore.Http;
 using NUnit.Framework;
@@ -368,7 +369,10 @@ internal sealed class ProgressionChecks : ServedChecks
         });
     }
 
-    /// <summary>CH-8: a CL 1 avatar's blows on a level 30 lair land halved — every blow 48 of its 95 — and the Attack carries what landed.</summary>
+    /// <summary>
+    /// CH-8: a CL 1 avatar's blows on a level 30 lair land halved — the blaster's 81 scaled to 41, then rolled (crafting-catalog.md § 9.3: ×0.9 to 1.1,
+    /// ×1.5 on a crit) — so every blow lies in 36..68, under the unscaled blaster's least, 72.
+    /// </summary>
     [Test]
     [CancelAfter(120_000)]
     [Category("Integration")]
@@ -379,16 +383,28 @@ internal sealed class ProgressionChecks : ServedChecks
         var lair = StageLair(sim, me, CreatureTemplates.Frog, level: 30, gapM: 10f, keepOccupants: false);
         var before = LairHealth(sim, lair);
         me.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(me.Link.Session, lair)));
+        Worlds.Arm(sim, me.Link);
         me.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
-        SessionHarness.Until(() => LairHealth(sim, lair) < before, "a blow to land");
-        Harness.Ticks(3 * Worlds.ServedHz);
-        var taken = before - LairHealth(sim, lair);
-        var blow = SimBridge.ScaleByLevel(95, 1, 30);
+        Equipment.TryStandard(ItemCatalog.Blaster, out var blaster);
+        var scaled = SimBridge.ScaleByLevel(blaster.Stat0, 1, 30);
+        var blows = new List<int>();
+        var health = before;
+        while (blows.Count < 4)
+        {
+            var last = health;
+            SessionHarness.Until(() => LairHealth(sim, lair) < last, "a blow to land");
+            health = LairHealth(sim, lair);
+            blows.Add(last - health);
+        }
+
         Assert.Multiple(() =>
         {
-            Assert.That(blow, Is.EqualTo(48));
-            Assert.That(taken % blow, Is.Zero, $"{taken} taken is not a whole number of {blow}-point blows");
-            Assert.That(taken % 95, Is.Not.Zero, "the blows landed unscaled");
+            Assert.That(scaled, Is.EqualTo(41));
+            foreach (var b in blows)
+            {
+                Assert.That(b, Is.InRange((int)(scaled * 0.9), (int)Math.Ceiling(scaled * 1.1 * Equipment.CritMultiplier)), $"a blow of {b}");
+                Assert.That(b, Is.LessThan((int)(blaster.Stat0 * 0.9)), "a blow landed unscaled");
+            }
         });
     }
 
@@ -500,6 +516,7 @@ internal sealed class ProgressionChecks : ServedChecks
         {
             SessionHarness.Until(() => SessionHarness.NetIdOf(me.Link.Session, frog) != 0, "the frog to reach both views");
             me.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(me.Link.Session, frog)));
+            Worlds.Arm(sim, me.Link);
             me.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         }
 
@@ -731,6 +748,7 @@ internal sealed class ProgressionChecks : ServedChecks
     {
         SessionHarness.Until(() => SessionHarness.NetIdOf(me.Link.Session, victim) != 0, "the victim to reach the client's view");
         me.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(me.Link.Session, victim)));
+        Worlds.Arm(sim, me.Link);
         me.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => tap.Any(e => e.Victim == victim), $"the kill of {victim} (lair {lair}) to be pushed");
         Harness.Ticks(2);

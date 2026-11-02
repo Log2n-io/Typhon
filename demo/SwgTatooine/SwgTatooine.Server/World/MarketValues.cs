@@ -8,8 +8,9 @@ namespace SwgTatooine.Server;
 /// <para>
 /// From <c>balance_model.py</c>'s <c>mat_value(b)</c> and <c>core_value(b)</c> (claude/design/SwgTatooine/design/balance/balance_model.py): a material unit
 /// rounded to 100 milli-credits, a core to the credit. <b>An add-on is valued as a core [EST]</b> — the model has no add-on value, as it has no add-on drop
-/// rate (inventory-loot § 4). Parts, armour, potions, kits and the crate have none yet: nothing makes them, and the vendor refuses them. Pinned by
-/// <c>MarketValueChecks</c> against the model's own numbers.
+/// rate (inventory-loot § 4). A weapon is <c>item_values(b)</c>'s typical carbine of its band, whatever its class; an armour piece, the typical set's value
+/// by the piece's share (<see cref="EquipSlot.SharePerMille"/>). Parts, potions, kits and the crate have none yet: nothing makes them, and the vendor
+/// refuses them. Pinned by <c>MarketValueChecks</c> against the model's own numbers.
 /// </para>
 /// </remarks>
 public static class MarketValues
@@ -17,6 +18,8 @@ public static class MarketValues
     // Index Mk 1..5; 0 unused.
     private static readonly long[] MaterialMilli = [0, 1_700, 2_800, 4_500, 7_200, 11_400];
     private static readonly long[] CoreMilli = [0, 726_000, 1_549_000, 3_099_000, 5_950_000, 11_106_000];
+    private static readonly long[] WeaponMilli = [0, 906_000, 1_795_000, 3_457_000, 6_498_000, 11_977_000];
+    private static readonly long[] ArmorSetMilli = [0, 6_340_000, 13_255_000, 26_232_000, 50_056_000, 93_070_000];
 
     /// <summary>One unit's market value, milli-credits; 0 for an item without one (the vendor refuses it).</summary>
     public static long MilliOf(ushort template, byte mk)
@@ -30,6 +33,8 @@ public static class MarketValues
         {
             ItemCategory.Material => MaterialMilli[mk],
             ItemCategory.Core or ItemCategory.Addon => CoreMilli[mk],
+            ItemCategory.Weapon => WeaponMilli[mk],
+            ItemCategory.Armor => ArmorSetMilli[mk] * EquipSlot.SharePerMille[Equipment.SlotOf(template) - EquipSlot.First] / 1000,
             _ => 0,
         };
     }

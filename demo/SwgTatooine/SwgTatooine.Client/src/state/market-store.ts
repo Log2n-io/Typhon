@@ -11,6 +11,7 @@ import {
   MAX_UNIT_PRICE,
   parseBrowse,
   parsePrices,
+  parseStandard,
   priceOf,
   type BazaarTab,
   type BrowsePage,
@@ -20,6 +21,7 @@ import {
   type MarketPrice,
   type MarketQuery,
   type Reservation,
+  type StandardOffer,
 } from '../data/market';
 import type { RevisionFetch } from '../data/revision-reader';
 
@@ -77,6 +79,8 @@ export interface MarketState {
   readonly browseError: string | null;
   readonly mine: MarketMine | null;
   readonly prices: readonly MarketPrice[];
+  /** What the vendor sells (crafting-catalog.md § 15.3), read when the standard-issue tab opens. */
+  readonly standard: readonly StandardOffer[];
   /** The character's stacks, as the inventory was last read: what can be sold. */
   readonly stacks: readonly InventoryItem[];
   readonly sell: SellForm;
@@ -97,6 +101,7 @@ export interface MarketState {
   /** Re-reads the page now. */
   readonly refreshBrowse: () => Promise<void>;
   readonly refreshPrices: () => Promise<void>;
+  readonly refreshStandard: () => Promise<void>;
   /** Called every frame: re-reads what is due while the panel is open. */
   readonly tick: (nowMs: number) => void;
   readonly setMine: (mine: MarketMine) => void;
@@ -113,6 +118,12 @@ export interface MarketState {
   readonly list: () => void;
   /** Sells the stack picked to the vendor, the form's quantity. */
   readonly vendor: () => void;
+  /** Buys one standard-issue item from the vendor at the price shown (crafting-catalog.md § 15.3). */
+  readonly buyStandard: (template: number, price: number) => void;
+  /** Wears an item with stats (crafting-build.md § 2.2); its refusal shows on the `'gear'` row. */
+  readonly equip: (itemId: string) => void;
+  /** Takes off what is worn in an equip slot, 101-107. */
+  readonly unequip: (slot: number) => void;
   /** The server refused `command` with `reason`. */
   readonly refused: (reason: number, command: MarketCommand) => void;
   /**
@@ -195,6 +206,7 @@ export const useMarket = create<MarketState>((set, get) => {
     browseError: null,
     mine: null,
     prices: [],
+    standard: [],
     stacks: [],
     sell: EMPTY_SELL,
     pending: [],
@@ -260,6 +272,12 @@ export const useMarket = create<MarketState>((set, get) => {
       // A buy in flight whose listing left the board has landed — or been refused, which says so on its row.
       const gone = new Set(before.filter((l) => !listed.has(l.id)).map((l) => l.id));
       set({ page: answer, kept, browseError: null, pending: get().pending.filter((r) => !gone.has(r)) });
+    },
+    refreshStandard: async () => {
+      const standard = parseStandard(await fetchJson('swg/market/standard'));
+      if (standard !== null) {
+        set({ standard });
+      }
     },
     refreshPrices: async () => {
       pricesAtMs = lastNowMs;
@@ -356,12 +374,14 @@ export const useMarket = create<MarketState>((set, get) => {
         return;
       }
 
+      // An item with stats is listed by its id, one at a time (crafting-build.md § 2.1).
       send({
         kind: 'list',
         template: stack.template,
         mk: stack.mk,
-        quantity: sell.quantity,
+        quantity: stack.stats === undefined ? sell.quantity : 1,
         unitPrice: sell.unitPrice,
+        ...(stack.stats === undefined ? {} : { item: stack.id }),
       });
     },
     vendor: () => {
@@ -376,7 +396,20 @@ export const useMarket = create<MarketState>((set, get) => {
         return;
       }
 
-      send({ kind: 'vendor', template: stack.template, mk: stack.mk, quantity: sell.quantity });
+      send(
+        stack.stats === undefined
+          ? { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: sell.quantity }
+          : { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: 1, item: stack.id },
+      );
+    },
+    buyStandard: (template, price) => {
+      send({ kind: 'standard', template, price });
+    },
+    equip: (itemId) => {
+      send({ kind: 'equip', item: itemId });
+    },
+    unequip: (slot) => {
+      send({ kind: 'unequip', slot });
     },
     refused: (reason, command) => {
       const row = commandRow(command);

@@ -71,6 +71,7 @@ internal static class MarketStats
     [
         (TransferKind.Grant, Flow.Faucet), (TransferKind.MissionReward, Flow.Faucet), (TransferKind.Tip, Flow.Transfer),
         (TransferKind.Sale, Flow.Transfer), (TransferKind.Tax, Flow.Sink), (TransferKind.ListFee, Flow.Sink), (TransferKind.Vendor, Flow.Faucet),
+        (TransferKind.Standard, Flow.Sink), (TransferKind.Fare, Flow.Sink), (TransferKind.Bench, Flow.Sink),
     ];
 
     /// <summary>Credits minted (faucets) and destroyed (sinks) since start, from the credits moved per kind.</summary>

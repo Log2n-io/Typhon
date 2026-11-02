@@ -174,6 +174,7 @@ public sealed partial class SimBridge
         {
             _walletsAsked.Add((character, body, tick));
             _boundThisTick.Add(character);
+            GearDueOnBind(character, body);
         }
 
         var tips = subs == null ? default : subs.Commands<GiveCredits>();
@@ -212,7 +213,9 @@ public sealed partial class SimBridge
             }
         }
 
+        FlushItemHead(tx);
         var committed = EndEconomy(tx.Commit());
+        var packs = EndItems(committed);
         _boundThisTick.Clear();
         if (!committed)
         {
@@ -230,6 +233,10 @@ public sealed partial class SimBridge
         foreach (var body in _walletsMoved)
         {
             BumpWallet(tick0, body);
+            if (packs)
+            {
+                BumpItems(tick0, body);
+            }
         }
     }
 
@@ -330,7 +337,27 @@ public sealed partial class SimBridge
         _economyDirty = true;
         Transfer(tx, EconomyLedger.World, key, EconomyLedger.StartingCredits, TransferKind.Grant, 0, worldTick);
         _pendingGrants++;
+        GrantPack(tx, key, worldTick);
         return true;
+    }
+
+    /// <summary>
+    /// The welcome pack (crafting-build.md O-1), minted with the wallet in its transaction: a standard-issue blaster, as <see cref="ItemMoveKind.Grant"/>
+    /// rows, <b>worn</b> — a new character can fight at once — so the body's gear is due. C2 adds three Mk I stims, C3 a Mk I repair kit.
+    /// </summary>
+    private void GrantPack(Transaction tx, long character, long worldTick)
+    {
+        if (!_config.WelcomePack || !Equipment.TryStandard(ItemCatalog.Blaster, out var blaster))
+        {
+            return;
+        }
+
+        var stats = StandardStats(in blaster);
+        var id = MintInstance(tx, character, ItemCatalog.Blaster, 1, in stats, ItemMoveKind.Grant, 0, worldTick);
+        if (!id.IsNull)
+        {
+            WearOnGrant(tx, character, id);
+        }
     }
 
     /// <summary>

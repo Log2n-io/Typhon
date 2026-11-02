@@ -1554,7 +1554,7 @@ public sealed class BotErrandChecks
     [Test]
     public void AFullInventory_Trades_ThenGoesBackToTheDesk()
     {
-        var (brain, sim) = Trader(26, 0);
+        var (brain, sim) = Trader(BotBrain.MarketStacks + 6, 0);
         var trades = new List<(long Tick, Intent Intent)>();
         var targets = new List<(float X, float Z)>();
         var doneAt = -1L;
@@ -1613,7 +1613,7 @@ public sealed class BotErrandChecks
     [Test]
     public void AFullInventoryTheBazaarCannotEmpty_IsNotTakenThereAgainBeforeItsRetry()
     {
-        var (brain, sim) = Trader(30, 0);
+        var (brain, sim) = Trader(BotBrain.MarketStacks + 10, 0);
         var chosenAt = new List<long>();
         var chosen = 0L;
         for (var tick = 1L; tick < 1400; tick++)
@@ -1692,7 +1692,7 @@ public sealed class BotErrandChecks
     public void ABazaarErrand_SendsEveryMarketCommandFromWithinTheTerminalsReach(int lateTicks, int commands, int dropped)
     {
         const double BazaarReachM = 6d;
-        var (brain, sim) = Trader(26, 0);
+        var (brain, sim) = Trader(BotBrain.MarketStacks + 6, 0);
         var sender = new MarketSender();
         var plan = Enumerable.Range(0, commands).Select(_ => MarketCommand.Vendor(8, 1, 5)).ToList();
         var offerAt = long.MaxValue;

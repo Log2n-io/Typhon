@@ -60,6 +60,9 @@ internal struct CombatEvent
     /// </summary>
     /// <remarks>Carried, so the drain opens no extra entity: it has the target open already and reads its level there. In the padding: still 24 bytes.</remarks>
     public byte AttackerLevel;
+
+    /// <summary>What the blow is made of (<see cref="Server.DamageType"/>): the armour of a player it lands on mitigates by it (crafting-catalog.md § 5.3).</summary>
+    public byte DamageType;
 }
 
 /// <summary>What a <see cref="CombatEvent"/> is.</summary>

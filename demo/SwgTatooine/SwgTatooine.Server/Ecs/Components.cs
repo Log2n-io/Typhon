@@ -749,6 +749,55 @@ public struct PlayerVitals
     public readonly bool IsAlive => Health > 0;
 }
 
+/// <summary>
+/// What a player's equipment makes of its blows and of the blows it takes (crafting-build.md § 2.3): the body's cache of its character's equipped items,
+/// written by <c>Workshop</c> on bind, equip and unequip, read on every hit.
+/// </summary>
+/// <remarks>
+/// <para><b>A component of its own</b>: <see cref="PlayerVitals"/> is written on every hit and partly replicated; these change on equip and are read on every
+/// hit. Not replicated: the client's equipment panel reads <c>/swg/inventory</c>, and a crit arrives with its blow.</para>
+/// <para><b>Not in <see cref="PlayerVitals"/></b>, not even the damage: the systems of the economy phase read vitals (is the body down?), and a writer of
+/// them there would have to order against every one. <see cref="PlayerVitals.AttackDamage"/> stays the crowd's.</para>
+/// <para><b>12 bytes, because every byte on a body costs players per cluster</b> (see <see cref="PlayerLook"/>): 28 took a Player cluster from 24 bodies
+/// to 23. The wear counters (crafting-catalog.md § 9.1) join it at C3, as 16-bit counts of at most 50 uses, through the field migration.</para>
+/// <para>All zero on a body <c>Workshop</c> has not seen yet, and on the scripted crowd, which fights with its own numbers.</para>
+/// </remarks>
+[Component("Swg.PlayerGear", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 2)]
+public struct PlayerGear
+{
+    /// <summary>The weapon's damage per hit, before the rolls (crafting-catalog.md § 9.3); unarmed 40. A perfect Mk V sword's is 460.</summary>
+    [Field] public short Damage;
+
+    /// <summary>The weapon's delay between blows, ms; unarmed 1 200.</summary>
+    [Field] public short DelayMs;
+
+    /// <summary>The weapon's reach, decimetres, edge to edge; unarmed 10.</summary>
+    [Field] public short RangeDm;
+
+    /// <summary>Kinetic mitigation, ‰ (§ 5.3: Σ share × protection, capped 750).</summary>
+    [Field] public short MitKinetic;
+
+    /// <summary>Energy mitigation, ‰.</summary>
+    [Field] public short MitEnergy;
+
+    /// <summary>The blows' <see cref="DamageType"/>.</summary>
+    [Field] public byte DamageType;
+
+    /// <summary>The stance the weapon fights in (<see cref="Stances"/>); <see cref="Stances.Unarmed"/> with none. 0: not set by <c>Workshop</c> yet.</summary>
+    [Field] public byte Stance;
+
+    /// <summary>A body with nothing equipped: the fist (Q2), kinetic, no armour.</summary>
+    public static PlayerGear Unarmed => new()
+    {
+        Damage = (short)Equipment.UnarmedDamage,
+        DelayMs = (short)Equipment.UnarmedDelayMs,
+        RangeDm = (short)Equipment.UnarmedRangeDm,
+        DamageType = Server.DamageType.Kinetic,
+        Stance = Stances.Unarmed,
+    };
+}
+
 /// <summary>A lair's structural integrity — what a destroy mission is sent to reduce to zero.</summary>
 [Component("Swg.LairVitals", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]

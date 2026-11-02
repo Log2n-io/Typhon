@@ -15,6 +15,7 @@ namespace SwgTatooine.Server;
 /// <param name="ListedTick">The world tick it was listed on.</param>
 /// <param name="City">Its city's group key, region + 1.</param>
 /// <param name="Realm">Its planet.</param>
+/// <param name="Stats">An item with stats: the one in escrow's (crafting-build.md § 2.1); default for units.</param>
 public readonly record struct ListingView(
     long Id,
     ushort Template,
@@ -25,7 +26,8 @@ public readonly record struct ListingView(
     string SellerName,
     long ListedTick,
     ushort City,
-    ushort Realm);
+    ushort Realm,
+    ItemInstance Stats = default);
 
 /// <summary>One city's board in a <see cref="MarketSnapshot"/>: its listed listings sorted by (template, Mk, unit price, listed tick), and its counts.</summary>
 public sealed class MarketCityView
@@ -256,6 +258,8 @@ public sealed partial class SimBridge
     private long _marketVendorPaid;
     private long _marketVendorUnits;
     private long _marketVendorSales;
+    private long _standardSold;
+    private long _standardPaid;
     private long _marketListings;
     private long _marketCancelled;
     private long _marketExpired;
@@ -295,6 +299,12 @@ public sealed partial class SimBridge
 
     /// <summary>Vendor sales since start.</summary>
     public long MarketVendorSales => Interlocked.Read(ref _marketVendorSales);
+
+    /// <summary>Standard-issue items the vendor sold since start (crafting-catalog.md § 15.3).</summary>
+    public long StandardSold => Interlocked.Read(ref _standardSold);
+
+    /// <summary>Credits paid to World for standard issue since start: a sink.</summary>
+    public long StandardPaid => Interlocked.Read(ref _standardPaid);
 
     /// <summary>Listings created since start.</summary>
     public long MarketListingsCreated => Interlocked.Read(ref _marketListings);
@@ -373,6 +383,9 @@ public sealed partial class SimBridge
         public EntityId Id;
         public Listing L;
         public string SellerName;
+
+        // An item with stats in escrow: what the board shows a buyer. Default for a listing of units.
+        public ItemInstance Stats;
     }
 
     /// <summary>The last 200 unit prices one (template, Mk) sold at, and its sales since start (bazaar.md § 5, <c>/prices</c>).</summary>
@@ -395,6 +408,8 @@ public sealed partial class SimBridge
         public long VendorPaid;
         public long VendorUnits;
         public long VendorSales;
+        public long StandardSold;
+        public long StandardPaid;
         public long Listings;
         public long Cancelled;
         public long Expired;
@@ -449,6 +464,7 @@ public sealed partial class SimBridge
     private readonly List<ClientCommand<MarketBuy>> _buysApplied = [];
     private readonly List<ClientCommand<MarketCollect>> _collectsApplied = [];
     private readonly List<ClientCommand<SellToVendor>> _vendorsApplied = [];
+    private readonly List<ClientCommand<BuyStandard>> _standardApplied = [];
     private readonly List<BookEntry> _marketScratch = [];
 
     /// <summary>For a check: listings listed from now on expire after <paramref name="ticks"/> world ticks; 0 restores <see cref="TatooineData.ListingLifeHours"/>.</summary>
@@ -629,6 +645,7 @@ public sealed partial class SimBridge
 
         foreach (var entry in _book.Values)
         {
+            TryStatsOf(tx, EscrowItemOf((long)entry.Id.RawValue), out entry.Stats);
             if (!names.TryGetValue(entry.L.Seller, out var name))
             {
                 name = NameOfCharacter(tx, entry.L.Seller);
@@ -667,7 +684,8 @@ public sealed partial class SimBridge
         var buys = subs == null ? default : subs.Commands<MarketBuy>();
         var lists = subs == null ? default : subs.Commands<MarketList>();
         var vendors = subs == null ? default : subs.Commands<SellToVendor>();
-        var commands = cancels.Count + collects.Count + buys.Count + lists.Count + vendors.Count;
+        var standard = subs == null ? default : subs.Commands<BuyStandard>();
+        var commands = cancels.Count + collects.Count + buys.Count + lists.Count + vendors.Count + standard.Count;
         if (buys.Count > Volatile.Read(ref _mostBuysInATick))
         {
             Volatile.Write(ref _mostBuysInATick, buys.Count);
@@ -692,6 +710,7 @@ public sealed partial class SimBridge
         _buysApplied.Clear();
         _collectsApplied.Clear();
         _vendorsApplied.Clear();
+        _standardApplied.Clear();
         bool committed;
         using (var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
         {
@@ -726,6 +745,12 @@ public sealed partial class SimBridge
                 foreach (var command in vendors)
                 {
                     VendorFromCommand(tx, tick0, subs, in command, worldTick);
+                }
+
+                // Last: a vendor sale frees the slot a purchase of standard issue fills.
+                foreach (var command in standard)
+                {
+                    StandardFromCommand(tx, tick0, subs, in command, worldTick);
                 }
             }
 
@@ -822,6 +847,11 @@ public sealed partial class SimBridge
         {
             RefuseMarket(subs, in c, TatooineReplication.MarketFailed);
         }
+
+        foreach (var c in _standardApplied)
+        {
+            RefuseMarket(subs, in c, TatooineReplication.MarketFailed);
+        }
     }
 
     /// <summary>
@@ -839,6 +869,8 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _marketVendorPaid, _marketCounts.VendorPaid);
             Interlocked.Add(ref _marketVendorUnits, _marketCounts.VendorUnits);
             Interlocked.Add(ref _marketVendorSales, _marketCounts.VendorSales);
+            Interlocked.Add(ref _standardSold, _marketCounts.StandardSold);
+            Interlocked.Add(ref _standardPaid, _marketCounts.StandardPaid);
 
             // A vendor sale changes what is held, which /prices reports, without touching a listing: without this the board — and the price of every item
             // held before its first listing — waited for a listing change, and bots that list only what /prices prices never listed the first one.
@@ -1015,7 +1047,16 @@ public sealed partial class SimBridge
             return;
         }
 
-        if (UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
+        // An item with stats is listed one at a time, by its id, from the grid: an equipped one is unequipped first.
+        var item = EntityId.FromRawValue(v.Item);
+        var stats = ItemCatalog.HasStats(v.Template);
+        if (stats && v.Quantity != 1)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
+            return;
+        }
+
+        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketNoItems);
             return;
@@ -1051,12 +1092,17 @@ public sealed partial class SimBridge
         var id = tx.Spawn<ListingArch>(ListingArch.Entry.Set(in l));
         var key = (long)id.RawValue;
         var entry = new BookEntry { Id = id, L = l, SellerName = NameOfCharacter(tx, seller) };
+        if (stats)
+        {
+            TryStatsOf(tx, item, out entry.Stats);
+        }
+
         _book[key] = entry;
         _expiries.Enqueue(key, l.ExpireTick);
         CountListing(entry, +1);
         MarkCityDirty(in entry.L);
         _marketWritten = true;
-        if (ItemTransfer(tx, seller, key, v.Template, v.Mk, v.Quantity, ItemMoveKind.List, key, worldTick) != v.Quantity
+        if (ItemTransfer(tx, seller, key, v.Template, v.Mk, v.Quantity, ItemMoveKind.List, key, worldTick, item) != v.Quantity
             || !Transfer(tx, seller, EconomyLedger.World, fee, TransferKind.ListFee, key, worldTick))
         {
             _marketAbort = true;
@@ -1309,7 +1355,9 @@ public sealed partial class SimBridge
             return;
         }
 
-        if (UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
+        var item = EntityId.FromRawValue(v.Item);
+        var stats = ItemCatalog.HasStats(v.Template);
+        if (stats ? v.Quantity != 1 || !HoldsInstance(seller, item, v.Template, v.Mk) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketNoItems);
             return;
@@ -1327,7 +1375,7 @@ public sealed partial class SimBridge
         _marketWritten = true;
         var firstItemSeq = _itemHead.LastSeq + 1;
         var creditSeq = _head.LastSeq + 1;
-        if (ItemTransfer(tx, seller, ItemLedger.World, v.Template, v.Mk, v.Quantity, ItemMoveKind.Vendor, creditSeq, worldTick) != v.Quantity
+        if (ItemTransfer(tx, seller, ItemLedger.World, v.Template, v.Mk, v.Quantity, ItemMoveKind.Vendor, creditSeq, worldTick, item) != v.Quantity
             || !Transfer(tx, EconomyLedger.World, seller, payout, TransferKind.Vendor, firstItemSeq, worldTick))
         {
             _marketAbort = true;
@@ -1342,6 +1390,85 @@ public sealed partial class SimBridge
         _marketItemsMoved.Add(seller);
         _vendorsApplied.Add(command);
     }
+
+    /// <summary>
+    /// Standard issue (crafting-catalog.md § 15.3): validated whole, then the item minted and the price paid to World, the two rows naming each other.
+    /// </summary>
+    private void StandardFromCommand(Transaction tx, Transaction tick0, SubscriptionsCommands subs, in ClientCommand<BuyStandard> command, long worldTick)
+    {
+        if (_marketAbort)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketFailed);
+            return;
+        }
+
+        if (!MarketActor(tick0, command.Session, out var buyer, out var realm, out var x, out var z))
+        {
+            RefuseMarket(subs, in command, TatooineReplication.NotInWorld);
+            return;
+        }
+
+        if (!BazaarNear(realm, x, z, out _))
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketNotAtBazaar);
+            return;
+        }
+
+        var v = command.Value;
+        if (!Equipment.TryStandard(v.Template, out var issue))
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
+            return;
+        }
+
+        var price = Equipment.StandardPrice(v.Template);
+        if (v.Price != price)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketSold);
+            return;
+        }
+
+        if (FreeSlot(ItemsOf(buyer)) == 0)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketNoRoom);
+            return;
+        }
+
+        if (BalanceOf(tx, buyer) < price)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketNotEnough);
+            return;
+        }
+
+        _marketWritten = true;
+        var stats = StandardStats(in issue);
+        var creditSeq = _head.LastSeq + 1;
+        if (MintInstance(tx, buyer, v.Template, 1, in stats, ItemMoveKind.Standard, creditSeq, worldTick).IsNull
+            || !Transfer(tx, buyer, EconomyLedger.World, price, TransferKind.Standard, v.Template, worldTick))
+        {
+            _marketAbort = true;
+            RefuseMarket(subs, in command, TatooineReplication.MarketFailed);
+            return;
+        }
+
+        _marketCounts.StandardSold++;
+        _marketCounts.StandardPaid += price;
+        _marketWalletsMoved.Add(buyer);
+        _marketItemsMoved.Add(buyer);
+        _standardApplied.Add(command);
+    }
+
+    /// <summary>A standard-issue item's stats: its table's lines, new — full condition, the life factor 1.0, pristine.</summary>
+    internal static ItemInstance StandardStats(in StandardIssue issue) => new()
+    {
+        Stat0 = issue.Stat0,
+        Stat1 = issue.Stat1,
+        Stat2 = issue.Stat2,
+        Condition = issue.MaxCondition,
+        MaxCondition = issue.MaxCondition,
+        LifeMilli = 1000,
+        Flags = ItemFlags.Pristine,
+    };
 
     /// <summary>
     /// Every listed listing past its expiry: returned to its seller, the fee not refunded — handed over at once when its seller stands at a bazaar of its
@@ -1474,7 +1601,8 @@ public sealed partial class SimBridge
                 _ageScratch[ages++] = Math.Max(0, worldTick - l.ListedTick);
                 if (dirty)
                 {
-                    board.Listed.Add(new ListingView(id, l.Template, l.Mk, l.Quantity, l.UnitPrice, l.Seller, entry.SellerName, l.ListedTick, l.City, l.Realm));
+                    board.Listed.Add(new ListingView(id, l.Template, l.Mk, l.Quantity, l.UnitPrice, l.Seller, entry.SellerName, l.ListedTick, l.City, l.Realm,
+                        entry.Stats));
                     board.Value += l.UnitPrice * l.Quantity;
                     rebuilt[cityKey] = board;
                 }

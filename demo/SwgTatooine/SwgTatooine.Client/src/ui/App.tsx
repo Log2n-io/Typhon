@@ -6,6 +6,7 @@ import { Hud } from './Hud';
 import { Inspector } from './Inspector';
 import { InventoryWindow } from './InventoryWindow';
 import { BazaarPanel } from './BazaarPanel';
+import { CraftPanel } from './CraftPanel';
 import { NavPane } from './NavPane';
 import { Kicked } from './Kicked';
 import { Login } from './Login';
@@ -65,6 +66,7 @@ export function App() {
       <MissionJournalPanel />
       <InventoryWindow />
       <BazaarPanel />
+      <CraftPanel />
       <Kicked />
     </div>
   );

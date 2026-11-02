@@ -391,6 +391,9 @@ public static class TatooineData
     /// <summary>How close to a bazaar terminal's centre a body must stand to list, collect, buy or sell to the vendor, metres: the mission terminal's rule.</summary>
     public const float BazaarReachM = 6f;
 
+    /// <summary>How close to a crafting station a craft starts, metres: the bazaar's reach (crafting-build.md C2).</summary>
+    public const float StationReachM = 6f;
+
     /// <summary>How long a listing stands before it expires and returns to its seller, hours of world time (B8). [EST]</summary>
     public const int ListingLifeHours = 24;
 
@@ -411,6 +414,12 @@ public static class TatooineData
 
     /// <summary>What the vendor pays, thousandths of the units' market value, rounded down (B7, C3).</summary>
     public const int VendorBuysPerMille = 200;
+
+    /// <summary>What the vendor asks for standard issue, thousandths of its market value (crafting-catalog.md § 15.3, C3): the ceiling, twice a typical craft.</summary>
+    public const int VendorSellsPerMille = 2000;
+
+    /// <summary>A shuttle ticket, credits (crafting-catalog.md § 15.4, C5): a sink paid at boarding.</summary>
+    public const int ShuttleFare = 150;
 
     /// <summary>The board republishes at least this often, in seconds of world time, so /swg/market/prices follows what is held (drops change it outside the desk).</summary>
     public const int MarketHeldRefreshSeconds = 60;
@@ -688,6 +697,16 @@ public static class CreatureTemplates
     /// passive creature never runs an aggro query, which is a real difference in cost.
     /// </summary>
     public static readonly bool[] Aggressive = [true, false, false, true, true, true, true, true, true, true];
+
+    /// <summary>
+    /// What each template's blows are made of (crafting-catalog.md § 5.3): beasts and the ninjas' blades are kinetic, the soldiers' blasters energy — which is
+    /// what makes a padded set the hunter's and a composite one the camp raider's.
+    /// </summary>
+    public static readonly byte[] Damage =
+    [
+        DamageType.Kinetic, DamageType.Kinetic, DamageType.Kinetic, DamageType.Kinetic, DamageType.Kinetic, DamageType.Kinetic,
+        DamageType.Kinetic, DamageType.Kinetic, DamageType.Energy, DamageType.Energy,
+    ];
 
     /// <summary>
     /// [CORE3] How far a lair scatters its creatures: the <c>LairSpawn.size</c> field, which every Tatooine template

@@ -154,6 +154,7 @@ internal sealed class InventoryChecks : ServedChecks
         SessionHarness.UntilNamed(p.Link.Session, victim, "the creature to reach the client's view", parked);
         var rev = Items.ItemsRev(sim, p.Body);
         p.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(p.Link.Session, victim)));
+        Worlds.Arm(sim, p.Link);
         p.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Items.Rows(sim).Count > 0, "the kill's drop to be written");
         Harness.Ticks(2);
@@ -207,6 +208,7 @@ internal sealed class InventoryChecks : ServedChecks
         Worlds.Park(sim, p.Link.Session, at.X + 10f, at.Z, out var parked);
         SessionHarness.UntilNamed(p.Link.Session, lair, "the lair to reach the client's view", parked);
         p.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(p.Link.Session, lair)));
+        Worlds.Arm(sim, p.Link);
         p.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Items.Rows(sim).Count > 0, "the lair's cache to be written");
         Harness.Ticks(2);
@@ -458,11 +460,11 @@ internal sealed class InventoryChecks : ServedChecks
         var (x, z) = OpenGround(sim);
         var p = LogIn(sim, 0x7406, x, z);
 
-        // A frog drops glands only, at Mk I to III for a level-0 frog: three gland stacks at 97, and 27 full stacks of everything else.
+        // A frog drops glands only, at Mk I to III for a level-0 frog: three gland stacks at 97, and full stacks of everything else to the last slot.
         var lines = new List<(ushort, byte, int)> { (ItemCatalog.Gland, 1, 97), (ItemCatalog.Gland, 2, 97), (ItemCatalog.Gland, 3, 97) };
         foreach (var t in ItemCatalog.Templates)
         {
-            for (byte mk = 1; mk <= 2 && lines.Count < ItemLedger.Slots; mk++)
+            for (byte mk = 1; mk <= 3 && lines.Count < ItemLedger.Slots; mk++)
             {
                 if (t.Lootable && t.Id != ItemCatalog.Gland)
                 {
@@ -472,7 +474,7 @@ internal sealed class InventoryChecks : ServedChecks
         }
 
         Mint(sim, p.Character, ItemLedger.Slots, [.. lines]);
-        Assert.That(Items.Stacks(sim, p.Character), Has.Count.EqualTo(ItemLedger.Slots), "the premise: 30 stacks");
+        Assert.That(Items.Stacks(sim, p.Character), Has.Count.EqualTo(ItemLedger.Slots), "the premise: a full grid");
 
         // Part of it fits: two glands, the rest lost.
         var rev = Items.ItemsRev(sim, p.Body);
@@ -535,13 +537,13 @@ internal sealed class InventoryChecks : ServedChecks
         foreach (var type in new[] { typeof(ItemStack), typeof(ItemLedgerEntry), typeof(ItemLedgerHead) })
         {
             var writers = systems.Where(s => s.Access.Writes.Contains(type) || s.Access.SideWrites.Contains(type)).Select(s => s.Name).OrderBy(n => n);
-            Assert.That(writers, Is.EqualTo(new[] { "Loot", "Market", "Missions" }), $"the writers of {type.Name}");
+            Assert.That(writers, Is.EqualTo(new[] { "Ledger", "Loot", "Market", "Missions", "Workshop" }), $"the writers of {type.Name}");
         }
 
         foreach (var type in new[] { typeof(Wallet), typeof(LedgerEntry), typeof(LedgerHead) })
         {
             var writers = systems.Where(s => s.Access.Writes.Contains(type) || s.Access.SideWrites.Contains(type)).Select(s => s.Name).OrderBy(n => n);
-            Assert.That(writers, Is.EqualTo(new[] { "Ledger", "Market", "Missions" }), $"the writers of {type.Name}");
+            Assert.That(writers, Is.EqualTo(new[] { "Ledger", "Market", "Missions", "Workshop" }), $"the writers of {type.Name}");
         }
 
         Assert.That(systems.Where(s => s.Access.Writes.Contains(typeof(Listing)) || s.Access.SideWrites.Contains(typeof(Listing))).Select(s => s.Name),
@@ -755,7 +757,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(ledger, Does.Contain($"\"item\":\"mat_hide\",\"mk\":2,\"fromStack\":\"0\",\"toStack\":\"{stack}\"}}"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
             Assert.That(inventory, Is.EqualTo(
-                $"{{\"open\":true,\"slots\":30,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
+                $"{{\"open\":true,\"slots\":40,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
                 + "\"count\":7}],\"lost\":[]}"), "the inventory carries ledger rows: the client never reads them");
         });
     }
@@ -889,7 +891,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x740F))).Body, Is.EqualTo(ItemEndpoints.Empty), "an account with no character");
             Assert.That(mine.Status, Is.EqualTo(200));
             Assert.That(mine.Body, Does.Contain("\"item\":\"mat_venom\""), "the bearer's own stack is missing");
-            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":30,\"items\":[],\"lost\":[]}"), "another's items, or not open");
+            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":40,\"items\":[],\"lost\":[]}"), "another's items, or not open");
         });
     }
 

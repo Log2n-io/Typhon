@@ -26,6 +26,58 @@ export interface InventoryItem {
   /** 1..5; 0 for an item without Mk. */
   readonly mk: number;
   readonly count: number;
+  /** An item with stats (crafting-build.md § 2.1): its lines by category, its condition. Absent for units. */
+  readonly stats?: ItemStats;
+}
+
+/** What `/swg/inventory` says of an item with stats: a weapon's or an armour piece's lines, and its wear. */
+export interface ItemStats {
+  /** A weapon's damage per hit, delay (ms) and reach (dm). */
+  readonly damage?: number;
+  readonly delayMs?: number;
+  readonly rangeDm?: number;
+  /** An armour piece's protections, per mille. */
+  readonly kinetic?: number;
+  readonly energy?: number;
+  /** A crafted part's grade, per mille. */
+  readonly grade?: number;
+  /** A potion's potency and duration (ms). */
+  readonly potency?: number;
+  readonly durationMs?: number;
+  readonly condition: number;
+  readonly maxCondition: number;
+  readonly lifeMilli: number;
+  readonly repairs: number;
+  /** The crafter's raw id, `'0'` for standard issue and loot. */
+  readonly crafter: string;
+}
+
+/** The equip slots (crafting-build.md § 2.2): 101 the weapon, then the six armour pieces; what each is called on the equipment strip. */
+export const EQUIP_SLOTS: readonly { readonly slot: number; readonly label: string }[] = [
+  { slot: 101, label: 'Weapon' },
+  { slot: 102, label: 'Head' },
+  { slot: 103, label: 'Torso' },
+  { slot: 104, label: 'Arms' },
+  { slot: 105, label: 'Legs' },
+  { slot: 106, label: 'Hands' },
+  { slot: 107, label: 'Feet' },
+];
+
+/** Whether a slot is one of the equip slots, out of the grid. */
+export function isEquipSlot(slot: number): boolean {
+  return slot >= 101 && slot <= 107;
+}
+
+/** What is worn, by equip slot. */
+export function equipped(items: readonly InventoryItem[]): ReadonlyMap<number, InventoryItem> {
+  const worn = new Map<number, InventoryItem>();
+  for (const item of items) {
+    if (isEquipSlot(item.slot)) {
+      worn.set(item.slot, item);
+    }
+  }
+
+  return worn;
 }
 
 /** A drop, or part of one, that did not fit and was never minted; numbered per character so it is announced once. */
@@ -64,7 +116,11 @@ export function parseInventory(answer: unknown): InventorySnapshot | null {
   return {
     open: a.open === true,
     slots: a.slots,
-    items: a.items.filter(isItem).map((i) => ({ ...i, template: typeof i.template === 'number' ? i.template : 0 })),
+    items: a.items.filter(isItem).map((i) => {
+      const { stats, ...rest } = i;
+      const item = { ...rest, template: typeof i.template === 'number' ? i.template : 0 };
+      return isStats(stats) ? { ...item, stats } : item;
+    }),
     lost: a.lost.filter(isLost),
   };
 }
@@ -88,10 +144,30 @@ export function mkNumeral(mk: number): string {
   return NUMERALS[mk] ?? '';
 }
 
-/** What hovering a stack says: `Hide · Mk II · ×7`. */
+/**
+ * What hovering a stack says: `Hide · Mk II · ×7`. An item with stats says them instead of a count: `DL-44 Blaster · Mk I · 81 dmg · 1.02 s · 30 m ·
+ * condition 100 %`, or an armour piece's protections.
+ */
 export function itemTooltip(item: InventoryItem): string {
   const mk = mkNumeral(item.mk);
-  return mk === '' ? `${item.name} · ×${String(item.count)}` : `${item.name} · Mk ${mk} · ×${String(item.count)}`;
+  const head = mk === '' ? item.name : `${item.name} · Mk ${mk}`;
+  const s = item.stats;
+  if (s === undefined) {
+    return `${head} · ×${String(item.count)}`;
+  }
+
+  const parts = [head];
+  if (s.damage !== undefined && s.delayMs !== undefined && s.rangeDm !== undefined) {
+    parts.push(`${String(s.damage)} dmg`, `${(s.delayMs / 1000).toFixed(2)} s`, `${String(s.rangeDm / 10)} m`);
+  }
+
+  if (s.kinetic !== undefined && s.energy !== undefined) {
+    parts.push(`kinetic ${(s.kinetic / 10).toFixed(0)} %`, `energy ${(s.energy / 10).toFixed(0)} %`);
+  }
+
+  const condition = s.maxCondition > 0 ? Math.round((100 * s.condition) / s.maxCondition) : 0;
+  parts.push(`condition ${String(condition)} %`);
+  return parts.join(' · ');
 }
 
 /** What a cell shows when the catalogue has no icon for the item (no `--assets`): the initials of its name. */
@@ -196,6 +272,21 @@ function isItem(value: unknown): value is InventoryItem {
     typeof i.category === 'string' &&
     typeof i.mk === 'number' &&
     typeof i.count === 'number'
+  );
+}
+
+function isStats(value: unknown): value is ItemStats {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const s = value as Record<string, unknown>;
+  return (
+    typeof s.condition === 'number' &&
+    typeof s.maxCondition === 'number' &&
+    typeof s.lifeMilli === 'number' &&
+    typeof s.repairs === 'number' &&
+    typeof s.crafter === 'string'
   );
 }
 

@@ -19,6 +19,16 @@ public enum MarketCategory : byte
 public readonly record struct HeldStack(ushort Template, string Item, MarketCategory Category, int Mk, int Count);
 
 /// <summary>A bazaar buy collected into the character: the listing it came from (the <c>buy</c> row's <c>ref</c>), and what and how many.</summary>
+/// <summary>An item with stats in a bot's inventory (crafting-build.md § 2.1): its id, template, the slot it sits in, the equip slot it is worn in.</summary>
+public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int Wears)
+{
+    /// <summary>Whether it is worn: in an equip slot, out of the grid.</summary>
+    public bool Worn => Slot > 100;
+}
+
+/// <summary>A standard-issue item the vendor sells (<c>GET /swg/market/standard</c>): its template, asset, price and the slot it is worn in.</summary>
+public readonly record struct StandardOffer(ushort Template, string Item, long Price, int Wears);
+
 public readonly record struct WonListing(ulong Listing, ushort Template, string Item, int Mk, int Count);
 
 /// <summary>One listing of a browse page (bazaar.md § 5): <c>{"id","city","item","category","mk","qty","unit","total","seller",…}</c>.</summary>
@@ -106,6 +116,20 @@ public static class MarketJson
     {
         using var doc = JsonDocument.Parse(json);
         return (long)Number(doc.RootElement, "credits");
+    }
+
+    /// <summary>What the vendor sells (<c>GET /swg/market/standard</c>).</summary>
+    public static List<StandardOffer> Standard(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var offers = new List<StandardOffer>();
+        foreach (var o in doc.RootElement.GetProperty("items").EnumerateArray())
+        {
+            var wears = o.TryGetProperty("stats", out var s) && s.TryGetProperty("wears", out var w) ? w.GetInt32() : 0;
+            offers.Add(new StandardOffer((ushort)o.GetProperty("template").GetInt32(), o.GetProperty("item").GetString(), (long)Number(o, "price"), wears));
+        }
+
+        return offers;
     }
 
     /// <summary>A browse page's listings (<c>GET /swg/market?…</c>), in the order sent.</summary>

@@ -501,6 +501,7 @@ internal sealed class MissionDeskSystem : CallbackSystem
         .Writes<LedgerEntry>()
         .Writes<LedgerHead>()
         .Writes<ItemStack>()
+        .Writes<ItemInstance>()
         .Writes<ItemLedgerEntry>()
         .Writes<ItemLedgerHead>()
 
@@ -572,6 +573,12 @@ internal sealed class LedgerSystem : CallbackSystem
         .Writes<LedgerEntry>()
         .Writes<LedgerHead>()
 
+        // The welcome pack (crafting-build.md O-1), minted with the wallet it comes with, in its transaction.
+        .Writes<ItemStack>()
+        .Writes<ItemInstance>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+
         // A tip is given between two bodies standing together, and lands as a revision on each.
         .Reads<PlayerPlacement>()
         .Reads<PlayerRealm>()
@@ -605,6 +612,7 @@ internal sealed class LootSystem : CallbackSystem
         .AfterAll("Missions", "Ledger")
         .ReadsEvents(_bridge.KillLootQueue)
         .Writes<ItemStack>()
+        .Writes<ItemInstance>()
         .Writes<ItemLedgerEntry>()
         .Writes<ItemLedgerHead>()
 
@@ -649,6 +657,7 @@ internal sealed class MarketSystem : CallbackSystem
         .Writes<LedgerEntry>()
         .Writes<LedgerHead>()
         .Writes<ItemStack>()
+        .Writes<ItemInstance>()
         .Writes<ItemLedgerEntry>()
         .Writes<ItemLedgerHead>()
 
@@ -659,6 +668,44 @@ internal sealed class MarketSystem : CallbackSystem
         .Reads<Character>();
 
     protected override void Execute(TickContext ctx) => _bridge.MarketTick(ctx);
+}
+
+/// <summary>
+/// The workshop (<c>SimBridge.Workshop.cs</c>; crafting-build.md § 1): equip and unequip, and the bodies' gear. C2 adds crafting to it, C3 repair.
+/// </summary>
+/// <remarks>
+/// <b>Serial, and the last writer of items</b>, after the market in the explicit chain: an item listed, sold or bought this tick is where the desk left it
+/// before anything here moves it. Its item writes go through a side transaction; the bodies' gear through the tick's own, after that commit.
+/// </remarks>
+internal sealed class WorkshopSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public WorkshopSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Workshop")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Missions", "Ledger", "Loot", "Market")
+        .Writes<ItemStack>()
+        .Writes<ItemInstance>()
+        .Writes<ItemLedgerEntry>()
+        .Writes<ItemLedgerHead>()
+        .Writes<CraftState>()
+
+        // The bench fee (crafting-catalog.md § 15.4): through its side transaction, as the Market's — a side write, ordered by the chain above.
+        .SideWrites<Wallet>()
+        .Writes<LedgerEntry>()
+        .Writes<LedgerHead>()
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerRealm>()
+
+        // The body's gear, its items revision; its level, for the gate.
+        .Writes<PlayerGear>()
+        .Writes<PlayerState>()
+        .Reads<PlayerLook>();
+
+    protected override void Execute(TickContext ctx) => _bridge.WorkshopTick(ctx);
 }
 
 /// <summary>
@@ -876,15 +923,15 @@ internal sealed class AwarenessSplitSystem : QuerySystem
 }
 
 /// <summary>
-/// Everything the tick does about sessions: kicks, counts, profiles, possession and this tick's client intents (SWG-01).
+/// Everything the tick does about sessions but their intents: kicks, counts, profiles, avatars and possession (SWG-01, A5). <see cref="PlayerIntentSystem"/>
+/// applies the intents after it.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Serial, and in this DAG rather than a replication DAG of its own, for two reasons that are both correctness.</b> Session requests append to an
-/// unsynchronized per-worker segment that no caller can address by its own worker index (#1070), so segment 0 is safe only while one thread writes it — and
-/// applying an intent writes <c>PlayerMotion</c>, which <c>PlayerThink</c> also writes, so the two have to be orderable, which across DAGs they are not
-/// (<c>overview/13-runtime.md</c>: "a cross-DAG <c>.After()</c> edge is a configuration error"). <see cref="TatooineReplication.SessionTick"/>'s remarks
-/// carry the full account.
+/// <b>In this DAG rather than a replication DAG of its own, for correctness.</b> Spawning an avatar and applying an intent write <c>PlayerMotion</c>, which
+/// <c>PlayerThink</c> also writes, so they have to be orderable, which across DAGs they are not (<c>overview/13-runtime.md</c>: "a cross-DAG
+/// <c>.After()</c> edge is a configuration error"). Session requests no longer constrain it: each system records into its own segment (SUB-39, #1070).
+/// <see cref="TatooineReplication.SessionTick"/>'s remarks carry the full account.
 /// </para>
 /// <para>
 /// <b>The <c>Input</c> phase, which exists for it</b> — see <c>SimPhases.Input</c>. <c>Shuttle</c> writes the same two player components in <c>Spawn</c>, and
@@ -919,12 +966,38 @@ internal sealed class PlayerSessionSystem : CallbackSystem
     protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
 }
 
+/// <summary>This tick's client intents (SWG-01): where each possessed player is heading, how fast, and what it is aiming at.</summary>
+/// <remarks>
+/// <para>
+/// <b>After <c>PlayerSessions</c>, by an edge</b>: an intent steers the avatar that system bound, possibly on this tick, and both write the player's motion,
+/// state and session in this phase. Its own system since #1070's fix (SUB-39) made session requests safe from any system; the two were one only because
+/// they shared an unsynchronized segment.
+/// </para>
+/// <para>
+/// <b>It reads the placement, realm and vitals of the player it steers without declaring them.</b> <c>PlayerSessions</c> and <c>StagedWrites</c> write them
+/// in this phase, so the deriver refuses a plain read, and a fresh read would add a <c>StagedWrites</c> → here edge against the explicit one there. The
+/// edges to both writers already order every read.
+/// </para>
+/// </remarks>
+internal sealed class PlayerIntentSystem : CallbackSystem
+{
+    protected override void Configure(SystemBuilder b) => b
+        .Name("PlayerIntents")
+        .Phase(SimPhases.Input)
+        .After("PlayerSessions")
+        .Writes<PlayerMotion>()
+        .Writes<PlayerState>()
+        .Writes<PlayerSession>();
+
+    protected override void Execute(TickContext ctx) => TatooineReplication.IntentTick(ctx);
+}
+
 /// <summary>Applies the writes a thread outside the tick staged (<see cref="StagedWrites"/>): a check placing a player while the server runs.</summary>
 /// <remarks>
 /// <b>Every player component, for the reason <see cref="PlayerSessionSystem"/> gives</b>: <c>DV-01</c> throws on the tick for an undeclared write, and a
-/// staged write may set any of them. After <c>PlayerSessions</c>, because the two share a phase and the deriver refuses two writers of one component in
-/// one phase without an edge — and so that a staged placement is the last word on the tick it lands in, after that tick's intents. Not gated on the
-/// pause: it is how a check stages the world, and a paused world is one it may want to stage.
+/// staged write may set any of them. After <c>PlayerSessions</c> and <c>PlayerIntents</c>, because they share a phase and the deriver refuses two writers of
+/// one component in one phase without a direct edge — and so that a staged placement is the last word on the tick it lands in, after that tick's intents.
+/// Not gated on the pause: it is how a check stages the world, and a paused world is one it may want to stage.
 /// </remarks>
 internal sealed class StagedWriteSystem : CallbackSystem
 {
@@ -935,7 +1008,7 @@ internal sealed class StagedWriteSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("StagedWrites")
         .Phase(SimPhases.Input)
-        .After("PlayerSessions")
+        .AfterAll("PlayerSessions", "PlayerIntents")
         .Writes<PlayerControl>()
         .Writes<PlayerMotion>()
         .Writes<PlayerState>()

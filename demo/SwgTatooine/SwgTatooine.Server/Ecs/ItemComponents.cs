@@ -30,6 +30,21 @@ public static class ItemMoveKind
     /// </summary>
     public const byte Vendor = 7;
 
+    /// <summary>
+    /// Standard issue bought from the vendor (crafting-catalog.md § 15.3): World → buyer, minted. <see cref="ItemLedgerEntry.Ref"/> is the
+    /// <see cref="LedgerEntry.Seq"/> of the sale's <see cref="TransferKind.Standard"/> credit row.
+    /// </summary>
+    public const byte Standard = 8;
+
+    /// <summary>The welcome pack (crafting-build.md O-1): World → a new character, minted when its wallet opens. <see cref="ItemLedgerEntry.Ref"/> is 0.</summary>
+    public const byte Grant = 9;
+
+    /// <summary>A craft's inputs (crafting-build.md C2): the crafter → World, consumed when the craft starts. <see cref="ItemLedgerEntry.Ref"/> is the craft's raw id.</summary>
+    public const byte Craft = 10;
+
+    /// <summary>A craft's result: World → the crafter, minted when it finishes. <see cref="ItemLedgerEntry.Ref"/> is the craft's raw id.</summary>
+    public const byte Make = 11;
+
     /// <summary>A cancelled or expired listing collected: the listing → its seller. <see cref="ItemLedgerEntry.Ref"/> is the listing's raw id.</summary>
     public const byte Return = 16;
 
@@ -42,6 +57,10 @@ public static class ItemMoveKind
         List => "list",
         Buy => "buy",
         Vendor => "vendor",
+        Standard => "standard",
+        Grant => "grant",
+        Craft => "craft",
+        Make => "make",
         Return => "return",
         _ => "unknown",
     };
@@ -127,6 +146,115 @@ public struct ItemLedgerEntry
 
     /// <summary>See <see cref="ItemMoveKind"/>.</summary>
     [Field] public byte Kind;
+}
+
+/// <summary>
+/// An item with stats (crafting-build.md § 2.1): the <see cref="ItemStack"/> of an <see cref="ItemInstanceArch"/>, which derives from
+/// <see cref="ItemStackArch"/>, so its owner, template, Mk, slot and count (1) are the stack's and move through the one item code path. These are what make
+/// it itself: who made it, its stat lines (<see cref="Equipment"/> says what they mean for its category), its condition and its life factor.
+/// </summary>
+/// <remarks>0 means "no data" in every field: <see cref="Crafter"/> 0 is standard issue or loot, never a character.</remarks>
+[Component("Swg.ItemInstance", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct ItemInstance
+{
+    /// <summary>The character that crafted it, raw; 0 when nobody did.</summary>
+    [Field] public long Crafter;
+
+    /// <summary>The crafter's craft count at the craft, the seed of its rolls (§ 1 rule 4); 0 when not crafted.</summary>
+    [Field] public int Serial;
+
+    /// <summary>The template's first stat line: a weapon's damage per hit, an armour piece's kinetic protection (‰).</summary>
+    [Field] public int Stat0;
+
+    /// <summary>The second: a weapon's delay (ms), an armour piece's energy protection (‰).</summary>
+    [Field] public int Stat1;
+
+    /// <summary>The third: a weapon's range (dm).</summary>
+    [Field] public int Stat2;
+
+    /// <summary>The fourth, unused by C1's templates.</summary>
+    [Field] public int Stat3;
+
+    /// <summary>What is left of its life (crafting-catalog.md § 9.1): a weapon's combat-milliseconds, an armour piece's damage points.</summary>
+    [Field] public int Condition;
+
+    /// <summary>Its full condition, × 0.75 per repair (§ 9.2).</summary>
+    [Field] public int MaxCondition;
+
+    /// <summary>The life factor, 900..1 100 per mille, rolled at the craft (§ 9.1); 1 000 for standard issue.</summary>
+    [Field] public short LifeMilli;
+
+    /// <summary>Repairs used, 0..2 (§ 9.2).</summary>
+    [Field] public byte Repairs;
+
+    /// <summary><see cref="ItemFlags"/>.</summary>
+    [Field] public byte Flags;
+}
+
+/// <summary>
+/// A craft under way (crafting-catalog.md § 3.4, crafting-build.md C2): its inputs already consumed, its lines' ceilings and how far each got, the points
+/// left — what a restart resumes. One per crafter at a time; destroyed when it finishes, in the commit that mints its result.
+/// </summary>
+/// <remarks>Fractions in millionths (<see cref="Crafting.Scale"/>), as <see cref="Crafting"/> keeps them: a resumed craft rolls the same numbers.</remarks>
+[Component("Swg.CraftState", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct CraftState
+{
+    /// <summary>The crafter, a character's raw id.</summary>
+    [Field, Index] public long Crafter;
+
+    /// <summary>The seed of its rolls with the crafter (§ 1 rule 4): the item ledger's last sequence number when it started, unique.</summary>
+    [Field] public long Serial;
+
+    /// <summary>The world tick it started on.</summary>
+    [Field] public long StartedTick;
+
+    /// <summary>Each line's ceiling, millionths.</summary>
+    [Field] public int Q0;
+
+    [Field] public int Q1;
+
+    [Field] public int Q2;
+
+    [Field] public int Q3;
+
+    /// <summary>How far each line got, millionths.</summary>
+    [Field] public int F0;
+
+    [Field] public int F1;
+
+    [Field] public int F2;
+
+    [Field] public int F3;
+
+    /// <summary>The schematic's id (<see cref="Schematics"/>).</summary>
+    [Field] public ushort Schematic;
+
+    /// <summary>What it makes: the schematic's output, or the composite piece when its segments are composite.</summary>
+    [Field] public ushort Output;
+
+    /// <summary>The result's Mk: its core's for a weapon or an armour piece, I for a crafted core, 0 otherwise.</summary>
+    [Field] public byte Mk;
+
+    /// <summary>Experimentation points left.</summary>
+    [Field] public byte PointsLeft;
+
+    /// <summary>The next roll's step: 1 for the first point, and so on (0 was the assembly).</summary>
+    [Field] public byte NextStep;
+
+    /// <summary>The add-on's Mk, 0 for none (§ 3.4 step 3).</summary>
+    [Field] public byte AddonMk;
+}
+
+/// <summary>The bits of <see cref="ItemInstance.Flags"/>.</summary>
+public static class ItemFlags
+{
+    /// <summary>Never used: it may be crated (crafting-catalog.md § 11.2).</summary>
+    public const byte Pristine = 1;
+
+    /// <summary>At 0 condition with a repair left: unusable, still owned (§ 9.2).</summary>
+    public const byte Broken = 2;
 }
 
 /// <summary>

@@ -17,10 +17,14 @@ public enum MarketStep : byte
 
     /// <summary><c>MarketBuy</c>: the listing and the unit price it was shown at.</summary>
     Buy,
+
+    /// <summary><c>BuyStandard</c> (crafting-catalog.md § 15.3): the template and the price it was shown at.</summary>
+    Standard,
 }
 
 /// <summary>One command of a trade.</summary>
-public readonly record struct MarketCommand(MarketStep Step, ushort Template, int Mk, int Quantity, long UnitPrice, ulong Listing)
+/// <remarks><see cref="Item"/> names an item with stats, listed or sold one at a time by its id (crafting-build.md § 2.1); 0 for units.</remarks>
+public readonly record struct MarketCommand(MarketStep Step, ushort Template, int Mk, int Quantity, long UnitPrice, ulong Listing, ulong Item = 0)
 {
     public static MarketCommand Collect(ulong listing = 0) => new(MarketStep.Collect, 0, 0, 0, 0, listing);
 
@@ -29,6 +33,8 @@ public readonly record struct MarketCommand(MarketStep Step, ushort Template, in
     public static MarketCommand Vendor(ushort template, int mk, int quantity) => new(MarketStep.Vendor, template, mk, quantity, 0, 0);
 
     public static MarketCommand Buy(ulong listing, long unit) => new(MarketStep.Buy, 0, 0, 0, unit, listing);
+
+    public static MarketCommand Standard(ushort template, long price) => new(MarketStep.Standard, template, 1, 1, price, 0);
 }
 
 /// <summary>
@@ -76,6 +82,68 @@ public static class MarketPlan
     public const int ListMaterialPercent = 20;
 
     public const int BuyPercent = 25;
+
+    /// <summary>The item with stats a bot puts on next: the first in its grid whose equip slot nothing is worn in; 0 when there is none.</summary>
+    public static ulong NextToWear(IReadOnlyList<GearItem> gear)
+    {
+        foreach (var g in gear)
+        {
+            if (g.Worn || g.Wears == 0)
+            {
+                continue;
+            }
+
+            var free = true;
+            foreach (var w in gear)
+            {
+                free &= !(w.Worn && w.Slot == g.Wears);
+            }
+
+            if (free)
+            {
+                return g.Id;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>What a bot keeps in its wallet after buying standard issue: a few repairs' and fees' worth (crafting-build.md § 6).</summary>
+    public const long StandardReserve = 1_500;
+
+    /// <summary>
+    /// The standard-issue armour piece a bot buys (crafting-build.md § 6, C1's gear rule): the cheapest padded one for an armour slot nothing worn or held
+    /// covers, if the wallet keeps <see cref="StandardReserve"/> after it; none when every slot is covered or it cannot afford one.
+    /// </summary>
+    public static MarketCommand? ChooseStandard(IReadOnlyList<StandardOffer> offers, IReadOnlyList<GearItem> gear, long credits)
+    {
+        if (offers == null)
+        {
+            return null;
+        }
+
+        StandardOffer? best = null;
+        foreach (var o in offers)
+        {
+            if (o.Wears is < 102 or > 107 || !o.Item.StartsWith("armor_padded_", StringComparison.Ordinal) || credits - o.Price < StandardReserve)
+            {
+                continue;
+            }
+
+            var covered = false;
+            foreach (var g in gear)
+            {
+                covered |= g.Wears == o.Wears;
+            }
+
+            if (!covered && (best == null || o.Price < best.Value.Price))
+            {
+                best = o;
+            }
+        }
+
+        return best is { } b ? MarketCommand.Standard(b.Template, b.Price) : null;
+    }
 
     /// <summary>A buy pays at most this times the value a unit, and at most <see cref="BuyWalletShare"/> of the wallet.</summary>
     /// <remarks>

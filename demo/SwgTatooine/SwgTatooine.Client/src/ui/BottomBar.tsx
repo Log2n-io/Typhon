@@ -4,6 +4,7 @@ import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
 import { useMissions } from '../state/mission-store';
 import { useSessionStore } from '../state/session-store';
+import { useCraft } from '../state/craft-store';
 import { useUi } from '../state/ui-store';
 import { useWallet } from '../state/wallet-store';
 
@@ -51,6 +52,8 @@ export function BottomBar() {
         useMissions.getState().toggleJournal();
       } else if (panel === 'bazaar') {
         useMarket.getState().toggle();
+      } else if (panel === 'craft') {
+        useCraft.getState().toggle();
       } else {
         useWallet.getState().toggleInventory();
       }

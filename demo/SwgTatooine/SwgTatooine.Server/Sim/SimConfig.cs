@@ -223,6 +223,12 @@ public sealed class SimConfig
     /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>
     public bool Shuttles = true;
 
+    /// <summary>
+    /// A new character's wallet opens with the welcome pack (crafting-build.md O-1): a standard-issue blaster beside the starting credits. Off for the
+    /// checks that count an inventory from empty.
+    /// </summary>
+    public bool WelcomePack = true;
+
     /// <summary>Share of in-city travel decisions taken by shuttle rather than on foot or mounted. [EST]</summary>
     public float ShuttleShare = 0.5f;
 
@@ -474,10 +480,8 @@ public sealed class SimConfig
     /// <b>A sleeping cluster is skipped by system dispatch AND by the replication projection pass.</b> The engine computes this at the tick fence from
     /// the per-entity dirty bitmap, so it costs replication nothing to consult and nothing to maintain.
     /// <para>
-    /// <b>It requires the simulation to mark its spatial writes.</b> <c>ClusterRef.WriteSpatial</c> deliberately raises no dirty bit, so a cluster whose
-    /// creatures only MOVE looks clean to the sweep and would be put to sleep while still in motion — after which nothing dispatches it and the creatures
-    /// freeze. <see cref="SimBridge"/> therefore marks a moved cluster dirty whenever this is non-zero. That is the documented contract for combining
-    /// <c>WriteSpatial</c> with dormancy, not a workaround.
+    /// <b>A cluster moved only by <c>ClusterRef.WriteSpatial</c> stays awake.</b> The write raises no dirty bit, but it notes the cluster for the sweep and
+    /// wakes it if it sleeps (rules DM-01, DM-05; #896), so the simulation marks nothing for dormancy's sake.
     /// </para>
     /// </remarks>
     public int DormancyTicks;

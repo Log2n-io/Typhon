@@ -52,6 +52,58 @@ internal sealed class ClientIntentChecks : ServedChecks
         return config;
     }
 
+    /// <summary>
+    /// #1070: the intents are a system of their own again, and the order the one serial system had is kept by edges — sessions and avatars bound, then the
+    /// intents applied, then the staged writes, all before <c>PlayerThink</c> decides for anyone.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TheIntentsRunAfterTheSessions_AndBeforeTheStagedWritesAndThink()
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var systems = sim.Runtime.Systems;
+
+        int IndexOf(string name) => Array.FindIndex(systems, s => s.Name == name);
+        bool Reaches(int from, int to)
+        {
+            var seen = new System.Collections.Generic.HashSet<int>();
+            var stack = new System.Collections.Generic.Stack<int>();
+            stack.Push(from);
+            while (stack.Count > 0)
+            {
+                foreach (var next in systems[stack.Pop()].Successors)
+                {
+                    if (next == to)
+                    {
+                        return true;
+                    }
+
+                    if (seen.Add(next))
+                    {
+                        stack.Push(next);
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        var sessions = IndexOf("PlayerSessions");
+        var intents = IndexOf("PlayerIntents");
+        var staged = IndexOf("StagedWrites");
+        var think = IndexOf("PlayerThink");
+        Assert.That(new[] { sessions, intents, staged, think }, Has.All.GreaterThanOrEqualTo(0), "precondition: every system is in the schedule");
+        Assert.Multiple(() =>
+        {
+            Assert.That(systems[sessions].Successors, Does.Contain(intents), "the intents are not ordered after the sessions that bind their avatars");
+            Assert.That(systems[intents].Successors, Does.Contain(staged), "a staged write is no longer the last word after the intents");
+            Assert.That(Reaches(intents, think), Is.True, "PlayerThink can run before the intents it must not overwrite");
+            Assert.That(Reaches(intents, sessions), Is.False, "the intents run before the sessions");
+        });
+    }
+
     /// <summary>A started server with one player client possessing a player, and the player it possesses.</summary>
     private sealed class Possessed : IDisposable
     {
@@ -1173,6 +1225,8 @@ internal sealed class ClientIntentChecks : ServedChecks
         world.Harness.Ticks(3 * Worlds.ServedHz);
         var idle = LairHealth(world, lair);
 
+        Worlds.Arm(world.Sim, world.Link);
+
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => TatooineReplication.StanceAsks.Applied >= 1, "the stance to be applied");
         world.Harness.Ticks(3 * Worlds.ServedHz);
@@ -1209,6 +1263,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         var before = LairHealth(world, lair);
 
         world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
+        Worlds.Arm(world.Sim, world.Link, stance == Stances.OneHanded ? ItemCatalog.Sword : ItemCatalog.Blaster);
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(stance));
         SessionHarness.Until(
             () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
@@ -1238,6 +1293,7 @@ internal sealed class ClientIntentChecks : ServedChecks
 
         world.Link.SendCommand(nameof(SetMount), ClientSays.SetMount(true));
         SessionHarness.Until(() => TatooineReplication.MountAsks.Applied >= 1, "the mount to be applied");
+        Worlds.Arm(world.Sim, world.Link, ItemCatalog.Sword);
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.OneHanded));
         SessionHarness.Until(() => TatooineReplication.StanceAsks.Applied >= 1, "the stance to be applied");
         world.Harness.Ticks(1);
@@ -1270,6 +1326,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         var lair = StageLair(world, gapM: 10f, site: 1);
         var before = LairHealth(world, lair);
         world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, lair)));
+        Worlds.Arm(world.Sim, world.Link);
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(
             () => TatooineReplication.Intents.TargetsSet >= 1 && TatooineReplication.StanceAsks.Applied >= 1,
@@ -1329,6 +1386,7 @@ internal sealed class ClientIntentChecks : ServedChecks
         SessionHarness.Until(() => !frog.IsNull && SessionHarness.NetIdOf(world.Link.Session, frog) != 0, "the frog to reach the client's view");
 
         world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(world.Link.Session, frog)));
+        Worlds.Arm(world.Sim, world.Link);
         world.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         world.Harness.Ticks(3 * Worlds.ServedHz);
 

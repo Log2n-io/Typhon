@@ -274,7 +274,8 @@ public sealed class ContentLevelChecks
         {
             foreach (var (level, foe, hp, hit) in new[]
                      {
-                         (1, false, 659, 31), (10, false, 805, 44), (25, false, 1125, 70), (50, false, 1965, 131), (1, true, 988, 40), (50, true, 2948, 170),
+                         // The model's hits ÷ 1.025, the crits' mean gain (crafting-catalog.md § 9.3).
+                         (1, false, 659, 30), (10, false, 805, 43), (25, false, 1125, 68), (50, false, 1965, 128), (1, true, 988, 39), (50, true, 2948, 166),
                      })
             {
                 Assert.That(ContentLevels.CreatureHealth(level, foe), Is.EqualTo(hp).Within(1), $"health at {level}, foe {foe}");
@@ -287,7 +288,7 @@ public sealed class ContentLevelChecks
                 var dps = 90 * Math.Pow(1.25, (level - 5) / 10.0);
                 var effHp = (1000 + (40.0 * level)) / (1 - (0.12 + (0.006 * (level - 5))));
                 Assert.That(ContentLevels.CreatureHealth(level, false), Is.EqualTo(dps * 8).Within(1), $"beast health at {level}");
-                Assert.That(ContentLevels.CreatureHit(level, true), Is.EqualTo(effHp / 75 * 1.3 * 2).Within(1), $"foe hit at {level}");
+                Assert.That(ContentLevels.CreatureHit(level, true), Is.EqualTo(effHp / 75 * 1.3 * 2 / 1.025).Within(1), $"foe hit at {level}");
                 Assert.That(ContentLevels.LairHealth(level, CreatureTemplates.Rat), Is.GreaterThan(ContentLevels.CreatureHealth(level, false)));
             }
         });

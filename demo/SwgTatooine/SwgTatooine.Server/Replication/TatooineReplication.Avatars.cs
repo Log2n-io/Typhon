@@ -20,7 +20,7 @@ namespace SwgTatooine.Server;
 /// what acceptance criterion A-8 measures.
 /// </para>
 /// <para>
-/// <b>In the serial session system and nowhere else</b> (see <c>SessionTick</c>'s remarks for why that system is serial). Every
+/// <b>In the session system and nowhere else</b> (see <c>SessionTick</c>'s remarks). Every
 /// spawn, destroy, character read and character write below runs on the tick's own transaction: no side transaction, so there is
 /// nothing for <c>EW-01</c> to catch, and the whole login is one atomic unit — the character is read or created, the avatar is
 /// spawned and the session is given control in one commit, or none of it happens.
@@ -1161,7 +1161,6 @@ public static partial class TatooineReplication
         {
             Health = health,
             MaxHealth = health,
-            AttackDamage = AvatarAttackDamage,
             AttackCooldown = 0,
         };
 
@@ -1190,6 +1189,7 @@ public static partial class TatooineReplication
             Player.Control.Set(in control),
             Player.Session.Set(in owner),
             Player.Look.Set(in look),
+            Player.Gear.Set(PlayerGear.Unarmed),
             Player.Realm.Set(new PlayerRealm(profile.LastRealm)));
     }
 
@@ -1210,9 +1210,6 @@ public static partial class TatooineReplication
 
         return CharacterProgress.Start;
     }
-
-    /// <summary>An avatar's attack damage, matching the pooled crowd's.</summary>
-    private const int AvatarAttackDamage = 95;
 
     /// <summary>The account's identity — its name and the outfit chosen at sign-up — or a default one for an account gone since its token was minted.</summary>
     /// <param name="tx">The tick's transaction.</param>

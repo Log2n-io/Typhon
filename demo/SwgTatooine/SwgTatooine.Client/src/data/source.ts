@@ -86,8 +86,18 @@ export interface SessionCost {
 
 /** Receives events as frames are applied, after enters and updates and before leaves (`03-wire-protocol.md` § 5). */
 export interface EventSink {
-  /** A hit. A netId of 0 is an end the client does not know; `hpAfter` is the target's health fraction after the hit. */
-  onAttack(tick: number, attackerNetId: number, targetNetId: number, damage: number, hpAfter: number): void;
+  /**
+   * A hit. A netId of 0 is an end the client does not know; `hpAfter` is the target's health fraction after the hit; `crit` whether it was a critical
+   * (crafting-catalog.md § 9.3), the one part of the roll a player reads.
+   */
+  onAttack(
+    tick: number,
+    attackerNetId: number,
+    targetNetId: number,
+    damage: number,
+    hpAfter: number,
+    crit: boolean,
+  ): void;
   /**
    * Something said within earshot (SWG-09).
    *
@@ -1103,7 +1113,20 @@ export class TyphonSource implements DataSource {
     this.giveCreditsCommand = plan.commandByName('GiveCredits');
     this.overviewCommand = plan.commandByName('Overview');
     this.marketCommands = new Map();
-    for (const name of ['MarketList', 'MarketCancel', 'MarketBuy', 'MarketCollect', 'SellToVendor']) {
+    for (const name of [
+      'MarketList',
+      'MarketCancel',
+      'MarketBuy',
+      'MarketCollect',
+      'SellToVendor',
+      'BuyStandard',
+      'Equip',
+      'Unequip',
+      'CraftStart',
+      'CraftExperiment',
+      'CraftEnhance',
+      'CraftFinish',
+    ]) {
       const command = plan.commandByName(name);
       if (command !== null) {
         this.marketCommands.set(name, command);
@@ -1302,6 +1325,7 @@ export class TyphonSource implements DataSource {
       target,
       event.number('amount'),
       this.healthOf(target),
+      event.number('crit') !== 0,
     );
   }
 

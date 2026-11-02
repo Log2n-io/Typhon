@@ -762,6 +762,26 @@ button.active {
   border-color: rgba(110, 170, 220, 0.5);
 }
 
+/* What the character wears (crafting-build.md § 2.2): one slot per piece, above the grid, the empty ones lettered. */
+.inventory-equip {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.2);
+}
+
+/* An attack slot whose weapon is not worn: the server refuses its stance (crafting-build.md C1). */
+.actionbar .slot.off {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.inventory-slot.equip-empty {
+  opacity: 0.55;
+}
+
 /* Drawn at the size the catalogue rendered it: a scaled icon is a blurred one. */
 .inventory-icon {
   width: 32px;

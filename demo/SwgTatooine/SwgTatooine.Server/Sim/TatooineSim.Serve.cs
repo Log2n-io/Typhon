@@ -327,8 +327,7 @@ public sealed partial class TatooineSim
     /// <remarks>
     /// <b>They join the simulation's DAG rather than a DAG of their own, which they had until SWG-01.</b> Two DAGs on one track have no barrier between them
     /// and cannot carry an edge to each other, so a session system in its own DAG could run concurrently with <c>PlayerThink</c> — which matters the moment it
-    /// applies an intent, because both write <c>PlayerMotion</c> — and concurrently with a second session system, which matters because session requests share
-    /// one unsynchronized segment. See <see cref="TatooineReplication.SessionTick"/>.
+    /// applies an intent, because both write <c>PlayerMotion</c>. See <see cref="TatooineReplication.SessionTick"/>.
     /// </remarks>
     private void BuildServeSchedule(RuntimeSchedule schedule)
         => BuildSchedule(schedule, replicating: true);

@@ -20,9 +20,11 @@ public sealed record InventoryView(int Stacks, int LastLost)
     /// <param name="before">What the last answer said.</param>
     /// <param name="count">Whether new notes count: false on the first read, which only learns what was already there.</param>
     /// <param name="unitsLost">Units in lost notes met for the first time, when counted.</param>
-    /// <param name="held">Filled with the stacks held, by slot; null when not wanted.</param>
-    /// <returns>What this answer says.</returns>
-    public static InventoryView Parse(string json, InventoryView before, bool count, out int unitsLost, List<HeldStack> held = null)
+    /// <param name="held">Filled with the stacks held, by slot — units only, the bazaar's goods; null when not wanted.</param>
+    /// <param name="gear">Filled with the items with stats, worn or not (crafting-build.md § 2.1); null when not wanted.</param>
+    /// <returns>What this answer says: <see cref="Stacks"/> counts the grid only, not what is worn.</returns>
+    public static InventoryView Parse(string json, InventoryView before, bool count, out int unitsLost, List<HeldStack> held = null,
+        List<GearItem> gear = null)
     {
         unitsLost = 0;
         using var doc = JsonDocument.Parse(json);
@@ -41,20 +43,31 @@ public sealed record InventoryView(int Stacks, int LastLost)
         }
 
         var items = root.GetProperty("items");
-        if (held != null)
+        var grid = 0;
+        foreach (var s in items.EnumerateArray())
         {
-            foreach (var s in items.EnumerateArray())
+            var item = s.GetProperty("item").GetString();
+            var slot = s.GetProperty("slot").GetInt32();
+            grid += slot <= 100 ? 1 : 0;
+            if (s.TryGetProperty("stats", out var stats))
             {
-                var item = s.GetProperty("item").GetString();
-                held.Add(new HeldStack(
+                // An item with stats: the bot's gear, never the bazaar's goods.
+                gear?.Add(new GearItem(
+                    MarketJson.Id(s.GetProperty("id")),
                     MarketCatalog.TemplateOf(s, item),
-                    item,
-                    MarketCatalog.CategoryOf(s.TryGetProperty("category", out var c) ? c.GetString() : null),
-                    s.GetProperty("mk").GetInt32(),
-                    s.GetProperty("count").GetInt32()));
+                    slot,
+                    stats.TryGetProperty("wears", out var w) ? w.GetInt32() : 0));
+                continue;
             }
+
+            held?.Add(new HeldStack(
+                MarketCatalog.TemplateOf(s, item),
+                item,
+                MarketCatalog.CategoryOf(s.TryGetProperty("category", out var c) ? c.GetString() : null),
+                s.GetProperty("mk").GetInt32(),
+                s.GetProperty("count").GetInt32()));
         }
 
-        return new InventoryView(items.GetArrayLength(), lastLost);
+        return new InventoryView(grid, lastLost);
     }
 }

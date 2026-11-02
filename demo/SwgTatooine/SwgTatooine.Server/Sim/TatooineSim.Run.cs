@@ -761,6 +761,7 @@ public sealed partial class TatooineSim
         dag.Add(new LedgerSystem(_bridge));
         dag.Add(new LootSystem(_bridge));
         dag.Add(new MarketSystem(_bridge));
+        dag.Add(new WorkshopSystem(_bridge));
         dag.Add(new NoticesSystem(_bridge));
         dag.Add(new ProgressionSystem(_bridge));
 
@@ -780,6 +781,7 @@ public sealed partial class TatooineSim
         if (replicating)
         {
             dag.Add(new PlayerSessionSystem());
+            dag.Add(new PlayerIntentSystem());
             dag.Add(new StagedWriteSystem(Staged));
             _drainsStagedWrites = true;
             dag.Add(new ReplicationReportSystem());

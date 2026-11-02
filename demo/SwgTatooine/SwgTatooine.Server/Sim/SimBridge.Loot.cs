@@ -71,6 +71,15 @@ public sealed partial class SimBridge
     internal void StageTransfer(long from, long to, ushort template, byte mk, int count, byte kind, long reference)
         => _stagedTransfers.Enqueue((from, to, template, mk, count, kind, reference));
 
+    // Instances staged by the checks (StageInstance), minted in the next tick's Loot transaction with the staged transfers.
+    private readonly ConcurrentQueue<(long To, ushort Template, byte Mk, ItemInstance Stats)> _stagedInstances = new();
+
+    /// <summary>
+    /// An item with stats for the next tick's <c>Loot</c> transaction to mint through <see cref="MintInstance"/>, as a <c>kill</c> row: the checks' way to
+    /// hold one at any Mk, which nothing in C1 drops or sells.
+    /// </summary>
+    internal void StageInstance(long to, ushort template, byte mk, in ItemInstance stats) => _stagedInstances.Enqueue((to, template, mk, stats));
+
     /// <summary>
     /// The <c>Loot</c> system: this tick's kills, drained from <see cref="KillLootQueue"/>, each looted in one side transaction committed once.
     /// </summary>
@@ -86,7 +95,7 @@ public sealed partial class SimBridge
         }
 
         var pending = KillLootQueue?.Count ?? 0;
-        if (pending == 0 && _stagedKills.IsEmpty && _stagedTransfers.IsEmpty)
+        if (pending == 0 && _stagedKills.IsEmpty && _stagedTransfers.IsEmpty && _stagedInstances.IsEmpty)
         {
             return;
         }
@@ -114,7 +123,7 @@ public sealed partial class SimBridge
             Gate(tick0, in kill);
         }
 
-        if (_lootAccepted.Count == 0 && _stagedTransfers.IsEmpty)
+        if (_lootAccepted.Count == 0 && _stagedTransfers.IsEmpty && _stagedInstances.IsEmpty)
         {
             return;
         }
@@ -123,6 +132,11 @@ public sealed partial class SimBridge
         while (_stagedTransfers.TryDequeue(out var t))
         {
             ItemTransfer(tx, t.From, t.To, t.Template, t.Mk, t.Count, t.Kind, t.Ref, worldTick);
+        }
+
+        while (_stagedInstances.TryDequeue(out var i))
+        {
+            MintInstance(tx, i.To, i.Template, i.Mk, in i.Stats, ItemMoveKind.Kill, 1, worldTick);
         }
 
         foreach (var (character, killer, kill) in _lootAccepted)

@@ -302,6 +302,7 @@ public sealed partial class TatooineSim : IDisposable
 
         // The static neighbourhood's disc: where a body last asked what was near it, and how far it may walk from there.
         Dbe.RegisterComponentFromAccessor<PlayerProximity>();
+        Dbe.RegisterComponentFromAccessor<PlayerGear>();
         Dbe.RegisterComponentFromAccessor<ShipPlacement>();
         Dbe.RegisterComponentFromAccessor<ShipMotion>();
         Dbe.RegisterComponentFromAccessor<ShipRealm>();
@@ -329,6 +330,8 @@ public sealed partial class TatooineSim : IDisposable
 
         // Items (inventory-loot.md): stacks, the item ledger and its head — Versioned and non-spatial like the wallets, written by ItemTransfer alone.
         Dbe.RegisterComponentFromAccessor<ItemStack>();
+        Dbe.RegisterComponentFromAccessor<ItemInstance>();
+        Dbe.RegisterComponentFromAccessor<CraftState>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerEntry>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerHead>();
 

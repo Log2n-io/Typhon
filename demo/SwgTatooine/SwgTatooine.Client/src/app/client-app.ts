@@ -52,11 +52,12 @@ import { PlayerNameDirectory } from '../data/player-names';
 import { entityTag, viewerClOf, type EntityTag } from '../data/content-level';
 import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
 import { playerMenuItems, WalletReader } from '../data/wallet';
-import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
+import { isEquipSlot, itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
 import { MockSource } from '../data/mock/mock-source';
 import type { MockInventory } from '../data/mock/inventory';
 import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
 import { parseMine, type MarketMine } from '../data/market';
+import { useCraft } from '../state/craft-store';
 import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
@@ -835,23 +836,23 @@ export class ClientApp {
           this.selfStrikes++;
         }
       },
-      impact: (netId, amount) => {
+      impact: (netId, amount, crit) => {
         this.crowdRouter?.hit(netId);
         if (netId === this.source?.selfNetId) {
           this.selfHits++;
         }
 
-        this.damage.spawn(netId, amount, performance.now());
+        this.damage.spawn(netId, amount, performance.now(), crit);
       },
       ranged: (netId) => this.archetypeName(netId) === 'Player' && this.fieldOf(netId, 'stance') === PISTOL_STANCE,
       aim: (netId) => this.heightOf(netId) * 0.6,
     };
     // The debug lines see every blow; the effects play them. One sink for the source, the two behind it.
     this.events = {
-      onAttack: (tick, attacker, target, damage) => {
+      onAttack: (tick, attacker, target, damage, _hpAfter, crit) => {
         this.attacks.onAttack(tick, attacker, target);
         this.fight.note(attacker, target, this.source?.selfNetId ?? 0, performance.now());
-        this.fx.push(tick, attacker, target, damage);
+        this.fx.push(tick, attacker, target, damage, crit);
       },
       onChat: (tick, speaker, text) => {
         const own = speaker !== 0 && speaker === (this.source?.selfNetId ?? 0);
@@ -4099,7 +4100,10 @@ export class ClientApp {
       const items = this.items.value;
       if (items !== null) {
         useItems.getState().setSnapshot(items);
-        useMarket.getState().setStacks(items.items);
+        // What is worn is not for sale until it is taken off (crafting-build.md § 2.2).
+        useMarket.getState().setStacks(items.items.filter((i) => !isEquipSlot(i.slot)));
+        // A craft's steps move the items revision: its state is read again with them (crafting-build.md C2).
+        void useCraft.getState().refresh();
       }
     }
 

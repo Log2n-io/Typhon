@@ -483,13 +483,13 @@ internal sealed class BotMarketDeskChecks : ServedChecks
         return new Trader(link, character);
     }
 
-    /// <summary>Two cores, then materials (Mk I-IV, five units each) until the inventory's 30 slots are full: a bot back from a day's hunting.</summary>
+    /// <summary>Two cores, then materials (Mk I-IV, five units each, ore first) until the inventory's 40 slots are full: a bot back from a day's hunting.</summary>
     private static void Fill(TatooineSim sim, Trader t)
     {
         sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
         sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
         var n = 2;
-        for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < ItemLedger.Slots; template++)
+        for (ushort template = 1; template <= ItemCatalog.Venom && n < ItemLedger.Slots; template++)
         {
             for (byte mk = 1; mk <= 4 && n < ItemLedger.Slots; mk++, n++)
             {
@@ -665,6 +665,10 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     private const int Quests = 8;
     private const int KillsPerQuest = 16;
 
+    // Slots each bot holds parts in, which no plan sells and no drop adds to: the grid grew to 40 (crafting-build.md O-9), and this keeps the 30 this
+    // measure was tuned on — and BotBrain.MarketStacks' ten slots left.
+    private const int PartSlots = ItemLedger.Slots - 30;
+
     private long LostOverQuests(bool market, string dir, out (bool Ok, string Why) audits)
     {
         var config = Worlds.Served(dir);
@@ -679,7 +683,14 @@ internal sealed class BotMarketDeskChecks : ServedChecks
             var at = (home.X + 2.5f, home.Z + (i * 0.6f));
             var t = LogIn(sim, 0x9200UL + (ulong)i, at, i + 1);
             bots.Add((t, TatooineReplication.ControlledBy(sim.Dbe, t.Link.Session), at));
+            for (var p = 0; p < PartSlots; p++)
+            {
+                // The modules, the swoop's parts and two kits: stacks no plan sells (no value) and nothing drops.
+                sim.Bridge.StageTransfer(ItemLedger.World, t.Key, (ushort)(p < 8 ? 36 + p : 62 + p - 8), 0, 1, ItemMoveKind.Kill, 1);
+            }
         }
+
+        SessionHarness.Until(() => bots.All(b => Items.Stacks(sim, b.T.Character).Count == PartSlots), "the parts");
 
         var victim = 0xB0000UL;
         var rng = 11u;

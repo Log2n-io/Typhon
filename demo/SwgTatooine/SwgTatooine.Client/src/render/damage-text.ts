@@ -25,8 +25,11 @@ const RISE_PX = 36;
 /** A glyph's height on screen, CSS pixels. */
 const GLYPH_PX = 17;
 
-/** The atlas: what a number is spelt with, in column order. */
+/** The atlas: what a number is spelt with, in column order — twice, red then gold, the second set a critical's. */
 const GLYPHS = '-0123456789';
+
+/** How much larger a critical's number is drawn (crafting-catalog.md § 9.3: "a larger number, its own colour"). */
+export const CRIT_SCALE = 1.4;
 const CELL_W = 34;
 const CELL_H = 64;
 
@@ -45,6 +48,7 @@ interface Number_ {
   born: number;
   text: string;
   live: boolean;
+  crit: boolean;
   /** Where it was last seen: a body that leaves the view mid-number keeps its number where it was. */
   readonly at: Anchor;
   seen: boolean;
@@ -67,8 +71,10 @@ export class DamageText {
   private readonly atlas: BaseTexture;
   private readonly anchors = new Float32Array(CAPACITY * 4);
   private readonly glyphData = new Float32Array(CAPACITY * 4);
+  private readonly scales = new Float32Array(CAPACITY);
   private readonly anchorsUploader = new PrefixUploader(this.anchors, 4);
   private readonly glyphUploader = new PrefixUploader(this.glyphData, 4);
+  private readonly scaleUploader = new PrefixUploader(this.scales, 1);
   private readonly viewport = new Vector2(1, 1);
   private readonly head: Anchor = { x: 0, y: 0, z: 0 };
 
@@ -89,6 +95,7 @@ export class DamageText {
     mesh.renderingGroupId = SCENE_GROUP;
     mesh.thinInstanceSetBuffer('dmgAnchor', this.anchors, 4, false);
     mesh.thinInstanceSetBuffer('dmgGlyph', this.glyphData, 4, false);
+    mesh.thinInstanceSetBuffer('dmgScale', this.scales, 1, false);
     this.mesh = mesh;
 
     const material = new ShaderMaterial(
@@ -96,7 +103,7 @@ export class DamageText {
       scene,
       { vertexSource: DAMAGE_VERTEX, fragmentSource: DAMAGE_FRAGMENT },
       {
-        attributes: ['position', 'dmgAnchor', 'dmgGlyph'],
+        attributes: ['position', 'dmgAnchor', 'dmgGlyph', 'dmgScale'],
         uniforms: ['viewProjection', 'uViewport', 'uGlyphPx', 'uAspect', 'uColumns'],
         samplers: ['uAtlas'],
         needAlphaBlending: true,
@@ -108,17 +115,17 @@ export class DamageText {
     material.setTexture('uAtlas', this.atlas);
     material.setFloat('uGlyphPx', GLYPH_PX);
     material.setFloat('uAspect', CELL_W / CELL_H);
-    material.setFloat('uColumns', GLYPHS.length);
+    material.setFloat('uColumns', GLYPHS.length * 2);
     mesh.material = material;
     this.material = material;
     this.setCount(0);
   }
 
-  /** A blow landed on `netId` for `amount`: "-amount" rises over its head for {@link DAMAGE_MS}. */
-  spawn(netId: number, amount: number, nowMs: number): void {
+  /** A blow landed on `netId` for `amount`: "-amount" rises over its head for {@link DAMAGE_MS}; a critical's gold and {@link CRIT_SCALE} larger. */
+  spawn(netId: number, amount: number, nowMs: number, crit = false): void {
     let n = this.numbers.find((d) => !d.live);
     if (n === undefined && this.numbers.length < NUMBERS) {
-      n = { netId: 0, born: 0, text: '', live: false, at: { x: 0, y: 0, z: 0 }, seen: false };
+      n = { netId: 0, born: 0, text: '', live: false, crit: false, at: { x: 0, y: 0, z: 0 }, seen: false };
       this.numbers.push(n);
     }
 
@@ -126,6 +133,7 @@ export class DamageText {
     n.netId = netId;
     n.born = nowMs;
     n.text = `-${String(Math.max(0, Math.round(amount)))}`;
+    n.crit = crit;
     n.live = true;
     n.seen = false;
   }
@@ -174,7 +182,8 @@ export class DamageText {
         this.anchors[b + 1] = n.at.y;
         this.anchors[b + 2] = z;
         this.anchors[b + 3] = alpha;
-        this.glyphData[b] = GLYPHS.indexOf(n.text[i]);
+        this.glyphData[b] = GLYPHS.indexOf(n.text[i]) + (n.crit ? GLYPHS.length : 0);
+        this.scales[g] = n.crit ? CRIT_SCALE : 1;
         this.glyphData[b + 1] = i;
         this.glyphData[b + 2] = n.text.length;
         this.glyphData[b + 3] = rise;
@@ -184,6 +193,7 @@ export class DamageText {
 
     this.anchorsUploader.upload(this.mesh.getVertexBuffer('dmgAnchor')?.getWrapperBuffer() ?? null, g);
     this.glyphUploader.upload(this.mesh.getVertexBuffer('dmgGlyph')?.getWrapperBuffer() ?? null, g);
+    this.scaleUploader.upload(this.mesh.getVertexBuffer('dmgScale')?.getWrapperBuffer() ?? null, g);
     this.viewport.set(view.viewportWidth, view.viewportHeight);
     this.material.setVector2('uViewport', this.viewport);
     this.setCount(g);
@@ -202,11 +212,11 @@ export class DamageText {
   }
 }
 
-/** The glyphs, drawn once: red with a dark outline, one cell each. */
+/** The glyphs, drawn once: red with a dark outline, one cell each; then the same in gold, a critical's. */
 function glyphAtlas(scene: Scene): DynamicTexture {
   const texture = new DynamicTexture(
     'damage-glyphs',
-    { width: CELL_W * GLYPHS.length, height: CELL_H },
+    { width: CELL_W * GLYPHS.length * 2, height: CELL_H },
     scene,
     true,
     Texture.TRILINEAR_SAMPLINGMODE,
@@ -215,19 +225,20 @@ function glyphAtlas(scene: Scene): DynamicTexture {
   texture.wrapU = Texture.CLAMP_ADDRESSMODE;
   texture.wrapV = Texture.CLAMP_ADDRESSMODE;
   const ctx = texture.getContext() as CanvasRenderingContext2D;
-  ctx.clearRect(0, 0, CELL_W * GLYPHS.length, CELL_H);
+  ctx.clearRect(0, 0, CELL_W * GLYPHS.length * 2, CELL_H);
   ctx.font = `800 ${String(CELL_H * 0.78)}px system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
-  for (let i = 0; i < GLYPHS.length; i++) {
+  for (let i = 0; i < GLYPHS.length * 2; i++) {
     const cx = CELL_W * (i + 0.5);
     const cy = CELL_H * 0.55;
+    const glyph = GLYPHS[i % GLYPHS.length];
     ctx.lineWidth = 8;
     ctx.strokeStyle = 'rgba(20, 0, 0, 0.9)';
-    ctx.strokeText(GLYPHS[i], cx, cy);
-    ctx.fillStyle = '#ff4b3e';
-    ctx.fillText(GLYPHS[i], cx, cy);
+    ctx.strokeText(glyph, cx, cy);
+    ctx.fillStyle = i < GLYPHS.length ? '#ff4b3e' : '#ffd23e';
+    ctx.fillText(glyph, cx, cy);
   }
 
   texture.update(true);

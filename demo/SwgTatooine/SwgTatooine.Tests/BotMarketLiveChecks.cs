@@ -192,21 +192,23 @@ internal sealed class BotMarketLiveChecks : ServedChecks
             bots[^1].Brain.Facilities.Seed(facilities);
         }
 
+        // Six stacks past the brain's trigger, as a bot back from a day's hunting.
+        const int Full = BotBrain.MarketStacks + 6;
         foreach (var b in bots)
         {
             sim.Bridge.StageTransfer(ItemLedger.World, b.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
             sim.Bridge.StageTransfer(ItemLedger.World, b.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
             var n = 2;
-            for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < 26; template++)
+            for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < Full; template++)
             {
-                for (byte mk = 1; mk <= 4 && n < 26; mk++, n++)
+                for (byte mk = 1; mk <= 4 && n < Full; mk++, n++)
                 {
                     sim.Bridge.StageTransfer(ItemLedger.World, b.Key, template, mk, 5, ItemMoveKind.Kill, 1);
                 }
             }
         }
 
-        SessionHarness.Until(() => bots.All(b => Items.Stacks(sim, b.Character).Count == 26), "the inventories to be filled");
+        SessionHarness.Until(() => bots.All(b => Items.Stacks(sim, b.Character).Count == Full), "the inventories to be filled");
         var listingsBefore = Market.Listings(sim).Count;
 
         // A minute of the driver's 4 Hz: long enough to walk there, trade, and stand while the plan goes out.

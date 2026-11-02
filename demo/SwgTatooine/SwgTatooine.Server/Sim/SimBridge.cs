@@ -284,8 +284,11 @@ public sealed partial class SimBridge : IShuttleBoarding
     /// <see cref="EntityId.EntityKey"/> is monotonic per archetype and never recycled, so it survives both. Callers pass an entity's key, or a logical
     /// identity of their own where the draw is not per entity (a realm id, say) — never a chunk or a slot.
     /// </remarks>
-    private uint Salt(long tick, long key, uint stream)
-        => ((uint)tick * 2654435761u) ^ ((uint)key * 2246822519u) ^ ((uint)(key >> 32) * 3266489917u) ^ stream ^ _seedSalt;
+    private uint Salt(long tick, long key, uint stream) => SaltOf(tick, key, stream, _seedSalt);
+
+    /// <summary><see cref="Salt"/> with the run's seed salt given.</summary>
+    private static uint SaltOf(long tick, long key, uint stream, uint seedSalt)
+        => ((uint)tick * 2654435761u) ^ ((uint)key * 2246822519u) ^ ((uint)(key >> 32) * 3266489917u) ^ stream ^ seedSalt;
 }
 
 /// <summary>One tick's behavioural counters — what the simulation did, as opposed to what it cost.</summary>

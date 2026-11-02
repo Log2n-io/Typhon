@@ -14,6 +14,9 @@ public static class ItemCategory
     public const byte Kit = 7;
     public const byte Container = 8;
 
+    /// <summary>A weapon: an item with stats (crafting-build.md § 2.1), equipped in slot 101.</summary>
+    public const byte Weapon = 9;
+
     /// <summary>The name the catalogue and the client use.</summary>
     public static string NameOf(byte category) => category switch
     {
@@ -25,6 +28,7 @@ public static class ItemCategory
         Potion => "potion",
         Kit => "kit",
         Container => "container",
+        Weapon => "weapon",
         _ => "unknown",
     };
 }
@@ -85,18 +89,18 @@ public static class ItemCatalog
         new(41, "part_engine", "Engine", ItemCategory.Part, false, false),
         new(42, "part_repulsor", "Repulsor", ItemCategory.Part, false, false),
         new(43, "part_chassis", "Chassis", ItemCategory.Part, false, false),
-        new(44, "armor_padded_helmet", "Padded Helmet", ItemCategory.Armor, false, false),
-        new(45, "armor_padded_torso", "Padded Torso", ItemCategory.Armor, false, false),
-        new(46, "armor_padded_arms", "Padded Arms", ItemCategory.Armor, false, false),
-        new(47, "armor_padded_legs", "Padded Legs", ItemCategory.Armor, false, false),
-        new(48, "armor_padded_gloves", "Padded Gloves", ItemCategory.Armor, false, false),
-        new(49, "armor_padded_boots", "Padded Boots", ItemCategory.Armor, false, false),
-        new(50, "armor_composite_helmet", "Composite Helmet", ItemCategory.Armor, false, false),
-        new(51, "armor_composite_torso", "Composite Torso", ItemCategory.Armor, false, false),
-        new(52, "armor_composite_arms", "Composite Arms", ItemCategory.Armor, false, false),
-        new(53, "armor_composite_legs", "Composite Legs", ItemCategory.Armor, false, false),
-        new(54, "armor_composite_gloves", "Composite Gloves", ItemCategory.Armor, false, false),
-        new(55, "armor_composite_boots", "Composite Boots", ItemCategory.Armor, false, false),
+        new(44, "armor_padded_helmet", "Padded Helmet", ItemCategory.Armor, true, false),
+        new(45, "armor_padded_torso", "Padded Torso", ItemCategory.Armor, true, false),
+        new(46, "armor_padded_arms", "Padded Arms", ItemCategory.Armor, true, false),
+        new(47, "armor_padded_legs", "Padded Legs", ItemCategory.Armor, true, false),
+        new(48, "armor_padded_gloves", "Padded Gloves", ItemCategory.Armor, true, false),
+        new(49, "armor_padded_boots", "Padded Boots", ItemCategory.Armor, true, false),
+        new(50, "armor_composite_helmet", "Composite Helmet", ItemCategory.Armor, true, false),
+        new(51, "armor_composite_torso", "Composite Torso", ItemCategory.Armor, true, false),
+        new(52, "armor_composite_arms", "Composite Arms", ItemCategory.Armor, true, false),
+        new(53, "armor_composite_legs", "Composite Legs", ItemCategory.Armor, true, false),
+        new(54, "armor_composite_gloves", "Composite Gloves", ItemCategory.Armor, true, false),
+        new(55, "armor_composite_boots", "Composite Boots", ItemCategory.Armor, true, false),
         new(56, "potion_stim", "Stim", ItemCategory.Potion, false, false),
         new(57, "potion_regen", "Regen", ItemCategory.Potion, false, false),
         new(58, "potion_fury", "Fury", ItemCategory.Potion, false, false),
@@ -108,6 +112,9 @@ public static class ItemCatalog
         new(64, "kit_vehicle_repair", "Vehicle Repair Kit", ItemCategory.Kit, false, false),
         new(65, "kit_structure_repair", "Structure Repair Kit", ItemCategory.Kit, false, false),
         new(66, "crate", "Crate", ItemCategory.Container, false, false),
+        new(67, "vibroknuckler", "Vibro Knuckler", ItemCategory.Weapon, true, false),
+        new(68, "sword_vibroblade", "Vibroblade", ItemCategory.Weapon, true, false),
+        new(69, "blaster_dl44", "DL-44 Blaster", ItemCategory.Weapon, true, false),
     ];
 
     public const ushort Metal = 3;
@@ -127,6 +134,11 @@ public static class ItemCatalog
     public const ushort AddonArmor = 17;
     public const ushort AddonTuning = 18;
     public const ushort AddonAdditive = 19;
+    public const ushort PaddedHelmet = 44;
+    public const ushort CompositeHelmet = 50;
+    public const ushort Knuckler = 67;
+    public const ushort Sword = 68;
+    public const ushort Blaster = 69;
 
     /// <summary>Every template, id 1 first: <c>Templates[id - 1]</c>.</summary>
     public static ReadOnlySpan<ItemTemplate> Templates => All;
@@ -160,6 +172,16 @@ public static class ItemCatalog
 
     /// <summary>Whether <paramref name="mk"/> is legal for <paramref name="template"/>: 1-5 for an item with a Mk, 0 for one without.</summary>
     public static bool MkFits(in ItemTemplate template, byte mk) => template.HasMk ? mk is >= 1 and <= 5 : mk == 0;
+
+    /// <summary>
+    /// Whether a template's items have stats, and so are instances (crafting-build.md § 2.1): one entity each, never merged, moved whole with its stats.
+    /// Weapons, armour and potions; and the parts a schematic makes with a grade (§ 13.4) — the modules and the swoop's parts stay stacks until their
+    /// phases craft them.
+    /// </summary>
+    public static bool HasStats(ushort template)
+        => TryGet(template, out var t)
+            && (t.Category is ItemCategory.Weapon or ItemCategory.Armor or ItemCategory.Potion
+                || (t.Category == ItemCategory.Part && Schematics.TryGet(template, out var s) && s.MakesInstance));
 }
 
 /// <summary>The item ledger's fixed points (inventory-loot.md § 2-3).</summary>
@@ -174,6 +196,6 @@ public static class ItemLedger
     /// <summary>The most units one stack holds.</summary>
     public const int StackMax = 99;
 
-    /// <summary>A character's inventory grid: slots 1..30.</summary>
-    public const int Slots = 30;
+    /// <summary>A character's inventory grid: slots 1..40 (crafting-build.md O-9: a crafter holds one recipe's inputs and its gear).</summary>
+    public const int Slots = 40;
 }

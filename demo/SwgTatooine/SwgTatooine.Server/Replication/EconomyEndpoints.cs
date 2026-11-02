@@ -434,6 +434,9 @@ public static class EconomyEndpoints
                 break;
             case TransferKind.Tax:
             case TransferKind.ListFee:
+            case TransferKind.Standard:
+            case TransferKind.Fare:
+            case TransferKind.Bench:
                 if (r.From == EconomyLedger.World || r.To != EconomyLedger.World || r.Ref == 0)
                 {
                     result.Violation($"seq {r.Seq}: a {TransferKind.NameOf(r.Kind)} must be paid by a wallet to World for a listing, not {r.From} to {r.To} for {r.Ref}");

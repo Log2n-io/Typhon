@@ -153,6 +153,11 @@ public static class MarketEndpoints
         app.MapGet("/swg/market/mine", (HttpContext context) => GetMine(dbe, board() ?? MarketSnapshot.Empty, context));
         app.MapGet("/swg/market/prices", (HttpContext context) => GetPrices(board() ?? MarketSnapshot.Empty, context));
         app.MapGet("/swg/market/audit", (HttpContext context) => GetAudit(dbe, board() ?? MarketSnapshot.Empty, context));
+        app.MapGet("/swg/market/standard", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Text(StandardJson(), "application/json");
+        });
         return app;
     }
 
@@ -364,8 +369,13 @@ public static class MarketEndpoints
                 .Append(",\"total\":").Append(v.UnitPrice * v.Quantity)
                 .Append(",\"seller\":\"").Append(unchecked((ulong)v.Seller)).Append('"')
                 .Append(",\"sellerName\":\"").Append(EconomyEndpoints.Escape(v.SellerName ?? "")).Append('"')
-                .Append(",\"ageS\":").Append(Math.Max(0, board.WorldTick - v.ListedTick) / board.TickRateHz)
-                .Append('}');
+                .Append(",\"ageS\":").Append(Math.Max(0, board.WorldTick - v.ListedTick) / board.TickRateHz);
+            if (ItemCatalog.HasStats(v.Template))
+            {
+                ItemEndpoints.Stats(json, in t, v.Stats);
+            }
+
+            json.Append('}');
         }
 
         return json.Append("]}").ToString();
@@ -503,6 +513,36 @@ public static class MarketEndpoints
     /// <c>vendor</c> what the vendor pays per unit in milli-credits (×1000), the rest from the board and its last 200 sales.
     /// </summary>
     public static string PricesJson(MarketSnapshot board)
+        => PricesJsonCore(board);
+
+    /// <summary>
+    /// What the vendor sells (crafting-catalog.md § 15.3): <c>{"items":[{"template","item","name","category","mk","price","stats"}]}</c>, standard issue,
+    /// Mk I, at twice its value — the client owns no item table, so the bazaar's standard-issue tab lists this. Fixed: the same for every caller.
+    /// </summary>
+    public static string StandardJson()
+    {
+        var json = new StringBuilder(2048);
+        json.Append("{\"items\":[");
+        var first = true;
+        foreach (var s in Equipment.Standard)
+        {
+            ItemCatalog.TryGet(s.Template, out var t);
+            json.Append(first ? "{" : ",{")
+                .Append("\"template\":").Append(s.Template)
+                .Append(",\"item\":\"").Append(t.Asset).Append('"')
+                .Append(",\"name\":\"").Append(EconomyEndpoints.Escape(t.Name ?? "")).Append('"')
+                .Append(",\"category\":\"").Append(ItemCategory.NameOf(t.Category)).Append('"')
+                .Append(",\"mk\":1")
+                .Append(",\"price\":").Append(Equipment.StandardPrice(s.Template));
+            ItemEndpoints.Stats(json, in t, SimBridge.StandardStats(in s));
+            json.Append('}');
+            first = false;
+        }
+
+        return json.Append("]}").ToString();
+    }
+
+    private static string PricesJsonCore(MarketSnapshot board)
     {
         ArgumentNullException.ThrowIfNull(board);
         var json = new StringBuilder(256 + (board.Prices.Length * 160));

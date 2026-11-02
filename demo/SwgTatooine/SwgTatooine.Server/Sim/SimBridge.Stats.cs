@@ -316,6 +316,16 @@ public sealed partial class SimBridge
         // The market (bazaar.md § 9): the board by city, its flows and their rates, the price index, the unsold's age.
         j.Append(",\"market\":");
         AppendMarketJson(j, r10, r60);
+
+        // Gear (crafting-build.md § 8, C1): what was put on and taken off, the bodies' gear written, the crits rolled, the standard issue sold.
+        j.Append(",\"gear\":{");
+        Num(j, "equips", Equips).Append(',');
+        Num(j, "unequips", Unequips).Append(',');
+        Num(j, "gearWrites", GearWrites).Append(',');
+        Num(j, "crits", Crits).Append(',');
+        Num(j, "standardSold", StandardSold).Append(',');
+        Num(j, "standardPaid", StandardPaid);
+        j.Append('}');
         return j.Append('}').ToString();
 
         static StringBuilder Bands(StringBuilder b, string name, int[] values)

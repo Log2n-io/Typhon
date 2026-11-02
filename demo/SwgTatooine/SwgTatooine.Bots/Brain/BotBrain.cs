@@ -226,16 +226,17 @@ public sealed partial class BotBrain
     /// </summary>
     public const double MountRetrySeconds = 10d;
 
-    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): ten of its 30 slots left, a quest's worth of drops.</summary>
+    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): ten of its 40 slots left, a quest's worth of drops.</summary>
     /// <remarks>
     /// 24 left six, and a bot that set out on a quest with 23 stacks came back full: live, 2 000 bots, two thirds of them questing at any time, the
     /// market cut the drops lost to a full inventory by a tenth only (2026-10-27). With 20 and the vendor's floor at 8 (<c>MarketPlan.KeepStacks</c>),
-    /// a quest starts with twelve slots free at least.
+    /// a quest starts with twelve slots free at least. The grid grew to 40 (crafting-build.md O-9): 30 keeps the ten left.
     /// </remarks>
-    public const int MarketStacks = 20;
+    public const int MarketStacks = 30;
 
     /// <summary>A bot this full is losing drops: the errand says so (<see cref="GoalWhy.MarketFull"/>) — the measure of headroom too small.</summary>
-    public const int MarketFullStacks = 29;
+    /// <remarks>One slot short of the 40 (crafting-build.md O-9): the next drop of a new key is lost.</remarks>
+    public const int MarketFullStacks = 39;
 
     /// <summary>A bazaar errand, made or failed, is not chosen again for this long, in seconds: a vendor that refuses cannot hold a bot at the bazaar.</summary>
     public const double MarketRetrySeconds = 120d;

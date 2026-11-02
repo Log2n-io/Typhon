@@ -121,8 +121,9 @@ internal sealed class CrowdReactionChecks : ServedChecks
         return (link, body);
     }
 
-    private static void Attack(FakeLink link, EntityId quarry)
+    private static void Attack(TatooineSim sim, FakeLink link, EntityId quarry)
     {
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, quarry)));
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
     }
@@ -143,7 +144,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var (link, body) = Stage(sim, quarry, PlayerActivity.Travelling);
         var before = Read(sim, body).Health;
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFoughtBack >= 1, "the quarry to answer the first blow");
         var seen = Read(sim, quarry);
         Assert.Multiple(() =>
@@ -168,7 +169,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var (link, body) = Stage(sim, quarry, PlayerActivity.Travelling);
         var start = Distance(Read(sim, body), Read(sim, quarry));
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 1, "the quarry to answer the first blow");
         SessionHarness.Until(() => Distance(Read(sim, body), Read(sim, quarry)) > start + 15f, "the quarry to get away from its attacker");
         var seen = Read(sim, quarry);
@@ -190,7 +191,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var quarry = CrowdBody(sim, fightsBack: true);
         var (link, _) = Stage(sim, quarry, PlayerActivity.Idle);
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled + sim.Bridge.CrowdFoughtBack >= 1, "the quarry to answer the first blow");
         Assert.Multiple(() =>
         {
@@ -211,7 +212,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var quarry = CrowdBody(sim, fightsBack: true);
         var (link, _) = Stage(sim, quarry, PlayerActivity.Idle);
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 3 || Read(sim, quarry).Down != Downed.Up, "three blows to land on the runner");
         Assert.Multiple(() =>
         {
@@ -229,7 +230,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var quarry = CrowdBody(sim, fightsBack: false);
         var (link, body) = Stage(sim, quarry, PlayerActivity.Combat);
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled + sim.Bridge.CrowdFoughtBack >= 1, "the quarry to answer the first blow");
         Assert.Multiple(() =>
         {
@@ -254,7 +255,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
             p.Set(Player.Vitals, v);
         });
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 1 || Read(sim, quarry).Down != Downed.Up, "the hurt quarry to answer the blow");
         Assert.Multiple(() =>
         {
@@ -293,7 +294,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         Harness.Ticks(3);
         Assert.That(Read(sim, quarry).Activity, Is.EqualTo(PlayerActivity.ToPortal), "the premise: the quarry is walking to a door");
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFoughtBack >= 1, "the quarry to answer the first blow");
         var seen = Read(sim, quarry);
         Assert.Multiple(() =>
@@ -327,7 +328,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
         Harness.Ticks(3);   // the parked bodies into the spatial index, which the crowd is found through
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdJoined >= 2, "the crowd round the quarry to join in");
         var b = Read(sim, brave);
         var t = Read(sim, timid);
@@ -357,7 +358,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var placed = Place(sim, quarry, city.X + city.Radius + 140f, city.Z, PlayerActivity.Travelling);
         SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 1, "the quarry to answer the first blow");
         var seen = Read(sim, quarry);
         Assert.That(Distance(seen.DestX, seen.DestZ, city.X, city.Z), Is.EqualTo(city.Radius * 0.5f).Within(2f), "it did not make for the city");
@@ -388,7 +389,7 @@ internal sealed class CrowdReactionChecks : ServedChecks
         var placed = Place(sim, quarry, city.X + city.Radius + 150f, city.Z, PlayerActivity.Travelling);
         SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
 
-        Attack(link, quarry);
+        Attack(sim, link, quarry);
         SessionHarness.Until(() => sim.Bridge.CrowdFled >= 1, "the quarry to answer the first blow");
         var seen = Read(sim, quarry);
         Assert.Multiple(() =>

@@ -156,6 +156,12 @@ public static class WorldRebuild
                 {
                     index.Bazaars.Add(new MissionTerminalRef(cluster.GetEntityId(slot), x, z, owner, realm));
                 }
+
+                // The workshop's stations (crafting-build.md C2).
+                if (st.Kind == StructureKind.CraftingStation)
+                {
+                    index.Stations.Add(new MissionTerminalRef(cluster.GetEntityId(slot), x, z, owner, realm));
+                }
             }
         }
 

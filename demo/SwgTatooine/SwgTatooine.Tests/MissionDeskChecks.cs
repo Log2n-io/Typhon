@@ -877,6 +877,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
         var before = BodyOf(sim, link.Session);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
 
@@ -969,6 +970,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         // Its own stance, read rather than remembered: a swoop, a door, a flight or a clone puts the weapon away, and a bot that remembered drawing it
         // named targets for minutes without a shot (2026-10-26).
         var unarmed = eyes.Read(store, new SwgTatooine.Bots.Brain.FacilityMap()).Stance;
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         Harness.Ticks(4);
         Replay(link, store);
@@ -1606,6 +1608,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the holder's view", parked);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => OwnerHit(sim, lair) != 0, "the holder's blow to be marked");
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.None));
@@ -1616,6 +1619,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         Worlds.Park(sim, partner.Session, held.Mission.LairX - 10f, held.Mission.LairZ, out var parkedB);
         SessionHarness.UntilNamed(partner.Session, lair, "the lair to reach the partner's view", parkedB);
         partner.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(partner.Session, lair)));
+        Worlds.Arm(sim, partner);
         partner.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, holder).Count == 0, "the mission to be completed");
         Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 4);
@@ -1670,6 +1674,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         Worlds.Park(sim, stranger.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
         SessionHarness.UntilNamed(stranger.Session, lair, "the lair to reach the stranger's view", parked);
         stranger.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(stranger.Session, lair)));
+        Worlds.Arm(sim, stranger);
         stranger.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => ProgressOf(sim, breaker).Xp > 0, "the stranger to be paid the lair");
         SessionHarness.Until(() => Held(sim, holder).Count != 1 || Held(sim, holder)[0].Mission.Lair != lair, "the mission to move");
@@ -2390,6 +2395,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
         var before = BodyOf(sim, link.Session);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
         Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 2);

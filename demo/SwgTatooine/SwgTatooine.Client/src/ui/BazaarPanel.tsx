@@ -1,4 +1,6 @@
-import { ITEM_ICON_PX, itemInitials, mkNumeral } from '../data/items';
+import { useEffect } from 'react';
+
+import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral } from '../data/items';
 import {
   cityName,
   feeLine,
@@ -74,11 +76,13 @@ export function BazaarPanel() {
         {tabButton('sell', 'Sell')}
         {tabButton('mine', `My listings${mine === null ? '' : ` (${String(mine.listed.length)})`}`)}
         {tabButton('reserved', `Reserved${mine === null ? '' : ` (${String(mine.reserved.length)})`}`)}
+        {tabButton('issue', 'Standard issue')}
       </div>
       {tab === 'browse' ? <BrowseTab /> : null}
       {tab === 'sell' ? <SellTab /> : null}
       {tab === 'mine' ? <MineTab /> : null}
       {tab === 'reserved' ? <ReservedTab /> : null}
+      {tab === 'issue' ? <IssueTab /> : null}
     </div>
   );
 }
@@ -297,6 +301,79 @@ function BrowseTab() {
         </div>
       ) : null}
     </>
+  );
+}
+
+/**
+ * The vendor's standard issue (crafting-catalog.md § 15.3): Mk I weapons and armour, a typical craft, at twice their value — the ceiling the board's
+ * prices sit under. Bought one at a time at a terminal; the item goes into the inventory, the credits to nobody.
+ */
+function IssueTab() {
+  const standard = useMarket((s) => s.standard);
+  const refresh = useMarket((s) => s.refreshStandard);
+  const buyStandard = useMarket((s) => s.buyStandard);
+  const here = useMarket((s) => s.here);
+  const pending = useMarket((s) => s.pending.includes('issue'));
+  const notice = useMarket((s) => s.rowNotices.issue);
+  const icons = useItems((s) => s.icons);
+  const credits = useWallet((s) => s.wallet?.credits ?? null);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return (
+    <div className="bazaar-issue" data-testid="bazaar-issue">
+      {notice === undefined ? null : (
+        <div className="hint" role="alert">
+          {notice}
+        </div>
+      )}
+      {standard.length === 0 ? <div className="hint">Nothing for sale.</div> : null}
+      {standard.map((o) => {
+        const icon = icons[o.item] as string | undefined;
+        const tip = itemTooltip({
+          id: '',
+          slot: 0,
+          item: o.item,
+          name: o.name,
+          category: o.category,
+          template: o.template,
+          mk: o.mk,
+          count: 1,
+          stats: o.stats,
+        });
+        return (
+          <div key={o.template} className="bazaar-row" title={tip} data-testid={`issue-${o.item}`}>
+            {icon === undefined ? (
+              <span className="inventory-initials">{itemInitials(o.name)}</span>
+            ) : (
+              <img
+                className="inventory-icon"
+                src={icon}
+                width={ITEM_ICON_PX}
+                height={ITEM_ICON_PX}
+                alt=""
+                draggable={false}
+              />
+            )}
+            <span className="bazaar-what">
+              {o.name} · Mk {mkNumeral(o.mk)}
+            </span>
+            <span className="bazaar-price">{formatCredits(o.price)}</span>
+            <button
+              type="button"
+              disabled={here === 0 || pending || (credits !== null && credits < o.price)}
+              title={here === 0 ? NOT_HERE : undefined}
+              onClick={() => {
+                buyStandard(o.template, o.price);
+              }}
+            >
+              Buy
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

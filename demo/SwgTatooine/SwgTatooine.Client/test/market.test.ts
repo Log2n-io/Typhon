@@ -107,8 +107,10 @@ describe('the fees', () => {
 });
 
 describe('a refusal', () => {
-  it('reads every reason of § 3.1, 151-163 in order, and NotInWorld reused', () => {
-    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 13 }, (_, i) => 151 + i)]);
+  it('reads every reason of § 3.1, 151-163 in order, the workshop 164-176, and NotInWorld reused', () => {
+    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 26 }, (_, i) => 151 + i)]);
+    expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
+    expect(marketRefusal(MarketReason.StanceNoWeapon)).toContain('weapon');
     expect(marketRefusal(MarketReason.Sold)).toBe('Sold to someone else first');
     expect(marketRefusal(MarketReason.NotEnough)).toBe('Not enough credits');
     expect(marketRefusal(MarketReason.NotAtBazaar)).toContain('bazaar terminal');
@@ -126,8 +128,18 @@ describe('a command', () => {
   it('goes on the wire by its catalog name and codec fields, a 64-bit id as a bigint', () => {
     expect(marketWire({ kind: 'list', template: 8, mk: 2, quantity: 20, unitPrice: 3 })).toEqual({
       name: 'MarketList',
-      values: { template: 8, mk: 2, quantity: 20, unitPrice: 3 },
+      values: { template: 8, mk: 2, quantity: 20, unitPrice: 3, item: 0n },
     });
+    expect(marketWire({ kind: 'list', template: 69, mk: 1, quantity: 1, unitPrice: 900, item: '65544' })).toEqual({
+      name: 'MarketList',
+      values: { template: 69, mk: 1, quantity: 1, unitPrice: 900, item: 65544n },
+    });
+    expect(marketWire({ kind: 'standard', template: 69, price: 1812 })).toEqual({
+      name: 'BuyStandard',
+      values: { template: 69, price: 1812 },
+    });
+    expect(marketWire({ kind: 'equip', item: '65544' })).toEqual({ name: 'Equip', values: { item: 65544n } });
+    expect(marketWire({ kind: 'unequip', slot: 101 })).toEqual({ name: 'Unequip', values: { slot: 101 } });
     expect(marketWire({ kind: 'buy', listing: '18446744073709551615', unitPrice: 3 })).toEqual({
       name: 'MarketBuy',
       values: { listing: 18446744073709551615n, unitPrice: 3 },
@@ -142,6 +154,8 @@ describe('a command', () => {
     expect(commandRow({ kind: 'buy', listing: '7', unitPrice: 1 })).toBe('7');
     expect(commandRow({ kind: 'collect', listing: '0' })).toBe('all');
     expect(commandRow({ kind: 'vendor', template: 8, mk: 1, quantity: 1 })).toBe('sell');
+    expect(commandRow({ kind: 'standard', template: 69, price: 1812 })).toBe('issue');
+    expect(commandRow({ kind: 'unequip', slot: 101 })).toBe('gear');
   });
 });
 

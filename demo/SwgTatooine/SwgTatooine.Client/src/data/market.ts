@@ -1,3 +1,4 @@
+import type { ItemStats } from './items';
 import { CITIES } from './world-data';
 
 /**
@@ -291,6 +292,19 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   161: 'You cannot buy your own listing',
   162: 'The server could not apply it — nothing changed, try again',
   163: 'The vendor will not buy that',
+  164: 'That cannot be worn, or is not yours',
+  165: 'Your combat level is too low for that Mk',
+  166: 'No room in your inventory to take it off',
+  167: 'The server could not apply it — nothing changed, try again',
+  168: 'Equip a weapon for that stance first',
+  169: 'Stand at a crafting station to start a craft',
+  170: 'Finish the craft under way first',
+  171: 'No craft under way',
+  172: 'Those inputs are not in your inventory',
+  173: 'No point left, or no such line',
+  174: 'No room in your inventory for the result',
+  175: 'Not enough credits for the bench fee',
+  176: 'The server could not apply it — nothing changed, try again',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -309,6 +323,11 @@ export const MarketReason = {
   OwnListing: 161,
   Failed: 162,
   Worthless: 163,
+  EquipNotYours: 164,
+  EquipLevel: 165,
+  EquipNoRoom: 166,
+  EquipFailed: 167,
+  StanceNoWeapon: 168,
 } as const;
 
 /**
@@ -331,12 +350,39 @@ export type MarketCommand =
       readonly mk: number;
       readonly quantity: number;
       readonly unitPrice: number;
+      /** An item with stats, listed by its id (`InventoryItem.id`), quantity 1; absent for units. */
+      readonly item?: string;
     }
   | { readonly kind: 'cancel'; readonly listing: string }
   | { readonly kind: 'buy'; readonly listing: string; readonly unitPrice: number }
   /** `listing` `'0'` collects everything of this character's that this city holds, oldest first. */
   | { readonly kind: 'collect'; readonly listing: string }
-  | { readonly kind: 'vendor'; readonly template: number; readonly mk: number; readonly quantity: number };
+  | {
+      readonly kind: 'vendor';
+      readonly template: number;
+      readonly mk: number;
+      readonly quantity: number;
+      readonly item?: string;
+    }
+  /** Standard issue from the vendor (crafting-catalog.md § 15.3), at the price it was shown. */
+  | { readonly kind: 'standard'; readonly template: number; readonly price: number }
+  /** Wear an item with stats (crafting-build.md § 2.2), by its id. */
+  | { readonly kind: 'equip'; readonly item: string }
+  /** Take off what is worn in an equip slot, 101-107. */
+  | { readonly kind: 'unequip'; readonly slot: number }
+  /** Start a craft (crafting-build.md C2): the Mk of each material or core slot in order (0 = the lowest that covers a bulk slot), the parts' ids. */
+  | {
+      readonly kind: 'craftStart';
+      readonly schematic: number;
+      readonly mks: readonly number[];
+      readonly parts: readonly string[];
+    }
+  /** One experimentation point on a line. */
+  | { readonly kind: 'craftPoint'; readonly line: number }
+  /** The add-on, at a Mk. */
+  | { readonly kind: 'craftEnhance'; readonly mk: number }
+  /** Finish the craft of this schematic. */
+  | { readonly kind: 'craftFinish'; readonly schematic: number };
 
 /** The command's name in the server's catalog, and its fields as the codec names them. `null` for a malformed one. */
 export function marketWire(
@@ -351,12 +397,13 @@ export function marketWire(
           mk: command.mk,
           quantity: command.quantity,
           unitPrice: command.unitPrice,
+          item: itemOf(command.item),
         },
       };
     case 'vendor':
       return {
         name: 'SellToVendor',
-        values: { template: command.template, mk: command.mk, quantity: command.quantity },
+        values: { template: command.template, mk: command.mk, quantity: command.quantity, item: itemOf(command.item) },
       };
     case 'cancel':
     case 'collect': {
@@ -370,15 +417,55 @@ export function marketWire(
       const listing = idOf(command.listing);
       return listing === null ? null : { name: 'MarketBuy', values: { listing, unitPrice: command.unitPrice } };
     }
+
+    case 'standard':
+      return { name: 'BuyStandard', values: { template: command.template, price: command.price } };
+    case 'equip': {
+      const item = idOf(command.item);
+      return item === null ? null : { name: 'Equip', values: { item } };
+    }
+
+    case 'unequip':
+      return { name: 'Unequip', values: { slot: command.slot } };
+    case 'craftStart': {
+      const values: Record<string, number | bigint> = { schematic: command.schematic };
+      for (let i = 0; i < 6; i++) {
+        values[`mk${String(i)}`] = command.mks[i] ?? 0;
+        values[`part${String(i)}`] = itemOf(command.parts[i]);
+      }
+
+      return { name: 'CraftStart', values };
+    }
+
+    case 'craftPoint':
+      return { name: 'CraftExperiment', values: { line: command.line } };
+    case 'craftEnhance':
+      return { name: 'CraftEnhance', values: { mk: command.mk } };
+    case 'craftFinish':
+      return { name: 'CraftFinish', values: { schematic: command.schematic } };
   }
 }
 
-/** The row a command is about — where its refusal is shown: the listing, `'all'` for a collect-all, `'sell'` for the Sell tab. */
+/**
+ * The row a command is about — where its refusal is shown: the listing, `'all'` for a collect-all, `'sell'` for the Sell tab, `'issue'` for standard
+ * issue, `'gear'` for an equip or unequip.
+ */
 export function commandRow(command: MarketCommand): string {
   switch (command.kind) {
     case 'list':
     case 'vendor':
       return 'sell';
+    case 'standard':
+      return 'issue';
+    case 'equip':
+    case 'unequip':
+      return 'gear';
+    case 'craftStart':
+    case 'craftEnhance':
+    case 'craftFinish':
+      return 'craft';
+    case 'craftPoint':
+      return `craft-line-${String(command.line)}`;
     case 'collect':
       return command.listing === '0' ? 'all' : command.listing;
     default:
@@ -391,8 +478,47 @@ function idOf(text: string): bigint | null {
   return /^\d+$/.test(text) ? BigInt(text) : null;
 }
 
-/** The bazaar panel's four tabs (§ 6). */
-export type BazaarTab = 'browse' | 'sell' | 'mine' | 'reserved';
+/** An item's id for a command's `item` field: 0 for units (no id). */
+function itemOf(text: string | undefined): bigint {
+  return text === undefined ? 0n : (idOf(text) ?? 0n);
+}
+
+/** The bazaar panel's tabs (§ 6), and the vendor's standard issue (crafting-catalog.md § 15.3). */
+export type BazaarTab = 'browse' | 'sell' | 'mine' | 'reserved' | 'issue';
+
+/** One standard-issue item the vendor sells, as `GET /swg/market/standard` answers it: Mk I, at twice its value. */
+export interface StandardOffer {
+  readonly template: number;
+  readonly item: string;
+  readonly name: string;
+  readonly category: string;
+  readonly mk: number;
+  readonly price: number;
+  readonly stats: ItemStats;
+}
+
+/** `GET /swg/market/standard` checked; `null` for anything else. A malformed row is dropped, not the answer. */
+export function parseStandard(answer: unknown): readonly StandardOffer[] | null {
+  if (typeof answer !== 'object' || answer === null || !Array.isArray((answer as Record<string, unknown>).items)) {
+    return null;
+  }
+
+  return ((answer as Record<string, unknown>).items as unknown[]).filter((v): v is StandardOffer => {
+    if (typeof v !== 'object' || v === null) {
+      return false;
+    }
+
+    const o = v as Record<string, unknown>;
+    return (
+      typeof o.template === 'number' &&
+      typeof o.item === 'string' &&
+      typeof o.name === 'string' &&
+      typeof o.price === 'number' &&
+      typeof o.stats === 'object' &&
+      o.stats !== null
+    );
+  });
+}
 
 /** `GET /swg/market` checked; `null` for anything else. A malformed row is dropped, not the answer. */
 export function parseBrowse(answer: unknown): BrowsePage | null {

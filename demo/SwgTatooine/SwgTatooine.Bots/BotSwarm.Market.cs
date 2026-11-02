@@ -21,6 +21,7 @@ public sealed partial class BotSwarm
     private const string MarketListCommand = "MarketList";
 
     private const string MarketBuyCommand = "MarketBuy";
+    private const string BuyStandardCommand = "BuyStandard";
     private const string MarketCollectCommand = "MarketCollect";
     private const string SellToVendorCommand = "SellToVendor";
 
@@ -97,12 +98,19 @@ public sealed partial class BotSwarm
             ["mk"] = FieldValue.Of((double)c.Mk),
             ["quantity"] = FieldValue.Of((double)c.Quantity),
             ["unitPrice"] = FieldValue.Of((double)c.UnitPrice),
+            ["item"] = FieldValue.OfUInt64(c.Item),
         }),
         MarketStep.Vendor => (SellToVendorCommand, new RecordValues
         {
             ["template"] = FieldValue.Of((double)c.Template),
             ["mk"] = FieldValue.Of((double)c.Mk),
             ["quantity"] = FieldValue.Of((double)c.Quantity),
+            ["item"] = FieldValue.OfUInt64(c.Item),
+        }),
+        MarketStep.Standard => (BuyStandardCommand, new RecordValues
+        {
+            ["template"] = FieldValue.Of((double)c.Template),
+            ["price"] = FieldValue.Of((double)c.UnitPrice),
         }),
         _ => (MarketBuyCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing), ["unitPrice"] = FieldValue.Of((double)c.UnitPrice) }),
     };
@@ -116,6 +124,9 @@ public sealed partial class BotSwarm
         public long MarketVendored;
         public long MarketVendorCredits;
         public long MarketBought;
+
+        /// <summary>Standard-issue items bought (crafting-build.md § 6).</summary>
+        public long StandardBought;
         public long MarketBuyLost;
         public long MarketWon;
         public long MarketCollected;
@@ -139,6 +150,8 @@ public sealed partial class BotSwarm
         private Uri _pricesUri;
         private Uri _browseUri;
         private Uri _walletUri;
+        private Uri _standardUri;
+        private List<StandardOffer> _standard;
 
         /// <summary>The market as last read: its listings and reservations, the prices and when, the stacks held.</summary>
         private volatile MarketMine _mine = MarketMine.None;
@@ -146,6 +159,9 @@ public sealed partial class BotSwarm
         private volatile MarketPrices _prices = MarketPrices.None;
         private DateTime _pricesAt = DateTime.MinValue;
         private volatile List<HeldStack> _held = [];
+
+        // The items with stats it holds, worn or not, as the last inventory read said (crafting-build.md § 2.1).
+        private volatile List<GearItem> _gear = [];
 
         // `/mine` re-read on each `items` revision while the last answer named something — the browser's rule (bazaar.md § 5, "Told").
         private readonly OwnerFieldPoll _minePoll;
@@ -176,6 +192,7 @@ public sealed partial class BotSwarm
             _pricesUri = new Uri(server, "market/prices");
             _browseUri = new Uri(server, "market");
             _walletUri = new Uri(server, "wallet");
+            _standardUri = new Uri(server, "market/standard");
             _marketRng = (uint)((index * 2654435769u) ^ 0x5bd1e995u) | 1u;
             _onWin = options.OnMarketWin;
             _brain.Trades = true;
@@ -287,7 +304,25 @@ public sealed partial class BotSwarm
                 buy = MarketPlan.ChooseBuy(page, prices, band, wallet, mine.ListedIds);
             }
 
-            return MarketPlan.Plan(_held, mine, prices, ref _marketRng, listMaterial, buy);
+            var plan = MarketPlan.Plan(_held, mine, prices, ref _marketRng, listMaterial, buy);
+            if (region != 0 && await StandardAsync().ConfigureAwait(false) is { } issue)
+            {
+                plan.Add(issue);
+            }
+
+            return plan;
+        }
+
+        /// <summary>
+        /// A piece of armour the bot lacks (crafting-build.md § 6, C1's half): the cheapest standard-issue padded piece for a slot nothing is worn in or
+        /// waiting to be, bought when the wallet keeps <see cref="MarketPlan.StandardReserve"/> after it. One a visit; none when all six are covered.
+        /// </summary>
+        private async Task<MarketCommand?> StandardAsync()
+        {
+            var gear = _gear;
+            _standard ??= MarketJson.Standard(await GetAsync(_standardUri).ConfigureAwait(false));
+            var wallet = MarketJson.Credits(await GetAsync(_walletUri).ConfigureAwait(false));
+            return MarketPlan.ChooseStandard(_standard, gear, wallet);
         }
 
         /// <summary>
@@ -361,6 +396,9 @@ public sealed partial class BotSwarm
                     break;
                 case MarketStep.Buy:
                     MarketBought++;
+                    break;
+                case MarketStep.Standard:
+                    StandardBought++;
                     break;
             }
 

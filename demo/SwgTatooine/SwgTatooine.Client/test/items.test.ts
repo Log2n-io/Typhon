@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Catalogue } from '../src/assets/descriptor';
 import {
+  equipped,
+  isEquipSlot,
   itemIcons,
   itemInitials,
   itemTooltip,
@@ -12,6 +14,7 @@ import {
   type InventorySnapshot,
   type LostNote,
 } from '../src/data/items';
+import { parseStandard } from '../src/data/market';
 import { useChat } from '../src/state/chat-store';
 import { useItems } from '../src/state/items-store';
 
@@ -173,5 +176,84 @@ describe('the items store', () => {
     useItems.getState().setIcons({ mat_hide: '/assets/mat_hide_icon32-1.png' });
     useItems.getState().reset();
     expect(useItems.getState().icons).toEqual({ mat_hide: '/assets/mat_hide_icon32-1.png' });
+  });
+});
+
+describe('items with stats (crafting-build.md C1)', () => {
+  const blaster = {
+    id: '65544',
+    slot: 101,
+    item: 'blaster_dl44',
+    name: 'DL-44 Blaster',
+    category: 'weapon',
+    template: 69,
+    mk: 1,
+    count: 1,
+    stats: {
+      damage: 81,
+      delayMs: 1021,
+      rangeDm: 300,
+      condition: 3600000,
+      maxCondition: 3600000,
+      lifeMilli: 1000,
+      repairs: 0,
+      crafter: '0',
+    },
+  };
+
+  it('keeps an instance stats, and drops a stats object that is not one', () => {
+    const snapshot = parseInventory({
+      open: true,
+      slots: 40,
+      items: [blaster, { ...blaster, id: '7', slot: 2, stats: { damage: 1 } }],
+      lost: [],
+    });
+    expect(snapshot?.items[0].stats?.damage).toBe(81);
+    expect(snapshot?.items[1].stats).toBeUndefined();
+  });
+
+  it('says a weapon by its numbers and its condition, not a count', () => {
+    expect(itemTooltip(blaster)).toBe('DL-44 Blaster · Mk I · 81 dmg · 1.02 s · 30 m · condition 100 %');
+    const gloves = {
+      ...blaster,
+      name: 'Padded Gloves',
+      category: 'armor',
+      stats: {
+        kinetic: 120,
+        energy: 100,
+        condition: 3927,
+        maxCondition: 3927,
+        lifeMilli: 1000,
+        repairs: 0,
+        crafter: '0',
+      },
+    };
+    expect(itemTooltip(gloves)).toBe('Padded Gloves · Mk I · kinetic 12 % · energy 10 % · condition 100 %');
+  });
+
+  it('finds what is worn by its equip slot, and the grid leaves it out', () => {
+    const worn = equipped([blaster, item(3, 'Hide', 2, 7)]);
+    expect([...worn.keys()]).toEqual([101]);
+    expect(isEquipSlot(101) && isEquipSlot(107) && !isEquipSlot(40) && !isEquipSlot(108)).toBe(true);
+    expect(slotGrid([blaster], 40).every((c) => c === null)).toBe(true);
+  });
+
+  it('reads the vendor standard issue, a malformed row dropped', () => {
+    const offers = parseStandard({
+      items: [
+        {
+          template: 69,
+          item: 'blaster_dl44',
+          name: 'DL-44 Blaster',
+          category: 'weapon',
+          mk: 1,
+          price: 1812,
+          stats: blaster.stats,
+        },
+        { template: 1 },
+      ],
+    });
+    expect(offers?.map((o) => o.price)).toEqual([1812]);
+    expect(parseStandard({ nope: true })).toBeNull();
   });
 });

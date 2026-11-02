@@ -34,12 +34,16 @@ public sealed partial class SimBridge
         public ushort Template;
         public byte Mk;
         public int Count;
+
+        // An item with stats (SimBridge.Instances.cs): never merged.
+        public bool Instance;
     }
 
-    // A character's grid: Slots[1..30]; Slots[0] unused, so a slot number indexes it.
+    // A character's grid: Slots[1..40]; Slots[0] unused, so a slot number indexes it. And what it wears: Equipped[slot - EquipSlot.First].
     private sealed class OwnerItems
     {
         public readonly ItemSlot[] Slots = new ItemSlot[ItemLedger.Slots + 1];
+        public readonly ItemSlot[] Equipped = new ItemSlot[EquipSlot.Count];
     }
 
     // Per (template, Mk): the counters' index.
@@ -219,27 +223,40 @@ public sealed partial class SimBridge
         _stackByOwner = Dbe.GetIndexRef<ItemStack, long>(s => s.Owner);
         _itemHeadByKey = Dbe.GetIndexRef<ItemLedgerHead, int>(h => h.Key);
         _itemsOf.Clear();
+        _escrowItemOf.Clear();
         var held = new long[ItemKeys];
         var stacks = 0L;
+
+        // The walk fans out over every archetype holding ItemStack (Transaction.EnumerateIndex): the item instances come with the stacks.
         using (var found = tx.EnumerateIndex<ItemStack, long>(_stackByOwner, long.MinValue, long.MaxValue))
         {
             while (found.MoveNext())
             {
                 var s = found.CurrentComponent;
-                if (s.Slot is < 1 or > ItemLedger.Slots)
+                var id = EntityId.FromRawValue((ulong)found.CurrentEntityPK);
+                var instance = IsInstance(id);
+                if (instance && IsListing(s.Owner))
                 {
-                    // Outside the grid: an item a later feature keeps elsewhere (equipped). Nothing here moves it.
+                    // In a listing's escrow: the listing's, not held.
+                    _escrowItemOf[s.Owner] = id;
                     continue;
                 }
 
-                var items = ItemsOf(s.Owner);
-                items.Slots[s.Slot] = new ItemSlot
+                var slot = new ItemSlot { Stack = id, Template = s.Template, Mk = s.Mk, Count = s.Count, Instance = instance };
+                if (instance && EquipSlot.IsEquip(s.Slot))
                 {
-                    Stack = EntityId.FromRawValue((ulong)found.CurrentEntityPK),
-                    Template = s.Template,
-                    Mk = s.Mk,
-                    Count = s.Count,
-                };
+                    ItemsOf(s.Owner).Equipped[s.Slot - EquipSlot.First] = slot;
+                }
+                else if (s.Slot is >= 1 and <= ItemLedger.Slots)
+                {
+                    ItemsOf(s.Owner).Slots[s.Slot] = slot;
+                }
+                else
+                {
+                    // Nowhere this code puts anything: the audit names it; nothing here moves it.
+                    continue;
+                }
+
                 held[KeyOf(s.Template, s.Mk)] += s.Count;
                 stacks++;
             }
@@ -370,9 +387,11 @@ public sealed partial class SimBridge
     /// </para>
     /// <para><b>Never throws</b>: a transfer the validation refuses — a bad count or side, an unknown template, a Mk its rule refuses, a side with no wallet, a
     /// debit it does not cover — writes nothing, is counted, and returns 0.</para>
+    /// <para><b>An item with stats moves as itself</b> (<see cref="InstanceTransfer"/>): one, whole — <paramref name="item"/> when it leaves a character.</para>
     /// </remarks>
     /// <returns>The units placed; what did not fit is the caller's to report.</returns>
-    private int ItemTransfer(Transaction tx, long from, long to, ushort template, byte mk, int count, byte kind, long reference, long worldTick)
+    private int ItemTransfer(Transaction tx, long from, long to, ushort template, byte mk, int count, byte kind, long reference, long worldTick,
+        EntityId item = default)
     {
         var fromListing = IsListing(from);
         var toListing = IsListing(to);
@@ -384,6 +403,11 @@ public sealed partial class SimBridge
         }
 
         EnsureItems(tx);
+        if (ItemCatalog.HasStats(template))
+        {
+            return InstanceTransfer(tx, from, to, template, mk, count, kind, reference, worldTick, item);
+        }
+
         if (fromListing || toListing)
         {
             return EscrowTransfer(tx, from, to, fromListing, template, mk, count, kind, reference, worldTick);
@@ -526,17 +550,19 @@ public sealed partial class SimBridge
         return n;
     }
 
+    /// <summary>How many units of the key fit: a free slot holds a stack, or one item with stats; a stack of the key, the rest of its 99.</summary>
     private static int RoomFor(OwnerItems items, ushort template, byte mk)
     {
         var n = 0;
+        var perSlot = ItemCatalog.HasStats(template) ? 1 : ItemLedger.StackMax;
         for (var s = 1; s <= ItemLedger.Slots; s++)
         {
             ref readonly var slot = ref items.Slots[s];
             if (slot.Count == 0)
             {
-                n += ItemLedger.StackMax;
+                n += perSlot;
             }
-            else if (slot.Template == template && slot.Mk == mk)
+            else if (!slot.Instance && slot.Template == template && slot.Mk == mk)
             {
                 n += ItemLedger.StackMax - slot.Count;
             }
@@ -551,7 +577,7 @@ public sealed partial class SimBridge
         for (var s = 1; s <= ItemLedger.Slots; s++)
         {
             ref readonly var slot = ref items.Slots[s];
-            if (slot.Count > 0 && slot.Count < ItemLedger.StackMax && slot.Template == template && slot.Mk == mk)
+            if (slot.Count > 0 && slot.Count < ItemLedger.StackMax && !slot.Instance && slot.Template == template && slot.Mk == mk)
             {
                 return s;
             }

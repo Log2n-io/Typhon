@@ -1,7 +1,16 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral, slotGrid, type InventoryItem } from '../data/items';
+import {
+  EQUIP_SLOTS,
+  equipped,
+  ITEM_ICON_PX,
+  itemInitials,
+  itemTooltip,
+  mkNumeral,
+  slotGrid,
+  type InventoryItem,
+} from '../data/items';
 import { formatCredits } from '../data/wallet';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
@@ -9,7 +18,7 @@ import { useMissions } from '../state/mission-store';
 import { useWallet } from '../state/wallet-store';
 
 /** The item grid's slots before the first read; the server's answer carries its own (`slots`). */
-export const INVENTORY_SLOTS = 30;
+export const INVENTORY_SLOTS = 40;
 
 /**
  * The inventory (economy-foundation.md E0-10, inventory-loot.md § 6): the character's items in their slots and its credits
@@ -21,6 +30,9 @@ export const INVENTORY_SLOTS = 30;
  *
  * <b>With the bazaar open</b> (bazaar.md § 6), a click on a stack picks it for the Sell tab. Units in a listing are not in
  * the grid: they left the inventory when it was listed.
+ *
+ * <b>What it wears</b> (crafting-build.md § 2.2) sits on the strip above the grid, one slot per piece: a click there takes it off, and a click on an
+ * item with stats in the grid puts it on — swapped with what was worn in its slot. The server refuses below the Mk's combat level, and says why here.
  */
 export function InventoryWindow() {
   const open = useWallet((s) => s.inventoryOpen);
@@ -31,6 +43,7 @@ export function InventoryWindow() {
   const icons = useItems((s) => s.icons);
   const bazaarOpen = useMarket((s) => s.open);
   const pick = useMarket((s) => s.sell.stack);
+  const gearNotice = useMarket((s) => s.rowNotices.gear);
   if (!open) {
     return null;
   }
@@ -41,7 +54,13 @@ export function InventoryWindow() {
         market.selectStack(id);
         market.setTab('sell');
       }
-    : null;
+    : (id: string) => {
+        const item = inventory?.items.find((i) => i.id === id);
+        if (item?.stats !== undefined) {
+          useMarket.getState().equip(id);
+        }
+      };
+  const worn = equipped(inventory?.items ?? []);
 
   const cells = slotGrid(inventory?.items ?? [], inventory?.slots ?? INVENTORY_SLOTS);
   return (
@@ -59,6 +78,36 @@ export function InventoryWindow() {
           ✕
         </button>
       </div>
+      <div className="inventory-equip" aria-label="Equipped">
+        {EQUIP_SLOTS.map(({ slot, label }) => {
+          const item = worn.get(slot);
+          return item === undefined ? (
+            <div
+              key={slot}
+              className="inventory-slot equip-empty"
+              title={label}
+              data-testid={`equip-slot-${String(slot)}`}
+            >
+              <span className="inventory-initials">{label[0]}</span>
+            </div>
+          ) : (
+            <ItemSlot
+              key={slot}
+              item={item}
+              icon={icons[item.item]}
+              picked={false}
+              onPick={() => {
+                useMarket.getState().unequip(slot);
+              }}
+            />
+          );
+        })}
+      </div>
+      {gearNotice === undefined ? null : (
+        <div className="hint" role="alert">
+          {gearNotice}
+        </div>
+      )}
       <div className="inventory-grid" aria-label="Items">
         {cells.map((item, i) =>
           item === null ? (
@@ -93,7 +142,7 @@ function ItemSlot({
   readonly icon: string | undefined;
   /** Whether it is the stack the bazaar's Sell tab holds. */
   readonly picked: boolean;
-  /** Picks it for the bazaar's Sell tab; `null` with the bazaar closed. */
+  /** Picks it for the bazaar's Sell tab with the bazaar open; wears or takes it off with it closed. */
   readonly onPick: ((id: string) => void) | null;
 }) {
   const tip = itemTooltip(item);
