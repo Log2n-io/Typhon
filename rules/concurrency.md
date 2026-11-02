@@ -335,10 +335,13 @@ lock ordering and deadlock prevention are still to come.
             positioning faults: a window's pins are slot references, and nothing else releases them
   invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator: a transaction's, and any of LongWalkClusters or more; a
             shorter walk on a lease is bounded by the lease; a ClusterRef is valid for its step, EP-03, and MoveNext records a page handed out before it
-            moves), an ordered query's merge streams (ArchetypeSortedStream, tree and
-            clusters), a spatial query past LongWalkClusters (SpatialQueryAccessorCache), a navigation's entity-map walk and its FK reverse lookup, and an
-            AllowMultiple key's value buffer in a walk (GetBufferReadOnlyAccessor without an accessor; an empty chunk it unlinks, it writes under the page's
-            latch). A point read of one key keeps the regular reader: TryGetMultiple's cost is the key's own length
+            moves), an ordered query's merge streams (ArchetypeSortedStream, tree and clusters, their windows narrowed to share a quarter of the cache, down to
+            two slots each: KWayMergeState.WindowSlots, a merge has no point to let go of them at; that budget is per merge, not per engine), a spatial query of
+            any shape past a sixteenth of the cache in clusters (SpatialQueryAccessorCache.Entry.OpenCluster, the only way a query opens one), a
+            navigation's entity-map walk and its FK reverse lookup, a fence's reclamation (ArchetypeClusterState.DrainPendingClusterFinalizations: the occupancy
+            it reads and the bitmap it frees in, ChunkBasedSegment.FreeChunkReleasingPage, under one scope a fence cannot move) and an AllowMultiple key's value
+            buffer in a walk (GetBufferReadOnlyAccessor without an accessor; an empty chunk it unlinks, it writes under the page's latch). A point read of one
+            key keeps the regular reader: TryGetMultiple's cost is the key's own length
   invariant a transaction's cluster walk of LongWalkClusters or more yields at every 64th cluster, and its back-pressure wait moves the epoch; a PTA worker's
             does not (EntityAccessor.NoteEntityOpen): a lease holds a bounded set of its own pages, and what other threads tag for as long as it lasts
   note an ordered query's merge and a spatial query have no yield point: each holds a bounded set of its own pages and its epoch for the length of the call,
@@ -363,8 +366,7 @@ lock ordering and deadlock prevention are still to come.
             a node stays unreclaimed for the pin it was read under, not for the cursor that stands on it, and a recycled node restarts at version 4, so
             at the version the cursor remembers another node validates and the scan reads its entries, silently (a walk lost every key from 4 000 up
             in BTreeRangeScanRestartTests). A cursor whose thread refreshed, in a tree that retired a leaf since it last looked (BTree._leafRetirements, counted
-            before the retire stamp is read), finds its place again from its last key. So an
-            index enumerator's own refresh (Transaction.IndexEntityEnumerator, the walk has no other point to make it at) is safe under its live
+            before the retire stamp is read), finds its place again from its last key. So an index enumerator's own refresh (Transaction.IndexEntityEnumerator, the walk has no other point to make it at) is safe under its live
             cursor, and under any other this thread holds; the other per-operation refreshes still wait for no cursor to be live
   invariant a back-pressure wait inside such a walk moves the waiting thread's epoch, with its warm accessors' (#1230): PagedMMF.RefreshableWaitDepth,
             entered by the walks a query passes a yield point to. Every page such a walk holds is a scan accessor's slot-reference pin, so the epoch
@@ -433,15 +435,17 @@ lock ordering and deadlock prevention are still to come.
   invariant the rollback of a commit that failed before its append moves its epoch between its entries while the cache is under pressure, as the
             publish does (Transaction.RefreshBetweenCommitSteps): the spawns it un-places (UnplaceSpawns), the revisions it voids (RollbackComponent),
             the pending deaths it clears (UnmarkDestroysPending) and the spawned chunks and copy-on-write chunks the dispose frees (CleanupEcsState); and
-            a unit of work gives its marks back before its registry write, which needs a page (UnitOfWork.Dispose). An entry keeps nothing it read for the next. Held for the whole rollback, the
-            failed commit's pin kept the cache its commit had filled, so the rollback met the same wall and so did the dispose's retry (#831). The
+            a unit of work gives its marks back before its registry write, which needs a page (UnitOfWork.Dispose). An entry keeps nothing it read for the
+            next. Held for the whole rollback, the failed commit's pin kept the cache its commit had filled, so the rollback met the same wall and so did the dispose's retry (#831). The
             placement before the append does NOT move its epoch, on purpose: its pin makes an oversized commit meet the wall in PREPARE, where it is
             refused (PS-22); moved on, the commit reached its publish, which keeps every mark it takes, and stopped the engine (AP-03)
   never epoch-tag the pages of a read whose length grows with the data: the tags pin every page for the caller's whole scope, and a
         transaction's scope lasts until its next epoch refresh, up to 128 opens, spawns or enumerated entities later (EP-03)
   scope: PagedMMF.AcquirePageForRead, PagedMMF.ReleasePageForRead, IPageStore.AcquirePageForRead, IPageStore.ReleasePageForRead,
-         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, LeafPageCursorState, Transaction.UnmarkDestroysPending, UnitOfWork.Dispose, ClusterEnumerator, ArchetypeSortedStream, SpatialQueryAccessorCache,
-         NavigationView.PopulateFromEntityMaps, FkReverseLookup, EntityAccessor.BeginScanYield, PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
+         BTree.RangeEnumerator, EpochManager.ThreadRefreshCount, LeafPageCursorState, Transaction.UnmarkDestroysPending, UnitOfWork.Dispose, ClusterEnumerator,
+         ArchetypeSortedStream, KWayMergeState.WindowSlots, SpatialQueryAccessorCache, NavigationView.PopulateFromEntityMaps, FkReverseLookup,
+         ArchetypeClusterState.DrainPendingClusterFinalizations, ChunkBasedSegment.FreeChunkReleasingPage, EntityAccessor.BeginScanYield,
+         PagedMMF.RefreshableWaitDepth, PagedMMF.RestartableOpenDepth, BackpressureOpenRestart,
          Transaction.ResolveEntity, PagedMMF.AwaitPageAfterOpenRestart, Transaction.Dispose, UowRegistry.TryClaimFreeSlot,
          PagedMMF.RestartForLockWithin, PagedMMF.OpenRestartAllowed, Transaction.EcsVersionedCopyOnWrite, RevisionEnumerator,
          ComponentRevisionManager.AddCompRev,
@@ -475,9 +479,10 @@ lock ordering and deadlock prevention are still to come.
   note: read-only reads only. Crash recovery's write passes (replay, rebuilds, scrubs) release their pages at batch points (CK-08). A write
         outside recovery keeps its pages resident by its ChangeSet's marks until its next release point: a transaction's epoch refresh (every
         128 operations), PREPARE's component pass (every 1 024 entries), the publish, a failed commit's rollback and the frees of the reset after it,
-        between entries under pressure (#831), or once a quarter of the cache is under the commit's own marks: an entry that meets a full cache cannot step
-        out to give them back, and a publish waiting on its own marks stops the engine. Each also gives back what the windows deferred: kept, a rollback of 4M updates held the whole cache
-        by slot reference, and a free left under one pin timed out of Dispose, which replaced the commit's own refusal. The spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted
+        between entries under pressure (#831), and whatever the pressure flag says at every sixteenth of the cache in entries or a quarter of it under its own marks:
+        the flag is raised by a wall already met, an entry that meets one cannot step out to give back what it holds, and a publish waiting on its own marks stops the engine. Each also gives back what the windows deferred: kept, a rollback of
+        4M updates held the whole cache by slot reference, and a free left under one pin timed out of Dispose, which replaced the commit's own refusal. The
+        spawn placement has none (above), so a commit whose PREPARE needs more than the cache is refused (PS-22). EP-01's other latent sites are not converted
   verified: WholeSegmentScanTests — a segment four times the cache: the load scan, an allocation's search across room bits on full pages and
             the chain walk complete inside
             one epoch scope, and each fails with every one of the 128 slots epoch-protected when its reads are epoch-tagged again
@@ -541,8 +546,8 @@ lock ordering and deadlock prevention are still to come.
             until its enumerator's next MoveNext or Dispose; the enumerator's own accessor holds the current page for that long. Under
             strict mode (CheckConfig.Enabled) a ClusterRef used after its step throws, from every data member
   invariant so the epoch may be refreshed at any call boundary: a transaction refreshes it every 128 entity opens
-            (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns, every 128 destroys, every 128 index lookups and every
-            128 index entries examined, whether the snapshot sees them or not: a walk of rows newer than its snapshot reads the same pages and emits
+            (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns, every 128 destroys, every 128 cluster walks, every 128
+            archetypes a spatial query reads, every 128 entries of a view's refresh, every 128 index lookups and every 128 index entries examined, whether the snapshot sees them or not: a walk of rows newer than its snapshot reads the same pages and emits
             nothing. The count of a lookup is the transaction's, since each lookup is a new enumerator, and a refresh gives back what the
             transaction's accessors deferred, whichever of them left the page: drained through its opened entities alone, a walk that opened none
             kept every page it left slot-referenced until its enumerator's Dispose. Its

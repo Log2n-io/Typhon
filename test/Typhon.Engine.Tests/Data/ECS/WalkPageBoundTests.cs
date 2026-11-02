@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using System;
 using System.Collections.Generic;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
@@ -89,6 +90,106 @@ class WbSpatialArch : Archetype<WbSpatialArch>
     public static readonly Comp<WbSpatial> Row = Register<WbSpatial>();
 }
 
+[Component("Typhon.Test.WalkBound.Merged", 1, StorageMode = StorageMode.SingleVersion)]
+unsafe struct WbMerged
+{
+    [Index]
+    public int Key;
+
+    public fixed byte Payload[108];
+}
+
+[Archetype]
+class WbMergedArch : Archetype<WbMergedArch>
+{
+    public static readonly Comp<WbMerged> Row = Register<WbMerged>();
+}
+
+[Archetype]
+class WbMerged1 : Archetype<WbMerged1, WbMergedArch>
+{
+}
+
+[Archetype]
+class WbMerged2 : Archetype<WbMerged2, WbMergedArch>
+{
+}
+
+[Archetype]
+class WbMerged3 : Archetype<WbMerged3, WbMergedArch>
+{
+}
+
+[Archetype]
+class WbMerged4 : Archetype<WbMerged4, WbMergedArch>
+{
+}
+
+[Archetype]
+class WbMerged5 : Archetype<WbMerged5, WbMergedArch>
+{
+}
+
+[Archetype]
+class WbMerged6 : Archetype<WbMerged6, WbMergedArch>
+{
+}
+
+[Archetype]
+class WbMerged7 : Archetype<WbMerged7, WbMergedArch>
+{
+}
+
+[Component("Typhon.Test.WalkBound.MergedVersioned", 1, StorageMode = StorageMode.Versioned)]
+unsafe struct WbMergedVer
+{
+    [Index]
+    public int Key;
+
+    public fixed byte Payload[108];
+}
+
+[Archetype]
+class WbMergedVerArch : Archetype<WbMergedVerArch>
+{
+    public static readonly Comp<WbMergedVer> Row = Register<WbMergedVer>();
+}
+
+[Archetype]
+class WbMergedVer1 : Archetype<WbMergedVer1, WbMergedVerArch>
+{
+}
+
+[Archetype]
+class WbMergedVer2 : Archetype<WbMergedVer2, WbMergedVerArch>
+{
+}
+
+[Archetype]
+class WbMergedVer3 : Archetype<WbMergedVer3, WbMergedVerArch>
+{
+}
+
+[Archetype]
+class WbMergedVer4 : Archetype<WbMergedVer4, WbMergedVerArch>
+{
+}
+
+[Archetype]
+class WbMergedVer5 : Archetype<WbMergedVer5, WbMergedVerArch>
+{
+}
+
+[Archetype]
+class WbMergedVer6 : Archetype<WbMergedVer6, WbMergedVerArch>
+{
+}
+
+[Archetype]
+class WbMergedVer7 : Archetype<WbMergedVer7, WbMergedVerArch>
+{
+}
+
 [Archetype]
 class WbSingleArch : Archetype<WbSingleArch>
 {
@@ -113,6 +214,12 @@ class WbVersionedArch : Archetype<WbVersionedArch>
 class WalkPageBoundTests : TestBase<WalkPageBoundTests>
 {
     private const int Entities = 30_000;
+
+    /// <summary>
+    /// A spawn batch over the cache, at the 8 MiB floor: a cache under it has no slot reserve (PS-24), and there the checkpoint's own read of the UoW registry,
+    /// after a cycle the batch had refilled the cache behind, waited for a slot only its next cycle could free, until the batch timed out (2 MiB, under load).
+    /// </summary>
+    private const int BatchEntities = 80_000;
     private const int Batch = 1000;
     private const int HeldPagesBound = 320;
 
@@ -521,6 +628,168 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     }
 
     /// <summary>
+    /// A merge has no point at which to let go of its windows, and each stream's hold 32 pages of clusters and as many of leaves: eight archetypes filled a
+    /// 256-slot cache by themselves, and the merge timed out on the pins of its own streams. Their windows now share a quarter of the cache.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void AnOrderedQueryOverManyArchetypes_StaysInsideASmallCache()
+    {
+        const int perArchetype = 6_000;
+        const int archetypes = 8;
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSingle>();
+        dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.RegisterComponentFromAccessor<WbPlain>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
+        dbe.RegisterComponentFromAccessor<WbMerged>();
+        dbe.RegisterComponentFromAccessor<WbMergedVer>();
+        dbe.InitializeArchetypes();
+
+        for (var first = 0; first < perArchetype * archetypes; first += Batch)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var key = first; key < first + Batch; key++)
+            {
+                var row = new WbMerged { Key = key };
+                switch (key % archetypes)
+                {
+                    case 0: tx.Spawn<WbMergedArch>(WbMergedArch.Row.Set(in row)); break;
+                    case 1: tx.Spawn<WbMerged1>(WbMergedArch.Row.Set(in row)); break;
+                    case 2: tx.Spawn<WbMerged2>(WbMergedArch.Row.Set(in row)); break;
+                    case 3: tx.Spawn<WbMerged3>(WbMergedArch.Row.Set(in row)); break;
+                    case 4: tx.Spawn<WbMerged4>(WbMergedArch.Row.Set(in row)); break;
+                    case 5: tx.Spawn<WbMerged5>(WbMergedArch.Row.Set(in row)); break;
+                    case 6: tx.Spawn<WbMerged6>(WbMergedArch.Row.Set(in row)); break;
+                    default: tx.Spawn<WbMerged7>(WbMergedArch.Row.Set(in row)); break;
+                }
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var read = dbe.CreateReadOnlyTransaction();
+        var rows = read.Query<WbMergedArch>().WhereField<WbMerged>(x => x.Key >= 0).OrderByField<WbMerged, int>(x => x.Key).ExecuteOrdered();
+
+        Assert.That(rows, Has.Count.EqualTo(perArchetype * archetypes));
+        for (var i = 0; i < rows.Count; i += 4_001)
+        {
+            Assert.That(read.Open(rows[i]).Read(WbMergedArch.Row).Key, Is.EqualTo(i), "in key order, across the archetypes");
+        }
+    }
+
+    /// <summary>
+    /// A row a later commit touched sends the merge to its stream's entity map, through a window of the same two slots: eight Versioned archetypes on 256
+    /// slots is the narrowest a merge runs at, and the map's reads must not outlive the cluster's. What the snapshot saw comes back, in order, and nothing else.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void AVersionedMergeAtItsNarrowestWindows_AnswersAtItsSnapshot()
+    {
+        const int perArchetype = 3_000;
+        const int archetypes = 8;
+        var total = perArchetype * archetypes;
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSingle>();
+        dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.RegisterComponentFromAccessor<WbPlain>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
+        dbe.RegisterComponentFromAccessor<WbMerged>();
+        dbe.RegisterComponentFromAccessor<WbMergedVer>();
+        dbe.InitializeArchetypes();
+        Assert.That(KWayMergeState.WindowSlots(archetypes, dbe.MMF.CacheSlotCount), Is.EqualTo(2), "premise: the narrowest windows");
+
+        static EntityId Spawn(Transaction tx, int key)
+        {
+            var row = new WbMergedVer { Key = key };
+            return (key % archetypes) switch
+            {
+                0 => tx.Spawn<WbMergedVerArch>(WbMergedVerArch.Row.Set(in row)),
+                1 => tx.Spawn<WbMergedVer1>(WbMergedVerArch.Row.Set(in row)),
+                2 => tx.Spawn<WbMergedVer2>(WbMergedVerArch.Row.Set(in row)),
+                3 => tx.Spawn<WbMergedVer3>(WbMergedVerArch.Row.Set(in row)),
+                4 => tx.Spawn<WbMergedVer4>(WbMergedVerArch.Row.Set(in row)),
+                5 => tx.Spawn<WbMergedVer5>(WbMergedVerArch.Row.Set(in row)),
+                6 => tx.Spawn<WbMergedVer6>(WbMergedVerArch.Row.Set(in row)),
+                _ => tx.Spawn<WbMergedVer7>(WbMergedVerArch.Row.Set(in row)),
+            };
+        }
+
+        var ids = new EntityId[total];
+        for (var first = 0; first < total; first += Batch)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var key = first; key < Math.Min(first + Batch, total); key++)
+            {
+                ids[key] = Spawn(tx, key);
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        using var read = dbe.CreateReadOnlyTransaction();
+
+        // After the snapshot: rows it still sees are gone, and rows it must not see arrive, in every archetype.
+        for (var first = 0; first < total; first += Batch)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var key = first; key < Math.Min(first + Batch, total); key += 5)
+            {
+                tx.Destroy(ids[key]);
+                Spawn(tx, total + key);
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        var rows = read.Query<WbMergedVerArch>().WhereField<WbMergedVer>(x => x.Key >= 0).OrderByField<WbMergedVer, int>(x => x.Key).ExecuteOrdered();
+
+        Assert.That(rows, Has.Count.EqualTo(total), "what the snapshot saw: the destroyed rows, and none of the later ones");
+        for (var i = 0; i < total; i++)
+        {
+            if (rows[i] != ids[i])
+            {
+                Assert.Fail($"row {i}: {rows[i]}, not {ids[i]}");
+            }
+        }
+    }
+
+    /// <summary>Every stream's windows, at the widest that leaves the merge a quarter of the cache: as wide as they ever were when that is enough.</summary>
+    [TestCase(1, 32_768, 32)]
+    [TestCase(64, 32_768, 32)]
+    [TestCase(64, 8_192, 8)]
+    [TestCase(11, 1_024, 4)]
+    [TestCase(8, 256, 2)]
+    [TestCase(200, 256, 2)]
+    [TestCase(0, 256, 32)]
+    public void AMergesWindows_ShareAQuarterOfTheCache(int streams, int cacheSlots, int expected) =>
+        Assert.That(KWayMergeState.WindowSlots(streams, cacheSlots), Is.EqualTo(expected));
+
+    /// <summary>A loop of walks too short for a yield point reads as many pages as one long walk, and each new enumerator looked like the first.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-03")]
+    public void ALoopOfShortClusterWalks_MovesItsEpoch()
+    {
+        var dbe = Build(Storage.Single);
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var pinned = dbe.EpochManager.CurrentThreadPinnedEpoch;
+        for (var i = 0; i < 2 * EntityAccessor.EpochRefreshInterval; i++)
+        {
+            using var walk = tx.GetClusterEnumerator<WbSingleArch>(0, 1);
+            Assert.That(walk.MoveNext(), Is.True);
+        }
+
+        Assert.That(dbe.EpochManager.CurrentThreadPinnedEpoch, Is.GreaterThan(pinned), "the loop ran under one epoch");
+    }
+
+    /// <summary>
     /// An index on near-distinct keys has one value buffer per key, and each buffer's reader tagged the pages it read. Two archetypes holding the component
     /// read their trees whole inside <c>EnumerateIndex</c>, with no walk to refresh for them: the call died before it returned.
     /// </summary>
@@ -565,15 +834,84 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         Assert.That(rows, Is.EqualTo(Entities));
     }
 
-    /// <summary>A spatial query over the whole world walks every cluster in a window that tagged each page: it died before its first row.</summary>
-    [TestCase(false)]
-    [TestCase(true)]
-    [CancelAfter(60_000)]
-    [NonParallelizable] // LongWalkClusters is process-wide
-    [VerifiesRule("EP-02")]
-    public void ASpatialQueryOverTheWholeWorld_HoldsABoundedSetOfPages(bool count)
+    public enum SpatialShape
     {
-        const float extent = 2_000f;
+        BoxExecute,
+        BoxCount,
+        Radius,
+        Frustum,
+        Nearest,
+    }
+
+    /// <summary>
+    /// A spatial query over the whole world walks every cluster in a window that tagged each page: it died before its first row. Whatever its shape, and on a
+    /// cache smaller than the absolute threshold, which this world never reaches.
+    /// </summary>
+    [TestCase(SpatialShape.BoxExecute)]
+    [TestCase(SpatialShape.BoxCount)]
+    [TestCase(SpatialShape.Radius)]
+    [TestCase(SpatialShape.Frustum)]
+    [TestCase(SpatialShape.Nearest)]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void ASpatialQueryOverTheWholeWorld_HoldsABoundedSetOfPages(SpatialShape shape)
+    {
+        var dbe = SpatialWorld();
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var whole = tx.Query<WbSpatialArch>();
+        double far = 2 * SpatialExtent;
+        int rows;
+        switch (shape)
+        {
+            case SpatialShape.BoxExecute:
+                rows = whole.WhereInAABB<WbSpatial>(-far, -far, -1, far, far, 2).Execute().Count;
+                break;
+            case SpatialShape.BoxCount:
+                rows = whole.WhereInAABB<WbSpatial>(-far, -far, -1, far, far, 2).Count();
+                break;
+            case SpatialShape.Radius:
+                rows = whole.WhereNearby<WbSpatial>(0, 0, 0, 2 * far).Count();
+                break;
+            case SpatialShape.Frustum:
+                double[] planes = [1, 0, 0, far, -1, 0, 0, far, 0, 1, 0, far, 0, -1, 0, far, 0, 0, 1, 10, 0, 0, -1, 10];
+                rows = whole.WhereFrustum<WbSpatial>(planes, 6, -far, -far, -10, far, far, 10).Count();
+                break;
+            default:
+                var hits = new (long entityId, double distSq)[Entities];
+                rows = dbe._archetypeStates[Archetype<WbSpatialArch>.Metadata.ArchetypeId].ClusterState.QueryNearest(dbe.Realm0Grid, 0, 0, 0, Entities, hits,
+                    categoryMask: 0);
+                break;
+        }
+
+        Assert.That(rows, Is.EqualTo(Entities));
+        var (slotReferenced, epochProtected) = Held(dbe);
+        Assert.That(epochProtected, Is.LessThan(HeldPagesBound / 4), "the query kept the clusters it read epoch-held for the transaction");
+        Assert.That(slotReferenced, Is.LessThanOrEqualTo(40), "what stays pinned is the warm window's 32: the query's scan window went with its rent");
+    }
+
+    /// <summary>Queries near an actor each tag a few pages, and in one transaction they added up to the cache: nothing on their path moved the epoch.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("EP-03")]
+    public void ALoopOfSpatialQueries_MovesItsEpoch()
+    {
+        var dbe = SpatialWorld();
+        using var tx = dbe.CreateReadOnlyTransaction();
+        var pinned = dbe.EpochManager.CurrentThreadPinnedEpoch;
+        for (var i = 0; i < 2 * EntityAccessor.EpochRefreshInterval; i++)
+        {
+            tx.Query<WbSpatialArch>().WhereInAABB<WbSpatial>(i, 0, -1, i + 50, 50, 2).Count();
+        }
+
+        Assert.That(dbe.EpochManager.CurrentThreadPinnedEpoch, Is.GreaterThan(pinned), "the loop ran under one epoch");
+    }
+
+    private const float SpatialExtent = 2_000f;
+
+    private DatabaseEngine SpatialWorld()
+    {
+        const float extent = SpatialExtent;
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<WbSpatial>();
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new System.Numerics.Vector2(-extent, -extent), new System.Numerics.Vector2(extent, extent),
@@ -597,21 +935,7 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
         dbe.WriteTickFence(1);
         var clusterPages = dbe._archetypeStates[Archetype<WbSpatialArch>.Metadata.ArchetypeId].ClusterState.ClusterSegment.Length;
         Assert.That(clusterPages, Is.GreaterThan(HeldPagesBound), "premise: the walk spans more pages than the bound");
-
-        var longWalk = EntityAccessor.LongWalkClusters;
-        EntityAccessor.LongWalkClusters = 256;   // this world is short of the threshold: what is asserted is the move to the scan window
-        try
-        {
-            using var tx = dbe.CreateReadOnlyTransaction();
-            var query = tx.Query<WbSpatialArch>().WhereInAABB<WbSpatial>(-extent, -extent, -1, extent, extent, 2);
-            var rows = count ? query.Count() : query.Execute().Count;
-            Assert.That(rows, Is.EqualTo(Entities));
-            Assert.That(Held(dbe).EpochProtected, Is.LessThan(HeldPagesBound), "the query kept the clusters it read epoch-held for the transaction");
-        }
-        finally
-        {
-            EntityAccessor.LongWalkClusters = longWalk;
-        }
+        return dbe;
     }
 
     /// <summary>
@@ -790,10 +1114,265 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
     }
 
     /// <summary>
+    /// A fence reclaims every cluster the commits since the last one emptied, and reads each one's occupancy to seal it. Those reads tagged their pages
+    /// under the reclamation's one epoch scope, so an archetype emptied in batches filled the cache with its own tags and the fence, or the clean close
+    /// after it, waited out the back-pressure bound with nothing to release. Thrown at a close, it read as frees lost.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void AReclamationOfMoreClustersThanTheCacheHolds_HoldsABoundedSetOfPages()
+    {
+        var clusters = EmptiedArchetype(out var dbe);
+        var peakSlot = 0;
+        var peakEpoch = 0;
+        clusters.DrainAfterSealProbe = _ => NoteHeld(dbe, ref peakSlot, ref peakEpoch);
+        clusters.DrainAfterFreeProbe = _ => NoteHeld(dbe, ref peakSlot, ref peakEpoch);
+        try
+        {
+            Assert.DoesNotThrow(() => dbe.WriteTickFence(1), "the reclamation holds what it reads, and only that");
+        }
+        finally
+        {
+            clusters.DrainAfterSealProbe = null;
+            clusters.DrainAfterFreeProbe = null;
+        }
+
+        Assert.That(clusters.LastTickClustersReclaimed, Is.GreaterThan(HeldPagesBound), "premise: it read more clusters than the bound");
+        Assert.That(clusters.ActiveClusterCount, Is.Zero);
+        Assert.That(peakEpoch, Is.LessThan(HeldPagesBound / 4), "the cache has 256 slots: tagged, the reclamation's pages fill it");
+        Assert.That(peakSlot, Is.LessThan(HeldPagesBound / 4));
+    }
+
+    /// <summary>
+    /// A reclamation takes the whole count before it reads the first record, and a read can time out. Only what it had sealed was put back: the records past
+    /// the fault were gone, and their clusters stayed listed, empty, until the next open.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("CLUSTERWALK-03")]
+    public void AThrowInAReclamation_LosesNoRecord()
+    {
+        var clusters = EmptiedArchetype(out var dbe);
+        var seen = 0;
+        clusters.DrainBeforeSealProbe = _ =>
+        {
+            if (++seen == 5)
+            {
+                throw new System.InvalidOperationException("staged fault");
+            }
+        };
+
+        try
+        {
+            Assert.That(() => dbe.WriteTickFence(1), Throws.InvalidOperationException);
+        }
+        finally
+        {
+            clusters.DrainBeforeSealProbe = null;
+        }
+
+        Assert.That(clusters.ActiveClusterCount, Is.GreaterThan(0), "premise: the fault left the reclamation unfinished");
+        dbe.WriteTickFence(2);
+        Assert.That(clusters.ActiveClusterCount, Is.Zero, "every record reached a reclamation in the end");
+    }
+
+    private ArchetypeClusterState EmptiedArchetype(out DatabaseEngine dbe)
+    {
+        dbe = Build(Storage.Single);
+        var ids = new List<EntityId>();
+        using (var read = dbe.CreateReadOnlyTransaction())
+        {
+            ids.AddRange(read.Query<WbSingleArch>().Execute());
+        }
+
+        for (var first = 0; first < ids.Count; first += Batch)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = first; i < first + Batch; i++)
+            {
+                tx.Destroy(ids[i]);
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        return dbe._archetypeStates[Archetype<WbSingleArch>.Metadata.ArchetypeId].ClusterState;
+    }
+
+    /// <summary>
+    /// A batch's content chunks are marked as they are written, and the refresh the batch made every 128 entities left the marks where they were: one larger
+    /// than the cache filled it with them, before the call returned. Its rollback reads as many pages again, and moved its epoch only once the cache's
+    /// pressure flag was up: with the flag expired, on a loaded box, it met the wall under one pin, and waited on itself.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 8 * 1024 * 1024)]
+    [VerifiesRule("EP-03")]
+    public void ASpawnBatchLargerThanTheCache_GivesBackItsMarks()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSingle>();
+        dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.RegisterComponentFromAccessor<WbPlain>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
+        dbe.InitializeArchetypes();
+
+        using var tx = dbe.CreateQuickTransaction();
+        var ids = new EntityId[BatchEntities];
+        var row = new WbMulti { Group = 1 };
+        Assert.DoesNotThrow(() => tx.SpawnBatch<WbMultiArch>(ids, WbMultiArch.Row.Set(in row)));
+        Assert.That(tx.Rollback(), Is.True);
+    }
+
+    /// <summary>
+    /// What the generated <c>SpawnBatch</c> goes through: the Versioned content is allocated at the write, past the allocation's own refresh, and a batch larger
+    /// than the cache filled it with its marks.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 8 * 1024 * 1024)]
+    [VerifiesRule("EP-03")]
+    public void ASpawnBatchWrittenAfterItsAllocation_GivesBackItsMarks()
+    {
+        var dbe = BuildForBatches();
+        using var tx = dbe.CreateQuickTransaction();
+        var ids = new EntityId[BatchEntities];
+        var values = new WbMulti[BatchEntities];
+        Assert.DoesNotThrow(() => tx.SpawnBatchWriteAll(tx.SpawnBatchAllocate<WbMultiArch>(BatchEntities, ids), BatchEntities, WbMultiArch.Row, values));
+        Assert.That(tx.Rollback(), Is.True);
+    }
+
+    /// <summary>The same through what the fence's command drain goes through, one value at a time.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 8 * 1024 * 1024)]
+    [VerifiesRule("EP-03")]
+    public void ACommandDrainsSpawnBatch_GivesBackItsMarks()
+    {
+        var dbe = BuildForBatches();
+        using var tx = dbe.CreateQuickTransaction();
+        var meta = Array.Find(dbe.OwnArchetypes(), m => m.ArchetypeType == typeof(WbMultiArch));
+        var keys = new long[BatchEntities];
+        for (var i = 0; i < BatchEntities; i++)
+        {
+            keys[i] = 1_000_000 + i;
+        }
+
+        var ids = new EntityId[BatchEntities];
+        var row = new WbMulti { Group = 1 };
+        var value = WbMultiArch.Row.Set(in row);
+        Assert.DoesNotThrow(() =>
+        {
+            var first = tx.SpawnBatchAllocateRaw(meta, keys, ids);
+            for (var i = 0; i < BatchEntities; i++)
+            {
+                tx.SpawnWriteValueRaw(first + i, in value);
+            }
+        });
+        Assert.That(tx.Rollback(), Is.True);
+    }
+
+    private DatabaseEngine BuildForBatches()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<WbSingle>();
+        dbe.RegisterComponentFromAccessor<WbVersioned>();
+        dbe.RegisterComponentFromAccessor<WbChild>();
+        dbe.RegisterComponentFromAccessor<WbPlain>();
+        dbe.RegisterComponentFromAccessor<WbMulti>();
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
+    /// <summary>
+    /// A live cursor stops the epoch, and only the epoch: a batch inside an index scan kept every mark as well. The marks go back; the epoch cannot, so a batch
+    /// larger than the cache still cannot run inside a scan (EP-02), and this one fits.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [Property("CacheSize", 2 * 1024 * 1024)]
+    [VerifiesRule("EP-03")]
+    public void ASpawnBatchInsideAnIndexScan_GivesBackItsMarks()
+    {
+        var dbe = BuildForBatches();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < Batch; i++)
+            {
+                var seed = new WbVersioned { Key = i };
+                tx.Spawn<WbVersionedArch>(WbVersionedArch.Row.Set(in seed));
+            }
+
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        const int InsideAScan = 3_000;
+        using var batch = dbe.CreateQuickTransaction();
+        var ids = new EntityId[InsideAScan];
+        using (var walk = batch.EnumerateIndex<WbVersioned, int>(dbe.GetIndexRef<WbVersioned, int>(x => x.Key), int.MinValue, int.MaxValue))
+        {
+            Assert.That(walk.MoveNext(), Is.True);
+            Assert.That(EntityAccessor.LiveIndexCursors, Is.GreaterThan(0), "premise: the batch runs under a live cursor");
+            var values = new WbMulti[InsideAScan];
+            var first = batch.SpawnBatchAllocate<WbMultiArch>(InsideAScan, ids);
+            batch.SpawnBatchWriteAll(first, InsideAScan, WbMultiArch.Row, values);
+            Assert.That(batch.MarkedPageCount, Is.LessThan(8), "what the batch wrote since its last 128 writes, not all of it");
+        }
+
+        Assert.That(batch.Rollback(), Is.True);
+    }
+
+    /// <summary>The refresh's own cadence reads 8 entries at a time, so a modulo over it fired at their least common multiple: a quarter of a 1,000-slot cache, not
+    /// a sixteenth. And an entry can touch far more pages than one: entries alone reach a whole small cache first.</summary>
+    [TestCase(56, 0, 1_000, false)]
+    [TestCase(64, 0, 1_000, true)]
+    [TestCase(16, 0, 256, true)]
+    [TestCase(8, 0, 256, false)]
+    [TestCase(8, 63, 256, false)]
+    [TestCase(8, 64, 256, true)]
+    [TestCase(8, 0, 16, true)]
+    public void ACommitGivesBack_ByEntriesOrByMarks(int steps, int marks, int cacheSlots, bool expected) =>
+        Assert.That(Transaction.CommitStepsGiveBack(steps, marks, cacheSlots), Is.EqualTo(expected));
+
+    /// <summary>
+    /// Under no back-pressure a publish gave nothing back, however much of the cache its own marks had taken: an entry that then met a full cache could not
+    /// step out to return them, and a publish waiting on its own marks stops the engine. It moves by its own count, on a cache that never fills.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [NonParallelizable]   // PagedMMF.PublishStepRefreshes is process-wide
+    [Property("CacheSize", 16 * 1024 * 1024)]
+    [VerifiesRule("EP-02")]
+    public void APublishOfManyEntries_GivesBackItsMarks()
+    {
+        var dbe = Build(Storage.Versioned);
+        var ids = new List<EntityId>();
+        using (var read = dbe.CreateReadOnlyTransaction())
+        {
+            ids.AddRange(read.Query<WbVersionedArch>().Execute());
+        }
+
+        var refreshes = System.Threading.Interlocked.Read(ref PagedMMF.PublishStepRefreshes);
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var id in ids)
+        {
+            var row = tx.Open(id).Read(WbVersionedArch.Row);
+            row.Key = -row.Key - 1;
+            tx.OpenMut(id).Set(WbVersionedArch.Row, row);
+        }
+
+        Assert.That(tx.Commit(), Is.True);
+        Assert.That(System.Threading.Interlocked.Read(ref PagedMMF.PublishStepRefreshes), Is.GreaterThan(refreshes), "the publish kept every mark it took");
+    }
+
+    /// <summary>
     /// A commit of more destroys than the cache holds pages is refused in PREPARE, under marks that fill the cache, and all it undoes and ends needs pages
-    /// too: the
-    /// undo ran out of slots with the whole cache under its own marks, out of Dispose, which replaced the refusal with a timeout. A commit that fits ends
-    /// cleanly.
+    /// too: the undo ran out of slots with the whole cache under its own marks, out of Dispose, which replaced the refusal with a timeout. A commit that fits
+    /// ends cleanly.
     /// </summary>
     [Test]
     [CancelAfter(60_000)]

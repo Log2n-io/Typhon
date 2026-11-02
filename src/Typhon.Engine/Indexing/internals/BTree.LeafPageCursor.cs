@@ -39,8 +39,7 @@ internal struct LeafPageCursorState
 
     /// <summary>
     /// <see cref="EpochManager.ThreadRefreshCount"/> at the last fill. <see cref="NodeChunkId"/> names a leaf for the pin it was read under: moved, the
-    /// leaf may be
-    /// retired and its chunk another node's, at a version that validates (EP-02).
+    /// leaf may be retired and its chunk another node's, at a version that validates (EP-02).
     /// </summary>
     public int RefreshesSeen;
 
@@ -137,6 +136,7 @@ internal abstract partial class BTree<TKey, TStore>
                 return 0;
             }
 
+            var refreshesAtDescent = EpochManager.ThreadRefreshCount;   // before: a wait in the descent can move the pin
             var startLeaf = FindLeaf(state.Reverse ? maxKey : minKey, out _, ref accessor);
             if (!startLeaf.IsValid)
             {
@@ -147,7 +147,7 @@ internal abstract partial class BTree<TKey, TStore>
             state.NodeChunkId = startLeaf.ChunkId;
             state.LeafScanHint = 0;
             state.Opened = true;
-            state.RefreshesSeen = EpochManager.ThreadRefreshCount;
+            state.RefreshesSeen = refreshesAtDescent;
         }
         else if (state.RefreshesSeen != EpochManager.ThreadRefreshCount)
         {

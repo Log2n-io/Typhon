@@ -27,11 +27,10 @@ namespace Typhon.Engine.Internals;
 /// <para>Pages are protected from eviction by their epoch tag, not by ref-counting.
 /// Dirty tracking uses a bitmask flushed to <see cref="ChangeSet"/> via
 /// <see cref="ChangeSet.AddByMemPageIndex"/>.</para>
-/// <para><b>Scan mode</b> (<see cref="ChunkBasedSegment{TStore}.CreateScanAccessor"/>, EP-02): an accessor for a scan whose length grows with the data. It
-/// marks nothing dirty and takes no ChangeSet: what is written under one is recorded by its writer (a ClusterRef's page on leaving it, a buffer reader's
+/// <para><b>Scan mode</b> (<see cref="ChunkBasedSegment{TStore}.CreateScanAccessor()"/>, EP-02): an accessor for a scan whose length grows with the data.
+/// It marks nothing dirty and takes no ChangeSet: what is written under one is recorded by its writer (a ClusterRef's page on leaving it, a buffer reader's
 /// unlink under the page latch). It pins the pages in its window by <c>SlotRefCount</c> only and never tags them with the caller's epoch, so a page that
-/// leaves the window
-/// is evictable at once: the scan holds at most <see cref="Capacity"/> pages, where an epoch-tagged one holds every page it ever touched until the
+/// leaves the window is evictable at once: the scan holds at most <see cref="Capacity"/> pages, where an epoch-tagged one holds every page it ever touched until the
 /// caller's scope ends. The price is the pointer contract: an address it returns stays valid only until this accessor's next window miss, not for the
 /// whole epoch scope. The clock hand may reclaim any slot but the most recently used one, so one miss can release the page of any earlier address: use
 /// an address before the next access through the same accessor, or resolve it again by chunk id.</para>
@@ -54,6 +53,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private byte _usedSlots;                   // 1 byte — high water mark (0-32)
     private bool _scan;                        // 1 byte — scan mode: window pins only, no epoch tag (EP-02)
     private byte _keptSlotPlusOne;             // 1 byte — the slot the clock hand never takes (KeepInWindow), plus one; 0: none
+    private byte _windowSlots;                 // 1 byte — slots of the window in use: a power of two, Capacity unless a scan was narrowed
 
     // === Cached hot-path values ===
     private int _stride;                       // 4 bytes — chunk size in bytes
@@ -84,7 +84,10 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     // a per-access re-pin (SlotRefCount Interlocked inc/dec + AccessEpoch CAS) on shared PageInfo lines that bounced
     // across all cores and capped concurrent-read scaling. 32 doubles the clock-hand runway so they survive.
     private const int Capacity = 32;
-    private const int CapacityMask = Capacity - 1;   // power-of-two window → branch-free clock-hand wrap
+
+    /// <summary>The widest window, the default. Narrow a scan's with <see cref="ChunkBasedSegment{TStore}.CreateScanAccessor(int)"/>.</summary>
+    internal const int MaxWindowSlots = Capacity;
+
     private const int InvalidPageIndex = -1;
 
 
@@ -130,11 +133,14 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// Create a new ChunkAccessor. All storage is stack-allocated — zero heap allocations.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal ChunkAccessor(ChunkBasedSegment<TStore> segment, TStore store, EpochManager epochManager, ChangeSet changeSet = null, bool scan = false)
+    internal ChunkAccessor(ChunkBasedSegment<TStore> segment, TStore store, EpochManager epochManager, ChangeSet changeSet = null, bool scan = false,
+        int windowSlots = Capacity)
     {
         Debug.Assert(epochManager.IsCurrentThreadInScope, "ChunkAccessor must be created inside an epoch scope");
         Debug.Assert(!scan || changeSet == null, "a scan accessor marks nothing: it carries no ChangeSet");
+        Debug.Assert(windowSlots is >= 2 and <= Capacity && BitOperations.IsPow2(windowSlots), "the clock hand wraps by mask and must have a slot to take");
         _scan = scan;
+        _windowSlots = (byte)windowSlots;
         _segment = segment;
         _store = store;
         _epochManager = epochManager;
@@ -381,6 +387,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// </summary>
     internal void KeepInWindow(int chunkId)
     {
+        Debug.Assert(_windowSlots > 2, "two slots, one kept and one the MRU, leave the clock hand none to take");
         (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
 
         ref int indices = ref _pageIndices[0];
@@ -506,16 +513,18 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     private int FindEvictionSlot()
     {
         // Fast path: use unused slots first
-        if (_usedSlots < Capacity)
+        int slots = _windowSlots;
+        if (_usedSlots < slots)
         {
             return _usedSlots++;
         }
 
         // Clock-hand: advance, skip MRU and the kept slot
-        var hand = (byte)((_clockHand + 1) & CapacityMask);
+        var mask = slots - 1;   // power-of-two window → branch-free clock-hand wrap
+        var hand = (byte)((_clockHand + 1) & mask);
         while (hand == _mruSlot || hand + 1 == _keptSlotPlusOne)
         {
-            hand = (byte)((hand + 1) & CapacityMask);
+            hand = (byte)((hand + 1) & mask);
         }
         _clockHand = hand;
         return hand;
@@ -527,8 +536,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     /// <b>Transaction path</b> (ChangeSet present): SlotRefCount and ACW decrements are deferred to
     /// <see cref="ChangeSet.DeferEviction"/>, so an address read from a slot this eviction takes stays valid until the next epoch refresh, which drains them
     /// with the rest (<see cref="EntityAccessor.FlushAndRefreshEpoch"/>). SlotRefCount &gt; 0 prevents <see cref="PagedMMF.TryAcquire"/> from reusing the
-    /// memory
-    /// page until then. No address outlives a refresh (EP-03).
+    /// memory page until then. No address outlives a refresh (EP-03).
     /// </para>
     /// <para>
     /// <b>Standalone path</b> (no ChangeSet): SlotRefCount is decremented immediately. Without a

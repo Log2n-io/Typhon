@@ -615,15 +615,37 @@ public unsafe partial class Transaction
 
             _spawnedEntities.Add(entry);
 
-            // Epoch refresh every 128 entities to avoid holding epoch too long
-            if ((n & 127) == 127)
-            {
-                _changeSet?.FlushDeferredEvictions();   // what the windows let go of: no address outlives this entity
-                _epochManager.RefreshScope();
-            }
+            RefreshBetweenBatchWrites();
         }
 
         CheckEpochRefresh();
+    }
+
+    /// <summary>
+    /// Every 128 writes of a spawn batch, whichever of its entry points wrote them: the content chunks' marks go back with the epoch, or a batch larger than the
+    /// cache fills it with them before the call returns. Under a live index cursor of this thread's only the epoch stays: the marks and the windows' releases
+    /// depend on no cursor (<see cref="RefreshBetweenCommitSteps"/>). Holds no address across the call: each write resolves its own.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RefreshBetweenBatchWrites()
+    {
+        if ((++_batchWriteCount & 127) == 0)
+        {
+            GiveBackBatchWrites();
+        }
+    }
+
+    private void GiveBackBatchWrites()
+    {
+        if (LiveIndexCursors == 0)
+        {
+            FlushAndRefreshEpoch();
+        }
+        else
+        {
+            _changeSet?.FlushDeferredEvictions();
+            _changeSet?.ReleaseDirtyMarks();
+        }
     }
 
     /// <summary>
@@ -690,11 +712,6 @@ public unsafe partial class Transaction
                 entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
             }
 
-            if ((n & 127) == 127)
-            {
-                _changeSet?.FlushDeferredEvictions();   // what the windows let go of: no address outlives this entity
-                _epochManager.RefreshScope();
-            }
         }
 
         CheckEpochRefresh();
@@ -745,6 +762,7 @@ public unsafe partial class Transaction
 
             Unsafe.AsRef<T>(ptr + overhead) = values[i];
             entry.EnabledBits |= bitMask;
+            RefreshBetweenBatchWrites();
         }
     }
 
@@ -823,11 +841,6 @@ public unsafe partial class Transaction
                 entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
             }
 
-            if ((n & 127) == 127)
-            {
-                _changeSet?.FlushDeferredEvictions();   // what the windows let go of: no address outlives this entity
-                _epochManager.RefreshScope();
-            }
         }
 
         CheckEpochRefresh();
@@ -892,6 +905,7 @@ public unsafe partial class Transaction
         var size = Math.Min(value.DataSize, table.ComponentStorageSize);
         value.Payload[..size].CopyTo(new Span<byte>(ptr + table.ComponentOverhead, size));
         entry.EnabledBits |= (ushort)(1 << slot);
+        RefreshBetweenBatchWrites();
     }
 
     /// <summary>
@@ -5273,8 +5287,7 @@ public unsafe partial class Transaction
                 }
 
                 // The undo of a refused commit gives back what it holds, or it meets the wall that refused it. Never the pass itself: moved in PREPARE, a
-                // commit
-                // past the limit reaches its append, and its publish fails where it cannot be undone (#831).
+                // commit past the limit reaches its append, and its publish fails where it cannot be undone (#831).
                 if (!pending)
                 {
                     RefreshBetweenCommitSteps();

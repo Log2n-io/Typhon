@@ -128,6 +128,9 @@ public partial class EntityAccessor : IDisposable
     private protected int _entityOperationCount;
     private protected ChangeSet _changeSet;
 
+    /// <summary>The pages this accessor's change set holds under its dirty marks. Diagnostic.</summary>
+    internal int MarkedPageCount => _changeSet?.MarkedPageCount ?? 0;
+
     /// <summary>
     /// True when <see cref="_changeSet"/> was created by this accessor and must therefore be released by it.
     /// </summary>
@@ -498,9 +501,8 @@ public partial class EntityAccessor : IDisposable
     /// B+Tree range cursors live on this thread (<c>BTree.RangeEnumerator</c>). While one is, no per-operation refresh moves the thread's epoch: retired
     /// nodes are reclaimed once the minimum active epoch has passed them (<c>BTree.DeferredReclaim</c>), so a refresh can send a live cursor back down the
     /// tree when its tree retired a leaf, and a refresh sends every other thread's warm accessors down their cold path. An open made inside such a scan
-    /// (an FK reverse lookup's per-entity
-    /// action) therefore waits for the scan to end; the count stays at the threshold, so the refresh happens at the first operation after. The one refresh
-    /// made under a live cursor is the index enumerator's own, whose walk has no other point to make it at.
+    /// (an FK reverse lookup's per-entity action) therefore waits for the scan to end; the count stays at the threshold, so the refresh happens at the first
+    /// operation after. The one refresh made under a live cursor is the index enumerator's own, whose walk has no other point to make it at.
     /// </summary>
     /// <remarks>A cursor disposed twice (a <c>foreach</c> over a <c>using</c> copy) would decrement twice, so the decrement clamps at zero.</remarks>
     [ThreadStatic]
@@ -541,8 +543,8 @@ public partial class EntityAccessor : IDisposable
 
     /// <summary>
     /// A yield point of a walk that keeps its own clock in <paramref name="refreshedAt"/>: one driven by its caller, whose loop body can run scans of its
-    /// own, each
-    /// of which restarts the transaction's clock in <see cref="BeginScanYield"/>, and at a millisecond apart would keep the walk from ever refreshing.
+    /// own, each of which restarts the transaction's clock in <see cref="BeginScanYield"/>, and at a millisecond apart would keep the walk from ever
+    /// refreshing.
     /// </summary>
     internal void YieldDuringWalk(ref long refreshedAt)
     {

@@ -90,8 +90,6 @@ public unsafe ref struct AabbClusterEnumerator
     // return is ignored, and a copy's use after the return throws.
     private SpatialQueryAccessorCache.Entry _warmEntry;
     private int _warmToken;
-    private ref ChunkAccessor<PersistentStore> _warm;
-    private int _clustersOpened;   // through the rent: at LongWalkClusters the query moves to the entry's scan window (EP-02)
 
     /// <summary>
     /// When set, <see cref="NextCluster"/> names the next admitted cluster without opening its page.
@@ -1509,23 +1507,7 @@ public unsafe ref struct AabbClusterEnumerator
 
     /// <summary>A cluster's base, through the window this query is on. Good until the next call.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private byte* Open(int chunkId)
-    {
-        if (++_clustersOpened == EntityAccessor.LongWalkClusters)
-        {
-            MoveToScanWindow();
-        }
-
-        return _warm.GetChunkAddress(chunkId);
-    }
-
-    /// <summary>A wide query leaves the warm window, which tags what it loads, for one that tags nothing. Once a query, and out of line.</summary>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private void MoveToScanWindow()
-    {
-        _warmEntry.OpenScanWindow();
-        _warm = ref _warmEntry.ScanWindow;
-    }
+    private byte* Open(int chunkId) => _warmEntry.OpenCluster(chunkId);
 
     /// <summary>
     /// Borrow this thread's warm window over the cluster segment. Out of line so nothing of the rent enters the frames of the per-entity drains: an
@@ -1533,11 +1515,7 @@ public unsafe ref struct AabbClusterEnumerator
     /// prologue on every call.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void RentAccessor()
-    {
-        _warmEntry = SpatialQueryAccessorCache.Instance.Rent(_state.ClusterSegment, out _warmToken);
-        _warm = ref _warmEntry.Accessor;
-    }
+    private void RentAccessor() => _warmEntry = SpatialQueryAccessorCache.Instance.Rent(_state.ClusterSegment, out _warmToken);
 
     /// <summary>
     /// Hand the window back, if this enumerator holds one, and add the query's tally to its archetype's (SO-02). The token makes a second return — a
@@ -1559,7 +1537,6 @@ public unsafe ref struct AabbClusterEnumerator
         {
             HandBack(entry, _warmToken, _state, _tallyClusters, _tallyCandidates, _tallyHits);
             _warmEntry = null;
-            _warm = ref Unsafe.NullRef<ChunkAccessor<PersistentStore>>();
         }
     }
 

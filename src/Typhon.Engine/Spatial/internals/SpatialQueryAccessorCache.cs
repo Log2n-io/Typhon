@@ -21,16 +21,17 @@ namespace Typhon.Engine.Internals;
 /// its pin at once (the standalone path), and a page an earlier query loaded carries an old <c>AccessEpoch</c>, so after that neither a pin nor the caller's
 /// epoch protects it. <c>ChunkAccessor</c>'s "valid for the enclosing EpochGuard" does not hold for these accessors. The enumerator never keeps an address
 /// past its next cluster open.</para>
-/// <para><b>A wide query.</b> The window tags what it loads, which a query near an actor can afford and a query over the world cannot: past
-/// <see cref="EntityAccessor.LongWalkClusters"/> clusters a query moves to the entry's scan window, which tags nothing (EP-02), and the return disposes it. Reading every
-/// query through a scan window costs a small one up to 15 %: a scan accessor's page miss is the dearer one.</para>
+/// <para><b>A wide query.</b> The window tags what it loads, which a query near an actor can afford and a query over the world cannot: past a sixteenth of
+/// the cache in clusters a rent moves to the entry's scan window, which tags nothing (EP-02), and the return disposes it. Every shape opens its clusters
+/// through <see cref="Entry.OpenCluster"/>.
+/// Reading every query through a scan window costs a small one up to 15 %: a scan accessor's page miss is the dearer one.</para>
 /// <para><b>Nesting and copies.</b> A query that finds its segment's entry rented takes another entry, so two live queries never share a window. A return must
 /// carry the token its rent stamped, and bumps it (SQ-05's pattern): <c>GetEnumerator()</c> copies the enumerator, and neither a stale copy's return nor its
 /// continued use may reach a window that has been handed back — the enumerator checks the token before each use.</para>
 /// <para><b>How long pins live.</b> A free entry keeps its window's pages pinned — that is the point — until one of three things releases them:
 /// <see cref="Release"/>, which an engine calls for its own page cache when that cache is under back-pressure and when the engine is disposed; the entry's
 /// finalizer, when its thread dies and the thread-static cache goes with it; or recycling past <see cref="TrimAbove"/>. So at most <see cref="TrimAbove"/> ×
-/// 32 pages per thread, and none that back-pressure cannot reclaim. A rented entry is in use and never released from outside. A release reaches only the
+/// 32 pages per thread, 32 more for each wide query running, and none that back-pressure cannot reclaim. A rented entry is in use and never released from outside. A release reaches only the
 /// windows over the releasing engine's pages: another engine's are none of its business, and emptying them would only make their next query re-warm. An
 /// entry a release emptied is refilled by its thread's next query rather than replaced, so re-warming allocates nothing.</para>
 /// <para><b>Leaked rents.</b> A query drained to the end hands its entry back itself; one that is neither drained nor disposed keeps it. Past
@@ -42,6 +43,13 @@ internal sealed class SpatialQueryAccessorCache
     /// <summary>Pooled entries per thread. Past it the least recently rented free entry is recycled; with none free, a rent gets an overflow entry.</summary>
     internal const int TrimAbove = 8;
 
+    /// <summary>
+    /// The share of the cache one rent may tag: a cluster is a page, and a rent's pages stay tagged until its transaction next refreshes, every 8 operations
+    /// under pressure. Relative, because that is what is being protected: 1 024 clusters is four caches at 2 MiB and a rounding error at 1.6 GiB, where the
+    /// move to a scan window cost a wide query up to 8 % for nothing.
+    /// </summary>
+    private const int TaggedCacheShare = 16;
+
     private const int Free = 0;
     private const int Rented = 1;
     private const int Releasing = 2;
@@ -51,7 +59,7 @@ internal sealed class SpatialQueryAccessorCache
 #pragma warning disable TYPHON005 // Released by the cache (Release, an overflow's return) or by the finalizer below, never by an owner's Dispose
         internal ChunkAccessor<PersistentStore> Accessor;
 
-        /// <summary>A wide query's window (<see cref="EntityAccessor.LongWalkClusters"/>): open only while the query that opened it holds the rent.</summary>
+        /// <summary>A wide query's window, past a sixteenth of the cache: open only while the query that opened it holds the rent.</summary>
         internal ChunkAccessor<PersistentStore> ScanWindow;
 #pragma warning restore TYPHON005
         internal bool ScanWindowOpen;
@@ -78,11 +86,41 @@ internal sealed class SpatialQueryAccessorCache
         /// <summary>The managed id of the thread whose cache made this entry, the only thread that rents it: its slot in a query tally (SO-02).</summary>
         internal int ThreadId;
 
-        /// <summary>Opens the scan window on the rented segment. Inside the query's epoch scope, like any accessor creation.</summary>
-        internal void OpenScanWindow()
+        private int _clustersOpened;
+        private int _wideAt;
+
+        /// <summary>A rent starts on the warm window, with its count of clusters at zero.</summary>
+        internal void BeginRent() => _clustersOpened = 0;
+
+        /// <summary>Points the entry at <paramref name="segment"/>: its warm window, and the count past which a rent over that cache is wide.</summary>
+        internal void Fill(ChunkBasedSegment<PersistentStore> segment)
         {
-            ScanWindow = Segment.CreateScanAccessor();
-            ScanWindowOpen = true;
+            Accessor = segment.CreateChunkAccessor();
+            Segment = segment;
+            _wideAt = segment.Store.Mmf.CacheSlotCount / TaggedCacheShare;
+        }
+
+        /// <summary>
+        /// A cluster's base, through the window this rent is on. Good until the next call. The one way a query opens a cluster: the count and the move to the
+        /// scan window live here so that no shape can miss them. Once moved, the query stays moved.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal unsafe byte* OpenCluster(int chunkId) => ++_clustersOpened < _wideAt ? Accessor.GetChunkAddress(chunkId) : OpenWideCluster(chunkId);
+
+        /// <summary>
+        /// A wide query's cluster, through a window that tags nothing, opened the first time. Inside the query's epoch scope, like any accessor creation. A copy
+        /// of the enumerator reaches this under the same rent, so a window already open stays the one.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private unsafe byte* OpenWideCluster(int chunkId)
+        {
+            if (!ScanWindowOpen)
+            {
+                ScanWindow = Segment.CreateScanAccessor();
+                ScanWindowOpen = true;
+            }
+
+            return ScanWindow.GetChunkAddress(chunkId);
         }
 
         internal void CloseScanWindow()
@@ -290,8 +328,7 @@ internal sealed class SpatialQueryAccessorCache
 
     private static Entry Fill(Entry entry, ChunkBasedSegment<PersistentStore> segment)
     {
-        entry.Accessor = segment.CreateChunkAccessor();
-        entry.Segment = segment;
+        entry.Fill(segment);
         return entry;
     }
 
@@ -303,6 +340,7 @@ internal sealed class SpatialQueryAccessorCache
     {
         entry.LastRent = ++_clock;
         token = ++entry.Token;
+        entry.BeginRent();
         return entry;
     }
 }

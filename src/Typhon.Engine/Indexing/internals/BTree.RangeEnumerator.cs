@@ -67,6 +67,12 @@ internal abstract partial class BTree<TKey, TStore>
         /// </summary>
         private int _retirementsSeen;
 
+        /// <summary>
+        /// A re-seek began and has not landed: it threw (a back-pressure timeout, transient), with the cursor between leaves. If the caller retries, the
+        /// next step seeks again before it reads anything.
+        /// </summary>
+        private bool _repositioning;
+
         /// <summary>True once the range is finished; further calls return false without touching the tree.</summary>
         private bool _finished;
 
@@ -328,7 +334,7 @@ internal abstract partial class BTree<TKey, TStore>
         /// </remarks>
         public bool MoveNext()
         {
-            if (_refreshesSeen != EpochManager.ThreadRefreshCount && !ResumeAfterRefresh())
+            if ((_refreshesSeen != EpochManager.ThreadRefreshCount || _repositioning) && !ResumeAfterRefresh())
             {
                 return false;
             }
@@ -487,7 +493,7 @@ internal abstract partial class BTree<TKey, TStore>
             // Marked caught up only once it is: a re-seek that throws (a back-pressure timeout, transient) must run again if the caller retries.
             var refreshes = EpochManager.ThreadRefreshCount;
             var retirements = Volatile.Read(ref _tree._leafRetirements);
-            if (retirements != _retirementsSeen && !_finished && _currentNode.IsValid && !Reposition())
+            if ((_repositioning || (retirements != _retirementsSeen && !_finished && _currentNode.IsValid)) && !Reposition())
             {
                 return false;
             }
@@ -502,7 +508,9 @@ internal abstract partial class BTree<TKey, TStore>
             // Asking the tree where the key lives NOW is what makes this correct under a split, a merge or a reclaim alike — the cursor's own leaf may no
             // longer answer for it, or may no longer exist. Nothing emitted yet: resume AT the seek key, or at the head of a scan that has none; otherwise
             // strictly past the last key emitted.
+            _repositioning = true;
             var positioned = !_bounded && !_hasLastKey ? PositionAtHead() : Position(_hasLastKey ? _lastKey : _seekKey, _hasLastKey);
+            _repositioning = false;
             if (!positioned)
             {
                 _finished = true;

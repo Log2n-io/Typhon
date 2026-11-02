@@ -1814,6 +1814,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private void OpenWindow(ChunkBasedSegment<PersistentStore> segment, EntityAccessor owner, int clusters)
     {
         var isTransaction = owner is Transaction;
+        if (isTransaction)
+        {
+            owner.NoteEntityOpen();   // EP-03: a walk is an operation: a loop of short ones reaches no yield, and never moved the epoch
+        }
+
         var isLong = clusters >= EntityAccessor.LongWalkClusters;
         if (segment != null)
         {

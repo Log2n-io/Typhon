@@ -47,7 +47,10 @@ def dotnet_test(filter_expr, env, timeout):
         out, _ = proc.communicate(timeout=timeout)
         return proc.returncode, time.monotonic() - start, out
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
         out, _ = proc.communicate()
         return None, time.monotonic() - start, out
 

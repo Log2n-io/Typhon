@@ -164,6 +164,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             while (DeltaBuffer.TryPeek(targetTSN, out var entry, out var flags, out var tsn, out var componentTag))
             {
                 DeltaBuffer.Advance();
+                tx.NoteEntityOpen();   // EP-03: between two entries the refresh holds no address, and each reads through the transaction
                 ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
                 SetLastRefreshTSN(tsn);
             }

@@ -8,8 +8,8 @@ namespace SwgTatooine.Tests;
 
 /// <summary>
 /// The real audits, unchanged, against ledgers far larger than the page cache. The dashboard keeps them off (<c>SWG_DASH_CONSISTENCY</c>) because of what
-/// they do
-/// to a grown server; these say what that is. The rows are a clean ledger's shape, not a valid one: the audits' verdicts do not matter here, only their walks.
+/// they do to a grown server; these say what that is. The rows are a clean ledger's shape, not a valid one: the audits' verdicts do not matter here, only
+/// their walks.
 /// </summary>
 [Category("Manual")]
 [Explicit("On-demand: bulk-loads millions of ledger rows. Never run by CI.")]
@@ -19,6 +19,8 @@ internal sealed class HugeAuditChecks : ServedChecks
 {
     private const int Rows = 3_000_000;
     private const int SessionRows = 500_000;
+    private const int Listings = 1_000_000;
+    private const int Sellers = 100_000;
     private const int CacheMiB = 64;
 
     private TatooineSim Start()
@@ -62,6 +64,34 @@ internal sealed class HugeAuditChecks : ServedChecks
         }
     }
 
+    /// <summary>Every listing names a seller, and the audit looks each one's wallet up by index: that loop of point reads is what the market audit adds to the
+    /// other two.</summary>
+    private static void LoadListings(TatooineSim sim)
+    {
+        using (var s = sim.Dbe.BeginBulkLoad(new BulkLoadOptions { CheckpointTimeout = TimeSpan.FromMinutes(30) }))
+        {
+            for (var i = 0; i < Sellers; i++)
+            {
+                var wallet = new Wallet { Owner = 1000 + i, Balance = 1 };
+                s.Spawn<WalletArch>(WalletArch.Purse.Set(in wallet));
+            }
+
+            s.CompleteBulkLoad();
+        }
+
+        for (var first = 0; first < Listings; first += SessionRows)
+        {
+            using var s = sim.Dbe.BeginBulkLoad(new BulkLoadOptions { CheckpointTimeout = TimeSpan.FromMinutes(30) });
+            for (var i = first; i < Math.Min(first + SessionRows, Listings); i++)
+            {
+                var row = new Listing { Seller = 1000 + i % Sellers, UnitPrice = 1, ListedTick = i, Quantity = 1, Rows = 1 };
+                s.Spawn<ListingArch>(ListingArch.Entry.Set(in row));
+            }
+
+            s.CompleteBulkLoad();
+        }
+    }
+
     private static void Measure(TatooineSim sim, string name, Func<long> audit)
     {
         var sw = Stopwatch.StartNew();
@@ -97,6 +127,17 @@ internal sealed class HugeAuditChecks : ServedChecks
         using var sim = Start();
         LoadItemLedger(sim);
         Measure(sim, "item audit, as shipped", () => ItemEndpoints.Audit(sim.Dbe).Entries);
+    }
+
+    /// <summary>As the endpoint runs it: both ledgers, every listing, and a wallet point read per listing in one read transaction.</summary>
+    [Test]
+    public void TheMarketAudit_AsShipped()
+    {
+        using var sim = Start();
+        LoadCreditLedger(sim);
+        LoadItemLedger(sim);
+        LoadListings(sim);
+        Measure(sim, "market audit, as shipped", () => MarketEndpoints.Audit(sim.Dbe, MarketSnapshot.Empty).Listings);
     }
 
     /// <summary>The same audit through a read-write transaction, which an engine walk must survive as well: this is what died of the slot-reference

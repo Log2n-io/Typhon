@@ -307,8 +307,7 @@ internal static unsafe class FkReverseLookup
                     for (var j = 0; j < count; j++)
                     {
                         if (!ProcessClusterLocation(values[j], ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride, targetPK, ref action,
-                            snapshot,
-                                entry))
+                                snapshot, entry))
                         {
                             return false;
                         }

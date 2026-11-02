@@ -81,7 +81,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // One bit per cluster, so a cluster reached twice is rejected once instead of every entity it holds being compared against the whole result set.
         var visited = ClusterVisitSet.Rent(aabbs.Length);
-        var accessor = ClusterSegment.CreateChunkAccessor();
+        var window = SpatialQueryAccessorCache.Instance.Rent(ClusterSegment, out var windowToken);   // as the box and radius queries: EP-02
         try
         {
             // `count < results.Length` at every level, as the frustum walk already did. Without it a filled buffer
@@ -106,9 +106,9 @@ internal sealed unsafe partial class ArchetypeClusterState
                         }
 
                         grid.CellOrigin(cellKey, out double cellOriginX, out double cellOriginY, out double cellOriginZ);
-                        RayScanHalf(slot, isStatic: false, ref accessor, cellOriginX, cellOriginY, cellOriginZ,
+                        RayScanHalf(slot, isStatic: false, window, cellOriginX, cellOriginY, cellOriginZ,
                             originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs, ref visited, results, ref count);
-                        RayScanHalf(slot, isStatic: true, ref accessor, cellOriginX, cellOriginY, cellOriginZ,
+                        RayScanHalf(slot, isStatic: true, window, cellOriginX, cellOriginY, cellOriginZ,
                             originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs, ref visited, results, ref count);
                     }
                 }
@@ -128,14 +128,14 @@ internal sealed unsafe partial class ArchetypeClusterState
                     continue;
                 }
 
-                RayScanCluster(escaped.ChunkIds[e], ref accessor, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs,
+                RayScanCluster(escaped.ChunkIds[e], window, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask, aabbs,
                     ref visited, results, ref count);
             }
         }
         finally
         {
             visited.Dispose();
-            accessor.Dispose();
+            SpatialQueryAccessorCache.Return(window, windowToken);
         }
 
         // Front-to-back is part of the contract, and cells are walked in grid order rather than along the ray, so the merge happens here.
@@ -152,7 +152,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         return count;
     }
 
-    private void RayScanHalf(PerCellSpatialSlot slot, bool isStatic, ref ChunkAccessor<PersistentStore> accessor, double cellOriginX, double cellOriginY,
+    private void RayScanHalf(PerCellSpatialSlot slot, bool isStatic, SpatialQueryAccessorCache.Entry window, double cellOriginX, double cellOriginY,
         double cellOriginZ, double originX, double originY, double originZ, double dirX, double dirY, double dirZ, double maxDistance, bool is3D,
         uint categoryMask, ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited, Span<(long entityId, double distance)> results, ref int count)
     {
@@ -171,7 +171,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             foreach (var hit in tree.QueryRay(rayOrigin, rayDir, maxDistance))
             {
-                RayScanCluster((int)hit.PayloadId, ref accessor, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask,
+                RayScanCluster((int)hit.PayloadId, window, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask,
                     aabbs, ref visited, results, ref count);
             }
             return;
@@ -207,12 +207,12 @@ internal sealed unsafe partial class ArchetypeClusterState
                 continue;
             }
 
-            RayScanCluster(linear.ClusterIds[i], ref accessor, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask,
+            RayScanCluster(linear.ClusterIds[i], window, originX, originY, originZ, dirX, dirY, dirZ, maxDistance, is3D, categoryMask,
                 aabbs, ref visited, results, ref count);
         }
     }
 
-    private void RayScanCluster(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor, double originX, double originY, double originZ,
+    private void RayScanCluster(int clusterChunkId, SpatialQueryAccessorCache.Entry window, double originX, double originY, double originZ,
         double dirX, double dirY, double dirZ, double maxDistance, bool is3D, uint categoryMask, ClusterSpatialAabb[] aabbs, ref ClusterVisitSet visited,
         Span<(long entityId, double distance)> results, ref int count)
     {
@@ -236,7 +236,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         int compSize = Layout.ComponentSize(ss.Slot);
         int fieldOffset = ss.FieldOffset;
 
-        byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
+        byte* clusterBase = window.OpenCluster(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
 
         // RM-04: a slot whose realm key names another realm (changed this tick, moved at the next fence) is not this realm's.
