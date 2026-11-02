@@ -85,6 +85,13 @@ class Program
                 return;
             }
 
+            // #1394 archetype-set migration, design 07 §12: --schema-migration-open, --schema-open-names, --schema-first-fence, --emit-world,
+            // --recovery-replay (flags and their options in SchemaMigrationOpenBench's header).
+            if (SchemaMigrationOpenBench.TryRun(args))
+            {
+                return;
+            }
+
             if (args.Contains("--trigger-direct"))
             {
                 TriggerDirect.Run(args);
@@ -348,7 +355,18 @@ class Program
 
             if (args.Contains("--rebuild-bench"))
             {
-                RebuildBench.Run();
+                // --n=<entities>: design 07 §12 (f) runs it at 100 000 and 1 000 000.
+                var entities = 200_000;
+                foreach (var a in args)
+                {
+                    if (a.StartsWith("--n=", StringComparison.Ordinal) && !int.TryParse(a.AsSpan(4), out entities))
+                    {
+                        Console.WriteLine($"--n: '{a[4..]}' is not a number.");
+                        return;
+                    }
+                }
+
+                RebuildBench.Run(entities);
                 return;
             }
 

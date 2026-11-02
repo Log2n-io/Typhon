@@ -89,12 +89,16 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
   invariant component identity on the wire = the per-archetype slot (0..15) resolved under the EntityId's per-DB routing id — (routingId, slot), BOTH durable
            (routing id persisted in ArchetypeR1.RoutingId + re-matched by name on reopen; slot order durable via ArchetypeR1.ComponentNames).
            NEVER the process-global dense ComponentTypeId — that is an in-memory-only handle, not persisted, and may be renumbered across runs.
+  invariant the slot (and a Spawn / SetEnabledBits mask) is in the numbering of the COMMITTED ComponentNames: an open that changes an archetype's
+           component set translates each record, committed → runtime, before any apply (ecs.md SCHEMA-09, SCHEMA-11; #1394)
   rationale (#514 Phase 2): the old dense ComponentTypeId-on-wire coupled replay to registration order → a crash→reopen under a shifted order could mis-map
            post-checkpoint records (silent data loss). (routingId, slot) is stable across crash→reopen by construction — this dissolves that risk.
   scope: RecordCodec.cs, RecordFormat.cs (SlotRecordBody.SlotIndex, CollectionDeltaRecordBody.SlotIndex); recovery RecoveryApplier maps (routingId, slot) → table
          ComponentTable.CollectionHandleRanges (the packed ranges the codec zeroes); RecordCodec.PackColumnHandleRange (the columnar twin)
   on_violation: the log is coupled to physical layout OR to registration order → replay breaks under page relocation / compaction / shifted schema order
-  verified: CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
+  verified: ArchetypeSetMigrationCrashTests.CrashOpen_WindowUnderOldSet_SlotAndFenceBlockReplayByName [VerifiesRule] — the committed-numbering
+    amendment (#1394): a window written under the old set replays onto the right components by name, through a set migration that shifts every
+    slot. CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
     Log06Verifier_RejectsABufferIdOnTheWire [RuleMutant] — re-covered 2026-08-11 (#389) after the 2026-08-07
     retirement (#703). The retired fixtures (RecordCodecPropertyTests, FenceBlockCodecTests) are "Pure — no engine,
     no recovery": they construct records themselves and round-trip them, so neither can observe the EMITTER placing
@@ -3156,7 +3160,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     derive from — its occupancy walk sees an empty cluster. Re-deriving there produced an EMPTY map and skipped the
     re-placement pass that is the actual rebuild (RebuildClusterFromChains), losing every entity of the archetype. So
     "integrity doubt ⟹ rebuild" must read "integrity doubt AND the primary data still exists ⟹ rebuild"; a migrating
-    open is repopulation, not recovery. Gate: DatabaseEngine.WillRebuildEntityMapOnCrash && !HasMigratedSlot.
+    open is repopulation, not recovery. Gate: DatabaseEngine.WillRebuildEntityMapOnCrash && !IsMigratingArchetype (a field or a set migration).
     (ComponentTable.RebuildSecondaryIndexEntriesFromHeads, DatabaseEngine.RebuildSecondaryIndexes).
     🔴 BOTH index homes, since #656. A cluster-backed archetype keeps its field indexes on the ARCHETYPE, and that home did
     NOT implement this rule: the cluster-index init block read the persisted SPI, loaded the segment and skipped its rebuild,

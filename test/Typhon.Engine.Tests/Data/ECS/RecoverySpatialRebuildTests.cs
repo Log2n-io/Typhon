@@ -225,6 +225,101 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         }
     }
 
+    /// <summary>
+    /// The strays two retired rebuild rules would file for the clusters as they stand: the first occupied slot's cell (pre-#1394) and the pure AABB-centre
+    /// cell (D11 before its best-of amendment). The fixture's band is 0, so a stray is an entity whose cell is not the rule's.
+    /// </summary>
+    private static unsafe (int FirstSlot, int Centre) CountStraysUnderTheRetiredRules(DatabaseEngine dbe)
+    {
+        var cs = dbe._archetypeStates[ArchetypeId].ClusterState;
+        var grid = dbe.Realm0Grid;
+        ref readonly var ss = ref cs.SpatialSlot;
+        int firstSlotStrays = 0, centreStrays = 0;
+        var centres = new List<(double X, double Y, double Z)>();
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var accessor = cs.ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            for (var i = 0; i < cs.ActiveClusterCount; i++)
+            {
+                var clusterBase = accessor.GetChunkAddress(cs.ActiveClusterIds[i]);
+                centres.Clear();
+                for (var bits = *(ulong*)clusterBase; bits != 0; bits &= bits - 1)
+                {
+                    var slot = BitOperations.TrailingZeroCount(bits);
+                    var field = clusterBase + cs.Layout.ComponentOffset(ss.Slot) + slot * cs.Layout.ComponentSize(ss.Slot) + ss.FieldOffset;
+                    SpatialGrid.ReadSpatialCenter3D(field, ss.FieldInfo.FieldType, out var x, out var y, out var z);
+                    centres.Add((x, y, z));
+                }
+
+                if (centres.Count == 0)
+                {
+                    continue;
+                }
+
+                var first = grid.WorldToCellKey(centres[0].X, centres[0].Y, centres[0].Z);
+                double loX = double.MaxValue, loY = double.MaxValue, hiX = double.MinValue, hiY = double.MinValue;
+                foreach (var (x, y, _) in centres)
+                {
+                    loX = Math.Min(loX, x);
+                    loY = Math.Min(loY, y);
+                    hiX = Math.Max(hiX, x);
+                    hiY = Math.Max(hiY, y);
+                }
+
+                var centre = grid.WorldToCellKey((loX + hiX) / 2, (loY + hiY) / 2, 0);
+                foreach (var (x, y, z) in centres)
+                {
+                    var cell = grid.WorldToCellKey(x, y, z);
+                    firstSlotStrays += cell != first ? 1 : 0;
+                    centreStrays += cell != centre ? 1 : 0;
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        return (firstSlotStrays, centreStrays);
+    }
+
+    /// <summary>
+    /// D11 best-of (#1394): a cluster the recovery claim packed with far-apart cells has its box centre in a cell holding none of them, so the pure centre
+    /// rule filed the whole cluster. The rebuild now scores the first slot's and the median cell too, and files no more strays than the first-slot rule did.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CC-02")]
+    [CancelAfter(30_000)]
+    public void MixedCellClusterFromRecoveryClaim_FilesNoMoreThanTheFirstSlotRule()
+    {
+        (float x, float y)[] cells = [(50f, 50f), (950f, 50f), (50f, 950f), (950f, 950f)];
+        var positions = new List<(float, float)>();
+        for (var i = 0; i < 24; i++)
+        {
+            var (cx, cy) = cells[i % cells.Length];
+            positions.Add((cx + i % 7, cy + i % 5));
+        }
+
+        SpawnThenCrash(positions);
+
+        using var scope = ServiceProvider.CreateScope();
+        using var reopened = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Configure(reopened);
+        var cs = reopened._archetypeStates[ArchetypeId].ClusterState;
+        var (firstSlot, centre) = CountStraysUnderTheRetiredRules(reopened);
+        Assert.Multiple(() =>
+        {
+            Assert.That(centre, Is.GreaterThan(firstSlot), "premise: the pure centre rule files more strays here than the first-slot rule");
+            Assert.That(cs.LastRebuildForeignCellSlots, Is.InRange(1, firstSlot), "never more strays than the first-slot rule");
+            Assert.That(CountSlotsOutsideTheirClusterCell(reopened), Is.EqualTo(cs.LastRebuildForeignCellSlots),
+                "the cell kept is the one the count was taken against");
+        });
+
+        reopened.WriteTickFence(1);
+        Assert.That(CountSlotsOutsideTheirClusterCell(reopened), Is.Zero, "and the first fence still takes every stray home");
+    }
+
     [Test]
     [VerifiesRule("CC-02")]
     [CancelAfter(30_000)]
@@ -290,6 +385,9 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         Configure(reopened);
         var cs = reopened._archetypeStates[ArchetypeId].ClusterState;
         Assert.That(cs.LastRebuildForeignCellSlots, Is.GreaterThan(0), "precondition: the replay mixed cells");
+        // Two cells alternating in one cluster: the box centre sits in neither, so the pure centre rule filed all 8; best-of keeps the first-slot count (D11).
+        Assert.That(cs.LastRebuildForeignCellSlots, Is.EqualTo(CountStraysUnderTheRetiredRules(reopened).FirstSlot),
+            "best-of files what the first-slot rule filed, not the whole cluster");
 
         // Move every entity a little, inside its own cell, before the first fence: the rebuild already filed the strays, and the detector sees the
         // writes too. One request per slot (CR-05; Debug asserts it at Prep), and every stray still lands home.

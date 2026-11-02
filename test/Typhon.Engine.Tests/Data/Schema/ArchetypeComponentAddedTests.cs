@@ -1,3 +1,4 @@
+using System;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Runtime.InteropServices;
@@ -66,14 +67,12 @@ class EvoArchGrowV2Arch : Archetype<EvoArchGrowV2Arch>
 /// stages a reopen.
 /// </para>
 /// <para>
-/// <b>Quarantined against #1394, which is the answer these cases produced.</b> The engine REFUSES the open rather than corrupting anything --
-/// <c>ValidateArchetypeSchema</c> compares the persisted component count with the runtime's and throws before a byte is touched -- so EN-8 is a failed
-/// open and not the lost world the programme doc sequences prod around. What is missing is the migration itself, which is a project and not a fix: a new
-/// cluster layout, the existing entities carried across it, and the added slot left absent-but-enableable per entity. These stay red and in the nightly
-/// until it exists, because a reproduction is what makes the next attempt cheap.
+/// <b>The reproduction of #1394, green since the archetype-set migration landed.</b> Before it the engine refused the open rather than corrupting anything
+/// (a failed open, not the lost world the programme doc sequenced prod around). The open now migrates the set: the entities are re-placed into the new
+/// cluster geometry, every surviving component carried by name, the added one ABSENT (<c>claude/design/Schema/07-archetype-set-evolution.md</c>). The bodies
+/// are the original questions, unchanged; the absence check is the one assertion added (AC-1).
 /// </para>
 /// </remarks>
-[Category("Quarantine")]
 class ArchetypeComponentAddedTests : TestBase<ArchetypeComponentAddedTests>
 {
     /// <summary>
@@ -110,6 +109,19 @@ class ArchetypeComponentAddedTests : TestBase<ArchetypeComponentAddedTests>
                 Assert.That(kept.A, Is.EqualTo(42), "the component the archetype already had must survive the geometry change");
                 Assert.That(kept.B, Is.EqualTo(3.5f).Within(0.0001f));
             });
+
+            // The added Versioned component is ABSENT (STAGE-02): no chain, bit clear, and Enable without a value refuses.
+            var open = tx.Open(entity);
+            var addedSlot = Archetype<EvoArchGrowV2Arch>.Metadata.GetSlot(EvoArchGrowV2Arch.Added._componentTypeId);
+            var enabled = open.IsEnabled(EvoArchGrowV2Arch.Added);
+            var absent = open.IsVersionedSlotAbsent(addedSlot);
+            Assert.Multiple(() =>
+            {
+                Assert.That(enabled, Is.False, "the added component is disabled");
+                Assert.That(absent, Is.True, "and has no value");
+            });
+            var ex = Assert.Throws<InvalidOperationException>(() => tx.OpenMut(entity).Enable(EvoArchGrowV2Arch.Added));
+            Assert.That(ex!.Message, Does.Contain("was never supplied for this entity"));
         }
     }
 

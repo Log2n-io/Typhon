@@ -12,6 +12,8 @@ An archetype is declared once as a `sealed partial class Unit : Archetype<Unit>`
 
 Marking the class **`partial`** lets Typhon's source generator add typed bulk accessors (`Unit.ReadAll` / `WriteAll`). Archetypes can also inherit (`Archetype<TSelf, TParent>`) to share a common component prefix. An [entity](xref:concept-entity) is one instance of an archetype.
 
+The set can grow across schema revisions: add a `Register<T>()` and bump the `[Archetype]` revision, and the next open migrates every stored entity, which holds the new component absent ([component-set evolution](xref:feature-schema-archetype-set-evolution)).
+
 ## How it relates
 
 - **[Component](xref:concept-component)** — an archetype is a fixed set of them; it owns each one's `Comp<T>` handle.

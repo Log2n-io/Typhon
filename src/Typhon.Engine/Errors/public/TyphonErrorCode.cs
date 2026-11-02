@@ -136,6 +136,13 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
 
+    /// <summary>
+    /// A crash open's WAL window holds records of an archetype the opening engine registers but left unopened under
+    /// <see cref="ArchetypeSetMigrationPolicy.Refuse"/>: its stored component set or revision differs from the build's (#1394). The open fails before
+    /// applying any record; opening under <see cref="ArchetypeSetMigrationPolicy.Apply"/> migrates the archetype and recovers them. Not a missing schema.
+    /// </summary>
+    RecoveryArchetypeSetChangeRefused = 7013,
+
     // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412; 7109: lifecycle, #1415; 7110: ops, #1416;
     // 7111-7112: WAL archiving, #1418)
 

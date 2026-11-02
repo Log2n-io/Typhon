@@ -289,8 +289,76 @@ internal sealed class SchemaCommandExecutor
             sb.AppendLine($"  [red]{failCount} component(s) have unresolvable breaking changes.[/] {passCount} passed.");
         }
 
+        AppendArchetypeValidation(sb);
         return CommandResult.Markup(sb.ToString().TrimEnd());
     }
+
+    /// <summary>
+    /// The archetype half of <c>schema-validate</c> (#1394): the archetypes whose stored component set or revision the next open would rewrite, those it
+    /// would skip for a component this session does not register, the refusals it would throw, and the refusals only the open can decide, from a dry run
+    /// that changes nothing (<see cref="DatabaseEngine.PreviewArchetypeSetChanges"/>).
+    /// </summary>
+    private void AppendArchetypeValidation(StringBuilder sb)
+    {
+        sb.AppendLine();
+        sb.AppendLine("  [white]Archetypes[/]");
+        sb.AppendLine("  [grey]──────────────────────────────────────────────────────────────────[/]");
+        if (_session.ArchetypesInitialized)
+        {
+            // The open already happened: the rows describe the runtime sets, and what it did is on the engine.
+            var migrated = _session.Engine.LastOpenArchetypeSetMigrations;
+            sb.AppendLine(migrated.Count == 0
+                ? "  [green]Archetypes are open in this session; their stored sets match.[/]"
+                : $"  [green]Archetypes are open in this session; {migrated.Count} set migration(s) ran at open (see 'migrate').[/]");
+            return;
+        }
+
+        var preview = _session.Engine.PreviewArchetypeSetChanges();
+        foreach (var c in preview.Changes)
+        {
+            var what = c.Kind switch
+            {
+                ArchetypeSetChangeKind.SetChange => $"set change: {c.Changes}",
+                ArchetypeSetChangeKind.RevisionOnly => "revision only (metadata)",
+                _ => "stored names refreshed (metadata)",
+            };
+            sb.AppendLine($"  [yellow]MIGRATE[/] {Markup.Escape(c.ArchetypeName)} — rev {c.FromRevision}→{c.ToRevision}, {Markup.Escape(what)}");
+        }
+
+        // Skipped, not migrated: the open never classifies an archetype it cannot resolve. What it would do once the component is registered is said too.
+        foreach (var s in preview.Skipped)
+        {
+            sb.AppendLine($"  [yellow]SKIPPED[/] {Markup.Escape(s.Change.ArchetypeName)} — {Markup.Escape(s.Reason)}; "
+                          + Markup.Escape(DescribeSkippedChange(s.Change)));
+        }
+
+        foreach (var message in preview.Refusals)
+        {
+            sb.AppendLine($"  [red]REFUSED[/] {Markup.Escape(message)}");
+        }
+
+        foreach (var line in preview.NotChecked)
+        {
+            sb.AppendLine($"  [grey]UNCHECKED[/] {Markup.Escape(line)}");
+        }
+
+        sb.AppendLine("  [grey]──────────────────────────────────────────────────────────────────[/]");
+        if (preview.Changes.Count == 0 && preview.Skipped.Count == 0 && preview.Refusals.Count == 0)
+        {
+            sb.AppendLine("  [green]Every stored archetype set matches.[/]");
+        }
+        else
+        {
+            sb.AppendLine($"  {preview.Changes.Count} archetype(s) would migrate at open ('migrate' applies them), {preview.Skipped.Count} would be skipped, "
+                          + $"{preview.Refusals.Count} would refuse the open. Nothing was changed.");
+        }
+    }
+
+    /// <summary>What an archetype skipped for an unregistered component would do once registered, one clause.</summary>
+    internal static string DescribeSkippedChange(ArchetypeSetChange change) =>
+        change.Kind == ArchetypeSetChangeKind.Refused
+            ? $"once registered, the open would refuse it: {change.Changes}"
+            : $"once registered, rev {change.FromRevision}→{change.ToRevision} would migrate: {change.Changes}";
 
     // ── schema-history ────────────────────────────────────────
 

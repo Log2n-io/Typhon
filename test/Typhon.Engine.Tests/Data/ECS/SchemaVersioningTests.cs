@@ -211,7 +211,7 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
 
                 if (SystemCrud.Read(table, chunkId, out ArchetypeR1 arch, dbe.EpochManager) && arch.Name.AsString == "EcsUnit")
                 {
-                    arch.ComponentCount = 99; // corrupt it
+                    arch.ComponentCount = 5; // corrupt it (a count an archetype can have: more than 16 is refused before the names are read)
                     SystemCrud.Update(table, chunkId, ref arch, dbe.EpochManager, cs);
                     break;
                 }
@@ -227,9 +227,11 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
             dbe.RegisterComponentFromAccessor<EcsVelocity>();
             dbe.RegisterComponentFromAccessor<EcsHealth>();
 
-            var ex = Assert.Throws<InvalidOperationException>(() => dbe.InitializeArchetypes());
-            Assert.That(ex.Message, Does.Contain("Schema mismatch"));
+            // The stored names no longer agree with the row's count: the slots cannot be matched by name (#1394, R5).
+            var ex = Assert.Throws<ArchetypeSchemaException>(() => dbe.InitializeArchetypes());
+            Assert.That(ex.Kind, Is.EqualTo(ArchetypeSchemaErrorKind.NamesUnreadable));
             Assert.That(ex.Message, Does.Contain("EcsUnit"));
+            Assert.That(ex.Message, Does.Contain("holds 2 names for the row's 5 components"));
         }
     }
 
@@ -290,9 +292,10 @@ unsafe class SchemaVersioningTests : TestBase<SchemaVersioningTests>
             dbe.RegisterComponentFromAccessor<EcsVelocity>();
             dbe.RegisterComponentFromAccessor<EcsHealth>();
 
-            var ex = Assert.Throws<InvalidOperationException>(() => dbe.InitializeArchetypes());
-            Assert.That(ex.Message, Does.Contain("Schema mismatch"));
-            Assert.That(ex.Message, Does.Contain("revision"));
+            // A stored revision above the runtime's is a file written by a newer build (#1394, R3).
+            var ex = Assert.Throws<ArchetypeSchemaException>(() => dbe.InitializeArchetypes());
+            Assert.That(ex.Kind, Is.EqualTo(ArchetypeSchemaErrorKind.Downgrade));
+            Assert.That(ex.Message, Does.Contain("Archetype 'EcsUnit' is stored at revision 999"));
         }
     }
 
