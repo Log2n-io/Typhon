@@ -21,7 +21,8 @@ involved.
 ## ⚙️ How it works (in brief)
 
 On open, the engine scans its retained WAL segments and CRC-validates the chunk chain, stopping at the first
-torn chunk. A transaction's records are applied only if its commit marker falls inside that valid prefix —
+torn chunk or at a break in the segment chain — a segment with no valid header below a valid one, or a segment
+whose `PrevSegmentLSN` is inconsistent with the chain (#938). A transaction's records are applied only if its commit marker falls inside that valid prefix —
 everything else (partial writes, never-committed transactions) is discarded. Applicable records replay in
 strict ascending LSN order through the same write primitives live transactions use (spawn-if-absent,
 destroy-if-present, value-overwrite), so re-running any prefix twice converges to the same state — a crash

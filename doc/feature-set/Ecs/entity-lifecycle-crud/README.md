@@ -110,7 +110,7 @@ dtx.Commit();
   cannot be stored in a field or passed across threads. `EntityRefMut` → `EntityRef` is an implicit copy, so
   read-only helpers take an `EntityRef`.
 - A handle stays valid for its whole transaction: no member returns a reference into a page (rule EP-03). A transaction
-  refreshes its epoch every 128 opens, spawns or enumerated entities, so a long one holds a bounded set of pages; a
+  refreshes its epoch every 128 opens, spawns, destroys, cluster walks, index lookups, or other walk steps, so a long one holds a bounded set of pages; a
   handle whose page was let go of in between finds it again on its next call.
 - To change one field, read the component, change the copy and `Set` it back. `Set<T>` is the dirty boundary — it
   marks dirty (or stages copy-on-write) and stores the value in one call; no separate `MarkDirty` step.
