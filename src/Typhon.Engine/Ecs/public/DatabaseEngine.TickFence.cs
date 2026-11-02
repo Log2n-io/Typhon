@@ -682,7 +682,7 @@ public partial class DatabaseEngine
     internal void ApplyStagedIndexUpdates(ArchetypeClusterState clusterState, ChangeSet changeSet)
     {
         var staging = clusterState?.IndexUpdates;
-        if (staging == null || staging.FieldCount == 0 || clusterState.IndexSlots == null)
+        if (staging == null || staging.FieldCount == 0)
         {
             return;
         }
@@ -699,28 +699,13 @@ public partial class DatabaseEngine
                 }
 
                 var fieldRef = staging.Field(fieldId);
-                ref var field = ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex];
-                var multi = field.AllowMultiple;
-
-                // The parallel path's Migrate workers sort their own chunk before leaving it; this path has no workers, so it sorts its single run here. The
-                // merge below then sees one sorted run and copies it, which is the degenerate case it already handles.
-                var run = staging.ChunkSpan(0, fieldId);
-                field.Index.SortBulkEntries(run, staging.SortScratch(0, run.Length), SerialRadixCounts, multi);
-
-                var merged = staging.MergeSortedRuns(fieldId, field.Index.BulkEntryStride(multi), field.Index, multi, out var byteCount);
-                if (byteCount == 0)
+                if (fieldRef.Transient)
                 {
-                    continue;
+                    ApplyStagedField(staging, fieldId, ref clusterState.TransientIndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex], changeSet);
                 }
-
-                var accessor = field.Index.Segment.CreateChunkAccessor(changeSet);
-                try
+                else
                 {
-                    field.Index.ApplyBulkEntries(merged.AsSpan(0, byteCount), multi, ref accessor, out _);
-                }
-                finally
-                {
-                    accessor.Dispose();
+                    ApplyStagedField(staging, fieldId, ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex], changeSet);
                 }
             }
 
@@ -729,6 +714,33 @@ public partial class DatabaseEngine
         finally
         {
             Interlocked.Add(ref clusterState.LastTickMigrationApplyTicks, Stopwatch.GetTimestamp() - applyStart);
+        }
+    }
+
+    private void ApplyStagedField<TStore>(IndexUpdateStaging staging, int fieldId, ref ClusterIndexField<TStore> field, ChangeSet changeSet)
+        where TStore : struct, IPageStore
+    {
+        var multi = field.AllowMultiple;
+
+        // The parallel path's Migrate workers sort their own chunk before leaving it; this path has no workers, so it sorts its single run here. The
+        // merge below then sees one sorted run and copies it, which is the degenerate case it already handles.
+        var run = staging.ChunkSpan(0, fieldId);
+        field.Index.SortBulkEntries(run, staging.SortScratch(0, run.Length), SerialRadixCounts, multi);
+
+        var merged = staging.MergeSortedRuns(fieldId, field.Index.BulkEntryStride(multi), field.Index, multi, out var byteCount);
+        if (byteCount == 0)
+        {
+            return;
+        }
+
+        var accessor = CreateIndexAccessor(field.Index.Segment, changeSet);
+        try
+        {
+            field.Index.ApplyBulkEntries(merged.AsSpan(0, byteCount), multi, ref accessor, out _);
+        }
+        finally
+        {
+            accessor.Dispose();
         }
     }
 

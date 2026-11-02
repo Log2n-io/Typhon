@@ -286,6 +286,9 @@ internal enum TimelineReason
 
     /// <summary>Not known: the parent of the oldest timeline an engine knew, whose own origin its meta does not record.</summary>
     Unknown,
+
+    /// <summary>A crash open dropped segments past a break in the log: their LSNs are reused, and the archive may hold the ones it dropped.</summary>
+    LogBreak,
 }
 
 /// <summary>Where a restored timeline came from.</summary>

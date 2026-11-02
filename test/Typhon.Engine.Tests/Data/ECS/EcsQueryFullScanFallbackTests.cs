@@ -127,19 +127,9 @@ class EcsQueryFullScanFallbackTests : TestBase<EcsQueryFullScanFallbackTests>
         Assert.That(ReadBValues(tx, result), Is.EquivalentTo(new[] { 5, 6, 8, 9 }));
     }
 
-    // ── Shape 2: OrderBy on a field the predicate never mentions — STILL OPEN, tracked by #706 ──────────────────────────────────────
-    //
-    // Left unfixed deliberately. Serving this needs a full-range scan bound on the OrderBy field, and for Float/Double the raw IEEE-bit endpoints that both
-    // PlanBuilder.TypeMinAsLong/TypeMaxAsLong and EcsQuery.GetTypeMinAsLong/GetTypeMaxAsLong return do not bracket negative values: -1.0f encodes to
-    // -1082130432, which is outside [float.MinValue bits, float.MaxValue bits] = [-8388609, 2139095039]. IntersectEvaluatorBounds already documents the same
-    // hazard ("IEEE 754 bit patterns don't sort as signed longs for negatives"). Substituting a stream here therefore drops negative keys — an attempt at it
-    // turned KWayMergeTests' negative-float cases red. The cluster path dodges this only because PrimaryFieldIndex stays -1 and it defaults to
-    // keyType=Int over [long.Min, long.Max]. So this half is blocked on the float key-range question, not on plumbing.
-    //
-    // These two stay as live reproducers.
+    // ── Shape 2: OrderBy on a field the predicate never mentions: the sort fallback (QORD-01) ──────────────────────────────
 
     [Test]
-    [Ignore("#706 — blocked on float/double full-range key bounds; see the comment above this fixture region.")]
     public void OrderByFieldAbsentFromPredicate_ReturnsOrderedResults()
     {
         using var dbe = SetupEngine();
@@ -158,7 +148,6 @@ class EcsQueryFullScanFallbackTests : TestBase<EcsQueryFullScanFallbackTests>
     }
 
     [Test]
-    [Ignore("#706 — blocked on float/double full-range key bounds; see the comment above this fixture region.")]
     public void OrderByFieldAbsentFromPredicate_AppliesThePredicate()
     {
         using var dbe = SetupEngine();
@@ -172,6 +161,31 @@ class EcsQueryFullScanFallbackTests : TestBase<EcsQueryFullScanFallbackTests>
 
         // Scanning A's index full-range must not lose B's filter — every evaluator is non-primary here and has to be applied per entity.
         Assert.That(ReadBValues(tx, ordered), Is.EqualTo(new[] { 6, 7, 8, 9 }));
+    }
+
+    /// <summary>#706: the bit patterns of negative floats do not sort as signed longs, so the existing rows, all at or above 0, never reached what the issue was about.</summary>
+    [Test]
+    [VerifiesRule("QORD-01")]
+    public void OrderByFieldAbsentFromPredicate_OrdersAcrossNegatives([Values] bool descending)
+    {
+        using var dbe = SetupEngine();
+        float[] values = [-3f, 2f, -1f, 0f, 1f];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < values.Length; i++)
+            {
+                tx.Spawn<CompDArch>(CompDArch.D.Set(new CompD { A = values[i], B = i + 1, C = i }));
+            }
+
+            tx.Commit();
+        }
+
+        using var read = dbe.CreateQuickTransaction();
+        var query = read.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0);
+        var ordered = (descending ? query.OrderByFieldDescending<CompD, float>(d => d.A) : query.OrderByField<CompD, float>(d => d.A)).ExecuteOrdered();
+
+        var expected = descending ? new[] { 2f, 1f, 0f, -1f, -3f } : [-3f, -1f, 0f, 1f, 2f];
+        Assert.That(ordered.Select(id => read.Open(id).Read(CompDArch.D).A), Is.EqualTo(expected));
     }
 
     // ── Control: plans that could always narrow must be untouched ──────────────────────────────────────────────────

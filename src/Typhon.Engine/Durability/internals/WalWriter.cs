@@ -265,6 +265,9 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
         Volatile.Write(ref _switchServed, requested);
     }
 
+    /// <summary>The LSN the active segment ends at, were it sealed now. A rotation names it to the reclaim gate and to the next segment's header.</summary>
+    private long SealLsn => Math.Max(_lastWrittenLsn, _segmentManager.ActiveSegment.FirstLSN - 1);
+
     /// <summary>
     /// Blocks the caller until the specified LSN has been durably written to stable media.
     /// Used by <see cref="DurabilityMode.Immediate"/> producers and explicit <c>Flush()</c> callers.
@@ -505,7 +508,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     // segment, so the rotation has to be visible before this batch's CRCs are computed.
                     if (!_segmentManager.ActiveSegmentCanHold(bytesToWrite))
                     {
-                        var sealAt = Math.Max(_lastWrittenLsn, _segmentManager.ActiveSegment.FirstLSN - 1);
+                        var sealAt = SealLsn;
                         Logger?.LogInformation("WAL batch of {Bytes} bytes does not fit the active segment, rotating before the write (sealing at LSN {LastLsn})",
                             bytesToWrite, sealAt);
                         using var fitRotateScope = TyphonEvent.BeginWalSegmentRotate((int)(_segmentManager.ActiveSegment?.SegmentId ?? -1));
@@ -602,22 +605,23 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
                     // This batch's bytes are now in the active segment — record where it ends so the next batch's fit check
                     // (step 4a) can seal the segment at the right LSN if it has to rotate before writing.
-                    _lastWrittenLsn = batchHighLsn;
+                    // A batch of abandoned claims alone has no high LSN (0): the segment still ends where the last record did.
+                    _lastWrittenLsn = Math.Max(_lastWrittenLsn, batchHighLsn);
 
                     // 8. Check segment rotation threshold, then any switch request (W2): one volatile read per drained batch
                     if (Volatile.Read(ref _switchRequested) != _switchServed)
                     {
-                        ServeSwitchRequest(batchHighLsn);
+                        ServeSwitchRequest(_lastWrittenLsn);
                     }
 
                     if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
                     {
                         Logger?.LogInformation("WAL segment rotation at {Utilization:P0}, rotating after LSN {LastLsn}",
-                            _segmentManager.ActiveSegmentUtilization, batchHighLsn);
+                            _segmentManager.ActiveSegmentUtilization, SealLsn);
                         using var rotateScope = TyphonEvent.BeginWalSegmentRotate((int)(_segmentManager.ActiveSegment?.SegmentId ?? -1));
                         try
                         {
-                            _segmentManager.RotateSegment(batchHighLsn + 1, batchHighLsn);
+                            _segmentManager.RotateSegment(SealLsn + 1, SealLsn);
                             _lastFooterCrc = 0; // Reset CRC chain for new segment
                             Logger?.LogInformation("WAL segment rotation complete, new segment {SegmentId}",
                                 _segmentManager.ActiveSegment?.SegmentId ?? -1);
@@ -842,13 +846,13 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
             Interlocked.Increment(ref _totalFlushes);
 
-            _lastWrittenLsn = batchHighLsn;
+            _lastWrittenLsn = Math.Max(_lastWrittenLsn, batchHighLsn);
 
             // Segment rotation parity with WriterLoop so multi-segment sync workloads behave like production.
-            ServeSwitchRequest(batchHighLsn);
+            ServeSwitchRequest(_lastWrittenLsn);
             if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
             {
-                _segmentManager.RotateSegment(batchHighLsn + 1, batchHighLsn);
+                _segmentManager.RotateSegment(SealLsn + 1, SealLsn);
                 _lastFooterCrc = 0;
             }
         }

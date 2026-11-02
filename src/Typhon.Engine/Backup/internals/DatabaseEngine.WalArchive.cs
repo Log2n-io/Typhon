@@ -98,9 +98,10 @@ public partial class DatabaseEngine
     internal TimeSpan RecoverySealWaitForTest { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// BKP-10's torn-tail seal (WA-9), on a crash open whose recovery stopped at a break, after the recovery's seal and before the session's first commit:
-    /// with archiving configured the archive floor keeps the torn segment past this open, so its tear must not stop the next recovery before the segments
-    /// this session writes. Archiving off, the seal's checkpoint reclaims the torn segment as it always did.
+    /// BKP-10's torn-tail seal (WA-9), on a crash open whose recovery stopped at a break, after the recovery's seal and before the session's first commit: a torn
+    /// segment outliving this open must not stop the next recovery before the segments this session writes. With archiving configured the archive floor keeps it.
+    /// Archiving off, the seal's checkpoint reclaims it only when recovery replayed something: with nothing replayed there is no cycle, and a crash before the
+    /// session's first checkpoint stopped at the same tear and lost that session's commits.
     /// </summary>
     /// <remarks>
     /// The sentinel hides the torn frame's valid fence chunks, which this recovery applied (fences apply without a commit) and a flush-only cycle may
@@ -109,9 +110,9 @@ public partial class DatabaseEngine
     /// rather than seal, and the next open recovers, and seals, again.
     /// </remarks>
     /// <exception cref="InvalidOperationException">The recovery's checkpoint did not consolidate the fence records the sentinel would hide.</exception>
-    private void SealTornTailForArchive(string walDir)
+    private void SealTornTail(string walDir)
     {
-        if (ArchiveConfiguration == null || TornTailSealDisabledForTest)
+        if (TornTailSealDisabledForTest)
         {
             return;
         }

@@ -79,6 +79,9 @@ internal sealed class WalFileIO : IWalFileIO
     public void Delete(string path) => File.Delete(path);
 
     /// <inheritdoc />
+    public void RetireSegment(string path) => File.Move(path, Path.ChangeExtension(path, ".dropped"), overwrite: true);
+
+    /// <inheritdoc />
     public void Dispose()
     {
         // No per-instance resources to dispose; file handles are owned by callers.

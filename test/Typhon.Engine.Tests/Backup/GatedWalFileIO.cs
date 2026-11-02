@@ -92,6 +92,8 @@ internal sealed class GatedWalFileIO : IWalFileIO
 
     public void Delete(string path) => _inner.Delete(path);
 
+    public void RetireSegment(string path) => _inner.RetireSegment(path);
+
     public IReadOnlyList<string> EnumerateSegmentPaths(string directory) => _inner.EnumerateSegmentPaths(directory);
 
     public void Dispose()

@@ -2636,7 +2636,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // prior session's CheckpointLSN; RecoveryDriver then skips the entire post-reopen window as already-consolidated (LOG-08 — silent loss of durably-acked commits).
         var frontierLsn = Math.Max(lastLSN, checkpointLsn);
         // With archiving configured the open reclaims nothing (WA-3): a close with the store unreachable left segments only the archive floor kept.
-        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn, ArchiveConfiguration != null ? 0 : long.MaxValue);
+        WalManager.Initialize(lastSegmentId, frontierLsn > 0 ? frontierLsn + 1 : 1, checkpointLsn, ArchiveConfiguration != null ? 0 : long.MaxValue,
+            CrashRecoveryAtOpen ? _lastRecoveryResult.FirstDroppedSegmentId : 0);
+        if (!CrashRecoveryAtOpen)
+        {
+            WalManager.SegmentManager.RetireSetAsideSegments();
+        }
+
         // Seed the durable watermark to the reopen frontier so it MATCHES LastAppendedLsn (= NextLsn-1 = frontierLsn). Initialize advances NextLsn to
         // frontierLsn+1 (LOG-08, LSN monotonic across sessions); without a matching durable seed, DurableLsn stays 0 while LastAppendedLsn=frontierLsn, so
         // the very first checkpoint barrier (CK-02 waits DurableLsn ≥ LastAppendedLsn) blocks for an LSN no frame will ever publish on an idle reopened
@@ -5806,6 +5812,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
+        // The driver reads what the open's scan left: a break that scan stopped at, it set aside (WR-01), and the driver sees a log with no hole in it.
+        if (result.StoppedAtCorruption || _lastRecoveryResult.Break != WalRecoveryBreak.None)
+        {
+            result.StoppedAtCorruption = true;
+            LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn, _lastRecoveryResult.Break, _lastRecoveryResult.FirstDroppedSegmentId);
+        }
+
         LastWalV2RecoveryResult = result;
         LastWalV2RecoveryCheckpointLsn = checkpointLsn;
 
@@ -5814,11 +5827,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             WorldTickBase = result.MaxWorldTick;
             WorldClock.Raise(WorldTickBase);
-        }
-
-        if (result.StoppedAtCorruption)
-        {
-            LogWalRecoveryStoppedAtCorruption(result.SegmentsScanned, result.MaxLsn);
         }
 
         // LOG-08 across a RECOVERY, not only across a clean reopen (#712). InitializeWalManager has to choose the LSN floor in the constructor, where the
@@ -5896,11 +5904,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _archetypeSpiPersistArmed = true;
         }
 
+        // The LSNs of what was dropped are reused from here, and the archive may hold those segments: a restore must not replay them over this log. Forked before
+        // they leave the log: a failure between the two finds the break again on the next open.
+        if (_lastRecoveryResult.FirstDroppedSegmentId != 0)
+        {
+            ForkTimeline(TimelineReason.LogBreak, false);
+        }
+
+        WalManager.SegmentManager.RetireSetAsideSegments();
+
         // BKP-10's torn-tail seal, once the seal's cycle consolidated what this recovery applied and before the session's first commit: the sentinel hides
         // the torn frame's valid fence chunks, which only a CheckpointLSN past them makes safe to hide (the seal's timeout is soft and leans on re-replay).
         if (result.StoppedAtCorruption)
         {
-            SealTornTailForArchive(walDir);
+            SealTornTail(walDir);
         }
 
         // Phase 6b — OCCUPANCY RE-DERIVE (03-recovery.md §7, rule CK-09): the occupancy bitmap is a DERIVED structure — post-crash it is never trusted but rebuilt
@@ -8606,8 +8623,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // LOG-03 / REC-01. Warning, not Information: the scan ending early is indistinguishable from a clean end in every other
     // counter, and the difference is whether the log was cut short by corruption. Everything after the boundary was discarded.
     [LoggerMessage(LogLevel.Warning,
-        "Open: WAL recovery STOPPED at a corruption boundary after {segmentsScanned} segment(s) — records beyond it were NOT applied (frontier LSN {maxLsn})")]
-    internal partial void LogWalRecoveryStoppedAtCorruption(int segmentsScanned, long maxLsn);
+        "Open: WAL recovery STOPPED at a corruption boundary after {segmentsScanned} segment(s) — records beyond it were NOT applied (frontier LSN {maxLsn}) [{kind}; first segment set aside: {firstDroppedSegment}]")]
+    internal partial void LogWalRecoveryStoppedAtCorruption(int segmentsScanned, long maxLsn, WalRecoveryBreak kind, long firstDroppedSegment);
 
     // LOG-08 on the crash path (#712). Information, not Debug: this is the moment the reopened writer's LSN sequence is rebased onto the recovered window,
     // and a crash-recovery investigation that cannot see the floor it continued from cannot tell a lost commit from one that was never appended.

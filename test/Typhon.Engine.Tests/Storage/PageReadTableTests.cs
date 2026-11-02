@@ -106,9 +106,33 @@ class PageReadTableTests
         Assert.That(RequestAndRead(mmf, filePageIndex).AllOnDisk, Is.True, "the page is read again, and this time it is fine");
     }
 
+    /// <summary>#1518: a miss reads on the thread that missed, so its completion needs no pool thread: a pool with none free still gets its page.</summary>
     [Test]
     [CancelAfter(10_000)]
-    public void AnOwnerThatFailsAfterStartingItsRead_LeavesNoReadRecorded()
+    [VerifiesRule("PS-15")]
+    public void AMiss_ReadsOnTheThreadThatMissed()
+    {
+        var filePageIndex = StagePagesOnDisk(1)[0];
+
+        using var scope = _serviceProvider.CreateScope();
+        var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
+
+        var completedOn = 0;
+        mmf.RecordedReadInterceptor = (fp, read) => fp == filePageIndex
+            ? read.ContinueWith(t =>
+            {
+                completedOn = Environment.CurrentManagedThreadId;
+                return t.Result;
+            }, TaskContinuationOptions.ExecuteSynchronously)
+            : read;
+
+        Assert.That(RequestAndRead(mmf, filePageIndex).AllOnDisk, Is.True);
+        Assert.That(completedOn, Is.EqualTo(Environment.CurrentManagedThreadId), "the read landed on another thread");
+    }
+
+    [Test]
+    [CancelAfter(10_000)]
+    public void AnOwnerThatFailsAfterClaimingItsRead_LeavesNoReadRecorded()
     {
         var filePageIndex = StagePagesOnDisk(1)[0];
 
@@ -116,7 +140,7 @@ class PageReadTableTests
         var mmf = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
 
         var thrown = false;
-        mmf.MissAfterReadStartProbe = fp =>
+        mmf.MissBeforeReadProbe = fp =>
         {
             if (fp == filePageIndex && !thrown)
             {

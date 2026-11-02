@@ -56,7 +56,7 @@ the filter as naming them, and a 2-term category filter qualifies where the gate
 305-term one does not. Reusing the gate's plan keeps nightly and gate selection
 identical by construction instead of by two mechanisms that have to agree.
 """
-import argparse, json, os, re, subprocess, sys, time
+import argparse, json, os, re, shutil, subprocess, sys, time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
@@ -319,8 +319,9 @@ def skipped_trx(results_dir, label):
     """The trx a skipped pass would have written, removed if an earlier run left one: a missing file reads as an empty run, a stale one
     would report that run's results as this one's."""
     path = os.path.join(results_dir, f"shard{label}.trx")
-    if os.path.exists(path):
-        os.remove(path)
+    for stale in (path, os.path.join(results_dir, f"shard{label}.log")):
+        if os.path.exists(stale):
+            os.remove(stale)
     return path
 
 
@@ -409,6 +410,37 @@ def shard_integrity(shards, trx_paths):
     return sorted(set(missing))
 
 
+# What vstest prints when the test host dies part-way. The trx then holds only the tests that finished, and the test that killed the host is not among them.
+HOST_DIED_MARKERS = ("The active test run was aborted", "Test host process crashed", "Test Run Aborted")
+
+def log_says_host_died(path):
+    """Whether a `dotnet test` log says its test host died."""
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    return any(marker in text for marker in HOST_DIED_MARKERS)
+
+def host_died(results_dir, label):
+    """Whether pass `label`'s test host died: a run that stopped part-way, whatever its trx says. The verdict read the trx alone, so a native crash in shard 0
+    left ~171 tests unrun and the gate reported PASS (#1391)."""
+    return log_says_host_died(os.path.join(results_dir, f"shard{label}.log"))
+
+def keep_crash_log(results_dir, label):
+    """The dead host's log, under a name the re-run does not overwrite: its stack is the only record of a crash that does not come back."""
+    path = os.path.join(results_dir, f"shard{label}.log")
+    shutil.copyfile(path, os.path.join(results_dir, f"shard{label}.crash.log"))
+    print(f"\nshard {label}: the test host DIED part-way (shard{label}.crash.log) — running it once more...", flush=True)
+
+def run_surviving(label, flt, results_dir, crashed, env_extra=None):
+    """`run_one` for a pass with no retry of its own: once more if its host died, its label added to `crashed`."""
+    result = run_one(label, flt, results_dir, env_extra=env_extra)
+    if host_died(results_dir, label):
+        keep_crash_log(results_dir, label)
+        crashed.add(label)
+        result = run_one(label, flt, results_dir, env_extra=env_extra)
+    return result
+
 def cmd_run(results_dir):
     shards = json.load(open(SHARDS_JSON))
     # Before spending a minute of shards on it: a plan whose filters disagree with its lists runs some classes twice or not
@@ -439,8 +471,15 @@ def cmd_run(results_dir):
     # locally on 2026-09-12, every shard AND the quiet pass aborted with "vstest.console process failed to connect to testhost process after 90
     # seconds" while the box was busy, and an identical rerun minutes later was green in 47 s. Without this the plan-integrity check (correctly) fails
     # the run on dozens of "classes that ran zero tests", and the only remedy is to rerun everything. A shard that is genuinely broken aborts again.
-    for label, _, _, trx in [r for r in results if parse_trx(r[3])[0] == 0]:
-        print(f"\nshard {label} produced no results (testhost never connected, or the host died) — running it once more...", flush=True)
+    # A host that died part-way gets the same one retry, for a different reason: what it left is a partial trx, and the tests it never reached say nothing.
+    # Dead again, the verdict below is FAIL (#1391).
+    crashed = set()
+    for label, _, _, trx in [r for r in results if parse_trx(r[3])[0] == 0 or host_died(results_dir, r[0])]:
+        if host_died(results_dir, label):
+            keep_crash_log(results_dir, label)
+            crashed.add(label)
+        else:
+            print(f"\nshard {label} produced no results (testhost never connected) — running it once more...", flush=True)
         results = [r for r in results if r[0] != label] + [run_one(label, shards[int(label)]["filter"], results_dir)]
     par = time.time() - t0
     results.sort(key=lambda x: int(x[0]))
@@ -450,12 +489,18 @@ def cmd_run(results_dir):
         t, p, f = parse_trx(trx); tot += t; pas += p; fail += f
         print(f"  {label:>2}  {rc:3d}  {dt:5.0f}s  {t:5d}  {p:5d}  {f:5d}", flush=True)
 
+    # Each pass's last exit code and failed-test count: a run that exited non-zero with no failure recorded did not finish, whatever its log says.
+    final_rcs = {}
+    for label, rc, _, trx in results:
+        final_rcs[label] = (rc, parse_trx(trx)[2])
+
     s0 = time.time()
     if project_names_category("Sensitive"):
         print("\nserial quiet pass (Category=Sensitive, workers=1, no siblings)...", flush=True)
-        _, src, sdt, strx = run_one("S", SENSITIVE_FILTER, results_dir)
+        _, src, sdt, strx = run_surviving("S", SENSITIVE_FILTER, results_dir, crashed)
         st, sp, sf = parse_trx(strx); tot += st; pas += sp; fail += sf
         print(f"   S  {src:3d}  {sdt:5.0f}s  {st:5d}  {sp:5d}  {sf:5d}", flush=True)
+        final_rcs["S"] = (src, sf)
     else:
         strx = skipped_trx(results_dir, "S")
         print("\nserial quiet pass skipped: no test of this project is Category=Sensitive", flush=True)
@@ -473,11 +518,12 @@ def cmd_run(results_dir):
             continue
         print(f"\ngated pass {label} (Category={category}, workers=1) — {why}...", flush=True)
         g0 = time.time()
-        _, grc, gdt, gtrx = run_one(label, gated_filter(category), results_dir, env_extra=env_extra)
+        _, grc, gdt, gtrx = run_surviving(label, gated_filter(category), results_dir, crashed, env_extra=env_extra)
         gated_secs += time.time() - g0
         gt, gp, gf = parse_trx(gtrx); tot += gt; pas += gp; fail += gf
         gated_trx.append(gtrx)
         print(f"   {label}  {grc:3d}  {gdt:5.0f}s  {gt:5d}  {gp:5d}  {gf:5d}", flush=True)
+        final_rcs[label] = (grc, gf)
 
     # ── Retry pass ───────────────────────────────────────────────────────────
     # The suite carries a long tail of low-probability TIMING flakes: concurrency/
@@ -526,8 +572,12 @@ def cmd_run(results_dir):
             # shards get above, applied where it was missing. Seen on 2026-09-27: a retry died with "Test host process crashed", wrote
             # no trx, and was therefore counted as "recovered 0, still failing 1" — which the verdict then reported as "likely a real
             # regression" about a test that passed on the next attempt and 3/3 in isolation. An attempt that did not run must not
-            # consume one of the two, or a host crash becomes a red gate.
-            if not res:
+            # consume one of the two, or a host crash becomes a red gate. Nor may an attempt whose host died part-way: the retry runs whole classes, so what it
+            # reported as recovered says nothing of the siblings it never reached (#1391). Its failures stay, for the next attempt to run.
+            if host_died(results_dir, suffix):
+                keep_crash_log(results_dir, suffix)
+                crashed.add(suffix)
+            if not res or host_died(results_dir, suffix):
                 print(f"   {suffix}  {rdt:5.0f}s  produced NO results (testhost never connected, or the host died) — not counted "
                       "as an attempt", flush=True)
                 continue
@@ -545,7 +595,12 @@ def cmd_run(results_dir):
     # names a class it never runs is a false green, which is exactly as blocking as a failing test.
     unexecuted = shard_integrity(shards, [t for _, _, _, t in results] + [strx])
 
-    overall = 0 if not failed and not unexecuted else 1
+    # The last run of every pass, by its log or by an exit code no failed test explains. A retry's own crash is not here: the tests it did not reach are still in
+    # `failed`. Shard 0's catch-all names no class, so the plan-integrity check cannot see it finish nothing.
+    labels = [r[0] for r in results] + ["S"] + [label for label, _, _, _ in GATED_PASSES]
+    aborted = [label for label in labels if host_died(results_dir, label) or (final_rcs.get(label, (0, 0))[0] != 0 and final_rcs[label][1] == 0)]
+
+    overall = 0 if not failed and not unexecuted and not aborted else 1
     print(f"\n[shard] WALL={par + ser + retry_secs:.0f}s "
           f"(parallel {par:.0f}s + serial {ser:.0f}s + retry {retry_secs:.0f}s)  "
           f"total={tot} initial-failed={initial_fail}", flush=True)
@@ -557,6 +612,13 @@ def cmd_run(results_dir):
         print(f"[shard] STILL FAILING after {MAX_RETRIES} retries (BLOCKING — likely a real regression):", flush=True)
         for c, n in sorted(failed):
             print(f"          x {c}.{n}", flush=True)
+    recovered_crashes = sorted(crashed - set(aborted))
+    if recovered_crashes:
+        print("[shard] HOST CRASHED, clean on its re-run (a native crash is never a timing flake: investigate, NON-blocking) — "
+              f"see shard<label>.crash.log: {', '.join(recovered_crashes)}", flush=True)
+    if aborted:
+        print(f"[shard] HOST DIED (BLOCKING) — the test host of pass(es) {', '.join(aborted)} died on its last run: the tests it never reached did not "
+              "pass, whatever the totals above say.", flush=True)
     if unexecuted:
         print(f"[shard] PLAN INTEGRITY (BLOCKING) — {len(unexecuted)} class(es) named by shards.json ran ZERO tests. "
               f"The gate budgeted a slot for each and reported on nothing:", flush=True)
@@ -565,13 +627,13 @@ def cmd_run(results_dir):
         print("[shard]   Fix: un-suppress the fixture, or drop the class from shards.json if it now belongs to an "
               "excluded tier (Quarantine/Nightly/Manual). A named class that runs nothing is a false green.",
               flush=True)
-    tail = f" ({len(flaked)} flaked, recovered)" if flaked and not failed and not unexecuted else ""
+    tail = f" ({len(flaked)} flaked, recovered)" if flaked and not overall else ""
     print(f"[shard] OVERALL={'PASS' if overall == 0 else 'FAIL'}{tail}", flush=True)
     return overall
 
 # ── retry (any project) ─────────────────────────────────────────────────────
 
-def cmd_retry(trx_path, project, results_dir, label):
+def cmd_retry(trx_path, project, results_dir, label, log_path=None):
     """Re-run the failures recorded in `trx_path`, alone, under the same policy `cmd_run` applies to the shards.
 
     The engine suite got this net when it was sharded (#405); the Workbench suite never did, because `run-gate.sh`
@@ -583,6 +645,11 @@ def cmd_retry(trx_path, project, results_dir, label):
     the worked example — reliably red, so no number of retries may turn it green, and quarantine is the only honest
     way to take it off the gate.
     """
+    # A host that died part-way recorded a failure or two and never reached the rest: re-running what it recorded would turn that into a pass (#1391).
+    if log_path and log_says_host_died(log_path):
+        print(f"[retry] {os.path.basename(log_path)} says the test host DIED: the tests it never reached did not pass — verdict unchanged.", flush=True)
+        return 1
+
     failed = {k for k, o in all_results(trx_path).items() if o == "Failed"}
     if not failed:
         # A non-zero exit with no recorded failure is a real failure of a different kind: a crashed host, a build
@@ -601,6 +668,10 @@ def cmd_retry(trx_path, project, results_dir, label):
         print(f"\n[retry] {attempt}/{MAX_RETRIES}: re-running {len(failed)} failed test(s) in {len(classes)} "
               f"class(es), alone (workers=1)...", flush=True)
         _, _, rdt, rtrx = run_one(f"{label}R{attempt}", rflt, results_dir, project=project)
+        if host_died(results_dir, f"{label}R{attempt}"):
+            print(f"[retry]   R{attempt}  {rdt:5.0f}s  the test host DIED — not counted as an attempt", flush=True)
+            continue
+
         res = all_results(rtrx)
         recovered = {t for t in failed if res.get(t) == "Passed"}
         flaked |= recovered
@@ -630,6 +701,7 @@ if __name__ == "__main__":
     pt.add_argument("--project", required=True)
     pt.add_argument("--results-dir", required=True)
     pt.add_argument("--label", default="W")
+    pt.add_argument("--log", help="the failed run's dotnet test log: a host that died there is not retried")
 
     # Print the gate's category exclusion so a suite that is NOT sharded can apply the same one. The Workbench suite is
     # a bare `dotnet test`, and it honoured no exclusion at all until #774 — which is precisely the hole the comment on
@@ -653,6 +725,6 @@ if __name__ == "__main__":
     elif a.cmd == "plan":
         cmd_plan(a.k, a.trx)
     elif a.cmd == "retry":
-        sys.exit(cmd_retry(a.trx, a.project, a.results_dir, a.label))
+        sys.exit(cmd_retry(a.trx, a.project, a.results_dir, a.label, a.log))
     else:
         sys.exit(cmd_run(a.results_dir))

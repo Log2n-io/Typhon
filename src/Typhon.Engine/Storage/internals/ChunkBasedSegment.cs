@@ -333,6 +333,31 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     internal bool TornGrowRepaired { get; private set; }
 
     /// <summary>
+    /// Counts the allocation bits of every page, against the allocated count: what the integrity audit compares (#1381). False when the count or the segment's length
+    /// moved during the walk: a free or an allocation between the two reads, which says nothing about their agreement.
+    /// </summary>
+    internal bool TryCountAllocatedBits(out int bits, out int counter)
+    {
+        counter = Volatile.Read(ref _allocatedCount);
+        var length = Length;
+        bits = 0;
+        for (var i = 0; i < length; i++)
+        {
+            var page = AcquirePageForRead(i, out var memPageIndex);
+            try
+            {
+                bits += CountAllocatedBits(page.MetadataReadOnly<long>(), i == 0 ? _bitmapLongsRoot : _bitmapLongsOther, i == 0 ? _rootChunkCount : _otherChunkCount);
+            }
+            finally
+            {
+                ReleasePageForRead(memPageIndex);
+            }
+        }
+
+        return counter == Volatile.Read(ref _allocatedCount) && length == Length;
+    }
+
+    /// <summary>
     /// Rebuilds the allocator from the chunk bitmaps, the source of truth: reads every page. Checks each page's forward link against the directory as the
     /// page goes by, at no extra read.
     /// </summary>

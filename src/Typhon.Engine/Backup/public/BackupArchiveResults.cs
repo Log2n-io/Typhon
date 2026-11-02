@@ -54,6 +54,9 @@ public enum BackupTimelineReason
 
     /// <summary>Not recorded.</summary>
     Unknown,
+
+    /// <summary>A crash open dropped WAL segments past a break in the log.</summary>
+    LogBreak,
 }
 
 /// <summary>Why a range of LSNs is missing from a timeline's archive: no restore crosses it.</summary>

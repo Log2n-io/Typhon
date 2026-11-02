@@ -53,7 +53,13 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
   invariant recovery truncates at the last chunk whose CRC chain validates; records past it are ignored
   invariant the stop is unconditional — a CRC break ANYWHERE (mid-log in a sealed segment, not only a torn tail on the
             last one) ends the scan; REC-01 states the general form
-  scope: RecoveryDriver.cs, WalSegmentReader.cs
+  invariant so does a break in the chain of segments (`WalSegmentWalk`, the one rule of both scanners): a file with no valid header below a segment that starts past
+            CheckpointLSN, or a segment whose `PrevSegmentLSN` is above max(highest LSN read, CheckpointLSN), which says the segment before it is gone. Recovery that
+            went on applied the commits past a hole (#938)
+  never decide a break from `FirstLSN` or ids. A false stop drops acknowledged commits. A new lifecycle's `FirstLSN` comes from what its open read, a torn frame's
+        valid chunk included, which a later reader may not find; ids legally skip. So a lifecycle's first segment (`PrevSegmentLSN` 0) never breaks the log, and a
+        gap before one goes unseen
+  scope: RecoveryDriver.cs, WalSegmentReader.cs, WalSegmentWalk.cs
   on_violation: records past the boundary have no CRC-chain guarantee — partially flushed, uncommitted, or stale bytes
                 from a recycled segment get applied as committed
   spec: rules/tla/CommitRecovery.tla, modelled at :164. NOTE the spec models the log as ONE Seq truncated to a prefix,
@@ -2256,8 +2262,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-15: A slot in the page directory is used only once its owner has prepared it `[fatal]` `[silent]`
   invariant a slot claimed for file page X is published (`GetOrAdd`) before it is prepared, so it carries `SlotReady == false` from its claim
             (`TryAcquire`) until its owner — the thread whose `GetOrAdd` published it — has reset `CrcVerified` and either cleared the page (not
-            on disk, PS-14) or started its read and recorded it in the read table, then set `ReadPending`; the owner then sets `SlotReady` with a
-            release write
+            on disk, PS-14) or recorded its read in the read table, then set `ReadPending`; the owner then sets `SlotReady` with a release write, and only
+            then reads the page, on its own thread: every requester blocks until the read lands, and a read whose completion needs a pool thread, waited for
+            on a pool thread, costs two of them per cold read, which starves the pool, exhausts the epoch registry and deadlocks a capped pool (#1518)
   invariant every `RequestPageEpoch*` that finds a slot not ready waits — acquire reads — until it is ready (then goes on) or no longer holds
             X (its owner abandoned it, or it was reclaimed — then looks the page up again)
   invariant after tagging the slot's epoch, a requester re-validates `FilePageIndex == X && SlotReady` before using it, and only then takes it
@@ -2271,15 +2278,13 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   invariant a thread whose `GetOrAdd` returns another slot takes that slot untouched: no read into it, no `CrcVerified` reset, no read-task
             replacement
   invariant an owner that throws before the slot is prepared unpublishes it first — a waiter sees it no longer holds X and looks the page
-            up again at once — then frees it. If it had started a read (only an allocation can fail after that: `AsTask`, the trace
-            continuation, the read-table insert), it frees the slot only once that read has landed: it is the read's only observer, and until
-            then the slot stays `Allocating`, which `TryAcquire` never takes. It drops any read-table entry the slot has. It does NOT mark the
-            slot ready: once Free it may already be another owner's unprepared slot. An owner that throws after the slot is prepared (the trace
-            scope's close) still marks it ready
+            up again at once — then frees it: nothing has read into it, the read coming after the slot is ready. It drops any read-table entry the slot has. It
+            does NOT mark the slot ready: once Free it may already be another owner's unprepared slot. An owner that throws after the slot is prepared (the
+            trace scope's close) still marks it ready. A read that fails stays recorded, for every requester
   invariant `ReadPending` is cleared only by a thread that holds the slot against a new read: a requester after tagging and validating it,
             `TryAcquire` under the slot's lock, or the slot's owner. The checkpoint and `SavePages`, which hold the slot by its debt, only wait
   scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, PagedMMF.WaitForSlotReady, PagedMMF.ValidateTaggedSlot,
-         PagedMMF.AbandonUnpreparedSlot, PagedMMF.WaitForOrphanedRead, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
+         PagedMMF.AbandonUnpreparedSlot, PagedMMF.ReadRecordedPage, PagedMMF.RequestPageEpoch, PagedMMF.RequestPageEpochUnchecked,
          PagedMMF.RequestPageEpochNoSweep, PagedMMF.TryAcquire, PagedMMF.CompletePendingRead, PagedMMF.WaitForPendingRead,
          PagedMMF.DropReadTask, SlotReady, ReadPending
   requires: PS-17 — the directory publishes one slot per page, and its lookups are hints the requester validates
@@ -2297,16 +2302,14 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             between publishing and preparing; a second requester must still be waiting, then see the disk content),
             TheLoserOfAConcurrentMiss_LeavesTheWinnersSlotAlone (a loser held before publishing must not overwrite a write made after the
             winner's read, and the page is read once), AnOwnerThatFailsBeforeItsRead_LeavesNoWaiterStuck and
-            AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck. Each fails with its part of the fix removed (#1128).
+            AnOwnerThatFailsAfterClaimingItsRead_LeavesNoWaiterStuck. Each fails with its part of the fix removed (#1128).
             AReclaimThatBacksOffAClaimedSlot_LeavesItsOwnersReadyAlone holds a reclaim between its first pass and its lock while another
             requester claims, publishes and prepares the slot; with the withdraw-and-restore on an Allocating slot, the reclaimer then waits
             on a page never marked ready and times out, 3 runs of 3 (#1201). Contended:
             `PrepSliceEquivalenceTests`, 6 concurrent processes × 10 rounds — 22 of 60 failing on `main`, 0 of 60 with this rule held. Two
-            parts have no deterministic test and are argued above: the reclaim/tag pairing (covered by that stress run), and the owner waiting
-            for its started read before freeing the slot (a real file read cannot be held in flight)
+            parts have no deterministic test and are argued above: the reclaim/tag pairing (covered by that stress run)
   note: the wait is bounded by `PageCacheLockTimeout`. The owner's preparation is a few microseconds and waits on nothing, and an owner that
-        fails unpublishes the slot before waiting for its read, so the bound only turns a defect into a loud `LockTimeoutException` instead
-        of a hang.
+        fails unpublishes the slot at once, so the bound only turns a defect into a loud `LockTimeoutException` instead of a hang.
 
 ### PS-16: A slot that owes a writeback has its debt bit set `[fatal]` `[silent]`
   invariant WritebackGen != CapturedGen ⟹ the slot's bit in the debt bitmap is set, wherever no writer is between its generation bump and
@@ -2642,14 +2645,21 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     - continues segment numbering from (max existing id + 1) — NEVER restarts at 1
       (restart re-collides filenames and strands higher-id files; it also makes on-disk id order
        diverge from LSN order, which DiscoverSegments sorts by — see REC-02 ordering)
-    - deletes files with no valid header (empty/pre-allocated placeholders): recovery's
-      WalSegmentReader.OpenSegment rejects them and Phase 2 skips them, so they hold zero records
+    - deletes a file with no valid header above the highest one that has it (empty/pre-allocated placeholders: spares
+      are always above the last written segment, so they hold zero records)
+    - adopts neither such a file below a valid one, which is damage, nor any segment from the scan's FirstDroppedSegmentId
+      up, and a crash open retires them (RetireSetAsideSegments, IWalFileIO.RetireSegment, `.dropped`) after its timeline
+      fork: earlier, a failed open left the next one no break to find, and no fork. Left in place they would read as the
+      log's continuation to the next crash, and the segment before them could never be sealed. Their bytes stay for a
+      manual salvage, and their ids stay spent
     - deletes valid segments whose records are all < CheckpointLSN, AND segments covering no live LSN
       (computed LastLSN < FirstLSN — header-only / never-written), via the existing MarkReclaimable gate
     - adopts the remaining valid segments (records ≥ CheckpointLSN) into _sealedSegments for normal
       checkpoint-gated reclaim
-  invariant NEVER delete a segment that may hold records ≥ CheckpointLSN (recovery replays from it — REC-04)
-  scope: WalSegmentManager.Initialize, DatabaseEngine.InitializeWalManager, WalSegmentManager.MarkReclaimable
+  invariant NEVER delete a segment that may hold records ≥ CheckpointLSN (recovery replays from it — REC-04), and a read that FAILS is not an invalid header: it
+            fails the open
+  scope: WalSegmentManager.Initialize, DatabaseEngine.InitializeWalManager, WalSegmentManager.MarkReclaimable, WalSegmentManager.RetireSetAsideSegments,
+         IWalFileIO.RetireSegment
   on_violation:
     skip the reconcile → prior-lifecycle segment files + pre-allocated placeholders orphan forever
       (never in _sealedSegments) → unbounded WAL disk growth per engine lifecycle
@@ -3605,7 +3615,8 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             range). The sentinel hides those fences, so it is written only once CheckpointLSN ≥ that fence LSN: a seal cycle that
             did not get there (its timeout is soft) fails the open, unsealed, and the next open recovers and seals again — hidden
             earlier, a second recovery replays the window without them and an earlier fence's values overwrite theirs. A break
-            followed by a segment holding data is mid-log corruption (#587): left as it is
+            followed by a segment holding data is mid-log corruption (#587): left as it is. A crash open reaches the seal with
+            such segments set aside (WR-01), so the break it meets there ends the log
   scope: CheckpointManager.EngageArchiveFloor, CheckpointManager.RaiseArchiveFloor, CheckpointManager.ArchiveFloorReleased
     (step 8, beside the backup floor W1), WalSegmentManager.Initialize (reclaimFloorAtOpen), WalSegmentManager.BytesHeldBetween,
     WalSegmentManager.ArchiveSnapshot, IWalFileIO.OpenSegmentForArchive, WalFileIO.OpenSegmentForArchive,
@@ -3626,7 +3637,9 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             outside the data and every 8th inside; Mutant_ADecodeWithoutTheRawCrc_IsReported), ArchiveStoreCrashTests (AC-A4, a
             crash after every operation of a publish, both directory models), ArchiveIndexTests
             (Mutant_AnIndexTrustedWithoutItsFingerprint_IsReported), ArchiveDivergenceTests, ArchiveTornTailTests (AC-A10:
-            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; a mid-log break left unsealed;
+            Mutant_ACrashOpenThatDoesNotSealTheTornTail_IsReported; AMidLogBreak_IsLeftUnsealed;
+            AMidLogBreak_IsSealedOnceWhatFollowsItIsSetAside; ABreakOnASegmentsFirstFrame_SetsItAsideWithItsBytes;
+            ACleanOpen_SetsNothingAside;
             ATornFence_WhoseRecoveryCheckpointDoesNotComplete_IsNotSealedAndIsReplayedByTheNextOpen), WalArchiveScannerTests
             (ASealedTornTail_EndsCleanlyAtItsSentinel_NamingTheFenceRecordsRecoveryApplied) — [VerifiesRule("BKP-10")]. Source
             mutants seen red: the floor raised before the publish, a release not counted, no flush before the rename, no

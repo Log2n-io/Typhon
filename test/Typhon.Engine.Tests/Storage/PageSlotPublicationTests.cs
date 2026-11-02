@@ -207,7 +207,7 @@ class PageSlotPublicationTests
     [Test]
     [CancelAfter(10_000)]
     [VerifiesRule("PS-15")]
-    public void AnOwnerThatFailsAfterStartingItsRead_LeavesNoWaiterStuck()
+    public void AnOwnerThatFailsAfterClaimingItsRead_LeavesNoWaiterStuck()
     {
         var filePageIndex = StagePageOnDisk();
 
@@ -219,7 +219,7 @@ class PageSlotPublicationTests
         var failingThread = new int[1];
         using var ownerReading = new ManualResetEventSlim();
         using var secondWaits = new ManualResetEventSlim();
-        mmf.MissAfterReadStartProbe = fp =>
+        mmf.MissBeforeReadProbe = fp =>
         {
             if (fp == filePageIndex && Environment.CurrentManagedThreadId == Volatile.Read(ref failingThread[0]))
             {

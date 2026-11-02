@@ -147,7 +147,9 @@ internal sealed class WalSegmentManager : IDisposable
     /// The WAL archive's floor at open (BKP-10, WA-3): no adopted segment whose last LSN is at or above it is reclaimed here. 0 when archiving is
     /// configured — the archive may not hold them yet, and nothing has spoken for it since the last session; <see cref="long.MaxValue"/> when off.
     /// </param>
-    public void Initialize(long lastSegmentId, long firstLSN, long checkpointLsn = 0, long reclaimFloorAtOpen = long.MaxValue)
+    /// <param name="firstDroppedSegmentId">The first segment recovery left out with a valid header (<see cref="WalRecoveryResult.FirstDroppedSegmentId"/>): it and
+    /// those above it are not adopted, and wait for <see cref="RetireSetAsideSegments"/>. 0 for none.</param>
+    public void Initialize(long lastSegmentId, long firstLSN, long checkpointLsn = 0, long reclaimFloorAtOpen = long.MaxValue, long firstDroppedSegmentId = 0)
     {
         if (!Directory.Exists(_walDirectory))
         {
@@ -157,7 +159,7 @@ internal sealed class WalSegmentManager : IDisposable
         // Reconcile leftover on-disk segments: delete empty placeholders, adopt valid segments into _sealedSegments, and
         // return the highest existing id so numbering continues (no restart-at-1, no filename collision with the new active).
         var recoveryLastValidLsn = firstLSN > 0 ? firstLSN - 1 : 0;
-        var maxExistingId = ReconcileExistingSegments(recoveryLastValidLsn);
+        var maxExistingId = ReconcileExistingSegments(recoveryLastValidLsn, firstDroppedSegmentId);
 
         _nextSegmentId = Math.Max(lastSegmentId, maxExistingId) + 1;
 
@@ -184,15 +186,15 @@ internal sealed class WalSegmentManager : IDisposable
     }
 
     /// <summary>
-    /// Reconciles WAL segment files left on disk by a previous engine lifecycle. Deletes files with no valid header
-    /// (empty/zero pre-allocated placeholders — <see cref="WalSegmentReader.OpenSegment"/> rejects them and recovery skips
-    /// them, so they hold zero records and deleting them cannot change recovery). Adopts each valid segment into
-    /// <see cref="_sealedSegments"/> with its computed LastLSN (chain rule: a segment's LSNs are below the next segment's
-    /// <see cref="WalSegmentHeader.FirstLSN"/>; the last runs to the recovery frontier) so the normal checkpoint gate can
-    /// reclaim it. Returns the highest existing segment id (0 if none). Does NOT itself delete any valid segment — the
-    /// caller's <see cref="MarkReclaimable"/> applies the checkpoint frontier. See WR-01.
+    /// Reconciles WAL segment files left on disk by a previous engine lifecycle. Deletes a file with no valid header above the highest one that has it (empty or
+    /// zero pre-allocated placeholders, which hold no record). Sets aside what recovery could not use, for <see cref="RetireSetAsideSegments"/>: such a file below a valid one,
+    /// which is damage, and every segment from <paramref name="firstDroppedSegmentId"/> up. A read that FAILS is neither: it fails the open, because it says nothing
+    /// about the file. Adopts each remaining valid segment into <see cref="_sealedSegments"/> with its computed LastLSN (chain rule: a segment's LSNs are below the
+    /// next segment's <see cref="WalSegmentHeader.FirstLSN"/>; the last runs to the recovery frontier) so the normal checkpoint gate can reclaim it. Returns the
+    /// highest existing segment id, set-aside ones included (0 if none). Does NOT itself delete any valid segment with records — the caller's
+    /// <see cref="MarkReclaimable"/> applies the checkpoint frontier. See WR-01.
     /// </summary>
-    private long ReconcileExistingSegments(long recoveryLastValidLsn)
+    private long ReconcileExistingSegments(long recoveryLastValidLsn, long firstDroppedSegmentId)
     {
         if (!Directory.Exists(_walDirectory))
         {
@@ -206,22 +208,37 @@ internal sealed class WalSegmentManager : IDisposable
         }
 
         var valid = new List<(long Id, long FirstLsn, string Path, uint SizeBytes)>(files.Length);
+        var invalid = new List<(long Id, string Path)>();
         long maxId = 0;
+        long highestValidId = 0;
         foreach (var path in files)
         {
             var id = ParseSegmentIdFromPath(path);
-            if (id > maxId)
+            maxId = Math.Max(maxId, id);
+            if (!TryReadSegmentFirstLsn(path, out var firstLsn, out var sizeBytes))
             {
-                maxId = id;
+                invalid.Add((id, path));
             }
-
-            if (TryReadSegmentFirstLsn(path, out var firstLsn, out var sizeBytes))
+            else if (firstDroppedSegmentId != 0 && id >= firstDroppedSegmentId)
             {
-                valid.Add((id, firstLsn, path, sizeBytes));
+                highestValidId = Math.Max(highestValidId, id);
+                _setAsideSegments.Add(path);
             }
             else
             {
-                // No valid header → empty/zero placeholder. Recovery skips these; deleting them is always safe.
+                highestValidId = Math.Max(highestValidId, id);
+                valid.Add((id, firstLsn, path, sizeBytes));
+            }
+        }
+
+        foreach (var (id, path) in invalid)
+        {
+            if (id < highestValidId)
+            {
+                _setAsideSegments.Add(path);
+            }
+            else
+            {
                 _fileIO.Delete(path);
             }
         }
@@ -236,8 +253,17 @@ internal sealed class WalSegmentManager : IDisposable
                 // The segment covers no live LSN (header-only / never written, e.g. the active segment a read-only
                 // session creates but never writes to). Recovery extracted nothing from it, so it is reclaimable now —
                 // delete it rather than adopt. Adopting (clamping LastLSN up to FirstLSN) would make it look non-empty
-                // and ≥ the frontier, so MarkReclaimable would retain it → one leaked segment per reopen.
-                _fileIO.Delete(valid[i].Path);
+                // and ≥ the frontier, so MarkReclaimable would retain it → one leaked segment per reopen. Unless a break stopped the scan in it, on its first frame:
+                // what it holds was not read, not absent.
+                if (firstDroppedSegmentId != 0)
+                {
+                    _setAsideSegments.Add(valid[i].Path);
+                }
+                else
+                {
+                    _fileIO.Delete(valid[i].Path);
+                }
+
                 continue;
             }
 
@@ -252,35 +278,52 @@ internal sealed class WalSegmentManager : IDisposable
         return maxId;
     }
 
+    private readonly List<string> _setAsideSegments = [];
+
+    /// <summary>
+    /// Takes what the reconcile set aside out of the log, its bytes kept for a manual salvage. Not done by the reconcile, because a break is recognised from these
+    /// files: gone before the open finishes, an open that fails after it leaves the next one with no break to report and no timeline fork, and the reused LSNs diverge
+    /// from what the archive holds. Left in place past the open, they would read as the log's continuation to the next crash.
+    /// </summary>
+    public void RetireSetAsideSegments()
+    {
+        foreach (var path in _setAsideSegments)
+        {
+            _fileIO.RetireSegment(path);
+        }
+
+        _setAsideSegments.Clear();
+    }
+
     /// <summary>Parses the segment id from a <c>{id:D16}.wal</c> path; 0 if unparseable.</summary>
-    private static long ParseSegmentIdFromPath(string path)
+    internal static long ParseSegmentIdFromPath(string path)
         => long.TryParse(Path.GetFileNameWithoutExtension(path), out var id) ? id : 0;
 
     /// <summary>Reads + validates a segment header, returning its <see cref="WalSegmentHeader.FirstLSN"/> and its declared
-    /// <see cref="WalSegmentHeader.SegmentSize"/>. False if the file has no valid header (empty placeholder or torn).</summary>
+    /// <see cref="WalSegmentHeader.SegmentSize"/>. False if the file has no valid header (empty placeholder or torn); a read that fails throws, since it says
+    /// nothing about the file (WR-01).</summary>
     private bool TryReadSegmentFirstLsn(string path, out long firstLsn, out uint sizeBytes)
     {
         firstLsn = 0;
         sizeBytes = 0;
-        try
-        {
-            using var handle = _fileIO.OpenSegmentForRead(path);
-            var headerBuffer = new byte[WalSegmentHeader.SizeInBytes];
-            _fileIO.ReadAligned(handle, 0, headerBuffer);
-            var header = MemoryMarshal.Read<WalSegmentHeader>(headerBuffer);
-            header.ThrowIfAnotherFormat(path);
-            if (!header.Validate())
-            {
-                return false;
-            }
-            firstLsn = header.FirstLSN;
-            sizeBytes = header.SegmentSize;
-            return true;
-        }
-        catch (IOException)
+        if (new FileInfo(path).Length < WalSegmentHeader.SizeInBytes)
         {
             return false;
         }
+
+        using var handle = _fileIO.OpenSegmentForRead(path);
+        var headerBuffer = new byte[WalSegmentHeader.SizeInBytes];
+        _fileIO.ReadAligned(handle, 0, headerBuffer);
+        var header = MemoryMarshal.Read<WalSegmentHeader>(headerBuffer);
+        header.ThrowIfAnotherFormat(path);
+        if (!header.Validate())
+        {
+            return false;
+        }
+
+        firstLsn = header.FirstLSN;
+        sizeBytes = header.SegmentSize;
+        return true;
     }
 
     /// <summary>
@@ -346,6 +389,12 @@ internal sealed class WalSegmentManager : IDisposable
                 oldSegment.WriteOffset, sealedUtcTicks, false));
             Volatile.Write(ref _sealedGeneration, _sealedGeneration + 1);
         }
+        // Without FUA the writes are in the OS's hands: a power cut could lose this tail under a next segment that survives, which is a break in a healthy log.
+        if (!_useFUA)
+        {
+            _fileIO.FlushBuffers(oldSegment.Handle);
+        }
+
         oldSegment.Dispose();
 
         // Replenish pre-allocated pool

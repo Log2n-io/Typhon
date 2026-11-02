@@ -10679,12 +10679,17 @@ internal sealed unsafe partial class ArchetypeClusterState
         FenceIndexedFieldCount = fenceIndexedFields;
         SvShadowBitmap = svIndexed != 0 && transientIndexed != 0 ? new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64)) : null;
 
-        // The flattened (slot, field) map the tick fence's IndexMassUpdate phase stages against. Persistent slots only: the migration path that produces the
-        // staged entries writes IndexSlots and nothing else (DatabaseEngine.ClusterMigration.cs, the `hasIdxAccessor && IndexSlots != null` block).
+        // The flattened (slot, field) map the tick fence's IndexMassUpdate phase stages against: persistent fields first, then Transient, the order migration
+        // walks them in (DatabaseEngine.StageMigrantIndexEntries).
         var fieldCount = 0;
         for (var s = 0; s < IndexSlots.Length; s++)
         {
             fieldCount += IndexSlots[s].Fields?.Length ?? 0;
+        }
+
+        for (var s = 0; TransientIndexSlots != null && s < TransientIndexSlots.Length; s++)
+        {
+            fieldCount += TransientIndexSlots[s].Fields?.Length ?? 0;
         }
 
         var fieldRefs = new IndexUpdateStaging.FieldRef[fieldCount];
@@ -10694,7 +10699,16 @@ internal sealed unsafe partial class ArchetypeClusterState
             var fields = IndexSlots[s].Fields;
             for (var f = 0; f < (fields?.Length ?? 0); f++)
             {
-                fieldRefs[fid++] = new IndexUpdateStaging.FieldRef(s, f);
+                fieldRefs[fid++] = new IndexUpdateStaging.FieldRef(s, f, false);
+            }
+        }
+
+        for (var s = 0; TransientIndexSlots != null && s < TransientIndexSlots.Length; s++)
+        {
+            var fields = TransientIndexSlots[s].Fields;
+            for (var f = 0; f < (fields?.Length ?? 0); f++)
+            {
+                fieldRefs[fid++] = new IndexUpdateStaging.FieldRef(s, f, true);
             }
         }
 

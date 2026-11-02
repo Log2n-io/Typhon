@@ -141,10 +141,10 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
 ### SCHEMA-08: A component field is in the schema at its true width, or the component is refused `[silent]`
   invariant ∀ non-static field F of a component, F not a fixed buffer: `FromType(F.type) ≠ None` — F gets a field id — or registration throws, naming the
             component, the field and the type
-  invariant ∀ CLR type T with `FromType(T) = K`, K not a handle kind (`Collection`, `Component`): `FieldSizeInComp(K) == sizeof(T)`
-            — one known violation, outside this rule's founding issue: `VarString` is a 1-byte marker that the table sizes as its 32-byte inline
-            handle, stored nowhere yet; `FieldTypeMappingTests.KnownMissized` lists it until it gets a real layout or loses its mapping
-  invariant ∀ storage FieldType K (not `None`, not a flag bit, not a handle kind): some CLR type T has `FromType(T) = K`
+  invariant ∀ CLR type T with `FromType(T) = K`, K not a handle kind (`Collection`, `Component`): `FieldSizeInComp(K) == sizeof(T)`. `VarString`, a 1-byte
+            marker with no storage, maps to nothing, so registration refuses it: mapped at the 32 bytes of its handle, the next field overlapped it (#1474)
+  invariant ∀ storage FieldType K (not `None`, not a flag bit, not a handle kind, not `String`, reserved for a field with storage): some CLR type T has
+            `FromType(T) = K`
   scope: DatabaseSchemaExtensions.FromType, DatabaseSchemaExtensions.FieldSizeInComp, DatabaseDefinitions.ReflectComponentSpec,
          DatabaseDefinitions.BuildFromSpec
   on_violation: a field the mapping skips keeps its bytes in the struct and stays readable from C#, because component values are copied whole, so nothing
@@ -154,7 +154,7 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
   rationale: the two engine tables are written by hand, side by side, and drift one entry at a time. `EntityId` was missing from the first (#1099), and
              `FieldType.Variant` from both at once (#1449): it existed as an enum value that no CLR type produced, sized 0. The tests enumerate every type
              the schema assembly exports instead of one type per bug. A third copy of the mapping, the CLI's `AssemblySchemaLoader.MapDotNetTypeToFieldType`,
-             is outside this rule's scope and already drifts (no AABB / BSphere, `VarString`, `EntityId` or `EntityLink<T>`); it is tracked separately.
+             is outside this rule's scope and already drifts (no AABB / BSphere, `EntityId` or `EntityLink<T>`); it is tracked separately.
   verified: FieldTypeMappingTests [VerifiesRule] [RuleMutant], UnmappableFieldTypeTests [VerifiesRule]
 
 ### SCHEMA-09: A schema migration becomes durable in one meta flip, the one that advances CheckpointLSN `[fatal][silent]`

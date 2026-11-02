@@ -225,9 +225,96 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
         return ids.Count(id => t.Open(id).Read(SvTestArchetype.SvComp).Value == -1);
     }
 
+    /// <summary>Three data segments, then the power cut; <paramref name="packed"/> lays the first one's frames mid-page, so the last can tear with others below it.</summary>
+    private string[] ThreeSegmentsThenACrash(bool packed)
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var walDir = WalDirectoryOf(dbe);
+        if (packed)
+        {
+            for (var i = 0; i < 200; i++)
+            {
+                using var t = dbe.CreateQuickTransaction(i < 199 ? DurabilityMode.Deferred : DurabilityMode.Immediate);
+                t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(10 + i)));
+                t.Commit();
+            }
+
+            Switch(dbe);
+        }
+        else
+        {
+            SpawnAndSeal(dbe, 10, 0);
+        }
+
+        SpawnAndSeal(dbe, 10, 100);
+        Spawn(dbe, 10, 200);
+        dbe.SimulateHardCrash();
+
+        var segments = DataSegments(walDir);
+        Assert.That(segments.Length, Is.GreaterThanOrEqualTo(3), "premise: two sealed segments and a later one with data");
+        return segments;
+    }
+
+    /// <summary>The seal itself: a break with data after it is not a tail. A crash open no longer brings it one (see below), which is why this calls it directly.</summary>
     [Test]
     [CancelAfter(60_000)]
     public void AMidLogBreak_IsLeftUnsealed()
+    {
+        var segments = ThreeSegmentsThenACrash(packed: false);
+        var broken = segments[0];
+        Tear(broken, FrameInside(File.ReadAllBytes(broken)));
+        var before = File.ReadAllBytes(broken);
+
+        using var io = new WalFileIO();
+        var seal = WalTornTailSeal.Seal(io, Path.GetDirectoryName(broken), long.MaxValue);
+
+        Assert.That((seal.Sealed, seal.SegmentId), Is.EqualTo((false, SegmentId(broken))), "a break followed by data is mid-log corruption, left as it is");
+        Assert.That(File.ReadAllBytes(broken), Is.EqualTo(before), "nothing written over it");
+    }
+
+    /// <summary>#938: what follows the break is set aside before the seal, so the break is the log's end and is sealed, or the next crash would stop there again.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("WR-01")]
+    public void AMidLogBreak_IsSealedOnceWhatFollowsItIsSetAside()
+    {
+        var segments = ThreeSegmentsThenACrash(packed: true);
+        var broken = segments[0];
+        var last = WalFrames.Read(File.ReadAllBytes(broken), out _).LastOrDefault(f => f.Start % 4096 != 0);
+        Assert.That(last, Is.Not.Null, "premise: a frame starts mid-page");
+        Tear(broken, last.Start + WalFrameHeader.SizeInBytes + 8);
+
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        Assert.That(dbe.LastWalV2RecoveryResult.StoppedAtCorruption, Is.True, "premise: the recovery met the break");
+        Assert.That((dbe.LastTornTailSeal.Sealed, dbe.LastTornTailSeal.SegmentId), Is.EqualTo((true, SegmentId(broken))));
+        Assert.That(File.Exists(Path.ChangeExtension(segments[1], ".dropped")), Is.True, "the segment past the break left the log");
+    }
+
+    /// <summary>A break on the first frame leaves the segment with nothing recovered, the reconcile's mark of a segment with nothing in it. It has: its bytes stay.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("WR-01")]
+    public void ABreakOnASegmentsFirstFrame_SetsItAsideWithItsBytes()
+    {
+        var segments = ThreeSegmentsThenACrash(packed: false);
+        var broken = segments[0];
+        Tear(broken, FrameInside(File.ReadAllBytes(broken)));
+        var before = File.ReadAllBytes(broken);
+
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        Assert.That(dbe.LastWalV2RecoveryResult.StoppedAtCorruption, Is.True, "premise: the recovery met the break");
+        Assert.That(File.Exists(broken), Is.False);
+        Assert.That(File.ReadAllBytes(Path.ChangeExtension(broken, ".dropped")), Is.EqualTo(before));
+    }
+
+    /// <summary>Only a crash open forks the timeline, so only a crash open may take segments out of the log: a clean one that did would reuse their LSNs unforked.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("WR-01")]
+    public void ACleanOpen_SetsNothingAside()
     {
         string walDir;
         using (var scope = ServiceProvider.CreateScope())
@@ -236,26 +323,19 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
             walDir = WalDirectoryOf(dbe);
             SpawnAndSeal(dbe, 10, 0);
             SpawnAndSeal(dbe, 10, 100);
-            Spawn(dbe, 10, 200);
-            dbe.SimulateHardCrash();
         }
 
-        // Three segments: the open keeps the middle one past the break (its LSNs end below the last one's first), and deletes the last (its LSNs lie
-        // past the recovered frontier).
         var segments = DataSegments(walDir);
-        Assert.That(segments.Length, Is.GreaterThanOrEqualTo(3), "premise: two sealed segments and a later one with data");
-        var broken = segments[0];
-        var bytes = File.ReadAllBytes(broken);
-        Tear(broken, FrameInside(bytes));
-        var before = File.ReadAllBytes(broken);
+        Assert.That(segments.Length, Is.GreaterThanOrEqualTo(2), "premise: the archive floor kept the sealed segments past the clean close");
+        Tear(segments[0], FrameInside(File.ReadAllBytes(segments[0])));
 
         using (var scope = ServiceProvider.CreateScope())
         {
             var dbe = Open(scope);
-            Assert.That(dbe.LastWalV2RecoveryResult.StoppedAtCorruption, Is.True, "premise: the recovery met the break");
-            Assert.That((dbe.LastTornTailSeal.Sealed, dbe.LastTornTailSeal.SegmentId), Is.EqualTo((false, SegmentId(broken))),
-                "a break followed by data is mid-log corruption, left as it is");
-            Assert.That(File.ReadAllBytes(broken), Is.EqualTo(before), "nothing written over it");
+            Assert.That(dbe.CrashRecoveryAtOpen, Is.False, "premise: a clean open");
+            Assert.That(dbe.LastRecoveryResult.FirstDroppedSegmentId, Is.Not.Zero, "premise: its scan met the break");
+            Assert.That(Directory.GetFiles(walDir, "*.dropped"), Is.Empty);
+            Assert.That(Directory.GetFiles(walDir, "*.wal"), Is.SupersetOf(segments[..^1]), "all but the empty active segment, which a reopen removes as it always did");
         }
     }
 

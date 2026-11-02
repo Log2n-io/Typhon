@@ -715,8 +715,7 @@ public partial class DatabaseEngine
     /// </remarks>
     private static int OpenZoneMapBatches(ArchetypeClusterState clusterState)
     {
-        var ixSlots = clusterState.IndexSlots;
-        if (ixSlots == null || !ArchetypeClusterState.BatchMigrateZoneMaps)
+        if (clusterState.IndexSlots == null || !ArchetypeClusterState.BatchMigrateZoneMaps)
         {
             return 0;
         }
@@ -736,9 +735,14 @@ public partial class DatabaseEngine
 
 
         var fieldCount = 0;
-        for (var s = 0; s < ixSlots.Length; s++)
+        for (var s = 0; s < clusterState.IndexSlots.Length; s++)
         {
-            fieldCount += ixSlots[s].Fields.Length;
+            fieldCount += clusterState.IndexSlots[s].Fields.Length;
+        }
+
+        for (var s = 0; clusterState.TransientIndexSlots != null && s < clusterState.TransientIndexSlots.Length; s++)
+        {
+            fieldCount += clusterState.TransientIndexSlots[s].Fields.Length;
         }
 
         if (fieldCount == 0)
@@ -758,16 +762,8 @@ public partial class DatabaseEngine
         var fieldId = 0;
         try
         {
-            for (var s = 0; s < ixSlots.Length; s++)
-            {
-                ref var ixSlot = ref ixSlots[s];
-                for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
-                {
-                    // BeginBatchAtCapacity, not BeginBatch: the growing form would replace the store under sibling workers that already hold batches on the
-                    // same field, which is the MD-02 abandonment ZoneMapArray.Grow refuses. Coverage comes from PreSizeArchetypeFence instead.
-                    stores[fieldId] = ixSlot.Fields[f].ZoneMap?.BeginBatchAtCapacity();
-                }
-            }
+            BeginZoneMapBatches(clusterState.IndexSlots, stores, ref fieldId);
+            BeginZoneMapBatches(clusterState.TransientIndexSlots, stores, ref fieldId);
         }
         catch
         {
@@ -778,6 +774,20 @@ public partial class DatabaseEngine
         return fieldCount;
     }
 
+    private static void BeginZoneMapBatches<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ZoneMapArray.Store[] stores, ref int fieldId) where TStore : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
+        {
+            ref var ixSlot = ref ixSlots[s];
+            for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
+            {
+                // BeginBatchAtCapacity, not BeginBatch: the growing form would replace the store under sibling workers that already hold batches on the
+                // same field, which is the MD-02 abandonment ZoneMapArray.Grow refuses. Coverage comes from PreSizeArchetypeFence instead.
+                stores[fieldId] = ixSlot.Fields[f].ZoneMap?.BeginBatchAtCapacity();
+            }
+        }
+    }
+
     /// <summary>Releases every batch <see cref="OpenZoneMapBatches"/> opened, and drops the store references so a stale one cannot be written through.</summary>
     private static void CloseZoneMapBatches(ArchetypeClusterState clusterState, int fieldCount)
     {
@@ -786,24 +796,126 @@ public partial class DatabaseEngine
             return;
         }
 
-        var ixSlots = clusterState.IndexSlots;
-        var stores = _zoneBatchStores;
         var fieldId = 0;
-        for (var s = 0; s < ixSlots.Length; s++)
+        EndZoneMapBatches(clusterState.IndexSlots, _zoneBatchStores, fieldCount, ref fieldId);
+        EndZoneMapBatches(clusterState.TransientIndexSlots, _zoneBatchStores, fieldCount, ref fieldId);
+    }
+
+    private static void EndZoneMapBatches<TStore>(ClusterIndexSlot<TStore>[] ixSlots, ZoneMapArray.Store[] stores, int fieldCount, ref int fieldId)
+        where TStore : struct, IPageStore
+    {
+        for (var s = 0; ixSlots != null && s < ixSlots.Length; s++)
         {
             ref var ixSlot = ref ixSlots[s];
-            for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
+            for (var f = 0; f < ixSlot.Fields.Length && fieldId < fieldCount; f++, fieldId++)
             {
                 if (stores[fieldId] == null)
                 {
                     continue;
                 }
 
-                // Cleared as well as released. The Store is dead the moment the latch is dropped — that is BeginBatch's stated contract — and leaving the
-                // reference in a thread-static array is how a later slice on this thread would write through an abandoned generation and lose a widen
-                // silently. The clear costs one store per field per slice and removes the whole class of mistake.
+                // Cleared as well as released. The Store is dead the moment the latch is dropped — that is BeginBatch's stated contract — and a live reference
+                // in a thread-static array is how a later slice on this thread would write through an abandoned generation, silently. The clear costs one
+                // store per field per slice and removes the whole class of mistake.
                 stores[fieldId] = null;
                 ixSlot.Fields[f].ZoneMap.EndBatch();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Step 7 of <see cref="ExecuteMigrations"/>, for one index home: each indexed field's value update staged, its elementId tail carried to the destination and
+    /// its zone map widened over the destination cluster. The Transient home goes through the same steps as the persistent one (IX-02, IX-08, #1162): left at the
+    /// source location, its entries named a released slot, its multi-value tails their slot's previous occupant, and its zone maps a repaired cluster unbounded.
+    /// </summary>
+    /// <param name="clusterState">The archetype's cluster state.</param>
+    /// <param name="ixSlots">The home's index slots; null for none.</param>
+    /// <param name="dstData">The destination cluster's bytes on the segment that holds this home's columns.</param>
+    /// <param name="srcPrimary">The source cluster on the primary segment, where the elementId tails of both homes live.</param>
+    /// <param name="dstPrimary">The destination cluster on the primary segment.</param>
+    /// <param name="srcSlot">The migrant's source slot.</param>
+    /// <param name="dstSlot">The migrant's destination slot.</param>
+    /// <param name="dstChunkId">The destination cluster.</param>
+    /// <param name="oldClusterLocation">The migrant's source location.</param>
+    /// <param name="newClusterLocation">The migrant's destination location.</param>
+    /// <param name="chunkIndex">The Migrate chunk staging this entry.</param>
+    /// <param name="fieldId">The next flattened field id: carried from one home to the next, in the order of <see cref="IndexUpdateStaging.FieldRef"/>.</param>
+    /// <param name="zoneBatchStores">The slice's open zone-map batches, by field id.</param>
+    /// <param name="zoneBatchFieldCount">How many of them there are.</param>
+    /// <param name="archetypeId">The archetype, for the failure message.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe void StageMigrantIndexEntries<TIdx>(ArchetypeClusterState clusterState, ClusterIndexSlot<TIdx>[] ixSlots, byte* dstData, byte* srcPrimary,
+        byte* dstPrimary, int srcSlot, int dstSlot, int dstChunkId, int oldClusterLocation, int newClusterLocation, int chunkIndex, ref int fieldId,
+        ZoneMapArray.Store[] zoneBatchStores, int zoneBatchFieldCount, ushort archetypeId) where TIdx : struct, IPageStore
+    {
+        if (ixSlots == null)
+        {
+            return;
+        }
+
+        var layout = clusterState.Layout;
+        var staging = clusterState.IndexUpdates;
+        for (var ixs = 0; ixs < ixSlots.Length; ixs++)
+        {
+            ref var ixSlot = ref ixSlots[ixs];
+            var ixCompSize = layout.ComponentSize(ixSlot.Slot);
+            var dstCompBase = dstData + layout.ComponentOffset(ixSlot.Slot) + dstSlot * ixCompSize;
+            for (var fi = 0; fi < ixSlot.Fields.Length; fi++, fieldId++)
+            {
+                ref var field = ref ixSlot.Fields[fi];
+                // fieldPtr already holds the key: the component copy in step 4 is src -> dst, so the destination bytes are the entity's current
+                // value. Passed straight through as a raw address rather than copied into a local first — building a KeyBytes8 here memcpy'd
+                // FieldSize bytes into an 8-byte struct (64 for a String64 field), smashing the stack and crashing the host. Same defect and
+                // same fix as the destroy twin (Transaction.ECS.cs:1393).
+                var fieldPtr = dstCompBase + field.FieldOffset;
+                // A sparse tree holds no key 0 (IX-09): nothing to re-value, so nothing staged — for a group field most of the batch.
+                var staged = !field.Index.SkipsKey(fieldPtr);
+                var stride = field.Index.BulkEntryStride(field.AllowMultiple);
+
+                if (field.AllowMultiple)
+                {
+                    // The elementId does NOT change, and that is the quiet simplification the conversion buys. Remove+Add relocated the entity's
+                    // element into a new buffer and had to write the new id into the destination tail; a value-only update leaves the element
+                    // exactly where it is, so the destination inherits the source's id and one VSBS allocation per migrant per field disappears.
+                    // srcPrimary still holds the source cluster's bytes — step 4's copy is src -> dst and does not touch the elementId tail.
+                    var elementId = *(int*)(srcPrimary + layout.IndexElementIdOffset(field.MultiFieldIndex, srcSlot));
+                    if (staged)
+                    {
+                        field.Index.WriteBulkMultiEntry(staging.Reserve(chunkIndex, fieldId, stride), fieldPtr, elementId, oldClusterLocation,
+                            newClusterLocation);
+                    }
+
+                    *(int*)(dstPrimary + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = elementId;
+                }
+                else if (staged)
+                {
+                    // Only where the tree names this migrant (#1348): the key its data holds may be another entity's in the tree, a unique
+                    // collision's holder when this migrant is the loser.
+                    field.Index.WriteBulkEntry(staging.Reserve(chunkIndex, fieldId, stride), fieldPtr, newClusterLocation, oldClusterLocation);
+                }
+
+                // The zone map is not an index and has no ordering dependency on the tree, so it stays inline.
+                //
+                // #926. Written through the slice's open batch instead of through `Widen`, which would take the archetype-wide grow latch
+                // shared and release it again for THIS ONE entity. The batch holds it once for the whole slice.
+                var zoneMap = field.ZoneMap;
+                if (zoneMap != null)
+                {
+                    var zoneStore = fieldId < zoneBatchFieldCount ? zoneBatchStores[fieldId] : null;
+                    if (zoneStore == null)
+                    {
+                        // No batch — the serial fence, or the A/B arm with batching off. The per-write form is correct on both; it is merely
+                        // contended on a path that has no contention to suffer from.
+                        zoneMap.Widen(dstChunkId, fieldPtr);
+                    }
+                    else if (!zoneMap.WidenInto(zoneStore, dstChunkId, fieldPtr))
+                    {
+                        // A pinned store implies a Migrate slice (OpenZoneMapBatches refuses to batch anywhere else), so the destination falling
+                        // past it means PreSizeArchetypeFence's bound was wrong. Growing out of it here would abandon the store every sibling
+                        // worker is writing into, so this is a loud fence failure (#890) — the same answer the sibling per-cluster arrays give.
+                        ThrowZoneMapBatchTooSmall(archetypeId, dstChunkId);
+                    }
+                }
             }
         }
     }
@@ -1199,78 +1311,17 @@ public partial class DatabaseEngine
                 //    That is precisely the shape the bulk partitioning descent exists for, so what used to be Remove(key) + Add(key, newLoc) per migrant per
                 //    field, two root-to-leaf descents to change four bytes, becomes one appended record. The IndexMassUpdate phase then applies every
                 //    archetype's whole batch in one descent per leaf-snapped key range.
-                // Gated on IndexSlots alone. The obvious-looking `IndexSegment != null` would be wrong: a field's nodes live in whichever segment its
-                // stride requires, so an archetype indexed ONLY on String64 fields keeps them all in IndexSegmentString64 (#658) and would skip staging
-                // entirely — its index would simply never be updated after a migration. IndexSlots is the list of fields that need updating, which is the
-                // actual precondition.
-                if (clusterState.IndexSlots != null)
+                // Gated on the slots alone, not on `IndexSegment != null`: a field's nodes live in whichever segment its stride requires, so an archetype indexed ONLY
+                // on String64 fields keeps them all in IndexSegmentString64 (#658). The slots are the list of fields that need updating.
+                if (clusterState.IndexSlots != null || clusterState.TransientIndexSlots != null)
                 {
-                    var ixSlots = clusterState.IndexSlots;
-                    var staging = clusterState.IndexUpdates;
                     var fieldId = 0;
-                    for (var ixs = 0; ixs < ixSlots.Length; ixs++)
-                    {
-                        ref var ixSlot = ref ixSlots[ixs];
-                        var ixCompSize = layout.ComponentSize(ixSlot.Slot);
-                        var dstCompBase = dstBase + layout.ComponentOffset(ixSlot.Slot) + dstSlot * ixCompSize;
-                        for (var fi = 0; fi < ixSlot.Fields.Length; fi++, fieldId++)
-                        {
-                            ref var field = ref ixSlot.Fields[fi];
-                            // fieldPtr already holds the key: the component copy in step 4 is src -> dst, so the destination bytes are the entity's current
-                            // value. Passed straight through as a raw address rather than copied into a local first — building a KeyBytes8 here memcpy'd
-                            // FieldSize bytes into an 8-byte struct (64 for a String64 field), smashing the stack and crashing the host. Same defect and
-                            // same fix as the destroy twin (Transaction.ECS.cs:1393).
-                            var fieldPtr = dstCompBase + field.FieldOffset;
-                            // A sparse tree holds no key 0 (IX-09): nothing to re-value, so nothing staged — for a group field most of the batch.
-                            var staged = !field.Index.SkipsKey(fieldPtr);
-                            var stride = field.Index.BulkEntryStride(field.AllowMultiple);
-
-                            if (field.AllowMultiple)
-                            {
-                                // The elementId does NOT change, and that is the quiet simplification the conversion buys. Remove+Add relocated the entity's
-                                // element into a new buffer and had to write the new id into the destination tail; a value-only update leaves the element
-                                // exactly where it is, so the destination inherits the source's id and one VSBS allocation per migrant per field disappears.
-                                // srcBase still holds the source cluster's bytes — step 4's copy is src -> dst and does not touch the elementId tail.
-                                var elementId = *(int*)(srcBase + layout.IndexElementIdOffset(field.MultiFieldIndex, srcSlot));
-                                if (staged)
-                                {
-                                    field.Index.WriteBulkMultiEntry(staging.Reserve(chunkIndex, fieldId, stride), fieldPtr, elementId, oldClusterLocation,
-                                        newClusterLocation);
-                                }
-
-                                *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = elementId;
-                            }
-                            else if (staged)
-                            {
-                                // Only where the tree names this migrant (#1348): the key its data holds may be another entity's in the tree, a unique
-                                // collision's holder when this migrant is the loser.
-                                field.Index.WriteBulkEntry(staging.Reserve(chunkIndex, fieldId, stride), fieldPtr, newClusterLocation, oldClusterLocation);
-                            }
-
-                            // The zone map is not an index and has no ordering dependency on the tree, so it stays inline.
-                            //
-                            // #926. Written through the slice's open batch instead of through `Widen`, which would take the archetype-wide grow latch
-                            // shared and release it again for THIS ONE entity. The batch holds it once for the whole slice.
-                            var zoneMap = field.ZoneMap;
-                            if (zoneMap != null)
-                            {
-                                var zoneStore = fieldId < zoneBatchFieldCount ? zoneBatchStores[fieldId] : null;
-                                if (zoneStore == null)
-                                {
-                                    // No batch — the serial fence, or the A/B arm with batching off. The per-write form is correct on both; it is merely
-                                    // contended on a path that has no contention to suffer from.
-                                    zoneMap.Widen(dstChunkId, fieldPtr);
-                                }
-                                else if (!zoneMap.WidenInto(zoneStore, dstChunkId, fieldPtr))
-                                {
-                                    // A pinned store implies a Migrate slice (OpenZoneMapBatches refuses to batch anywhere else), so the destination falling
-                                    // past it means PreSizeArchetypeFence's bound was wrong. Growing out of it here would abandon the store every sibling
-                                    // worker is writing into, so this is a loud fence failure (#890) — the same answer the sibling per-cluster arrays give.
-                                    ThrowZoneMapBatchTooSmall(archetypeId, dstChunkId);
-                                }
-                            }
-                        }
-                    }
+                    StageMigrantIndexEntries(clusterState, clusterState.IndexSlots, dstBase, srcBase, dstBase, srcSlot, dstSlot, dstChunkId, oldClusterLocation,
+                        newClusterLocation, chunkIndex, ref fieldId, zoneBatchStores, zoneBatchFieldCount, archetypeId);
+                    // A mixed archetype's Transient columns live in its Transient store; a pure-Transient archetype's primary IS that store, as in step 4. The
+                    // elementId tails live in the primary for both homes.
+                    StageMigrantIndexEntries(clusterState, clusterState.TransientIndexSlots, dstTransBase != null ? dstTransBase : dstBase, srcBase, dstBase, srcSlot,
+                        dstSlot, dstChunkId, oldClusterLocation, newClusterLocation, chunkIndex, ref fieldId, zoneBatchStores, zoneBatchFieldCount, archetypeId);
                 }
 
                 // 8. Maintain per-cell cluster AABB index at the destination (issue #230 Phase 3 Option B: the legacy R-Tree step 8 call has been removed;
@@ -1663,7 +1714,7 @@ public partial class DatabaseEngine
     /// A Transient segment has nothing to log or checkpoint, and the tick-fence shadow pass makes the same distinction by hand in its two branches.
     /// Resolved by type test rather than by an overload because the caller is generic over the store; the test is a JIT-time constant per instantiation.
     /// </remarks>
-    private static ChunkAccessor<TStore> CreateIndexAccessor<TStore>(ChunkBasedSegment<TStore> segment, ChangeSet changeSet) where TStore : struct, IPageStore
+    internal static ChunkAccessor<TStore> CreateIndexAccessor<TStore>(ChunkBasedSegment<TStore> segment, ChangeSet changeSet) where TStore : struct, IPageStore
         => typeof(TStore) == typeof(PersistentStore) ? segment.CreateChunkAccessor(changeSet) : segment.CreateChunkAccessor();
 
     /// <summary>Drains one index home's shadow buffers. See <see cref="ProcessClusterShadowEntries"/> for what each of the three stores addresses.</summary>
