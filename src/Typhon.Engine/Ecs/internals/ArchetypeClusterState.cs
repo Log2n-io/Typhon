@@ -5643,10 +5643,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// teleported cluster is never filed with more strays than the first-slot rule filed. A clean cluster never reaches it.
     /// </para>
     /// <para>
-    /// The centres, the cell and the AABB are separate reads: the centres come from <see cref="SpatialGrid.ReadSpatialCenter3D"/> (the same centre the grid
-    /// files a spawn by), while the AABB unions <c>SpatialMaintainer.ReadAndValidateBoundsFromPtr</c> over the in-realm slots, relative to the cell found.
-    /// The AABB union SKIPS a slot whose bounds fail validation, while the centre box keeps any finite centre: a cluster whose first slot is degenerate but
-    /// finite gets a real cell and an AABB that ignores it — what the two-pass version did, and what the differential test pins.
+    /// <b>One walk.</b> The centre box and the AABB come from the same pass over the in-realm slots (<see cref="ReduceWorldBounds{TSink}"/>): the AABB is
+    /// reduced in WORLD space and made cell-relative once the cell is known, which is exact because the conversion is monotone (see
+    /// <see cref="RecomputeClusterAabb(int, ref ChunkAccessor{PersistentStore}, double, double, double, out int)"/>). A second walk for the centres cost a
+    /// plain reopen ~20 % of its rebuild (design 07 §12 (f)). The centres are the ones <see cref="SpatialGrid.ReadSpatialCenter3D"/> computes (the centre
+    /// the grid files a spawn by); the AABB union SKIPS a slot whose bounds fail validation, while the centre box keeps any finite centre: a cluster whose
+    /// first slot is degenerate but finite gets a real cell and an AABB that ignores it — what the two-pass version did, and what the differential test
+    /// pins.
     /// </para>
     /// <para>
     /// <paramref name="hint"/> is a migration's realm hint (SCHEMA-12): when present on a realm-keyed archetype and at least one valid key of the cluster
@@ -5659,6 +5662,10 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// is invalid is rewritten to the cluster's realm by the reduce, but its position was never written for that realm, so it does not steer the cell.
     /// </para>
     /// </remarks>
+    // AggressiveOptimization: called once per cluster of a rebuild — an open-time walk, never a tick — from a loop that runs a handful of times per process,
+    // so call counting promotes it late: measured, the default tiers left it (and the reduction it calls) in instrumented Tier0 through the whole rebuild
+    // bench, doubling the serial rebuild (design 07 §12 (f)). Full opts from the first call, the f32 reduction inlined into it.
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private ClusterRebuildMapResult MapClusterForRebuild(int chunkId, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, in ClusterHomeHint hint)
     {
         var result = default(ClusterRebuildMapResult);
@@ -5738,21 +5745,22 @@ internal sealed unsafe partial class ArchetypeClusterState
             result.Realm = grid.Realm.Value;
         }
 
-        // D11: the AABB-centre cell of the in-realm centres — the slots whose key is the cluster's realm, as a migration's home key reads them. Falls back to
-        // the first in-realm slot's cell only when no centre is finite — that read refuses a non-finite coordinate, which is what a cluster of nothing but
-        // corrupt positions has always met.
-        if (!TryReadCentreCell(clusterBase, centreSlots, grid, out result.CellX, out result.CellY, out result.CellZ))
+        // One walk over the in-realm slots: the world-space bounds of their AABB union, and the box of the centres of the slots whose key is the cluster's
+        // realm (as a migration's home key reads them). The reduction is RecomputeClusterAabb's own (ReduceWorldBounds), not a twin of that [fatal][silent]
+        // CA-01 computation: only the centre sink is added.
+        var centres = new CentreBoxSink(centreSlots);
+        var world = ReduceWorldBounds(clusterBase, inRealm, ref centres);
+
+        // D11: the AABB-centre cell of those centres. Falls back to the first in-realm slot's cell only when no centre is finite — that read refuses a
+        // non-finite coordinate, which is what a cluster of nothing but corrupt positions has always met.
+        if (!centres.Box.TryGetCell(grid, out result.CellX, out result.CellY, out result.CellZ))
         {
             var firstFieldPtr = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot) + ss.FieldOffset;
             grid.ReadCellCoordsFromSpatialField(firstFieldPtr, ss.FieldInfo.FieldType, out result.CellX, out result.CellY, out result.CellZ);
         }
 
-        // Delegate the union rather than inlining a twin of it. Inlining would save one GetChunkAddress (an MRU-cache hit on a line this method just touched)
-        // and one occupancy load — worth far less than the ~18 % the merge itself buys — at the price of a SECOND copy of a [fatal][silent] CA-01 computation
-        // that could silently diverge from this one. The 3D branch in particular is only covered through RecomputeClusterAabb, so a twin's 3D half would have
-        // had no test at all.
         grid.CellOriginFromCoords(result.CellX, result.CellY, result.CellZ, out var originX, out var originY, out var originZ);
-        result.Aabb = RecomputeClusterAabb(chunkId, ref accessor, originX, originY, originZ, inRealm, out _);
+        result.Aabb = world.ToCellRelative(originX, originY, originZ, ss.FieldInfo.Category);
 
         // Realms P0.2 (§9.3-2): a recovery claim is cell-agnostic (ClaimSlot, design 07 D6), and an entity written after the last fence can be stored
         // beyond its cluster's band, so a rebuild can meet a cluster whose entities sit in several cells — CC-02 broken silently until they are next
@@ -5770,7 +5778,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the centre). Never worse than the first-slot rule, and a clean cluster pays nothing for it.
         if (result.ForeignCellSlots != 0)
         {
-            PickFewestStraysCell(chunkId, clusterBase, inRealm, firstSlot, grid, margin, ref accessor, ref result);
+            PickFewestStraysCell(clusterBase, inRealm, firstSlot, grid, margin, in world, ref result);
         }
 
         return result;
@@ -5779,10 +5787,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>
     /// The best-of half of D11: scores the first in-realm slot's cell and the per-axis median cell of the in-realm finite centres against the centre cell
     /// <paramref name="result"/> already holds, and keeps the one with the fewest foreign slots — the centre on a tie, then the first slot's. Rewrites the
-    /// result's cell, AABB and foreign slots when another cell wins. Called only for a cluster the centre cell leaves strays in.
+    /// result's cell, AABB and foreign slots when another cell wins. Called only for a cluster the centre cell leaves strays in. <paramref name="world"/> is
+    /// the in-realm slots' world-space AABB union the map already reduced: the winner's AABB is that union made relative to its cell, with no re-walk.
     /// </summary>
-    private void PickFewestStraysCell(int chunkId, byte* clusterBase, ulong inRealm, int firstSlot, SpatialGrid grid, double margin,
-        ref ChunkAccessor<PersistentStore> accessor, ref ClusterRebuildMapResult result)
+    private void PickFewestStraysCell(byte* clusterBase, ulong inRealm, int firstSlot, SpatialGrid grid, double margin, in ClusterWorldBounds world,
+        ref ClusterRebuildMapResult result)
     {
         ref readonly var ss = ref SpatialSlot;
         var firstField = clusterBase + Layout.ComponentOffset(ss.Slot) + ss.FieldOffset;
@@ -5843,7 +5852,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         result.CellZ = bestZ;
         result.ForeignCellSlots = bestForeign;
         grid.CellOriginFromCoords(bestX, bestY, bestZ, out var originX, out var originY, out var originZ);
-        result.Aabb = RecomputeClusterAabb(chunkId, ref accessor, originX, originY, originZ, inRealm, out _);
+        result.Aabb = world.ToCellRelative(originX, originY, originZ, ss.FieldInfo.Category);
         return;
 
         void Score(int cx, int cy, int cz)
@@ -5874,27 +5883,6 @@ internal sealed unsafe partial class ArchetypeClusterState
     private static bool BoxFitsCellWithBand(in ClusterSpatialAabb aabb, float cellSize, float margin) =>
         aabb.MinX >= -margin && aabb.MinY >= -margin && aabb.MinZ >= -margin
         && aabb.MaxX <= cellSize + margin && aabb.MaxY <= cellSize + margin && aabb.MaxZ <= cellSize + margin;
-
-    /// <summary>
-    /// The cell of <paramref name="grid"/> holding the centre of the box of the spatial centres of <paramref name="slots"/> (D11), skipping a non-finite
-    /// centre. False, with zero coordinates, when no centre is finite.
-    /// </summary>
-    private bool TryReadCentreCell(byte* clusterBase, ulong slots, SpatialGrid grid, out int cellX, out int cellY, out int cellZ)
-    {
-        ref readonly var ss = ref SpatialSlot;
-        var firstField = clusterBase + Layout.ComponentOffset(ss.Slot) + ss.FieldOffset;
-        var stride = Layout.ComponentSize(ss.Slot);
-        var fieldType = ss.FieldInfo.FieldType;
-        var box = SpatialCentreBox.Empty;
-        for (var bits = slots; bits != 0; bits &= bits - 1)
-        {
-            var slot = BitOperations.TrailingZeroCount(bits);
-            SpatialGrid.ReadSpatialCenter3D(firstField + slot * stride, fieldType, out var x, out var y, out var z);
-            box.Add(x, y, z);
-        }
-
-        return box.TryGetCell(grid, out cellX, out cellY, out cellZ);
-    }
 
     /// <summary>
     /// The occupied slots whose centre lies outside <c>[origin - margin, origin + cellSize + margin]</c> on some axis: entities CC-02 does not allow in
@@ -7108,52 +7096,79 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor,
         double originX, double originY, double originZ, ulong slotMask, out int slotsScanned)
     {
-        ref readonly var ss = ref SpatialSlot;
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
         var occupancy = *(ulong*)clusterBase & slotMask;
         slotsScanned = BitOperations.PopCount(occupancy);
-        var componentOffset = Layout.ComponentOffset(ss.Slot);
-        var componentStride = Layout.ComponentSize(ss.Slot);
+        var noCentres = default(NoCentreSink);
+        return ReduceWorldBounds(clusterBase, occupancy, ref noCentres).ToCellRelative(originX, originY, originZ, SpatialSlot.FieldInfo.Category);
+    }
 
-        // -- Specialised f32 scans, and why they are not merely "the switch hoisted" ---------------------------------
+    /// <summary>
+    /// The WORLD-space union of the spatial field's bounds over <paramref name="occupancy"/>, degenerate slots skipped: the reduction half of
+    /// <see cref="RecomputeClusterAabb(int, ref ChunkAccessor{PersistentStore}, double, double, double, ulong, out int)"/>, made cell-relative by
+    /// <see cref="ClusterWorldBounds.ToCellRelative"/>. In the same pass, <paramref name="centres"/> receives the spatial centre of every slot it
+    /// <see cref="ISpatialCentreSink.Wants">wants</see> — the rebuild's D11 centre box — whether or not that slot's bounds are degenerate;
+    /// <see cref="NoCentreSink"/> wants none, and the JIT folds the test away for it.
+    /// </summary>
+    // AggressiveInlining, NOT AggressiveOptimization: this is the tick fence's AABB recompute too (RecomputeClusterAabb, from the dirty and shrink
+    // passes), which keeps the default tiers and their PGO. Inlined into each caller, the f32 reduction is compiled at the caller's tier: full opts in
+    // the open-time MapClusterForRebuild, tiered in RecomputeClusterAabb. The generic decoder stays a call (ReduceGeneric: its stackalloc blocks inlining).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ClusterWorldBounds ReduceWorldBounds<TSink>(byte* clusterBase, ulong occupancy, ref TSink centres) where TSink : struct, ISpatialCentreSink
+    {
+        ref readonly var ss = ref SpatialSlot;
+        var firstField = clusterBase + Layout.ComponentOffset(ss.Slot) + ss.FieldOffset;
+        var stride = Layout.ComponentSize(ss.Slot);
+
+        // -- Reduce in world space, convert once, and why that is exact rather than merely "the switch hoisted" ------------------------------------------
         //
         // The generic loop below is the decoder for all eight SpatialFieldType shapes, and it pays for that generality once per ENTITY: an eight-case switch
-        // on a loop-invariant field, a nine-branch degeneracy test, six float-to-double widenings into a stackalloc Span<double>, six loads back out, and then
-        // six double subtractions each followed by a narrowing and a re-promotion to compare against. Measured in isolation (--profile-aabb), that is 27.4 ns
-        // per occupied slot on a 7950X -- roughly 137 cycles to reduce six floats -- at a 1.02 GB/s effective read rate on a machine that will do fifty times
-        // that. The scan is not memory-bound; it is bound on work it does not need to do.
+        // on a loop-invariant field, a nine-branch degeneracy test, six float-to-double widenings into a stackalloc Span<double> and six loads back out.
+        // Measured in isolation (--profile-aabb), the generic loop with a per-entity cell-relative conversion was 27.4 ns per occupied slot on a 7950X --
+        // roughly 137 cycles to reduce six floats -- at a 1.02 GB/s effective read rate on a machine that will do fifty times that. The scan is not
+        // memory-bound; it is bound on work it does not need to do.
         //
         // The transformation that matters is NOT the switch. It is that ToCellRelativeMin and ToCellRelativeMax are MONOTONE in the world value, so
         //
         //         min_i( ToCellRelativeMin(w_i, origin) )  ==  ToCellRelativeMin( min_i(w_i), origin )
         //
         // and likewise for max. The cell-relative conversion -- the double subtract, the narrowing, the directed-rounding guard -- therefore belongs OUTSIDE
-        // the reduction, once per cluster per axis, instead of inside it once per entity per axis. At the ~33 occupied slots these clusters carry that is a
-        // 33x reduction in conversions, and the result is bit-identical rather than approximated: min/max over f32 values is exact, and applying a monotone
-        // map to the winner gives the same answer as applying it to every candidate and taking the winner. CA-01's outward-rounding guarantee is preserved
-        // exactly, because the same guarded conversion still runs -- just once.
+        // the reduction, once per cluster per axis (ClusterWorldBounds.ToCellRelative), instead of inside it once per entity per axis. At the ~33 occupied
+        // slots these clusters carry that is a 33x reduction in conversions, and the result is bit-identical rather than approximated: min/max is exact, and
+        // applying a monotone map to the winner gives the same answer as applying it to every candidate and taking the winner. CA-01's outward-rounding
+        // guarantee is preserved exactly, because the same guarded conversion still runs -- just once. It is also what lets the rebuild find the cluster's
+        // cell and its AABB in ONE walk: the union does not need the cell's origin until the walk is over.
         //
-        // What is left in the loop is six loads and six compares, which is what the operation actually is.
+        // What is left in the f32 loops is six loads and six compares, which is what the operation actually is.
         //
         // The degeneracy test collapses with it. `IsNaN(a) || IsNaN(b) || a > b` is `!(a <= b)` under IEEE comparison -- NaN makes every ordered compare false
         // -- so nine branches become three, with identical semantics.
         var fieldType = ss.FieldInfo.FieldType;
         if (fieldType == SpatialFieldType.AABB3F)
         {
-            return RecomputeAabb3F(clusterBase + componentOffset + ss.FieldOffset, componentStride, occupancy, originX, originY, originZ,
-                ss.FieldInfo.Category);
+            return ReduceAabb3F(firstField, stride, occupancy, ref centres);
         }
 
         if (fieldType == SpatialFieldType.AABB2F)
         {
-            return RecomputeAabb2F(clusterBase + componentOffset + ss.FieldOffset, componentStride, occupancy, originX, originY, ss.FieldInfo.Category);
+            return ReduceAabb2F(firstField, stride, occupancy, ref centres);
         }
 
-        var aabb = ClusterSpatialAabb.Empty;
+        return ReduceGeneric(firstField, stride, occupancy, ref centres);
+    }
+
+    /// <summary>
+    /// The reduction for every tier but the f32 AABBs: <see cref="SpatialMaintainer.ReadAndValidateBoundsFromPtr"/> per slot, widened to double.
+    /// </summary>
+    private ClusterWorldBounds ReduceGeneric<TSink>(byte* firstField, int stride, ulong occupancy, ref TSink centres) where TSink : struct, ISpatialCentreSink
+    {
+        ref readonly var ss = ref SpatialSlot;
+        var fieldType = ss.FieldInfo.FieldType;
+        var is3D = fieldType.Is3D();
+        var world = ClusterWorldBounds.Empty(is3D);
         // 6 doubles covers both 2D ([minX, minY, maxX, maxY]) and 3D ([minX, minY, minZ, maxX, maxY, maxZ]) layouts produced by
         // SpatialMaintainer.ReadAndValidateBoundsFromPtr. The tail slots cost nothing for 2D reads.
         Span<double> coords = stackalloc double[6];
-        var is3D = ss.FieldInfo.FieldType.Is3D();
 
         var bits = occupancy;
         while (bits != 0)
@@ -7161,46 +7176,38 @@ internal sealed unsafe partial class ArchetypeClusterState
             var slot = BitOperations.TrailingZeroCount(bits);
             bits &= bits - 1;
 
-            var fieldPtr = clusterBase + componentOffset + slot * componentStride + ss.FieldOffset;
+            var fieldPtr = firstField + slot * stride;
+            if (centres.Wants(slot))
+            {
+                SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var cx, out var cy, out var cz);
+                centres.Add(cx, cy, cz);
+            }
+
             if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, ss.FieldInfo, coords))
             {
                 continue; // skip degenerate slot
             }
 
-            // The narrowing to f32 happens HERE, through the directed-rounding helpers, and not as the bare `(float)` casts this used to do. coords is
-            // double; subtracting the origin and rounding to nearest can land a min bound above — or a max bound below — the entity it must contain, which
-            // is a CA-01 violation and therefore a silent SQ-01 false negative. See ClusterSpatialAabb.ToCellRelativeMin.
             if (is3D)
             {
-                aabb.Union3F(
-                    ClusterSpatialAabb.ToCellRelativeMin(coords[0], originX),
-                    ClusterSpatialAabb.ToCellRelativeMin(coords[1], originY),
-                    ClusterSpatialAabb.ToCellRelativeMin(coords[2], originZ),
-                    ClusterSpatialAabb.ToCellRelativeMax(coords[3], originX),
-                    ClusterSpatialAabb.ToCellRelativeMax(coords[4], originY),
-                    ClusterSpatialAabb.ToCellRelativeMax(coords[5], originZ),
-                    ss.FieldInfo.Category);
+                world.Union3(coords[0], coords[1], coords[2], coords[3], coords[4], coords[5]);
             }
             else
             {
-                aabb.Union2F(
-                    ClusterSpatialAabb.ToCellRelativeMin(coords[0], originX),
-                    ClusterSpatialAabb.ToCellRelativeMin(coords[1], originY),
-                    ClusterSpatialAabb.ToCellRelativeMax(coords[2], originX),
-                    ClusterSpatialAabb.ToCellRelativeMax(coords[3], originY),
-                    ss.FieldInfo.Category);
+                world.Union2(coords[0], coords[1], coords[2], coords[3]);
             }
         }
 
-        return aabb;
+        return world;
     }
 
     /// <summary>
-    /// The <see cref="SpatialFieldType.AABB3F"/> scan: reduce in world f32, convert to cell-relative once per axis. See the remarks at the dispatch site in
-    /// <see cref="RecomputeClusterAabb(int, ref ChunkAccessor{PersistentStore}, double, double, double, out int)"/> for why that is exact.
+    /// The <see cref="SpatialFieldType.AABB3F"/> reduction: world f32 min/max, plus the centres <paramref name="centres"/> wants. See
+    /// <see cref="ReduceWorldBounds{TSink}"/> for why reducing before the cell-relative conversion is exact.
     /// </summary>
-    private static ClusterSpatialAabb RecomputeAabb3F(byte* firstField, int stride, ulong occupancy, double originX, double originY, double originZ,
-        uint category)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ClusterWorldBounds ReduceAabb3F<TSink>(byte* firstField, int stride, ulong occupancy, ref TSink centres)
+        where TSink : struct, ISpatialCentreSink
     {
         var minX = float.PositiveInfinity;
         var minY = float.PositiveInfinity;
@@ -7218,6 +7225,11 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             ref var b = ref *(AABB3F*)(firstField + slot * stride);
 
+            if (centres.Wants(slot))
+            {
+                centres.Add(SpatialGrid.AabbCentre(b.MinX, b.MaxX), SpatialGrid.AabbCentre(b.MinY, b.MaxY), SpatialGrid.AabbCentre(b.MinZ, b.MaxZ));
+            }
+
             if (!(b.MinX <= b.MaxX) || !(b.MinY <= b.MaxY) || !(b.MinZ <= b.MaxZ))
             {
                 continue;
@@ -7232,26 +7244,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             any = true;
         }
 
-        if (!any)
-        {
-            // Every slot degenerate, or none occupied. The caller distinguishes this by testing MinX for positive infinity, exactly as with the generic path.
-            return ClusterSpatialAabb.Empty;
-        }
-
-        var result = ClusterSpatialAabb.Empty;
-        result.Union3F(
-            ClusterSpatialAabb.ToCellRelativeMin(minX, originX),
-            ClusterSpatialAabb.ToCellRelativeMin(minY, originY),
-            ClusterSpatialAabb.ToCellRelativeMin(minZ, originZ),
-            ClusterSpatialAabb.ToCellRelativeMax(maxX, originX),
-            ClusterSpatialAabb.ToCellRelativeMax(maxY, originY),
-            ClusterSpatialAabb.ToCellRelativeMax(maxZ, originZ),
-            category);
-        return result;
+        // Every slot degenerate, or none occupied: ToCellRelative returns ClusterSpatialAabb.Empty, which the caller tests by MinX = positive infinity.
+        return any ? ClusterWorldBounds.Of3(minX, minY, minZ, maxX, maxY, maxZ) : ClusterWorldBounds.Empty(true);
     }
 
-    /// <summary>The <see cref="SpatialFieldType.AABB2F"/> scan. Same transformation as <see cref="RecomputeAabb3F"/>, two axes.</summary>
-    private static ClusterSpatialAabb RecomputeAabb2F(byte* firstField, int stride, ulong occupancy, double originX, double originY, uint category)
+    /// <summary>The <see cref="SpatialFieldType.AABB2F"/> reduction. Same as <see cref="ReduceAabb3F{TSink}"/>, two axes.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ClusterWorldBounds ReduceAabb2F<TSink>(byte* firstField, int stride, ulong occupancy, ref TSink centres)
+        where TSink : struct, ISpatialCentreSink
     {
         var minX = float.PositiveInfinity;
         var minY = float.PositiveInfinity;
@@ -7266,6 +7266,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             bits &= bits - 1;
 
             ref var b = ref *(AABB2F*)(firstField + slot * stride);
+
+            if (centres.Wants(slot))
+            {
+                centres.Add(SpatialGrid.AabbCentre(b.MinX, b.MaxX), SpatialGrid.AabbCentre(b.MinY, b.MaxY), 0d);
+            }
+
             if (!(b.MinX <= b.MaxX) || !(b.MinY <= b.MaxY))
             {
                 continue;
@@ -7278,19 +7284,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             any = true;
         }
 
-        if (!any)
-        {
-            return ClusterSpatialAabb.Empty;
-        }
-
-        var result = ClusterSpatialAabb.Empty;
-        result.Union2F(
-            ClusterSpatialAabb.ToCellRelativeMin(minX, originX),
-            ClusterSpatialAabb.ToCellRelativeMin(minY, originY),
-            ClusterSpatialAabb.ToCellRelativeMax(maxX, originX),
-            ClusterSpatialAabb.ToCellRelativeMax(maxY, originY),
-            category);
-        return result;
+        return any ? ClusterWorldBounds.Of2(minX, minY, maxX, maxY) : ClusterWorldBounds.Empty(false);
     }
 
     /// <summary>
@@ -11489,6 +11483,144 @@ internal readonly record struct ClusterHomeHint(bool Present, ushort Realm)
 }
 
 /// <summary>
+/// The world-space union of a cluster's entity bounds, before it is made cell-relative: what the AABB walk reduces to, so that the cell can be chosen
+/// after the walk (the rebuild's D11 centre cell) and the conversion runs once per axis instead of once per entity.
+/// </summary>
+internal struct ClusterWorldBounds
+{
+    public double MinX, MinY, MinZ, MaxX, MaxY, MaxZ;
+    public bool Is3D;
+    public bool Any;
+
+    /// <summary>A union holding nothing; <see cref="ToCellRelative"/> returns <see cref="ClusterSpatialAabb.Empty"/> for it.</summary>
+    public static ClusterWorldBounds Empty(bool is3D) => new()
+    {
+        MinX = double.PositiveInfinity, MinY = double.PositiveInfinity, MinZ = double.PositiveInfinity,
+        MaxX = double.NegativeInfinity, MaxY = double.NegativeInfinity, MaxZ = double.NegativeInfinity,
+        Is3D = is3D,
+    };
+
+    /// <summary>The union of a 2D f32 reduction (exact: every f32 is a double).</summary>
+    public static ClusterWorldBounds Of2(float minX, float minY, float maxX, float maxY)
+    {
+        var b = Empty(false);
+        b.MinX = minX;
+        b.MinY = minY;
+        b.MaxX = maxX;
+        b.MaxY = maxY;
+        b.Any = true;
+        return b;
+    }
+
+    /// <summary>The union of a 3D f32 reduction (exact: every f32 is a double).</summary>
+    public static ClusterWorldBounds Of3(float minX, float minY, float minZ, float maxX, float maxY, float maxZ)
+    {
+        var b = Of2(minX, minY, maxX, maxY);
+        b.MinZ = minZ;
+        b.MaxZ = maxZ;
+        b.Is3D = true;
+        return b;
+    }
+
+    /// <summary>Widens the union by one entity's validated 2D bounds.</summary>
+    public void Union2(double minX, double minY, double maxX, double maxY)
+    {
+        if (minX < MinX) { MinX = minX; }
+        if (minY < MinY) { MinY = minY; }
+        if (maxX > MaxX) { MaxX = maxX; }
+        if (maxY > MaxY) { MaxY = maxY; }
+        Any = true;
+    }
+
+    /// <summary>Widens the union by one entity's validated 3D bounds.</summary>
+    public void Union3(double minX, double minY, double minZ, double maxX, double maxY, double maxZ)
+    {
+        Union2(minX, minY, maxX, maxY);
+        if (minZ < MinZ) { MinZ = minZ; }
+        if (maxZ > MaxZ) { MaxZ = maxZ; }
+    }
+
+    /// <summary>
+    /// The union relative to the cell whose minimum corner is the origin (C15), rounded outward by the directed conversions (CA-01). Equal, bit for bit,
+    /// to converting every entity and taking the union, because the conversions are monotone.
+    /// </summary>
+    public readonly ClusterSpatialAabb ToCellRelative(double originX, double originY, double originZ, uint category)
+    {
+        var aabb = ClusterSpatialAabb.Empty;
+        if (!Any)
+        {
+            return aabb;
+        }
+
+        if (Is3D)
+        {
+            aabb.Union3F(
+                ClusterSpatialAabb.ToCellRelativeMin(MinX, originX),
+                ClusterSpatialAabb.ToCellRelativeMin(MinY, originY),
+                ClusterSpatialAabb.ToCellRelativeMin(MinZ, originZ),
+                ClusterSpatialAabb.ToCellRelativeMax(MaxX, originX),
+                ClusterSpatialAabb.ToCellRelativeMax(MaxY, originY),
+                ClusterSpatialAabb.ToCellRelativeMax(MaxZ, originZ),
+                category);
+        }
+        else
+        {
+            aabb.Union2F(
+                ClusterSpatialAabb.ToCellRelativeMin(MinX, originX),
+                ClusterSpatialAabb.ToCellRelativeMin(MinY, originY),
+                ClusterSpatialAabb.ToCellRelativeMax(MaxX, originX),
+                ClusterSpatialAabb.ToCellRelativeMax(MaxY, originY),
+                category);
+        }
+
+        return aabb;
+    }
+}
+
+/// <summary>Receives the spatial centres an AABB walk reads on the side (<c>ArchetypeClusterState.ReduceWorldBounds</c>).</summary>
+internal interface ISpatialCentreSink
+{
+    /// <summary>True when the centre of <paramref name="slot"/> is wanted.</summary>
+    bool Wants(int slot);
+
+    /// <summary>One wanted centre.</summary>
+    void Add(double x, double y, double z);
+}
+
+/// <summary>Wants no centre: the plain AABB recompute. A constant <c>false</c>, which the JIT folds out of the specialised loop.</summary>
+internal struct NoCentreSink : ISpatialCentreSink
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool Wants(int slot) => false;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Add(double x, double y, double z)
+    {
+    }
+}
+
+/// <summary>Collects the centres of a slot mask into a <see cref="SpatialCentreBox"/>: the rebuild's D11 centre cell.</summary>
+internal struct CentreBoxSink : ISpatialCentreSink
+{
+    private readonly ulong _slots;
+
+    /// <summary>The box of the centres collected so far.</summary>
+    public SpatialCentreBox Box;
+
+    public CentreBoxSink(ulong slots)
+    {
+        _slots = slots;
+        Box = SpatialCentreBox.Empty;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool Wants(int slot) => ((_slots >> slot) & 1) != 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Add(double x, double y, double z) => Box.Add(x, y, z);
+}
+
+/// <summary>
 /// The box of a set of spatial centres, and the cell holding its centre (D11): what a rebuild maps a cluster to, and what a migration computes an old
 /// cluster's home cell from (design 07 §6.3). A non-finite centre is skipped, as the AABB union skips its slot.
 /// </summary>
@@ -11504,6 +11636,7 @@ internal struct SpatialCentreBox
     public readonly bool HasAny => _any;
 
     /// <summary>Adds one centre; a non-finite one is ignored.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(double x, double y, double z)
     {
         if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))

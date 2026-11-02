@@ -648,30 +648,42 @@ internal static class SchemaMigrationOpenBench
         if (shape == Shape.Spatial)
         {
             using var epoch = EpochGuard.Enter(dbe.EpochManager);
+
+            // Timed: one query per grid cell, the boxes tiling the world with no gap. Closed boxes, so an entity on a shared edge is returned by every box
+            // touching it — the same entities in both worlds, so the migrated/fresh ratio still compares like with like. The count is not taken from these.
             var sw = Stopwatch.StartNew();
-            var hits = 0;
+            var cellHits = 0;
             foreach (var realm in new ushort[] { 1, 2 })
             {
                 for (var cx = 0; cx < World / CellSize; cx++)
                 {
                     for (var cy = 0; cy < World / CellSize; cy++)
                     {
-                        var box = new AABB2F
-                        {
-                            MinX = cx * CellSize, MinY = cy * CellSize, MaxX = (cx + 1) * CellSize - 0.01f, MaxY = (cy + 1) * CellSize - 0.01f,
-                        };
+                        var box = new AABB2F { MinX = cx * CellSize, MinY = cy * CellSize, MaxX = (cx + 1) * CellSize, MaxY = (cy + 1) * CellSize };
                         foreach (var _ in dbe.ClusterSpatialQuery<SmoSpV2>(new RealmId(realm)).AABB(box))
                         {
-                            hits++;
+                            cellHits++;
                         }
                     }
                 }
             }
 
             queryMs = sw.Elapsed.TotalMilliseconds;
-            if (hits != n)
+
+            // Untimed: the completeness check, one world-sized box per realm — each entity counted exactly once.
+            var hits = 0;
+            foreach (var realm in new ushort[] { 1, 2 })
             {
-                Console.WriteLine($"    !! cell queries found {hits} of {n} entities");
+                var world = new AABB2F { MinX = 0, MinY = 0, MaxX = World, MaxY = World };
+                foreach (var _ in dbe.ClusterSpatialQuery<SmoSpV2>(new RealmId(realm)).AABB(world))
+                {
+                    hits++;
+                }
+            }
+
+            if (hits != n || cellHits < n)
+            {
+                Console.WriteLine($"    !! spatial queries found {hits} of {n} entities ({cellHits} hits over the cell boxes)");
             }
         }
 

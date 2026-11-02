@@ -592,7 +592,11 @@
     narrowed by one ULP there drops a cluster grazing its edge — an SQ-01 false negative that no containment check
     on the storage side can see.
   invariant RecomputeClusterAabb scans all occupied slots via TZCNT loop
-    over the 64-bit occupancy word and calls ReadAndValidateBoundsFromPtr per slot
+    over the 64-bit occupancy word and calls ReadAndValidateBoundsFromPtr per slot (an f32 AABB tier reads the field
+    directly). The union is reduced in WORLD space (ReduceWorldBounds) and converted once per axis
+    (ClusterWorldBounds.ToCellRelative) — bit-identical to converting each entity, because the directed conversions are
+    monotone. The rebuild's map (MapClusterForRebuild) runs the same reduction, collecting the D11 centre box in the
+    same walk, so a rebuild's AABB is never a second copy of this computation
   post after the refresh pass: ∀ cluster C selected by ClusterProcessBitmap:
     ClusterAabbs[C.chunkId] ⊇ union of C's live entity AABBs, and == the exact union when a shrink was pending
     (corrected 2026-07-28: the pass no longer reads dirtyBits — it is driven by ClusterProcessBitmap +
@@ -603,7 +607,8 @@
     (b) blind full-struct store from the AabbRefresh fence phase
     The tick barrier separating dispatch from the fence is what makes (b) safe, and it is LOAD-BEARING. Relax it and
     the fence store silently discards concurrent grows → AABB too tight → this rule's own containment fails.
-  scope: ArchetypeClusterState.RecomputeClusterAabb, RecomputeDirtyClusterAabbs, RecomputeDirtyClusterAabbsSlice
+  scope: ArchetypeClusterState.RecomputeClusterAabb, ArchetypeClusterState.ReduceWorldBounds, ClusterWorldBounds.ToCellRelative,
+         RecomputeDirtyClusterAabbs, RecomputeDirtyClusterAabbsSlice
          (the parallel path that performs the store), RebuildClusterAabbs,
          ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink / WriteSpatialSet (the concurrent writer class),
          ClusterRef.TryGetCellOrigin, ClusterSpatialAabb.ToCellRelativeMin, ClusterSpatialAabb.ToCellRelativeMax,
@@ -1725,7 +1730,7 @@
     ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.TryClaimPinnedSlot, ArchetypeClusterState.ClusterCellMap,
     DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster,
     ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.MapClusterForRebuild,
-    ArchetypeClusterState.TryReadCentreCell, ArchetypeClusterState.PickFewestStraysCell, SpatialCentreBox, ClusterHomeHint, ArchetypeClusterState.FileForeignCellSlots,
+    ArchetypeClusterState.ReduceWorldBounds, ArchetypeClusterState.PickFewestStraysCell, SpatialCentreBox, ClusterHomeHint, ArchetypeClusterState.FileForeignCellSlots,
     ArchetypeClusterState.ClearAabbRefreshBookkeeping, ArchetypeClusterState.ClusterMigrationTakenSlots,
     ArchetypeClusterState.FlagOutOfBarrierSpatialWrite, Transaction.PublishStagedEntry
   verified: RecoverySpatialRebuildTests.MixedCellClusterFromRecoveryClaim_FiledAtRebuild_FixedAtFirstFence (the replay packs
