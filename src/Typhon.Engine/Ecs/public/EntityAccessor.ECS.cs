@@ -121,6 +121,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     internal unsafe bool TryCopyCommittedAtSnapshot(ArchetypeMetadata meta, int slot, int chainRoot, byte* destination, int size)
     {
+        ResumeIfSuspended();
         var chunk = ResolveVersionedContentChunk(meta, slot, chainRoot);
         if (chunk == 0)
         {
@@ -143,6 +144,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     internal int ResolveVersionedContentChunk(ArchetypeMetadata meta, int slot, int chainRoot)
     {
+        ResumeIfSuspended();
         if (chainRoot == 0)
         {
             return 0;
@@ -218,6 +220,7 @@ public unsafe partial class EntityAccessor
     /// it.</exception>
     public void Teleport<T>(EntityId id, Comp<T> spatial, RealmId realm, in T value) where T : unmanaged
     {
+        ResumeIfSuspended();
         var mut = OpenMut(id);
         var state = mut._ref._engineState?.ClusterState;
         if (state == null || !state.SpatialSlot.HasRealmKey || state.SpatialSlot.Slot != mut._ref._archetype.GetSlot(spatial._componentTypeId))
@@ -287,7 +290,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     public virtual bool IsAlive(EntityId id)
     {
-        AssertThreadAffinity();
+        BeginOperation();
         return IsCommittedAlive(id, NeedsEpochGuard());
     }
 
@@ -603,6 +606,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     internal byte* ReresolveClusterBase(ArchetypeEngineState es, ushort archetypeId, int clusterChunkId, bool writable)
     {
+        ResumeIfSuspended();
         ref var cache = ref EnsureArchetypeCache(es, archetypeId);
         return cache.HasPersistent
             ? cache.Persistent.GetChunkAddress(clusterChunkId, writable)
@@ -620,7 +624,7 @@ public unsafe partial class EntityAccessor
     /// </summary>
     private protected virtual EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
-        AssertThreadAffinity();
+        BeginOperation();
 
         if (id.IsNull)
         {
@@ -802,6 +806,7 @@ public unsafe partial class EntityAccessor
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal byte* ReadEcsComponentDataRaw(ComponentTable table, int componentTypeId, Type componentType, int location, bool isOwnSpawn)
     {
+        ResumeIfSuspended();
         var info = GetComponentInfoByTypeId(componentTypeId, componentType);
         byte* ptr = ResolveSpawnAwarePayload(table, location, isOwnSpawn, ref info.TransientCompContentAccessor, ref info.CompContentAccessor);
         return ptr + info.ComponentOverhead;

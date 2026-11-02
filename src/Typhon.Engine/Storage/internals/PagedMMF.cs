@@ -1281,6 +1281,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool RequestPageEpoch(int filePageIndex, long currentEpoch, out int memPageIndex)
     {
+        // A walk step may have suspended the epoch scope of a transaction on this thread, and the operation reaching this page not resumed it (EP-03):
+        // resumed here, the pin covers the page before it is read. The engine's entry points resume first; this is the net under them.
+        if (EpochManager is { } epochs)
+        {
+            EntityAccessor.ResumeSuspendedBeforePageRead(epochs);
+        }
+
         while (true)
         {
             if (!FetchPageToMemory(filePageIndex, out memPageIndex))
@@ -1336,6 +1343,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool RequestPageEpochUnchecked(int filePageIndex, long currentEpoch, out int memPageIndex)
     {
+        // A walk step may have suspended the epoch scope of a transaction on this thread, and the operation reaching this page not resumed it (EP-03):
+        // resumed here, the pin covers the page before it is read. The engine's entry points resume first; this is the net under them.
+        if (EpochManager is { } epochs)
+        {
+            EntityAccessor.ResumeSuspendedBeforePageRead(epochs);
+        }
+
         while (true)
         {
             if (!FetchPageToMemory(filePageIndex, out memPageIndex))
@@ -1400,6 +1414,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false)
     {
+        // No epoch net here, unlike the epoch-tagged requests: a read pin needs no scope, and the engine's own unpinned scans (a fence's, a structural one) run
+        // on threads a suspended walk may share.
         while (true)
         {
             if (!FetchPageToMemory(filePageIndex, out memPageIndex))
@@ -1470,6 +1486,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool RequestPageEpochNoSweep(int filePageIndex, long currentEpoch, out int memPageIndex)
     {
+        // A walk step may have suspended the epoch scope of a transaction on this thread, and the operation reaching this page not resumed it (EP-03):
+        // resumed here, the pin covers the page before it is read. The engine's entry points resume first; this is the net under them.
+        if (EpochManager is { } epochs)
+        {
+            EntityAccessor.ResumeSuspendedBeforePageRead(epochs);
+        }
+
         while (true)
         {
             if (!FetchPageToMemory(filePageIndex, out memPageIndex))

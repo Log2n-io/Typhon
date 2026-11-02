@@ -641,8 +641,9 @@ structural mutation.
          dormancy promote, the checkerboard promote and the dispatch capture in OnParallelQueryPrepare (the chunk-partition sites
          read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy, EcsQuery.ScanClusterSoa and
          EcsQuery.ScanPerArchetypeBTreeSelective (the last two hoist it out of their scan loop), ClusterEnumerator.Create and
-         ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex and
-         StatisticsRebuilder — the last of these being the only reader on a thread no tick phase bounds
+         ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex,
+         SnapshotWalker.NextCluster (a snapshot walk, once per step) and StatisticsRebuilder — the last two being the readers on a thread no tick phase
+         bounds
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
   rationale: #582 face 2. It makes the pair CONSISTENT, not the walk SAFE: what makes the walk safe is CLUSTERWALK-01, which keeps
@@ -707,7 +708,7 @@ structural mutation.
          ClusterRef.SpatialWriteChangesKeys, ClusterEnumerator.MarkCurrentDirty, ArchetypeAccessor.GetClusterEnumerator,
          EntityAccessor.GetClusterEnumerator, Transaction.Destroy, Transaction.DestroyBatch, Transaction.DestroyBulk, Transaction.DestroyInternal,
          Transaction.AddPendingDestroy, Transaction.OwnDestroyedSlotsFor, Transaction.CleanupEcsState, OwnDestroyedSlots.Unhidden,
-         ArchetypeClusterState.SlotMoveEpoch, DatabaseEngine.ExecuteMigrations
+         ArchetypeClusterState.SlotMoveEpoch, DatabaseEngine.ExecuteMigrations, SnapshotWalker.ReadRows, SnapshotWalker.NextGatherBatch
   on_violation: one transaction gives two answers about one entity. OpenMut on what the walk chose throws and aborts the tick (SWG LairLife, tick 137 260,
                 #1482); a TryOpen or an in-place ClusterRef write acts silently on a dead entity — a write into a slot about to be released, children
                 spawned for a dead parent, a double count
@@ -735,6 +736,39 @@ structural mutation.
             a spatial archetype migrates, at the fence, and EW-02 confines its writes to systems, whose commits end before the fence — so no compliant
             application reaches it; EcsQuery's snapshot gate has the same dependence
   NOT covered: a fence migration DURING a walk (outside the contract: a walk during the fence window is excluded, CLUSTERWALK-01 note)
+
+### WALK-01: A snapshot walk yields every entity visible at its snapshot exactly once, across any number of tick fences `[fatal][silent]`
+  invariant ∀ walk W = Transaction.Walk<TArch>() of transaction T, ∀ entity e of TArch visible at T's snapshot and present for W's whole length, not
+            destroyed by T: W yields e exactly once, however many fences run between or during its steps; an entity spawned or destroyed by another
+            transaction during W may or may not be yielded on a SingleVersion or Transient archetype, which promise no snapshot, and is decided by the
+            snapshot on one with a Versioned component (VIS-08, VIS-09). T's own pending spawns are never yielded, nor its own pending destroys
+            (CLUSTERWALK-04)
+  invariant on an archetype without a spatial index the walk is in cluster order. The fence never moves its entities between clusters — every
+            migration (a cell crossing, a relocation, a repair) is queued against a spatial grid — and only compacts the active list (the reclamation,
+            CLUSTERWALK-03) and reissues the chunks it frees. The walk keeps a bitmap of the chunk ids it visited, starts its search over when
+            ArchetypeClusterState.ReclaimGeneration moved (the compaction, and RemoveFromActiveList, bump it; appends do not), and passes over a
+            visited id: a reissued one holds only entities spawned after the walk began
+  invariant on a spatial archetype the walk is in entity-map order (EMAP-02 across fills: RawValuePagedHashMap.FillFrom): an entity keeps its key and
+            its bucket wherever the fence moves it. Each batch's columns are gathered from the slots its records name, resolved again when a fence ran
+            since the batch's fill
+  invariant a step never starts while a fence runs on another thread (ExclusiveWindow.IsOpen, waited out with the scope suspended), and a step a fence
+            overlapped is read again (ExclusiveWindow.ReadToken, ReadOverlapped): the reclamation compacts the list in place and frees chunks, and
+            a read that straddles it can see half of it
+  scope: Transaction.Walk, ArchetypeWalk, WalkBatch, SnapshotWalker, ArchetypeClusterState.ReclaimGeneration, ArchetypeClusterState.RemoveFromActiveList,
+         ArchetypeClusterState.DrainPendingClusterFinalizations, ExclusiveWindow.ReadToken, ExclusiveWindow.ReadOverlapped
+  on_violation: an off-tick walk — an audit, an export, a migration — spans hundreds of fences on a live server. Kept in cluster order across a
+                migration it meets an entity twice (moved into a cluster it had not reached) or never (moved into one it had passed); kept at its list
+                position across a reclamation it skips the clusters that slid back under it. Silent: every count is plausible
+  rationale: the fence's migrations move live entities, so per-entity knowledge is the only exact answer on a spatial archetype; the entity map has it
+             at about foreach's cost per entity. A migration log consumed by live walks would keep the cluster order there too, for fence machinery no
+             walk needs yet (decided 2026-11-02, design/Ecs/EntityClusters/13-snapshot-walks.md)
+  requires CLUSTERWALK-02, CLUSTERWALK-03, CLUSTERWALK-04, EMAP-02, VIS-08, VIS-09
+  verified: TransactionWalkTests.AReclamationBetweenSteps_LosesAndRepeatsNothing [VerifiesRule] — clusters the walk visited and clusters it had not,
+            emptied and reclaimed between two steps, their chunk ids reissued: every entity present throughout yielded once;
+            Mutant_AWalkThatKeepsItsPositionAcrossAReclamation_IsRejected [RuleMutant]. AMigrationBetweenSteps_LosesAndRepeatsNothing [VerifiesRule]
+            — the entities the walk saw and as many it had not moved to a corner cell and migrated by the fence between two steps: each yielded
+            once, with its own values; Mutant_ASpatialWalkInClusterOrder_IsRejected [RuleMutant]. AFenceDuringAStep_RedoesIt — a fence run while a
+            step reads makes it read again
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
@@ -1648,8 +1682,11 @@ cost 12 µs at 20M entries (#1205).
             Otherwise b existed at p's read, nothing moved from p into b since, and W reads b. The count each read saw is kept only where it changes,
             and nothing is allocated unless the map splits during W
   invariant AnyEntry only runs to the live count, without passing over
+  invariant so does a walk resumed between fills (RawValuePagedHashMap.FillFrom, EntryCursor: the streaming foreach, a spatial archetype's snapshot
+            walk): the cursor keeps the scan's state, which time passing between two buckets does not disturb, and a fill stops only at a bucket
+            boundary
   scope: PagedHashMapBase.BeginScan, PagedHashMapBase.SplitTolerantScan, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
-         RawValuePagedHashMap.AnyEntry
+         RawValuePagedHashMap.AnyEntry, RawValuePagedHashMap.FillFrom, RawValuePagedHashMap.EntryCursor
   on_violation: a walk bounded by the count it read at its start never reached the bucket a split of an unread bucket created, so the entries moved
                 there went unvisited: a broad query (Execute, Count, Any, Where<T>, navigation views) missed live entities whenever the archetype grew
                 under it, about two scans in three in a churn test past 1 300 entities (#1351). One that ran to the live count without passing over
@@ -1660,4 +1697,5 @@ cost 12 µs at 20M entries (#1205).
             entries that stay throughout. QueryStressOracleTests' Where<T> check runs over the broad scan. Mutants, run by hand: the start count as the bound, every
             staged miss case and the concurrent test; no passing over, every duplicate case and the concurrent test; a passed-over parent not
             inherited, the images-of-images cases; the count each read saw replaced by the start count, ten of twelve and the concurrent test;
-            AnyEntry bounded by the start count, its test
+            AnyEntry bounded by the start count, its test. StreamingForeachTests.AMapSplitBetweenFills_LosesAndRepeatsNothing [VerifiesRule] — a foreach
+            whose map splits under it between two fills yields exactly its snapshot's entities

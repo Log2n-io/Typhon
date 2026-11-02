@@ -193,15 +193,6 @@ public unsafe ref struct EntityRef
         }
     }
 
-    /// <summary>Copy locations from an inline EntityLocations struct (zero-allocation foreach path).</summary>
-    internal void CopyLocationsFrom(in EntityLocations locs, int componentCount)
-    {
-        for (int i = 0; i < componentCount; i++)
-        {
-            _locations[i] = locs.Values[i];
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
     // Properties
     // ═══════════════════════════════════════════════════════════════════════

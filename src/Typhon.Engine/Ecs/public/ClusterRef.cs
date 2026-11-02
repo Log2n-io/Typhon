@@ -1898,6 +1898,8 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             NoteLeftPageWritten();
         }
 
+        _owner?.ResumeIfSuspended();   // EP-03: a walk step inside this loop may have left the transaction's scope
+
         while (++_index < _endIndex)
         {
             var chunkId = _clusterIds[_index];

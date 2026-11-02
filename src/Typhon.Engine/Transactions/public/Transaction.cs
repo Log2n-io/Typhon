@@ -254,6 +254,7 @@ public unsafe partial class Transaction : EntityAccessor
         _ = _epochManager.EnterScope(); // Depth unused: Transaction uses ExitScopeUnordered (not LIFO)
         _dbe.LogTxInitPhase(0, "epoch entered");
         _isDisposed = false;
+        _ending = false;
         IsReadOnly = readOnly;
         OwningUnitOfWork = uow;
         ChainLockWaitContextProbe = null;
@@ -325,6 +326,15 @@ public unsafe partial class Transaction : EntityAccessor
     /// succeeded or not — PREPARE consumed each entry's read revision.
     /// </summary>
     private bool _prepareConsumed;
+
+    /// <summary>
+    /// Set once a commit or a rollback begins, reset only by <see cref="Init"/>. A walk step never suspends the epoch scope of an ending transaction: a
+    /// publish asserts its pin does not move, and its conflict handler is user code that could step a walk.
+    /// </summary>
+    private bool _ending;
+
+    /// <inheritdoc/>
+    private protected override bool CanSuspendEpoch => !_ending && State is TransactionState.Created or TransactionState.InProgress;
 
     /// <summary>How many of this commit's prepared Versioned writes move a key a unique index covers: <c>ValidatePublishBeforeAppend</c> checks them.</summary>
     private int _pendingUniqueMoves;
@@ -398,7 +408,7 @@ public unsafe partial class Transaction : EntityAccessor
             return;
         }
 
-        AssertThreadAffinity();
+        BeginOperation();
 
         // Read-only transactions have no ChangeSet, UoW, or commit/rollback path —
         // just exit the epoch scope and remove from the chain.
@@ -626,7 +636,12 @@ public unsafe partial class Transaction : EntityAccessor
         var tsn = TSN;
 
         dbe.LogTxDispose(tsn, "ExitEpoch");
-        _epochManager.ExitScopeUnordered();
+        // A walk step suspended the scope and an outer one, opened since, covered this dispose (EntityAccessor.ResumeEpoch): the thread holds no unit of
+        // this transaction's to exit.
+        if (!DropSuspension())
+        {
+            _epochManager.ExitScopeUnordered();
+        }
         var owningUow = OwnsUnitOfWork ? OwningUnitOfWork : null;
         dbe.LogTxDispose(tsn, "ChainRemove");
         // The pool's Reset unplaces a failed commit's spawns, which loads pages and can throw: the unit of work is disposed all the same, or its marks and
@@ -674,7 +689,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <returns>A read-only, zero-copy enumerator over the collection.</returns>
     public ReadOnlyCollectionEnumerator<T> GetReadOnlyCollectionEnumerator<T>(ref ComponentCollection<T> field) where T : unmanaged
     {
-        AssertThreadAffinity();
+        BeginOperation();
         return new ReadOnlyCollectionEnumerator<T>(_dbe.GetComponentCollectionVSBS<T>(), field._bufferId);
     }
 
@@ -686,7 +701,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// <returns>The backing buffer's reference count.</returns>
     public int GetComponentCollectionRefCounter<T>(ref ComponentCollection<T> field) where T : unmanaged
     {
-        AssertThreadAffinity();
+        BeginOperation();
         var vsbs = _dbe.GetComponentCollectionVSBS<T>();
         using var a = new VariableSizedBufferAccessor<T, PersistentStore>(vsbs, field._bufferId);
 
@@ -756,7 +771,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// </remarks>
     public IndexEntityEnumerator<T, TKey> EnumerateIndex<T, TKey>(IndexRef indexRef, TKey minKey, TKey maxKey) where T : unmanaged where TKey : unmanaged
     {
-        AssertThreadAffinity();
+        BeginOperation();
         indexRef.Validate();
         NoteEntityOpen();   // a lookup is an operation: the enumerator's own count starts again with each one, and a loop of them never reached a refresh
 
@@ -1760,7 +1775,7 @@ public unsafe partial class Transaction : EntityAccessor
     [PublicAPI]
     public bool QueryRead<T>(long pk, out T t) where T : unmanaged
     {
-        AssertThreadAffinity();
+        BeginOperation();
         var componentType = typeof(T);
         var info = GetComponentInfo(componentType);
 
@@ -1875,6 +1890,7 @@ public unsafe partial class Transaction : EntityAccessor
     [PublicAPI]
     public bool WriteComponent<T>(long pk, ref T comp) where T : unmanaged
     {
+        ResumeIfSuspended();
         var entityId = Unsafe.As<long, EntityId>(ref pk);
         var entity = OpenMut(entityId);
         entity.Set(in comp);
@@ -1888,6 +1904,7 @@ public unsafe partial class Transaction : EntityAccessor
     [PublicAPI]
     public EntityId SpawnByArchetypeId(ushort archetypeId, params ComponentValue[] values)
     {
+        ResumeIfSuspended();
         var meta = ArchetypeRegistry.GetMetadata(archetypeId);
         if (meta == null)
         {
@@ -3774,7 +3791,8 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // The hot fast path here is read-only-tx auto-rollback on Dispose: state is already Created/Committed/Rollbacked, returns immediately. By keeping
         // the holdoff `using` and span try/finally inside RollbackCore (slow), this fast-path shim stays EH-free and inlinable into Dispose.
-        AssertThreadAffinity();
+        BeginOperation();
+        _ending = true;
 
         // Nothing to undo if the transaction is empty, but it ends here all the same: left in Created, it kept accepting writes (TX-01, #1056)
         if (State is TransactionState.Created)
@@ -4314,7 +4332,8 @@ public unsafe partial class Transaction : EntityAccessor
     /// </exception>
     public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler = null)
     {
-        AssertThreadAffinity();
+        BeginOperation();
+        _ending = true;
 
         // Can't commit a transaction already processed — read-only included: one that was rolled back is not committed by this call (TX-01) — nor
         // one a failed commit's PREPARE consumed (#1262), should its rollback have failed

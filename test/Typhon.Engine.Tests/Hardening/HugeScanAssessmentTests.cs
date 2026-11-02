@@ -407,6 +407,20 @@ public unsafe class HugeScanAssessmentTests
                 }
             });
 
+            // The snapshot walk (I3): one cluster per batch, at the transaction's snapshot, holding no epoch between batches.
+            yield return new Scenario($"TxWalk_{Tag}", ctx =>
+            {
+                using var tx = ctx.Dbe.CreateReadOnlyTransaction();
+                foreach (var batch in tx.Walk<TArch>())
+                {
+                    var span = batch.GetReadOnlySpan(Comp);
+                    for (var bits = batch.Rows; bits != 0; bits &= bits - 1)
+                    {
+                        ctx.Visit(Seq(span[BitOperations.TrailingZeroCount(bits)]));
+                    }
+                }
+            });
+
             yield return new Scenario($"ForeachWhereLambda_{Tag}", ctx =>
             {
                 using var tx = ctx.Dbe.CreateReadOnlyTransaction();
@@ -866,6 +880,86 @@ public unsafe class HugeScanAssessmentTests
             ctx.Visited = tx.Query<HsSpatialArch>().WhereRay<HsSpatial>(-WorldExtent, 0.5, 0.5, 1, 0, 0, 2 * WorldExtent).Execute().Count;
         }, ChecksEveryRow: false, ExpectedRows: 0);
 
+        // I10: a snapshot walk paused 5 s after its first batch while a writer appends. Between batches the walk holds no epoch, so what the writer touches
+        // stays evictable: the peak of epoch-held pages and the writer's back-pressure rounds against TailChase_Ver's idle transaction (8 128 pages).
+        yield return new Scenario("PausedWalk_Ver", ctx =>
+        {
+            using var tx = ctx.Dbe.CreateReadOnlyTransaction();
+            var latencies = new List<double>();
+            Exception writerFault = null;
+            var stop = false;
+            var writer = new Thread(() =>
+            {
+                try
+                {
+                    var seq = ctx.Rows + 1;
+                    while (!Volatile.Read(ref stop))
+                    {
+                        var commit = Stopwatch.StartNew();
+                        using (var w = ctx.Dbe.CreateQuickTransaction())
+                        {
+                            for (var i = 0; i < 1000; i++, seq++)
+                            {
+                                var row = new HsVersioned { Seq = seq, Group = GroupOf(seq), Value = 1, Shuffled = ShuffledOf(seq) };
+                                w.Spawn<HsVerArch>(HsVerArch.Row.Set(in row));
+                            }
+
+                            w.Commit();
+                        }
+
+                        latencies.Add(commit.Elapsed.TotalMilliseconds);
+                    }
+                }
+                catch (Exception e)
+                {
+                    writerFault = e;
+                }
+            }) { IsBackground = true, Name = "hs-appender" };
+
+            var suspendedDuringPause = false;
+            var heldAfterPause = -1;
+            var heldWhileAppending = -1;
+            using (var walk = tx.Walk<HsVerArch>())
+            {
+                var first = true;
+                while (walk.MoveNext())
+                {
+                    var batch = walk.Current;
+                    var span = batch.GetReadOnlySpan(HsVerArch.Row);
+                    for (var bits = batch.Rows; bits != 0; bits &= bits - 1)
+                    {
+                        ctx.Visit(span[BitOperations.TrailingZeroCount(bits)].Seq);
+                    }
+
+                    if (first)
+                    {
+                        first = false;
+                        writer.Start();
+                        Thread.Sleep(5000);
+                        suspendedDuringPause = tx.EpochSuspended && !ctx.Dbe.EpochManager.IsCurrentThreadInScope;
+                        ctx.Dbe.MMF.GetMetrics().GetMemPageExtraInfo(out var running);
+                        heldWhileAppending = running.EpochProtectedPageCount;
+                        Volatile.Write(ref stop, true);
+                        writer.Join();
+
+                        // The appender gone, only this thread could still pin what it touched: the I10 measure, against TailChase_Ver's idle transaction.
+                        ctx.Dbe.MMF.GetMetrics().GetMemPageExtraInfo(out var census);
+                        heldAfterPause = census.EpochProtectedPageCount;
+                    }
+                }
+            }
+
+            if (writerFault != null)
+            {
+                throw new InvalidOperationException("the appender failed beside the paused walk", writerFault);
+            }
+
+            latencies.Sort();
+            var p99 = latencies.Count == 0 ? 0 : latencies[(int)(latencies.Count * 0.99)];
+            ctx.Note = $"suspended {suspendedDuringPause}, epoch-held while appending {heldWhileAppending}, after {heldAfterPause}, appender commits {latencies.Count}, p99 {p99:F1} ms, "
+                       + $"max {(latencies.Count == 0 ? 0 : latencies[^1]):F1} ms";
+        }, Writes: true);
+
         // A walk at an old snapshot, near the ledger's end, while a writer appends: every row the writer adds is invisible to the walk, so MoveNext skips
         // them and never emits, and the walk's refresh runs only on an emission.
         yield return new Scenario("TailChase_Ver", ctx =>
@@ -898,6 +992,8 @@ public unsafe class HugeScanAssessmentTests
             }) { IsBackground = true, Name = "hs-appender" };
             writer.Start();
             Thread.Sleep(5000);
+            ctx.Dbe.MMF.GetMetrics().GetMemPageExtraInfo(out var idleCensus);
+            ctx.Note = $"epoch-held while appending {idleCensus.EpochProtectedPageCount} (an idle transaction)";
             using (var rows = tx.EnumerateIndex<HsVersioned, long>(ctx.Dbe.GetIndexRef<HsVersioned, long>(v => v.Seq), ctx.Rows - 1000, long.MaxValue))
             {
                 while (rows.MoveNext())

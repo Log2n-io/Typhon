@@ -1637,6 +1637,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     // Released, to pair with the acquiring readers (CLUSTERWALK-02); shrinking is the benign direction. One version bump for the whole pass.
                     Volatile.Write(ref ActiveClusterCount, w);
                     Interlocked.Increment(ref _clusterSetVersion);
+                    Interlocked.Increment(ref ReclaimGeneration);   // WALK-01: a walk's position in the list moved
                 }
 
                 evicted = true;
@@ -2242,6 +2243,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// them again (CLUSTERWALK-04). Load-bearing, unlike the telemetry <see cref="TotalMigrationCount"/> beside it.
     /// </summary>
     internal long SlotMoveEpoch;
+
+    /// <summary>
+    /// Bumped whenever an entry leaves <see cref="ActiveClusterIds"/> — the fence's reclamation, which compacts it in place — so a snapshot walk that spans
+    /// fences (<see cref="SnapshotWalker"/>) knows its position in the list moved and finds its next unvisited cluster again (WALK-01). Appends do not move
+    /// it: they leave every position where it was. <c>ClusterSetVersion</c>, which moves on appends too, would send every walk back to the start each tick.
+    /// </summary>
+    internal int ReclaimGeneration;
 
     /// <summary>
     /// Telemetry counter: boundary crossings absorbed by the hysteresis margin since this cluster state was created. Cumulative counterpart to
@@ -10470,6 +10478,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                 // Issue #231: any change to the active cluster set invalidates the tier index.
                 Interlocked.Increment(ref _clusterSetVersion);
+                Interlocked.Increment(ref ReclaimGeneration);   // WALK-01: the swap moved an entry
                 return;
             }
         }
