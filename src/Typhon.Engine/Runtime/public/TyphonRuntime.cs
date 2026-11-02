@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;
@@ -91,6 +92,20 @@ public sealed partial class TyphonRuntime : IDisposable
     // Per-system transaction tracking. Only one worker processes a given system index at a time (CAS on _isReady ensures single claimer), so no contention
     // on these slots.
     private readonly Transaction[] _systemTransactions;
+
+    // Per system: whether it ever took the start hook — a single-invocation system, whose end without a transaction is a second end of one run (RT-02).
+    private readonly bool[] _systemEverStarted;
+
+    private long _duplicateSystemEnds;
+
+    /// <summary>Ends of a system run that found no transaction of its own: a second end of one run (RT-02, #879). Non-zero names a scheduler defect.</summary>
+    internal long DuplicateSystemEnds => Interlocked.Read(ref _duplicateSystemEnds);
+
+    /// <summary>Test seam: the system-start hook, as the scheduler calls it.</summary>
+    internal TickContext StartSystemForTest(int sysIdx, int workerId) => OnSystemStartInternal(sysIdx, workerId);
+
+    /// <summary>Test seam: the system-end hook, as the scheduler calls it.</summary>
+    internal void EndSystemForTest(int sysIdx, bool success) => OnSystemEndInternal(sysIdx, success);
 
     private readonly ViewBase[] _systemViews;                      // Resolved View per system (null if no input)
     // Per-system Stopwatch start ticks captured at OnSystemStart / OnParallelQueryPrepare; consumed by OnSystemEnd to emit a per-tick QueryPlan span (#342
@@ -353,6 +368,7 @@ public sealed partial class TyphonRuntime : IDisposable
         }
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
+        _systemEverStarted = new bool[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
         _systemQueryPlanStartTicks = new long[scheduler.AllSystemCount];
         _systemChangeFilterTables = new ComponentTable[scheduler.AllSystemCount][];
@@ -3098,6 +3114,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 DeltaTime = _currentDeltaTime,
                 AmortizedDeltaTime = amortizedDt,
                 Transaction = tx,
+                Accessor = tx,
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = slice,
                 ConsumedQueues = null,
@@ -3946,7 +3963,52 @@ public sealed partial class TyphonRuntime : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int[] ReadActiveClusterList(ArchetypeClusterState cs, out int count) => cs.ReadActiveClusterList(out count);
 
+    /// <remarks>
+    /// A start that throws undoes what it did, and the scheduler then fails the system without calling the end hook (CD-04, RT-02): its transaction taken
+    /// back out of the slot and disposed, its entity list returned, its lifecycle span closed. Nothing is left for an end to find, so an end never has to
+    /// guess whose transaction the slot holds.
+    /// </remarks>
     private TickContext OnSystemStartInternal(int sysIdx, int workerId)
+    {
+        if (!_systemEverStarted[sysIdx])
+        {
+            _systemEverStarted[sysIdx] = true;
+        }
+
+        // RT-02 (#879): a run starting while one of the same system is live — a system completed twice, its tick ended early and the next one started it
+        // again — would overwrite the live run's transaction, and the live run's end would then commit and dispose the new one under it. Refused before
+        // anything is touched: the system fails and the tick ends failed instead of aliasing a transaction.
+        if (Volatile.Read(ref _systemTransactions[sysIdx]) != null)
+        {
+            LogSystemStartedOverALiveRun(Scheduler.Systems[sysIdx].Name, Scheduler.CurrentTickNumber, workerId);
+            throw new InvalidOperationException($"System '{Scheduler.Systems[sysIdx].Name}' started while a run of it was still live (RT-02)");
+        }
+
+        Transaction installed = null;
+        try
+        {
+            return StartSystemRun(sysIdx, workerId, ref installed);
+        }
+        catch
+        {
+            if (installed != null)
+            {
+                // Taken back only if still ours: a concurrent start refused by the CAS left the slot alone.
+#pragma warning disable TYPHON004 // the slot's own transaction is taken back here and disposed just below; another run's is left alone
+                _ = Interlocked.CompareExchange(ref _systemTransactions[sysIdx], null, installed);
+#pragma warning restore TYPHON004
+                installed.Dispose();
+                _systemEntityLists[sysIdx].Return();
+                _systemEntityLists[sysIdx] = default;
+            }
+
+            _systemQueryPlanStartTicks[sysIdx] = 0;
+            TyphonEvent.EmitRuntimeTransactionLifecycleEnd(false);
+            throw;
+        }
+    }
+
+    private TickContext StartSystemRun(int sysIdx, int workerId, ref Transaction installed)
     {
         TyphonEvent.BeginRuntimeTransactionLifecycleTls((ushort)sysIdx);
 
@@ -3974,7 +4036,14 @@ public sealed partial class TyphonRuntime : IDisposable
         // Create a Transaction on the CALLING THREAD (worker thread).
         // This respects Transaction's single-thread affinity constraint.
         var tx = _currentUow.CreateTransaction();
-        _systemTransactions[sysIdx] = tx;
+        if (Interlocked.CompareExchange(ref _systemTransactions[sysIdx], tx, null) != null)
+        {
+            tx.Dispose();
+            LogSystemStartedOverALiveRun(Scheduler.Systems[sysIdx].Name, Scheduler.CurrentTickNumber, workerId);
+            throw new InvalidOperationException($"System '{Scheduler.Systems[sysIdx].Name}' started while a run of it was still live (RT-02)");
+        }
+
+        installed = tx;
 
         // #197: Build entity set based on input View and change filter
         IReadOnlyCollection<EntityId> entities;
@@ -4005,7 +4074,21 @@ public sealed partial class TyphonRuntime : IDisposable
             metrics.EntitiesSkippedByChangeFilter = _systemViews[sysIdx].Count - entityCount;
         }
 
-        var sys = Scheduler.Systems[sysIdx];
+        // DSEL-05 (#908): the selection a serial QuerySystem's entities came from, handed over as the parallel path hands its chunk's — one cluster walk serves
+        // both. Locals, so _dispatchClusterIds keeps its "null is the whole view" meaning for BuildFullViewEntitySet.
+        int[] clusterIds = null;
+        var clusterCount = 0;
+        if (_systemViews[sysIdx] != null && _systemClusterStates[sysIdx] is { } clusterState)
+        {
+            clusterIds = _dispatchClusterIds[sysIdx];
+            clusterCount = _dispatchClusterCount[sysIdx];
+            if (clusterIds == null)
+            {
+                // Nothing narrows the system: the whole active list, read once as a pair (CLUSTERWALK-02).
+                clusterIds = clusterState.ReadActiveClusterList(out clusterCount);
+            }
+        }
+
         float amortizedDt = AmortizedDeltaTimeFor(sysIdx);
         return new TickContext
         {
@@ -4014,6 +4097,11 @@ public sealed partial class TyphonRuntime : IDisposable
             DeltaTime = _currentDeltaTime,
             AmortizedDeltaTime = amortizedDt,
             Transaction = tx,
+            // The transaction is an EntityAccessor: a body written over ctx.Accessor runs on every dispatch path (DSEL-05).
+            Accessor = tx,
+            ClusterIds = clusterIds,
+            StartClusterIndex = 0,
+            EndClusterIndex = clusterCount,
             CreateSideTransaction = _createSideTxDelegate,
             Entities = entities,
             ConsumedQueues = _systemConsumedQueues[sysIdx],
@@ -4046,9 +4134,16 @@ public sealed partial class TyphonRuntime : IDisposable
             _systemQueryPlanStartTicks[sysIdx] = 0;
         }
 
-        var tx = _systemTransactions[sysIdx];
+        // Taken exactly once (RT-02, #879): a second end of one run finds the slot empty, and is counted instead of ending whatever run holds it next.
+        var tx = Interlocked.Exchange(ref _systemTransactions[sysIdx], null);
         if (tx == null)
         {
+            if (_systemEverStarted[sysIdx])
+            {
+                Interlocked.Increment(ref _duplicateSystemEnds);
+                LogDuplicateSystemEnd(Scheduler.Systems[sysIdx].Name, Scheduler.CurrentTickNumber, Environment.CurrentManagedThreadId);
+            }
+
             return;
         }
 
@@ -4066,7 +4161,6 @@ public sealed partial class TyphonRuntime : IDisposable
         finally
         {
             tx.Dispose();
-            _systemTransactions[sysIdx] = null;
             TyphonEvent.EmitRuntimeTransactionLifecycleEnd(success);
 
             // #197: Return pooled entity list to ArrayPool

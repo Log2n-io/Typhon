@@ -160,10 +160,12 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// A grow before the last completed checkpoint's barrier was written whole, so such a page came after it: what was committed on it is in the log
     /// window, the replay brings it back, and a chain or cluster that named a chunk there finds it free. A torn page past the one that disagrees is such a
     /// page too — the grow's, written after the barrier — and is initialized; the disagreeing page itself, torn and this segment's, may hold a checkpoint's
-    /// data and is refused (review of #1296). Also called for a directory's last page whose link agrees, 0: one the grow had not written is initialized —
+    /// data: its link is set and it stays suspect, held back from every write until the suspect resolution judges it (RB-04) — live chunks on it refuse
+    /// the open, none heal it (#1304). Also called for a directory's last page whose link agrees, 0: one the grow had not written is initialized —
     /// loaded as it was, it had no header and another owner's bits. False when the shape is not a torn grow's: a page written before incarnations
-    /// existed whose link is wrong and not 0; a torn disagreeing page; or the directory's last page, written, linking on to a page written as this
-    /// segment's. Linking on to a page that was not, the chain ran ahead of the directory and is ended where the directory ends (#1299). Single-threaded.
+    /// existed whose link is wrong and not 0; or the directory's last page, written, linking on to a page written as this segment's, or torn and this
+    /// segment's (its link read from a torn page). Linking on to a page that was not, the chain ran ahead of the directory and is ended where the directory
+    /// ends (#1299). Single-threaded.
     /// </summary>
     internal bool RepairTornGrow(int at)
     {
@@ -180,8 +182,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             type = _store.GetPage(rootMemPageIndex).StructAt<PageBaseHeader>(PageBaseHeader.Offset).Type;
 
             // The page that disagrees: written, it keeps its bytes and gets its link; never written, it is initialized from here. Torn and this segment's,
-            // it is refused as before the completion existed: patched, it was dirtied, and a cycle before the suspect resolution re-checksummed its torn
-            // bytes for the next open to serve (review).
+            // it gets its link too and keeps its suspicion: a dirtied suspect page is written by no save and no cycle before the suspect resolution
+            // judges it (RB-04), so its torn bytes are never re-checksummed. It used to be refused for that reason, which made a grow over a torn tail
+            // fail the open even with no live chunk on it, and after a second crash during the replay's grow (#1304).
             atPage = ClassifyForRepair(pages[at], epoch, out link);
 
             // The chain ahead of the directory (#1299): its last page, written as this segment's, links on to a page the directory does not list — a
@@ -201,7 +204,7 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                 return true;
             }
 
-            if (atPage == RepairPage.TornOurs || (last && atPage != RepairPage.NotWritten) || (atPage == RepairPage.Legacy && link != 0))
+            if ((last && atPage != RepairPage.NotWritten) || (atPage == RepairPage.Legacy && link != 0))
             {
                 return false;
             }

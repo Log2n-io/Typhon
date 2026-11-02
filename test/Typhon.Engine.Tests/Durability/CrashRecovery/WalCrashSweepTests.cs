@@ -289,16 +289,6 @@ internal sealed class WalCrashSweepTests
     [VerifiesRule("AP-12")]
     public void WalWindow_MidCheckpoint_OracleHolds(string workloadName)
     {
-        // KnownIssue #398: a hard crash AFTER a consolidating checkpoint loses the enabled-bits of FLAT archetypes. The checkpoint persists the
-        // EntityMap's data chunks but not its index metadata (ArchetypeR1.EntityMapSPI + the hash-map entryCount/bucket directory), so the
-        // consolidated map is orphaned on reopen → increment-D rebuilds it all-enabled. Flat archetypes have no derivable enabled-bits source
-        // (cluster archetypes recover them from EnabledBits[C]). LifecycleChurn disables a component on a flat archetype, so it trips this.
-        // Remove this guard when #398 is fixed. The same workload's WalWindow_Recover (live WAL window → replay heals) stays green.
-        if (workloadName == "LifecycleChurn")
-        {
-            Assert.Ignore("KnownIssue #398: flat-archetype enabled-bits not durable through a consolidating checkpoint on hard crash.");
-        }
-
         var workload = MakeWorkload(workloadName);
         var shadow = new RecoveryShadowModel();
 

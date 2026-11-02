@@ -17,10 +17,6 @@ internal sealed class SpiderUpdateSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("SpiderUpdate")
         .Phase(AntPhases.Simulation)
-        // Named-resource marker so the scheduler sees a declared write and schedules the body.
-        // Systems with no declared component / resource / event access can be skipped by the
-        // auto-DAG deriver. "Spiders" is a phantom resource — nothing else reads or writes it.
-        .WritesResource("Spiders")
         .After("AntUpdate");
 
     protected override void Execute(TickContext ctx) => _bridge.SpiderUpdateTick(ctx);

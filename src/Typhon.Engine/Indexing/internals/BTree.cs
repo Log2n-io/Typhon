@@ -1375,9 +1375,10 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// entity's perfectly ordinary indexed write — threw, although it runs the full OLC protocol and the fence was nowhere near its tree.
     /// </para>
     /// <para>
-    /// <b>The real hazard is narrow.</b> The only path on which the fence drops the protocol is the bulk value rewrite (<c>UpdateValues</c> → <c>RunBatch</c> →
-    /// <c>ApplyBatch</c>), which repoints migrants' index entries after cluster relocation and is therefore reached only for a SPATIAL archetype. It navigates
-    /// by <c>FindChildAndBound</c> with no <c>ValidateVersion</c>, no write latch and no B-link right-walk, relying on slice boundaries snapped to leaf edges.
+    /// <b>The real hazard is narrow.</b> The fence drops the protocol on two paths: the bulk value rewrite (<c>UpdateValues</c> → <c>RunBatch</c> →
+    /// <c>ApplyBatch</c>), which repoints migrants' index entries after cluster relocation, and the batched index moves (<c>PrepareMoveBatch</c> →
+    /// <c>ApplyMoveRange</c> → <c>FinishMoveBatch</c>, #1346), for every prep-sliceable archetype. Both navigate with no <c>ValidateVersion</c>, no write
+    /// latch and no B-link right-walk, relying on range boundaries snapped to leaf edges; a move batch holds the mark from its cut to its finish (#1365).
     /// A concurrent latched insert that splits one of those leaves relocates keys out from under the slice — that, and only that, is what the detector exists to
     /// catch on a B+Tree.
     /// </para>

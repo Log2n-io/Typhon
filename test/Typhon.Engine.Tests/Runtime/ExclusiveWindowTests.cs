@@ -291,6 +291,121 @@ class ExclusiveWindowTests : TestBase<ExclusiveWindowTests>
         });
     }
 
+    /// <summary>Moves every key of the fresh tree up by 5: a batch big enough to be cut into several ranges.</summary>
+    private static IndexMove[] ShiftEveryKey()
+    {
+        var moves = new IndexMove[TreeSize];
+        for (var i = 0; i < TreeSize; i++)
+        {
+            moves[i] = new IndexMove { OldKey = KeyBytes8.FromInt((i + 1) * 10), NewKey = KeyBytes8.FromInt((i + 1) * 10 + 5), Value = i + 1 };
+        }
+
+        return moves;
+    }
+
+    private static Exception ForeignAdd(IntSingleBTree<PersistentStore> tree, ChunkBasedSegment<PersistentStore> segment, EpochManager epochManager, int key) =>
+        OnForeignThread(epochManager, () =>
+        {
+            var accessor = segment.CreateChunkAccessor();
+            try
+            {
+                tree.Add(key, 1, ref accessor);
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        });
+
+    /// <summary>
+    /// #1365: a move batch's ranges trust the leaf edges the cut read, so its licence starts at the cut. The detector was armed only inside each range: a
+    /// foreign latched write between the cut and the ranges — one spilling into a sibling moves an edge — passed silently. Armed from the cut to the finish,
+    /// and disarmed by the finish.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EW-01")]
+    [CancelAfter(15_000)]
+    public void AForeignLatchedMutation_BetweenTheCutAndTheDispatch_IsCaught()
+    {
+        OnFreshTree(static (tree, segment, epochManager) =>
+        {
+            var window = epochManager.FenceWindow;
+            window.ResetCounters();
+            var minEvents = IndexMoveBatch.MinEventsPerRange;
+            IndexMoveBatch.MinEventsPerRange = 64;
+            try
+            {
+                using var open = window.Open();
+                var moves = ShiftEveryKey();
+                var ranges = new IndexMoveRange[8];
+                var accessor = segment.CreateChunkAccessor();
+                try
+                {
+                    var count = tree.PrepareMoveBatch(moves, ranges.Length, ranges, ref accessor);
+                    Assert.That(count, Is.GreaterThan(1), "premise: the batch was cut into ranges");
+
+                    var thrown = ForeignAdd(tree, segment, epochManager, 999_999);
+                    Assert.That(thrown, Is.InstanceOf<InvalidOperationException>().And.Message.Contains("EW-01"), "a foreign write between the cut and the ranges");
+                    Assert.That((window.Violations, window.FirstViolationSite), Is.EqualTo((1, "BTree.Add")));
+
+                    tree.FinishMoveBatch(moves, ranges.AsSpan(0, count), ref accessor);
+                }
+                finally
+                {
+                    accessor.Dispose();
+                }
+
+                Assert.That(ForeignAdd(tree, segment, epochManager, 999_998), Is.Null, "the finish disarmed the tree: a latched write is legal again");
+                Assert.That(window.Violations, Is.EqualTo(1));
+            }
+            finally
+            {
+                IndexMoveBatch.MinEventsPerRange = minEvents;
+            }
+        });
+    }
+
+    /// <summary>#1365: a finish that throws still disarms the tree, or every later legal write to it inside a window would be reported.</summary>
+    [Test]
+    [VerifiesRule("EW-01")]
+    [CancelAfter(15_000)]
+    public void AFailedFinish_LeavesTheTreeDisarmed()
+    {
+        OnFreshTree(static (tree, segment, epochManager) =>
+        {
+            var window = epochManager.FenceWindow;
+            window.ResetCounters();
+            var minEvents = IndexMoveBatch.MinEventsPerRange;
+            IndexMoveBatch.MinEventsPerRange = 64;
+            try
+            {
+                using var open = window.Open();
+                var moves = ShiftEveryKey();
+                var ranges = new IndexMoveRange[8];
+                var accessor = segment.CreateChunkAccessor();
+                try
+                {
+                    var count = tree.PrepareMoveBatch(moves, ranges.Length, ranges, ref accessor);
+                    Assert.That(count, Is.GreaterThan(1), "premise: the batch was cut into ranges");
+                    ranges[0].Slot = int.MaxValue;   // a range whose state cannot be found: the finish, applying it, throws
+                    Assert.Catch(() => tree.FinishMoveBatch(moves, ranges.AsSpan(0, count), ref accessor), "premise: the finish failed");
+                }
+                finally
+                {
+                    accessor.Dispose();
+                }
+
+                var thrown = ForeignAdd(tree, segment, epochManager, 999_999);
+                Assert.That(thrown?.Message ?? "", Does.Not.Contain("EW-01"), "no tree left armed by the failed finish");
+                Assert.That(window.Violations, Is.Zero);
+            }
+            finally
+            {
+                IndexMoveBatch.MinEventsPerRange = minEvents;
+            }
+        });
+    }
+
     /// <summary>
     /// A foreign latched write to a tree the fence is NOT rewriting unlatched is legal, even with the window wide open.
     /// </summary>

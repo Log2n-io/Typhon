@@ -129,6 +129,73 @@ class ExceptionHandlingTests
         });
     }
 
+    public enum ThrowingHook
+    {
+        Start,
+        EndOfAWorkerRun,
+        EndOfAnInlineSuccessor,
+        ShouldRun,
+        ReactiveSkip,
+    }
+
+    /// <summary>
+    /// #1509: a hook around a system body that throws must fail THAT system and complete it. The start and end hooks (the runtime's transaction open and
+    /// commit), the untyped ShouldRun and the reactive skip ran outside the body's try/catch: a throw escaped to the worker's last-resort catch, which
+    /// completes nothing, and the tick waited forever with every worker parked.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    [VerifiesRule("CD-04")]
+    public void AThrowingLifecycleHook_FailsItsSystem_AndTheTickCompletes([Values] ThrowingHook hook, [Values(1, 2)] int workers)
+    {
+        var afterRuns = 0;
+        // "B" runs inline as A's successor; "C" after it. The throwing system is A, or B for the inline end hook and the gates.
+        var throwsOnB = hook is ThrowingHook.EndOfAnInlineSuccessor or ThrowingHook.ShouldRun or ThrowingHook.ReactiveSkip;
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = workers, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("A", _ => { });
+        dag.CallbackSystem("B", _ => { }, after: "A",
+            shouldRun: hook == ThrowingHook.ShouldRun ? () => throw new InvalidOperationException("ShouldRun fails") : null);
+        dag.CallbackSystem("C", _ => Interlocked.Increment(ref afterRuns), after: "B");
+
+        using var scheduler = dag.Build(_registry.Runtime);
+        var thrower = throwsOnB ? 1 : 0;
+        if (hook == ThrowingHook.Start)
+        {
+            scheduler.SystemStartCallback = (sysIdx, slot) => sysIdx == thrower
+                ? throw new InvalidOperationException("start fails")
+                : new TickContext { WorkerId = slot, ChunkCount = 1 };
+        }
+        else if (hook is ThrowingHook.EndOfAWorkerRun or ThrowingHook.EndOfAnInlineSuccessor)
+        {
+            scheduler.SystemEndCallback = (sysIdx, _) =>
+            {
+                if (sysIdx == thrower)
+                {
+                    throw new InvalidOperationException("commit fails");
+                }
+            };
+        }
+        else if (hook == ThrowingHook.ReactiveSkip)
+        {
+            scheduler.Systems[thrower].ReactiveSkip = () => throw new InvalidOperationException("reactive skip fails");
+        }
+
+        scheduler.Start();
+        var advanced = SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 4, TimeSpan.FromSeconds(3));
+        scheduler.Shutdown();
+
+        Assert.That(advanced, Is.True, "the tick completes when a hook throws");
+        var ring = scheduler.Telemetry;
+        var systems = ring.GetSystemMetrics(ring.NewestTick);
+        var (throwerSkip, successorSkip) = (systems[thrower].SkipReason, systems[2].SkipReason);
+        Assert.Multiple(() =>
+        {
+            Assert.That(throwerSkip, Is.EqualTo(SkipReason.Exception), "the failure is the throwing system's");
+            Assert.That(successorSkip, Is.EqualTo(SkipReason.DependencyFailed), "its successor is skipped");
+            Assert.That(afterRuns, Is.Zero, "nothing after the failed system runs");
+        });
+    }
+
     [Test]
     public void ParallelQueryException_TickCompletes_NoFullCpuWedge()
     {

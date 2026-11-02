@@ -4545,6 +4545,12 @@ public unsafe partial class Transaction : EntityAccessor
             var walHighLsn = AppendToWal(ref ctx);
             var published = false;
 
+            // Counted at the append, the point of no return: the unit of work's dispose has these records to make durable (#1376).
+            if (walHighLsn > 0)
+            {
+                OwningUnitOfWork?.RecordTransactionCommitted();
+            }
+
             // AP-03: past the append, page-cache back-pressure is waited out rather than thrown (up to CommitPublishBackpressureTimeout from here): a throw
             // could not roll this commit back, only stop the engine.
             var outerPublishSince = PagedMMF.PublishSince;

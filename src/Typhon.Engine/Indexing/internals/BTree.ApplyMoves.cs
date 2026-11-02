@@ -211,29 +211,68 @@ internal abstract partial class BTree<TKey, TStore>
         var parts = 0;
         TKey low = default;
         var hasLow = false;
-        for (var p = 1; p < desiredParts; p++)
+
+        // The batch's licence starts at the cut (EW-01, #1365): the ranges trust leaf edges read here, so a foreign latched mutation that moves one — an
+        // insert spilling into a sibling, a remove that borrows or merges — between the cut and the ranges is what the detector must see. Armed until
+        // FinishMoveBatch; a cut that throws disarms, so the caller's fallback to a whole ApplyMoves starts clean.
+        if (desiredParts > 1)
         {
-            var quantile = _moveSample[(int)((long)sampled * p / desiredParts)];
-            if (hasLow && CompareKeys(quantile, low, Comparer) < 0)
-            {
-                continue;   // below the previous cut: the sample is dense there, and that range already holds it
-            }
+            ArmMoveBatch();
+        }
 
-            var leaf = FindLeaf(quantile, out _, ref accessor, followRightLink: false);
-            if (!leaf.IsValid || !leaf.GetNext(ref accessor).IsValid)
+        try
+        {
+            for (var p = 1; p < desiredParts; p++)
             {
-                break;   // an empty tree, or the rightmost leaf: it owns every key from here on
-            }
+                var quantile = _moveSample[(int)((long)sampled * p / desiredParts)];
+                if (hasLow && CompareKeys(quantile, low, Comparer) < 0)
+                {
+                    continue;   // below the previous cut: the sample is dense there, and that range already holds it
+                }
 
-            // Above the quantile, which its leaf owns, so above the previous cut: the intervals ascend and tile the key space.
-            var high = leaf.GetHighKey(ref accessor);
-            SetMoveRange(ranges, parts++, hasLow, low, true, high, sampled, events);
-            low = high;
-            hasLow = true;
+                var leaf = FindLeaf(quantile, out _, ref accessor, followRightLink: false);
+                if (!leaf.IsValid || !leaf.GetNext(ref accessor).IsValid)
+                {
+                    break;   // an empty tree, or the rightmost leaf: it owns every key from here on
+                }
+
+                // Above the quantile, which its leaf owns, so above the previous cut: the intervals ascend and tile the key space.
+                var high = leaf.GetHighKey(ref accessor);
+                SetMoveRange(ranges, parts++, hasLow, low, true, high, sampled, events);
+                low = high;
+                hasLow = true;
+            }
+        }
+        catch
+        {
+            DisarmMoveBatch();
+            throw;
         }
 
         SetMoveRange(ranges, parts++, hasLow, low, false, default, sampled, events);
         return parts;
+    }
+
+    // Whether a cut batch holds this tree's unlatched window open from its cut to its finish (#1365). A flag, not a depth: one batch at a time per tree, the
+    // prepare and the finish both serial, and re-arming after a finish that never ran stays idempotent where a depth would leak.
+    private bool _moveBatchArmed;
+
+    private void ArmMoveBatch()
+    {
+        if (!_moveBatchArmed)
+        {
+            _moveBatchArmed = true;
+            Interlocked.Increment(ref _unlatchedRewriteDepth);
+        }
+    }
+
+    private void DisarmMoveBatch()
+    {
+        if (_moveBatchArmed)
+        {
+            _moveBatchArmed = false;
+            Interlocked.Decrement(ref _unlatchedRewriteDepth);
+        }
     }
 
     /// <summary>Sorted keys of up to 64 moves per part, evenly strided over the batch, both keys of each: the cut's quantiles.</summary>
@@ -434,6 +473,12 @@ internal abstract partial class BTree<TKey, TStore>
             }
 
             throw;
+        }
+        finally
+        {
+            // After the deferred single-entry paths, so the structural remainder is still inside the window; on every exit, so a failed finish leaves no
+            // tree armed (#1365).
+            DisarmMoveBatch();
         }
     }
 

@@ -186,7 +186,7 @@ internal ref struct ComponentRevisionManager
             // overflowed the stack (market, 4 desks under 16 writers: 32,768 revisions of one desk, kept by the oldest snapshot). Refused before any write:
             // a first write waits for the compaction outside its pin, within the chain lock's timeout (EP-02); past it, or where it cannot restart, the
             // chain is full.
-            if (firstHeader.FirstItemIndex + firstHeader.ItemCount + CompRevCountInNext >= MaxChainRevisionIndex)
+            if (IsChainFull(ref firstHeader))
             {
                 Interlocked.Increment(ref s_chainFullRefusals);
                 if (canRestart)
@@ -906,6 +906,12 @@ internal ref struct ComponentRevisionManager
         return false;
     }
 
+    /// <summary>
+    /// Whether an append to the chain whose root header is <paramref name="header"/> would name an index past <see cref="MaxChainRevisionIndex"/>: the
+    /// new entry, plus the chunk a grow shifts <see cref="CompRevStorageHeader.FirstItemIndex"/> by (CHAIN-03).
+    /// </summary>
+    internal static bool IsChainFull(ref CompRevStorageHeader header) => header.FirstItemIndex + header.ItemCount + CompRevCountInNext >= MaxChainRevisionIndex;
+
     /// <summary>Compactions put off because what they would keep does not fit the chain's root (#1298). Diagnostic.</summary>
     internal static long CompactionsDeferred;
 
@@ -1504,12 +1510,16 @@ internal ref struct ComponentRevisionManager
             }
         }
 
-        // Free orphan revision-table chunks (allocated, not a chain root) — the allocated chunks walked page by page (EP-02, #1183).
+        // Free orphan revision-table chunks (allocated, not a chain root) — the allocated chunks walked page by page (EP-02, #1183). Each is cleared first: what
+        // names an orphan root is its own header, its live entity's EntityPK among them (the old root of a re-applied spawn). Freed as it was, a spawn took it
+        // again without clearing it, a capture wrote its page between the allocation and the header, and the next crash open read two roots for that entity
+        // and kept the stale one (#1516). Cleared, its page owes the write before the free, which the quarantine waits out (CK-17).
         foreach (var chunkId in revSeg.AllocatedChunks())
         {
             if (!revSeg.IsChunkHeld(chunkId) && !reachableRoots.Contains(chunkId))
             {
                 BatchPointEvery(ref sinceBatchPoint, batchPoint, ref revAccessor, ref contentAccessor);
+                revAccessor.GetChunkAsSpan(chunkId, true).Clear();
                 revSeg.FreeChunk(chunkId);
             }
         }

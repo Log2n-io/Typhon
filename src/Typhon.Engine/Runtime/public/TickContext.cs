@@ -55,9 +55,9 @@ public struct TickContext
     public Transaction Transaction { get; init; }
 
     /// <summary>
-    /// Per-worker EntityAccessor for parallel QuerySystems that do NOT write Versioned components.
-    /// Provides Open/OpenMut with warm ChunkAccessor caches, zero per-entity dictionary overhead.
-    /// Null when the system uses Transaction-based access (WritesVersioned=true or non-parallel systems).
+    /// The accessor a system body reads and writes through. For a parallel QuerySystem that writes no Versioned component, the worker's own EntityAccessor
+    /// (Open/OpenMut with warm ChunkAccessor caches, no per-entity dictionary); wherever the system has a <see cref="Transaction"/>, that transaction, which is an
+    /// EntityAccessor. So one body works on every dispatch path (DSEL-05). Null only for a system with neither, a chunked callback.
     /// </summary>
     public EntityAccessor Accessor { get; init; }
 
@@ -104,19 +104,20 @@ public struct TickContext
     /// into <see cref="ClusterIds"/>, which points at either the full <c>ActiveClusterIds</c> (for <see cref="SimTier.All"/> systems) or a per-tier cluster
     /// list (for tier-filtered systems). Game code that passed <c>ctx.StartClusterIndex</c> / <c>ctx.EndClusterIndex</c> to the old two-argument
     /// <c>GetClusterEnumerator(int, int)</c> overload must migrate to the new three-argument overload that takes <see cref="ClusterIds"/> explicitly.</para>
-    /// <para>Default 0 (not -1) due to struct constraint. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means not applicable
-    /// (non-parallel, non-cluster, or entity-level dispatch).</para>
+    /// <para>A serial QuerySystem over a cluster archetype gets its whole selection, <c>0</c> to its count (DSEL-05, #908). An empty range with a non-null
+    /// <see cref="ClusterIds"/> selects no cluster; with a null one the system has no cluster partition.</para>
     /// </remarks>
     public int StartClusterIndex { get; init; }
 
     /// <summary>Exclusive end index into <see cref="ClusterIds"/> for this worker's assigned cluster range.</summary>
-    /// <remarks>Default 0. Check <c>EndClusterIndex &gt; StartClusterIndex</c> for validity — a zero range means not applicable.</remarks>
+    /// <remarks>Equal to <see cref="StartClusterIndex"/> when the selection holds no cluster.</remarks>
     public int EndClusterIndex { get; init; }
 
     /// <summary>
     /// Source array for the <see cref="StartClusterIndex"/> / <see cref="EndClusterIndex"/> partition (issue #231).
     /// Points at <see cref="ArchetypeClusterState.ActiveClusterIds"/> for systems with no tier filter, or at a per-tier (or per-bucket, for <c>cellAmortize</c>)
-    /// cluster list for tier-filtered systems. Null when the system has no cluster partition (non-parallel, non-cluster-eligible, or empty view).
+    /// cluster list for tier-filtered systems, on the serial path as on the parallel one (DSEL-05). Null when the system has no view or its archetype has no
+    /// cluster state.
     /// </summary>
     public int[] ClusterIds { get; init; }
 

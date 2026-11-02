@@ -234,6 +234,8 @@ scoped.
           throws on a worker is not rethrown there — that would fail every later fence phase and leave other trees' batches unfinished — but by the
           tail, once every batch is finished. The tail finishes every archetype's batches first, then runs every archetype's tail, whatever throws,
           and raises the first failure at the end: a finished batch is always reset, never replayed; an unfinished one has faulted its tree
+          (every archetype's batch is applied before its failure is kept: a `failure ??= Apply(...)` skipped the call once a first archetype had
+          failed, leaving every later archetype's batch unfinished, #1365)
   scope: BTreeBase.ApplyMoves, BTree.ApplyMoves, BTree.DecideUniqueCollisions, BTree.MergeLeaf, FieldShadowBuffer.StageMove,
          FieldShadowBuffer.StageMoveAt, DatabaseEngine.ApplyStagedMoves, DatabaseEngine.ApplyStagedIndexMoves,
          DatabaseEngine.PrepareArchetypeFenceTails, ArchetypeClusterState.PendingIndexCollision, BTreeBase.PrepareMoveBatch,
@@ -857,13 +859,17 @@ written for the read path; these are the write-path obligations that went unwrit
   invariant a multi-value buffer's append cursor — `FirstStoredChunkId`, where `AddElement` appends without walking the chain — is always a chunk of
             its storage chain: a reader that unlinks the empty chunks it walks past (`VariableSizedBufferAccessor.NextChunk`) never unlinks the cursor,
             however empty it is
-  scope: VariableSizedBufferAccessor.NextChunk, VariableSizedBufferSegment.AddElement
+  invariant a buffer parks emptied chunks in its free list only below VariableSizedBufferRecovery.FreeChunkThreshold, clamped under the 16-bit
+            TotalFreeChunk: past ~8.1 M elements under one key the unclamped threshold wrapped the count negative, emptied chunks were no longer
+            freed, and a crash open took the root for no buffer root and skipped its lock reset (#1210)
+  scope: VariableSizedBufferAccessor.NextChunk, VariableSizedBufferSegment.AddElement, VariableSizedBufferRecovery.FreeChunkThreshold
   on_violation: the cursor, unlinked and parked on the buffer's free list (or freed to the segment), keeps receiving appends: every element appended
                 after the walk is in a chunk no walk reaches — an index entry that exists and is never found — and is wiped when AddElement takes the
                 chunk off the free list, or the segment reissues it. Found through MarketHardeningTests' owner index (#1232): a key whose last chunk
                 was emptied, then walked by a reader, lost the next append
   verified: OwnerIndexChurnTests.AKeyWhoseLastChunkWasEmptied_ThenWalked_FindsWhatIsAppendedNext [VerifiesRule] — move a key's last 1, 2, 8, 32 or
             100 items out, walk the key, move one back: the key finds it (before the fix, at 100: "finds 300, expected 301")
+            VsbsFreeChunkThresholdTests (the threshold stays below the count's width at any element count, and still scales) [VerifiesRule]
 
 ### IXW-09: A write that throws under its latches faults the tree; an SMO faults in its pages before its first write `[fatal]`
   invariant an exception that leaves a B+Tree write holding more latches than it started with (`OlcLatchHeld.Count`, kept by `OlcLatch`) faults

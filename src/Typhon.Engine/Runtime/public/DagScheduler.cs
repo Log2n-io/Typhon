@@ -1382,8 +1382,18 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             return;
         }
 
-        // Evaluate ShouldRun (untyped delegate + typed virtual for ChunkedCallbackSystem<TContext>).
-        bool shouldRunSingle = sys.ShouldRun?.Invoke() ?? true;
+        // Evaluate ShouldRun (untyped delegate + typed virtual for ChunkedCallbackSystem<TContext>). A throw fails the system, as on the worker pool (CD-04).
+        bool shouldRunSingle;
+        try
+        {
+            shouldRunSingle = sys.ShouldRun?.Invoke() ?? true;
+        }
+        catch (Exception ex)
+        {
+            FailSingleThreaded(sysIdx, ex);
+            return;
+        }
+
         if (shouldRunSingle && sys.Instance is ChunkedCallbackSystem ccsSingle)
         {
             try
@@ -1433,7 +1443,18 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             }
         }
 
-        if (sys.ReactiveSkip != null && sys.ReactiveSkip())
+        bool reactivelySkipped;
+        try
+        {
+            reactivelySkipped = sys.ReactiveSkip != null && sys.ReactiveSkip();
+        }
+        catch (Exception ex)
+        {
+            FailSingleThreaded(sysIdx, ex);
+            return;
+        }
+
+        if (reactivelySkipped)
         {
             _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.EmptyInput;
             InspectorSystemSkipped(sysIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
@@ -1453,6 +1474,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         var startTick = Stopwatch.GetTimestamp();
         _currentTickSystemMetrics[sysIdx].FirstChunkGrabTick = startTick;
 
+        var started = true;
+
         // Phase 4: Scheduler:System:SingleThreaded span — wraps the per-system synchronous tick body. ChunkCount filled once known.
         var stScope = TyphonEvent.BeginSchedulerSystemSingleThreaded(
             (ushort)sysIdx,
@@ -1467,10 +1490,21 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 bool morePhases;
                 do
                 {
-                    var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
+                    int totalChunks;
+                    try
+                    {
+                        totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
+                    }
+                    catch (Exception ex)
+                    {
+                        FailSystem(sysIdx, ex);
+                        CleanUpParallelDispatch(sysIdx);
+                        break;
+                    }
+
                     if (totalChunks <= 0)
                     {
-                        morePhases = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
+                        morePhases = CleanUpParallelDispatch(sysIdx) && !_systemFailed[sysIdx];
                         continue;
                     }
 
@@ -1506,8 +1540,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         }
                     }
 
-                    morePhases = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
-                    if (chunkFailed)
+                    morePhases = CleanUpParallelDispatch(sysIdx);
+                    if (chunkFailed || _systemFailed[sysIdx])
                     {
                         morePhases = false; // Abort remaining phases on failure
                     }
@@ -1542,9 +1576,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             }
             else // CallbackSystem or non-parallel QuerySystem — single invocation
             {
-                // Single-threaded dispatch: the tick thread is the one and only worker, so worker 0 is the truthful id (#860).
-                var ctx = SystemStartCallback?.Invoke(sysIdx, 0)
-                          ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = 0, ChunkCount = 1 };
+                // Single-threaded dispatch: the tick thread is the one and only worker, so worker 0 is the truthful id (#860). A start that throws
+                // undid its own work: the system fails, with no body and no end hook (RT-02).
+                if (!TryStartSystem(sysIdx, 0, out var ctx))
+                {
+                    started = false;
+                }
+                else
+                {
                 ctx.DebugValidateWorkerId(WorkerSlotCount, sys.Name);
                 SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
                 CorrelationContext.EnterSystem(sysIdx);
@@ -1568,6 +1607,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     CorrelationContext.LeaveSystem();
                     SystemAccessValidator.LeaveSystem();
                 }
+                }
             }
 
             var endTick = Stopwatch.GetTimestamp();
@@ -1580,11 +1620,33 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             // the callback-system `else` branch above, which silently skipped the parallel-query and pipeline branches —
             // hiding the entire #327 Phase A emit path on real workloads. Placed after LastChunkDoneTick is set so the
             // emit's `endTs > 0` guard sees a populated timestamp.
-            SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
+            if (started)
+            {
+                EndSystem(sysIdx, !_systemFailed[sysIdx]);
+            }
+
+            // Whatever failed the system on this path — its body, a hook, its commit — its successors are skipped.
+            if (_systemFailed[sysIdx])
+            {
+                foreach (var succ in sys.Successors)
+                {
+                    _systemFailed[succ] = true;
+                }
+            }
         }
         finally
         {
             stScope.Dispose();
+        }
+    }
+
+    /// <summary>Fails <paramref name="sysIdx"/> on the single-threaded path: recorded against it, and its successors skipped.</summary>
+    private void FailSingleThreaded(int sysIdx, Exception ex)
+    {
+        FailSystem(sysIdx, ex);
+        foreach (var succ in Systems[sysIdx].Successors)
+        {
+            _systemFailed[succ] = true;
         }
     }
 
@@ -1934,8 +1996,14 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // ShouldRun was already evaluated at dispatch time (OnSystemComplete or root marking).
         // System lifecycle hook: create per-system Transaction (called on the worker thread)
         var workerSlot = ToWorkerSlot(workerId);
-        var ctx = SystemStartCallback?.Invoke(sysIdx, workerSlot)
-                  ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
+        if (!TryStartSystem(sysIdx, workerSlot, out var ctx))
+        {
+            // The start undid its own work: nothing for the end hook (RT-02).
+            RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
+            OnSystemComplete(sysIdx, workerId, trackUtilization);
+            return;
+        }
+
         var workStart = Stopwatch.GetTimestamp();
         RecordFirstChunkGrab(sysIdx, workStart);
         InspectorChunkStart(sysIdx, 0, workStart, 1);
@@ -1960,7 +2028,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             CorrelationContext.LeaveSystem();
             SystemAccessValidator.LeaveSystem();
             // System lifecycle hook: commit/dispose per-system Transaction
-            SystemEndCallback?.Invoke(sysIdx, success);
+            EndSystem(sysIdx, success);
 
             var workEnd = Stopwatch.GetTimestamp();
             InspectorChunkEnd(sysIdx, 0, workEnd, _currentTickSystemMetrics[sysIdx].EntitiesProcessed);
@@ -2089,7 +2157,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         RecordSystemDone(sysIdx, doneTs);
         // Mirror the success-path SystemEndCallback so a failed system still gets its lifecycle hook (e.g. Phase A telemetry, transaction rollback wiring).
-        SystemEndCallback?.Invoke(sysIdx, false);
+        EndSystem(sysIdx, false);
         OnSystemComplete(sysIdx, workerId, trackUtilization);
         return true;
     }
@@ -2109,7 +2177,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         RecordSystemDone(sysIdx, doneTs);
         _currentTickSystemMetrics[sysIdx].WorkersTouched = totalChunks;
-        var nextPhase = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
+        var nextPhase = CleanUpParallelDispatch(sysIdx);
         if (nextPhase && !_systemFailed[sysIdx])
         {
             DispatchParallelQuery(sysIdx, workerId, trackUtilization);
@@ -2119,7 +2187,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // System is genuinely done (no further checkerboard phase). Fire the system-end lifecycle hook so #327 Phase A emits its per-(system, archetype)
         // row — this path was missing the call entirely, which is why parallel-query systems produced zero `SchedulerSystemArchetypeEvent` records on real
         // workloads despite being correctly bound at runtime construction.
-        SystemEndCallback?.Invoke(sysIdx, !_systemFailed[sysIdx]);
+        EndSystem(sysIdx, !_systemFailed[sysIdx]);
         OnSystemComplete(sysIdx, workerId, trackUtilization);
     }
 
@@ -2256,7 +2324,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         if (totalChunks <= 0)
         {
             // Empty entity set — cleanup may trigger re-dispatch (checkerboard: zero Red clusters but non-zero Black).
-            var reDispatch = ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
+            var reDispatch = CleanUpParallelDispatch(sysIdx) && !_systemFailed[sysIdx];
             if (reDispatch)
             {
                 DispatchParallelQuery(sysIdx, workerId, trackUtilization);
@@ -2349,12 +2417,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                         {
                             // Skip/dispatch already handled inside EvaluateShouldRunAndPrepare.
                         }
-                        else if (succ.ReactiveSkip != null && succ.ReactiveSkip())
+                        else if (CompletedByReactiveSkip(succIdx, workerId, trackUtilization))
                         {
-                            _currentTickSystemMetrics[succIdx].SkipReason = SkipReason.EmptyInput;
-                            InspectorSystemSkipped(succIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
                             fanOutSkipped++;
-                            OnSystemComplete(succIdx, workerId, trackUtilization);
                         }
                         else
                         {
@@ -2418,8 +2483,20 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         var succ = Systems[succIdx];
 
         // ─── ShouldRun gate ───
-        // Untyped delegate (fluent .ShouldRun(Func<bool>)) gate.
-        bool shouldRun = succ.ShouldRun?.Invoke() ?? true;
+        // Untyped delegate (fluent .ShouldRun(Func<bool>)) gate. A throw fails this system, as the typed gate's does: escaped, it left the predecessor's
+        // fan-out with this system and every later successor never completed, and the tick waited on them forever (#1509).
+        bool shouldRun;
+        try
+        {
+            shouldRun = succ.ShouldRun?.Invoke() ?? true;
+        }
+        catch (Exception ex)
+        {
+            FailSystem(succIdx, ex);
+            fanOutSkipped++;
+            OnSystemComplete(succIdx, workerId, trackUtilization);
+            return false;
+        }
 
         // Typed virtual gate (overridden by ChunkedCallbackSystem<TContext>).
         if (shouldRun && succ.Instance is ChunkedCallbackSystem ccs)
@@ -2487,12 +2564,111 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         return true;
     }
 
+    /// <summary>
+    /// The system-start hook of a single-invocation system on the worker pool: the runtime opens the system's transaction and selects its entities there. A
+    /// throw fails THIS system instead of escaping (#1509): escaped, it skipped the system's completion, and the dispatcher spun on a track that could no
+    /// longer finish while every worker sat parked.
+    /// </summary>
+    /// <param name="sysIdx">The system.</param>
+    /// <param name="workerSlot">The worker's slot.</param>
+    /// <param name="ctx">The system's context; default when the hook threw.</param>
+    /// <returns>False when the hook threw: the system is failed, the hook undid its own work, and the caller completes the system without its end hook.</returns>
+    private bool TryStartSystem(int sysIdx, int workerSlot, out TickContext ctx)
+    {
+        try
+        {
+            ctx = SystemStartCallback?.Invoke(sysIdx, workerSlot)
+                  ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
+            return true;
+        }
+        catch (Exception ex)
+        {
+            FailSystem(sysIdx, ex);
+            ctx = default;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The system-end hook: the runtime commits or rolls back the system's transaction there. A throw fails the system rather than escaping past its
+    /// completion (#1509): a commit that throws is a system whose writes did not land, so its successors are skipped.
+    /// </summary>
+    private void EndSystem(int sysIdx, bool success)
+    {
+        try
+        {
+            SystemEndCallback?.Invoke(sysIdx, success);
+        }
+        catch (Exception ex)
+        {
+            FailSystem(sysIdx, ex);
+        }
+    }
+
+    /// <summary>A parallel dispatch's cleanup, and whether it asks for a further phase. A throw fails the system, which then starts no further phase.</summary>
+    private bool CleanUpParallelDispatch(int sysIdx)
+    {
+        try
+        {
+            return ParallelQueryCleanupCallback?.Invoke(sysIdx) ?? false;
+        }
+        catch (Exception ex)
+        {
+            FailSystem(sysIdx, ex);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The reactive skip of a ready system. When it skips, or throws, which fails the system, the system is completed here and this returns true.
+    /// </summary>
+    private bool CompletedByReactiveSkip(int sysIdx, int workerId, bool trackUtilization)
+    {
+        var reactiveSkip = Systems[sysIdx].ReactiveSkip;
+        if (reactiveSkip == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!reactiveSkip())
+            {
+                return false;
+            }
+
+            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.EmptyInput;
+            InspectorSystemSkipped(sysIdx, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
+        }
+        catch (Exception ex)
+        {
+            FailSystem(sysIdx, ex);
+        }
+
+        OnSystemComplete(sysIdx, workerId, trackUtilization);
+        return true;
+    }
+
+    /// <summary>Fails <paramref name="sysIdx"/> on <paramref name="ex"/>: its successors are skipped, and the failure is recorded against it.</summary>
+    private void FailSystem(int sysIdx, Exception ex)
+    {
+        _systemFailed[sysIdx] = true;
+        _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
+        RecordSystemFailure(sysIdx, Systems[sysIdx].Name, ex);
+    }
+
     private void ExecuteInline(int sysIdx, int workerId, bool trackUtilization)
     {
         // ShouldRun was already evaluated by the caller (OnSystemComplete).
         var workerSlot = ToWorkerSlot(workerId);
-        var ctx = SystemStartCallback?.Invoke(sysIdx, workerSlot)
-                  ?? new TickContext { TickNumber = _currentTickNumber, WorldTick = CurrentWorldTick, DeltaTime = 0f, WorkerId = workerSlot, ChunkCount = 1 };
+        if (!TryStartSystem(sysIdx, workerSlot, out var ctx))
+        {
+            // The start undid its own work: nothing for the end hook (RT-02).
+            RecordSystemDone(sysIdx, Stopwatch.GetTimestamp());
+            OnSystemComplete(sysIdx, workerId, trackUtilization);
+            return;
+        }
+
         var workStart = Stopwatch.GetTimestamp();
         RecordFirstChunkGrab(sysIdx, workStart);
         InspectorChunkStart(sysIdx, 0, workStart, 1);
@@ -2516,7 +2692,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         {
             CorrelationContext.LeaveSystem();
             SystemAccessValidator.LeaveSystem();
-            SystemEndCallback?.Invoke(sysIdx, success);
+            EndSystem(sysIdx, success);
 
             var workEnd = Stopwatch.GetTimestamp();
             InspectorChunkEnd(sysIdx, 0, workEnd, _currentTickSystemMetrics[sysIdx].EntitiesProcessed);
@@ -2752,11 +2928,9 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 // Skip / Prepare-dispatch already handled by helper.
             }
-            else if (sys.ReactiveSkip != null && sys.ReactiveSkip())
+            else if (CompletedByReactiveSkip(root, -1, false))
             {
-                _currentTickSystemMetrics[root].SkipReason = SkipReason.EmptyInput;
-                InspectorSystemSkipped(root, SkipReason.EmptyInput, Stopwatch.GetTimestamp());
-                OnSystemComplete(root, -1, false);
+                // Skipped or failed, and completed, by the helper.
             }
             else
             {

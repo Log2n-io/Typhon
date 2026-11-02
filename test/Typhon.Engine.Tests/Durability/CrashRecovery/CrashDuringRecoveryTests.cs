@@ -88,6 +88,78 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
     }
 
     /// <summary>
+    /// #1306: a crash during the crash open's entity-map rebuild leaves a partial map on disk. The rebuild once snapshotted enabled bits from the persisted
+    /// map, and the next open's snapshot missed the entities not yet re-inserted; it takes them from the clusters now (ENABLE-01), so the partial map is
+    /// never read.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("ENABLE-01")]
+    public void ACrashDuringTheEntityMapRebuild_KeepsEnabledBits()
+    {
+        const int Count = 64;
+        var ids = new List<EntityId>(Count);
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < Count; i++)
+                {
+                    var id = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = i, OwnerNo = 1, LastTradeSeq = -1 - i }));
+                    tx.OpenMut(id).Enable(MkItemArch.Lore, new MkLore());
+                    ids.Add(id);
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the build");
+            }
+
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < Count; i += 2)
+                {
+                    tx.OpenMut(ids[i]).Disable(MkItemArch.Lore);
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the disables");
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.SimulateHardCrash();
+        }
+
+        var stopped = 0;
+        DatabaseEngine.RecoveryBatchPointProbe = (p, _) =>
+        {
+            if (p == DatabaseEngine.RecoveryPass.EntityMap && ++stopped == 2)
+            {
+                throw new InvalidOperationException("crash inside the entity-map rebuild");
+            }
+        };
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Assert.Catch(() => RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>()), "premise: the rebuild stopped half way");
+        }
+
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        Assert.That(stopped, Is.GreaterThanOrEqualTo(2), "premise: the rebuild made two batch points");
+
+        using var scope3 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope3.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        using var read = reopened.CreateReadOnlyTransaction();
+        var wrong = 0;
+        for (var i = 0; i < Count; i++)
+        {
+            if (read.Open(ids[i]).IsEnabled(MkItemArch.Lore) != (i % 2 != 0))
+            {
+                wrong++;
+            }
+        }
+
+        Assert.That(wrong, Is.Zero, "items whose lore reads back with the wrong enabled state");
+    }
+
+    /// <summary>
     /// Two recoveries stopped in a row — the second replays the window over the first's partial output and leaves its own — then a third: every committed
     /// value, nothing else. The market failed this with any two stops (59 to 87 problems, items held by two live entities) and passed it with one.
     /// </summary>

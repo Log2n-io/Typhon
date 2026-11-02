@@ -686,12 +686,12 @@ internal static class DamageKit
     /// Closes one segment's forward chain on itself: its last page now links back to the root, so the chain never ends — the shape an engine walking it
     /// would loop on forever (CHK-SEG-06, fatal).
     /// </summary>
-    internal static DamageRecord LoopForwardChain(string bundlePath, out int segmentRoot)
+    internal static DamageRecord LoopForwardChain(string bundlePath, out int segmentRoot, StorageSegmentKind? kind = null)
     {
         int last;
         using (var source = new OfflineBundlePageSource(bundlePath))
         {
-            (segmentRoot, _) = FindChainToDamage(source, null, 0);
+            (segmentRoot, _) = FindChainToDamage(source, kind, 0);
             last = new SegmentWalker(source).WalkSegment(segmentRoot).Pages[^1];
         }
 
