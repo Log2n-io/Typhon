@@ -74,7 +74,7 @@ struct GroupDenseKey
     public int Town;
 }
 
-/// <summary>A key on a Transient component, refused until Transient indexes follow migration (#1162).</summary>
+/// <summary>A key on a Transient component, refused: a set reads its key's persistent tree.</summary>
 [Component("Typhon.Test.Group.TransientKey", 1, StorageMode = StorageMode.Transient)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 struct GroupTransientKey

@@ -608,7 +608,7 @@
   never accept at Start what is not built: a set with no selector, or with two; groups on a World or ClientRegion observer; a region set named with no
     reach, or an explicit or shared one named with one; a realm-kind variant naming other explicit sets than its profile; a shared key no member's
     field can hold; a key that is not an integer, not
-    [Index(AllowMultiple = true, Sparse = true)], on a Transient component (#1162), or of another signedness than its region key; an observer naming
+    [Index(AllowMultiple = true, Sparse = true)], on a Transient component, or of another signedness than its region key; an observer naming
     an archetype with no position; more than four sets per archetype or 256 per runtime; an extent that is not an AABB2F, AABB3F, BSphere2F or BSphere3F; a declaration without MaxGroupsPerSession, or with one above 1 048 576 (a rail
     against a mistyped value, not a cost)
   scope: PushReplication.GatherGroups, PushReplication.ReadMembers, PushReplication.BuildMemberLog, PushReplication.RefreshRegions,

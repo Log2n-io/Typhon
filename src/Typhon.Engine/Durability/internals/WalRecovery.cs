@@ -114,12 +114,22 @@ internal sealed class WalRecovery : IDisposable
         using var reader = new WalSegmentReader(_fileIO);
 
         var segIndex = 0;
+        var walk = new WalSegmentWalk(checkpointLSN);
         foreach (var segmentPath in segmentPaths)
         {
             if (!reader.OpenSegment(segmentPath))
             {
+                walk.NoteInvalidHeader();   // a placeholder at the top of the log; below a valid header, the next check stops the scan
                 segIndex++;
-                continue; // Invalid segment header — skip
+                continue;
+            }
+
+            var logBreak = walk.Check(in reader.SegmentHeader);
+            if (logBreak != WalRecoveryBreak.None)
+            {
+                result.Break = logBreak;
+                result.FirstDroppedSegmentId = WalSegmentManager.ParseSegmentIdFromPath(segmentPath);
+                break;
             }
 
             result.SegmentsScanned++;
@@ -175,9 +185,20 @@ internal sealed class WalRecovery : IDisposable
             // before its recovery completed leaves a new segment with no record in it. Taken from that one, the frontier fell back to CheckpointLSN, the
             // next writer began a segment inside the window's LSNs, and the open after it read the window short — durable transfers lost (LOG-08, #1183).
             result.LastValidLSN = Math.Max(result.LastValidLSN, reader.LastValidLSN);
+            walk.NoteRead(Math.Max(reader.LastValidLSN, reader.HighestFrameLsn));
             if (reader.WasTruncated)
             {
-                break; // Stop at truncation point
+                // Stop at truncation point. What follows it is dropped, from the next segment with a header: a spare above a torn tail is no break in anything.
+                result.Break = WalRecoveryBreak.Crc;
+                for (var next = segIndex + 1; next < segmentPaths.Count && result.FirstDroppedSegmentId == 0; next++)
+                {
+                    if (reader.OpenSegment(segmentPaths[next]))
+                    {
+                        result.FirstDroppedSegmentId = WalSegmentManager.ParseSegmentIdFromPath(segmentPaths[next]);
+                    }
+                }
+
+                break;
             }
             segIndex++;
         }

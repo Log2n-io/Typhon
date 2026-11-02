@@ -79,7 +79,7 @@ if [ "$RUN_WORKBENCH" = "true" ]; then
   elif SHARD_REPO="$REPO" SHARD_CONFIG=Release python3 bench/aws/shard.py retry \
          --trx "$OUT/workbench.trx" \
          --project test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj \
-         --results-dir "$OUT" --label W 2>&1 | tee -a "$OUT/workbench-dotnet.log"
+         --results-dir "$OUT" --label W --log "$OUT/workbench-dotnet.log" 2>&1 | tee -a "$OUT/workbench-dotnet.retry.log"
   then echo "- ✅ workbench .NET tests passed (after retry — see the FLAKED list)" >> "$S"
   else RC=1; echo "- ❌ workbench .NET tests FAILED" >> "$S"
   fi

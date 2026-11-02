@@ -1111,8 +1111,8 @@ public partial class DatabaseEngine
     /// pages — they are bit-set but not part of <c>Pages</c>), plus each directory page's CK-05 twin (the alternate slot, bit-set but in no segment list),
     /// plus the reserved root pages (0..InitialReservedPageCount-1), plus the occupancy-reserve pages (data, map-extension, and the map-extension twin) held by
     /// the page-allocator machinery. Any orphan (bit set, no claimant) or phantom (claimant, bit clear) is reported as a hard durability/structural bug.</item>
-    /// <item><b>Chunk-segment capacity</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, <c>AllocatedChunkCount + FreeChunkCount</c> must equal
-    /// <c>ChunkCapacity</c>. Desync indicates the segment's allocated count drifted from its on-page chunk bitmaps.</item>
+    /// <item><b>Chunk-segment allocated count</b> — for every <see cref="ChunkBasedSegment{TStore}"/>, the allocated count must equal the bits set on its pages. A
+    /// segment that keeps moving through the count is left out and counted in <see cref="StorageIntegrityReport.ChunkSegmentsUnsettled"/>: it is no evidence.</item>
     /// <item><b>Cluster MVCC visibility summary</b> — every cluster's <c>ClusterMaxBorn</c> / <c>ClusterMaxDied</c> pair, recomputed from the archetype's
     /// EntityMap and compared against the maintained one. A summary that claims more visibility than its entities justify makes the SoA scan skip its
     /// per-entity probe and emit a phantom; see <see cref="StorageIntegrityIssueKind.ClusterVisibilitySummaryUnsound"/>.</item>
@@ -1219,20 +1219,49 @@ public partial class DatabaseEngine
             }
         }
 
-        // ─── Chunk-segment internal capacity ─
+        // ─── Chunk-segment allocated count ─
+        var chunkSegmentsUnsettled = 0;
         foreach (var seg in segments)
         {
             if (seg is not ChunkBasedSegment<PersistentStore> cbs)
             {
                 continue;
             }
-            var sum = cbs.AllocatedChunkCount + cbs.FreeChunkCount;
-            if (sum != cbs.ChunkCapacity)
+            // A mismatch counts when two counts in a row agree on it: a free clears its bit before it decrements, and a walk can fit between the two.
+            var agreed = false;
+            var unreadable = false;
+            var bits = 0;
+            var counter = 0;
+            var previousBits = -1;
+            var previousCounter = -1;
+            for (var attempt = 0; attempt < 4 && !agreed && !unreadable; attempt++)
+            {
+                try
+                {
+                    if (cbs.TryCountAllocatedBits(out bits, out counter))
+                    {
+                        agreed = bits == counter || (bits == previousBits && counter == previousCounter);
+                        previousBits = bits;
+                        previousCounter = counter;
+                    }
+                }
+                catch (PageCorruptionException ex)
+                {
+                    unreadable = true;
+                    issues.Add(new StorageIntegrityIssue(
+                        StorageIntegrityIssueKind.ChunkSegmentCapacity, cbs.Pages[0], -1, 0, $"segment root={cbs.Pages[0]} kind={cbs.Kind}: a page cannot be read: {ex.Message}"));
+                }
+            }
+
+            if (agreed && bits != counter)
             {
                 issues.Add(new StorageIntegrityIssue(
                     StorageIntegrityIssueKind.ChunkSegmentCapacity, cbs.Pages[0], -1, 0,
-                    $"segment root={cbs.Pages[0]} kind={cbs.Kind} alloc={cbs.AllocatedChunkCount} free={cbs.FreeChunkCount} " +
-                    $"sum={sum} capacity={cbs.ChunkCapacity}"));
+                    $"segment root={cbs.Pages[0]} kind={cbs.Kind} allocated count={counter} bits set={bits}"));
+            }
+            else if (!agreed && !unreadable)
+            {
+                chunkSegmentsUnsettled++;
             }
         }
 
@@ -1247,6 +1276,7 @@ public partial class DatabaseEngine
             OccupancyBitsSet = bitsSet,
             SegmentClaimedPages = segClaimedTotal,
             VisibilitySummaryClustersChecked = visibilityClustersChecked,
+            ChunkSegmentsUnsettled = chunkSegmentsUnsettled,
         };
     }
 

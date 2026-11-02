@@ -85,7 +85,7 @@ class UlongIndexOrderingTests : TestBase<UlongIndexOrderingTests>
         using var tx = dbe.CreateQuickTransaction();
         var got = new List<ulong>();
         // The full-range WhereField is required plumbing, not part of the claim: OrderByField needs a preceding WhereField to identify the component table
-        // (#706's second shape). The predicate admits every row, so what is under test is purely the ORDER.
+        // (the sort fallback, QORD-01). The predicate admits every row, so what is under test is purely the ORDER.
         foreach (var id in tx.Query<UlongIdxArch>()
                      .WhereField<UlongIdxAccount>(a => a.Handle >= ulong.MinValue)
                      .OrderByField<UlongIdxAccount, ulong>(a => a.Handle)

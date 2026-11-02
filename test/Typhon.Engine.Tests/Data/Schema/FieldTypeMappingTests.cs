@@ -18,10 +18,6 @@ class FieldTypeMappingTests
     // Handles, not inline values: a collection is its 4-byte buffer id, a nested component its 8-byte reference. Neither is the CLR size of its type.
     private static readonly HashSet<FieldType> Handles = [FieldType.Collection, FieldType.Component];
 
-    // The one known violation, outside #1449: VarString is an empty marker struct (1 byte) that FieldSizeInComp sizes as its 32-byte inline handle. Nothing in
-    // the engine stores one yet. Remove it from here when VarString gets its real layout or loses its mapping.
-    private static readonly HashSet<Type> KnownMissized = [typeof(VarString)];
-
     // Every CLR type a field can be declared as: the primitives, each public value type the schema assembly exports, and the engine's entity references.
     private static IEnumerable<Type> FieldCandidates()
     {
@@ -58,7 +54,7 @@ class FieldTypeMappingTests
 
             // A None-mapped type has no width to check, so this verifier cannot see an unmapped type: the real pre-#1449 tables (Variant unmapped AND sized 0)
             // pass it. The orphan check below is the one that catches #1449; this one catches a type that maps but is sized wrong.
-            if (field == FieldType.None || Handles.Contains(field) || KnownMissized.Contains(t))
+            if (field == FieldType.None || Handles.Contains(field))
             {
                 continue;
             }
@@ -85,7 +81,8 @@ class FieldTypeMappingTests
         foreach (var value in Enum.GetValues<FieldType>())
         {
             // None is the sentinel, Unsigned / DoubleFloat are flag bits OR-ed onto a base type, and the handle kinds map from generic or attributed types.
-            if (value is FieldType.None or FieldType.Unsigned or FieldType.DoubleFloat || Handles.Contains(value))
+            // String: a Variant's tag, and reserved for a variable-length field; no field can declare it until it has storage (#1474).
+            if (value is FieldType.None or FieldType.Unsigned or FieldType.DoubleFloat or FieldType.String || Handles.Contains(value))
             {
                 continue;
             }
@@ -106,6 +103,12 @@ class FieldTypeMappingTests
     [Test]
     [VerifiesRule("SCHEMA-08")]
     public void EveryStorageFieldTypeIsProducedBySomeClrType() => AssertEveryStorageFieldTypeIsProduced(Map);
+
+    /// <summary>#1474: a marker with no storage maps to nothing, which is what makes registration refuse it: mapped at the 32 bytes of its handle, the field after
+    /// it overlapped them.</summary>
+    [Test]
+    [VerifiesRule("SCHEMA-08")]
+    public void AVarStringField_MapsToNothing() => Assert.That(DatabaseSchemaExtensions.FromType(typeof(VarString)).Item1, Is.EqualTo(FieldType.None));
 
     // The genuineness proof, one mutated table per verifier: the width table with Variant sized 0 but still mapped (the size check skips unmapped types, so
     // the mapping has to stay intact for it to look), and the mapping table with Variant unmapped. Each verifier must reject its mutant.

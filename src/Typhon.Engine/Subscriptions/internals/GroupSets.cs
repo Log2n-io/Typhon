@@ -608,10 +608,10 @@ internal static class GroupSetCompiler
                 var table = engine.GetComponentTable(meta._slotToComponentType[slot]);
                 if (table?.StorageMode == StorageMode.Transient)
                 {
-                    // #1162: a Transient index is not re-valued on migration, so a member's location in it can go stale; refused until it is.
+                    // The set's enumeration reads the key's tree through the persistent index slots (TreeOf).
                     throw new NotSupportedException(
-                        $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is on a Transient component. A group key field is SingleVersion until "
-                        + "Transient indexes follow migration (#1162).");
+                        $"Group set '{d.Name}': '{meta.Name}.{member.KeyField}' is on a Transient component. A group key field is SingleVersion: a set reads "
+                        + "its key's persistent tree.");
                 }
 
                 // A Versioned key is admitted: its commit copies the HEAD into the cluster slot, marks it (the tap) and moves the index entry, all before the

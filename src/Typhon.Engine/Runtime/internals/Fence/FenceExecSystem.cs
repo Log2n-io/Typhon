@@ -552,7 +552,7 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
         {
             var clusterState = states[aid]?.ClusterState;
             var staging = clusterState?.IndexUpdates;
-            if (staging == null || staging.FieldCount == 0 || clusterState.IndexSlots == null)
+            if (staging == null || staging.FieldCount == 0)
             {
                 continue;
             }
@@ -566,8 +566,16 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
                 }
 
                 var fieldRef = staging.Field(fieldId);
-                ref var field = ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex];
-                field.Index.SortBulkEntries(run, staging.SortScratch(chunkIndex, run.Length), RadixCounts(chunkIndex), field.AllowMultiple);
+                if (fieldRef.Transient)
+                {
+                    ref var field = ref clusterState.TransientIndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex];
+                    field.Index.SortBulkEntries(run, staging.SortScratch(chunkIndex, run.Length), RadixCounts(chunkIndex), field.AllowMultiple);
+                }
+                else
+                {
+                    ref var field = ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex];
+                    field.Index.SortBulkEntries(run, staging.SortScratch(chunkIndex, run.Length), RadixCounts(chunkIndex), field.AllowMultiple);
+                }
             }
         }
     }
@@ -1079,31 +1087,43 @@ internal sealed class FenceIndexMassUpdateExecSystem : FencePhaseExecSystemBase
             }
 
             var fieldRef = staging.Field(fieldId);
-            ref var field = ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex];
-            var tree = field.Index;
-            var multi = field.AllowMultiple;
-            var stride = tree.BulkEntryStride(multi);
-
-            // The runs arrived sorted from the Migrate workers, so this is an O(n log W) merge rather than an O(n log n) sort.
-            var merged = staging.MergeSortedRuns(fieldId, stride, tree, multi, out var byteCount);
-            var entryCount = byteCount / stride;
-            if (entryCount == 0)
+            if (fieldRef.Transient)
             {
-                continue;
+                PrepareField(staging, fieldId, ref clusterState.TransientIndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex], desiredParts);
             }
-
-            var boundaries = staging.RentBoundaries(fieldId, desiredParts);
-
-            var accessor = tree.Segment.CreateChunkAccessor();
-            try
+            else
             {
-                var parts = tree.PartitionBulkEntries(merged.AsSpan(0, byteCount), multi, desiredParts, boundaries, ref accessor);
-                staging.SetPrepared(fieldId, byteCount, stride, boundaries, parts);
+                PrepareField(staging, fieldId, ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex], desiredParts);
             }
-            finally
-            {
-                accessor.Dispose();
-            }
+        }
+    }
+
+    private static void PrepareField<TStore>(IndexUpdateStaging staging, int fieldId, ref ClusterIndexField<TStore> field, int desiredParts)
+        where TStore : struct, IPageStore
+    {
+        var tree = field.Index;
+        var multi = field.AllowMultiple;
+        var stride = tree.BulkEntryStride(multi);
+
+        // The runs arrived sorted from the Migrate workers, so this is an O(n log W) merge rather than an O(n log n) sort.
+        var merged = staging.MergeSortedRuns(fieldId, stride, tree, multi, out var byteCount);
+        var entryCount = byteCount / stride;
+        if (entryCount == 0)
+        {
+            return;
+        }
+
+        var boundaries = staging.RentBoundaries(fieldId, desiredParts);
+
+        var accessor = tree.Segment.CreateChunkAccessor();
+        try
+        {
+            var parts = tree.PartitionBulkEntries(merged.AsSpan(0, byteCount), multi, desiredParts, boundaries, ref accessor);
+            staging.SetPrepared(fieldId, byteCount, stride, boundaries, parts);
+        }
+        finally
+        {
+            accessor.Dispose();
         }
     }
 
@@ -1122,14 +1142,28 @@ internal sealed class FenceIndexMassUpdateExecSystem : FencePhaseExecSystemBase
         }
 
         var fieldRef = staging.Field(item.FieldId);
-        ref var field = ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex];
+        if (fieldRef.Transient)
+        {
+            ApplySlice(clusterState, staging, in item, ref clusterState.TransientIndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex], changeSet);
+        }
+        else
+        {
+            ApplySlice(clusterState, staging, in item, ref clusterState.IndexSlots[fieldRef.SlotIndex].Fields[fieldRef.FieldIndex], changeSet);
+        }
+
+        return 0;
+    }
+
+    private static void ApplySlice<TStore>(ArchetypeClusterState clusterState, IndexUpdateStaging staging, in FenceWorkItem item, ref ClusterIndexField<TStore> field,
+        ChangeSet changeSet) where TStore : struct, IPageStore
+    {
         var tree = field.Index;
         var multi = field.AllowMultiple;
         var stride = staging.Stride(item.FieldId);
         var buffer = staging.Prepared(item.FieldId);
 
         var applyStart = Stopwatch.GetTimestamp();
-        var accessor = tree.Segment.CreateChunkAccessor(changeSet);
+        var accessor = DatabaseEngine.CreateIndexAccessor(tree.Segment, changeSet);
         try
         {
             // The slice is this worker's alone: the boundaries were snapped forward to leaf edges in Prepare, so no two slices of the same tree can reach the
@@ -1142,7 +1176,5 @@ internal sealed class FenceIndexMassUpdateExecSystem : FencePhaseExecSystemBase
             // #872 step 11. Summed across workers AND across fields — a two-field archetype pays two descents per migrant and the model must see both.
             Interlocked.Add(ref clusterState.LastTickMigrationApplyTicks, Stopwatch.GetTimestamp() - applyStart);
         }
-
-        return 0;
     }
 }

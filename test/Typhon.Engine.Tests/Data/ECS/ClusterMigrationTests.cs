@@ -2264,7 +2264,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
 
         const int Runs = 5;
         const int PerRun = 7;
-        var staging = new IndexUpdateStaging([new IndexUpdateStaging.FieldRef(0, 0)]);
+        var staging = new IndexUpdateStaging([new IndexUpdateStaging.FieldRef(0, 0, false)]);
         staging.BeginTick(Runs);
 
         var stride = tree.BulkEntryStride(true);

@@ -43,9 +43,15 @@ scoped.
   invariant every value stored in a per-archetype B+Tree is `ClusterLocation = clusterChunkId * 64 + slotIndex`,
             interpretable ONLY against the archetype that owns the tree
   never a `ClusterLocation` resolved against a different archetype's cluster segment
-  scope: ArchetypeSortedStream, ClusterIndexField, EcsQuery
+  invariant a migration moves every indexed field's entry with its entity, in both index homes: the value re-pointed at the destination, the elementId tail
+            carried to the destination slot, the zone map widened over the destination cluster (`DatabaseEngine.StageMigrantIndexEntries`). The persistent home
+            alone left a Transient entry naming a released slot, which the next occupant answers for (#1162)
+  scope: ArchetypeSortedStream, ClusterIndexField, EcsQuery, DatabaseEngine.StageMigrantIndexEntries, DatabaseEngine.ApplyStagedIndexUpdates,
+         IndexUpdateStaging.FieldRef
   on_violation: reads land on an unrelated entity's bytes — wrong data, no error
   requires IX-01 (one home per (archetype, field) is what makes the owning archetype unambiguous)
+  verified: ClusterTransientIndexMigrationTests [VerifiesRule] (both fences). Without the Transient call of StageMigrantIndexEntries the zone-map test goes red
+            and the query tests hang on the stale entry
 
 ### IX-03: A query that cannot reach an index raises rather than under-reporting `[correctness]`
   invariant if an archetype CARRIES the where-component but exposes no per-archetype index for it, the query throws

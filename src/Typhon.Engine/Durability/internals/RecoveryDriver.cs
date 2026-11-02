@@ -219,11 +219,19 @@ internal sealed class RecoveryDriver
         var paths = walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal).ToArray();
         using (var reader = new WalSegmentReader(walIO))
         {
+            var walk = new WalSegmentWalk(checkpointLsn);
             foreach (var path in paths)
             {
                 if (!reader.OpenSegment(path))
                 {
+                    walk.NoteInvalidHeader();
                     continue;
+                }
+
+                if (walk.Check(in reader.SegmentHeader) != WalRecoveryBreak.None)
+                {
+                    result.StoppedAtCorruption = true;
+                    break;
                 }
 
                 result.SegmentsScanned++;
@@ -336,6 +344,7 @@ internal sealed class RecoveryDriver
                 // This must be tested HERE, per segment: OpenSegment resets WasTruncated (WalSegmentReader), so the next iteration erases the evidence before
                 // anything downstream could act on it. v1 has always done this (WalRecovery); v2 never read the flag at all, which meant the two paths computed
                 // disagreeing frontiers at the same open — v1 stopped at the boundary while v2 kept applying past it (#587).
+                walk.NoteRead(Math.Max(reader.LastValidLSN, reader.HighestFrameLsn));
                 if (reader.WasTruncated)
                 {
                     result.StoppedAtCorruption = true;

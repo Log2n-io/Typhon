@@ -108,7 +108,7 @@ drops what is still waiting — a new session holds none of it.
 ## ⚠️ Guarantees & limits
 
 - Refused at `Start`: a set with no region, groups on a `World` or `ClientRegion` observer, a key that is not an integer, not sparse and
-  multi-value, on a `Transient` component (#1162), or of another signedness than its region key, a member with no projection, an observer
+  multi-value, on a `Transient` component, or of another signedness than its region key, a member with no projection, an observer
   naming an archetype with no position, more than four sets per archetype or 256 per runtime, an extent of another type, and a declaration
   without `MaxGroupsPerSession` (at most 1 048 576 — a rail against a mistyped value, not a cost).
 - A region in a realm other than 0 needs a positioned region archetype: one with no spatial field has no realm, and its regions are realm 0's.

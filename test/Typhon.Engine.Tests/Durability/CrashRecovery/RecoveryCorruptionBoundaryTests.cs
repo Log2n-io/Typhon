@@ -195,7 +195,9 @@ internal sealed class RecoveryCorruptionBoundaryTests
     }
 
     /// <summary>Commits filler transactions until the writer has genuinely rotated into a second segment (that segment holds bytes).</summary>
-    private void FillUntilSecondSegmentHasData(DatabaseEngine dbe)
+    private void FillUntilSecondSegmentHasData(DatabaseEngine dbe) => FillUntilSegmentHasData(dbe, 1);
+
+    private void FillUntilSegmentHasData(DatabaseEngine dbe, int index)
     {
         for (var round = 0; round < 400; round++)
         {
@@ -211,7 +213,7 @@ internal sealed class RecoveryCorruptionBoundaryTests
             }
 
             var files = WalFiles();
-            if (files.Length >= 2 && SegmentHasData(files[1]))
+            if (files.Length > index && SegmentHasData(files[index]))
             {
                 return;
             }
@@ -286,15 +288,180 @@ internal sealed class RecoveryCorruptionBoundaryTests
             "a record written AFTER the corruption boundary has no CRC-chain guarantee and must not be replayed (REC-01)");
     }
 
+    private DatabaseEngine OpenEngine(IServiceScope scope)
+    {
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<CompA>();
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
+    private static EntityId Commit(DatabaseEngine dbe, int value)
+    {
+        using var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
+        var c = new CompA(value, 0, 0);
+        var id = tx.Spawn<CompAArch>(CompAArch.A.Set(in c));
+        Assert.That(tx.Commit(), Is.True);
+        return id;
+    }
+
+    /// <summary>Three segments holding data, a commit in the first and one past the third's start; then the power cut. Returns the segments.</summary>
+    private string[] ThreeSegmentsThenACrash(out EntityId inFirst, out EntityId inLast)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var dbe = OpenEngine(scope);
+        inFirst = Commit(dbe, 1);
+        FillUntilSegmentHasData(dbe, 2);
+        inLast = Commit(dbe, 2);
+        dbe.SimulateHardCrash();
+        return WalFiles();
+    }
+
     /// <summary>
-    /// A crash tears the active segment's last block (a sector-torn O_DIRECT write: header landed, body did not). The reopen recovers up to the tear and keeps
-    /// going in a new segment; a second crash must not lose what that session committed. Recovery reads every segment on disk and stops for good at a tear
-    /// (REC-01), so this holds only while no torn segment outlives the crash open: today that open's checkpoint reclaims it before the open returns. Any
-    /// floor that retains it (#1418's archive floor) would lose the next session's commits (impl/1418 WA-9).
+    /// #938: a damaged middle header used to be skipped and the segments past it applied, commits with a hole under them. The open stops there, as for a CRC break,
+    /// and sets the rest aside with its bytes intact.
     /// </summary>
     [Test]
     [CancelAfter(60_000)]
-    public void TornActiveSegment_ThenASecondCrash_KeepsTheNextSessionsCommits()
+    [VerifiesRule("LOG-03")]
+    [VerifiesRule("WR-01")]
+    public void ADamagedMiddleHeader_EndsRecoveryAtTheGap()
+    {
+        var segments = ThreeSegmentsThenACrash(out var inFirst, out var inLast);
+        var lastBytes = File.ReadAllBytes(segments[2]);
+        using (var fs = new FileStream(segments[1], FileMode.Open, FileAccess.Write))
+        {
+            fs.Write(new byte[64], 0, 64);
+        }
+
+        using var scope = _serviceProvider.CreateScope();
+        using var dbe = OpenEngine(scope);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.LastRecoveryResult.Break, Is.EqualTo(WalRecoveryBreak.DamagedHeader));
+            Assert.That(dbe.LastWalV2RecoveryResult.StoppedAtCorruption, Is.True);
+            Assert.That(File.Exists(segments[1]), Is.False, "the damaged segment is set aside");
+            Assert.That(File.ReadAllBytes(Path.ChangeExtension(segments[2], ".dropped")), Is.EqualTo(lastBytes), "what was dropped keeps its bytes");
+        });
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.IsAlive(inFirst), Is.True, "below the gap");
+        Assert.That(read.IsAlive(inLast), Is.False, "past the gap");
+    }
+
+    /// <summary>#938: a missing segment leaves no file to find damaged: the LSN chain says so.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("LOG-03")]
+    public void AMissingMiddleSegment_EndsRecoveryAtTheGap()
+    {
+        var segments = ThreeSegmentsThenACrash(out var inFirst, out var inLast);
+        File.Delete(segments[1]);
+
+        using var scope = _serviceProvider.CreateScope();
+        using var dbe = OpenEngine(scope);
+
+        Assert.That(dbe.LastRecoveryResult.Break, Is.EqualTo(WalRecoveryBreak.MissingSegment));
+        using var read = dbe.CreateQuickTransaction();
+        Assert.That(read.IsAlive(inFirst), Is.True, "below the gap");
+        Assert.That(read.IsAlive(inLast), Is.False, "past the gap");
+    }
+
+    /// <summary>
+    /// #938: what lay past a break used to stay in the directory, so the next crash stopped at the same break and lost the session in between. Set aside, the broken
+    /// segment is the log's last again.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("WR-01")]
+    public void ASecondCrashAfterAGap_KeepsTheNextSessionsCommits([Values] bool missing)
+    {
+        var segments = ThreeSegmentsThenACrash(out var inFirst, out _);
+        if (missing)
+        {
+            File.Delete(segments[1]);
+        }
+        else
+        {
+            using var fs = new FileStream(segments[1], FileMode.Open, FileAccess.Write);
+            fs.Write(new byte[64], 0, 64);
+        }
+
+        EntityId nextSession;
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = OpenEngine(scope);
+            nextSession = Commit(dbe, 3);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        using var dbe2 = OpenEngine(scope2);
+        Assert.That(dbe2.LastRecoveryResult.Break, Is.EqualTo(WalRecoveryBreak.None), "the set-aside segments are no longer in the log");
+        using var read = dbe2.CreateQuickTransaction();
+        Assert.That(read.IsAlive(inFirst), Is.True);
+        Assert.That(read.IsAlive(nextSession), Is.True, "the session after the gap");
+    }
+
+    /// <summary>A read that fails says nothing about a file: the open fails, and the segment is still there for the next one.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("WR-01")]
+    public void AReadFailureOnASegment_FailsTheOpenAndDeletesNothing()
+    {
+        var segments = ThreeSegmentsThenACrash(out _, out _);
+        using (new FileStream(segments[1], FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            using var scope = _serviceProvider.CreateScope();
+            Assert.That(() => OpenEngine(scope), Throws.InstanceOf<IOException>());
+        }
+
+        Assert.That(WalFiles(), Is.SupersetOf(segments), "nothing was deleted over a failed read");
+    }
+
+    /// <summary>Ids skip legally: a session that wrote nothing leaves a header-only segment a reopen removes. No false stop: it would drop acknowledged commits.</summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("LOG-03")]
+    public void LegalIdGaps_DoNotStopRecovery()
+    {
+        EntityId first, second;
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = OpenEngine(scope);
+            first = Commit(dbe, 1);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            OpenEngine(scope).SimulateHardCrash();
+        }
+
+        using (var scope = _serviceProvider.CreateScope())
+        {
+            var dbe = OpenEngine(scope);
+            second = Commit(dbe, 2);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope3 = _serviceProvider.CreateScope();
+        using var dbe3 = OpenEngine(scope3);
+        Assert.That(dbe3.LastRecoveryResult.Break, Is.EqualTo(WalRecoveryBreak.None));
+        using var read = dbe3.CreateQuickTransaction();
+        Assert.That(read.IsAlive(first) && read.IsAlive(second), Is.True);
+    }
+
+    /// <summary>
+    /// A crash tears the active segment's last block (a sector-torn O_DIRECT write: header landed, body did not). The reopen recovers up to the tear and keeps
+    /// going in a new segment; a second crash must not lose what that session committed. Recovery reads every segment on disk and stops for good at a tear
+    /// (REC-01), so a torn segment that outlives the crash open must end cleanly: the archive floor keeps it (impl/1418 WA-9), and with archiving off so does a
+    /// crash open that replayed nothing, its seal having no cycle to run (<paramref name="nothingToReplay"/>).
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("LOG-03")]
+    public void TornActiveSegment_ThenASecondCrash_KeepsTheNextSessionsCommits([Values] bool nothingToReplay)
     {
         EntityId first, second;
 
@@ -308,6 +475,11 @@ internal sealed class RecoveryCorruptionBoundaryTests
                 var c = new CompA(1, 1, 1);
                 first = tx.Spawn<CompAArch>(CompAArch.A.Set(in c));
                 tx.Commit();
+            }
+
+            if (nothingToReplay)
+            {
+                dbe.ForceCheckpoint();
             }
 
             dbe.SimulateHardCrash();

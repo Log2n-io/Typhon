@@ -20,7 +20,8 @@ internal readonly record struct WalTornTailSealResult(long SegmentId, int Offset
 /// its tear into a break in the middle of the log the next time, dropping every later segment. So once recovery has read it, the crash open writes a
 /// <see cref="WalFrameHeader.PaddingSentinel"/> over the first invalid frame of a torn LAST data-bearing segment and flushes it, before the session's first
 /// append: the segment then ends cleanly for recovery, captures and the archiver. A break followed by a segment holding data is mid-log corruption (#587)
-/// and is left as it is. The sentinel hides the torn frame's valid fence chunks, so it is written only once CheckpointLSN covers them.
+/// and is left as it is; a crash open has set such segments aside by now (WR-01), which leaves the break the log's end. The sentinel hides the torn frame's
+/// valid fence chunks, so it is written only once CheckpointLSN covers them.
 /// </summary>
 internal static class WalTornTailSeal
 {
