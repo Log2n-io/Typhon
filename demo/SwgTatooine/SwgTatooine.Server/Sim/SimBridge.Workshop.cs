@@ -88,8 +88,11 @@ public sealed partial class SimBridge
         var experiments = subs == null ? default : subs.Commands<CraftExperiment>();
         var enhances = subs == null ? default : subs.Commands<CraftEnhance>();
         var finishes = subs == null ? default : subs.Commands<CraftFinish>();
-        var crafting = starts.Count + experiments.Count + enhances.Count + finishes.Count;
-        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0)
+        var repairs = subs == null ? default : subs.Commands<RepairItem>();
+        var salvages = subs == null ? default : subs.Commands<SalvageItem>();
+        var crafting = starts.Count + experiments.Count + enhances.Count + finishes.Count + repairs.Count + salvages.Count;
+        var flushDue = ctx.TickNumber % Math.Max(1, _config.TickRateHz) == 0;
+        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue))
         {
             return;
         }
@@ -119,9 +122,12 @@ public sealed partial class SimBridge
         _craftWalletsMoved.Clear();
         _craftCounts = default;
         _craftAbort = false;
+        _repairsApplied.Clear();
+        _salvagesApplied.Clear();
         _gearScratch.Clear();
         _gearScratch.AddRange(_gearDue);
         _gearDue.Clear();
+        GatherWear(tick0, subs, flushDue);
         bool committed;
         using (var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
         {
@@ -131,6 +137,9 @@ public sealed partial class SimBridge
                 EnsureEconomy(tx);
                 EnsureCrafts(tx);
             }
+
+            // The wear counted on the bodies first: an item about to move or be repaired has its condition up to date (crafting-catalog.md § 9.1).
+            WearTick(tx, tick0, ctx.WorldTick);
 
             if (subs != null)
             {
@@ -165,6 +174,16 @@ public sealed partial class SimBridge
                 {
                     CraftFinishFromCommand(tx, subs, in command, ctx.WorldTick);
                 }
+
+                foreach (var command in repairs)
+                {
+                    RepairFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in salvages)
+                {
+                    SalvageFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
             }
 
             // The gear from what the transaction leaves worn, read through it before it commits; written to the bodies once it has.
@@ -175,7 +194,8 @@ public sealed partial class SimBridge
                 _gearComputed.Add((body, gear));
             }
 
-            var written = _equipsApplied.Count + _unequipsApplied.Count + _craftsApplied.Count > 0;
+            var written = _equipsApplied.Count + _unequipsApplied.Count + _craftsApplied.Count + _repairsApplied.Count + _salvagesApplied.Count
+                + _wearCounts.Writes > 0;
             if (written)
             {
                 FlushItemHead(tx);
@@ -191,6 +211,7 @@ public sealed partial class SimBridge
         }
 
         EndItems(committed);
+        EndWear(tick0, committed);
 
         if (committed)
         {
@@ -221,6 +242,16 @@ public sealed partial class SimBridge
             {
                 subs?.Reject(session, id, TatooineReplication.CraftFailed);
                 Interlocked.Increment(ref _workshopRefusedBy[TatooineReplication.CraftFailed]);
+            }
+
+            foreach (var c in _repairsApplied)
+            {
+                RefuseWorkshop(subs, in c, TatooineReplication.CraftFailed);
+            }
+
+            foreach (var c in _salvagesApplied)
+            {
+                RefuseWorkshop(subs, in c, TatooineReplication.CraftFailed);
             }
 
             return;
@@ -331,8 +362,10 @@ public sealed partial class SimBridge
     {
         var items = ItemsOf((long)character.RawValue);
         gear = default;
+        // A broken item is worn but does nothing (crafting-catalog.md § 9.2): a broken weapon leaves the fist, a broken piece no protection.
         var weapon = items.Equipped[0];
-        if (weapon.Count > 0 && TryStatsOf(tx, weapon.Stack, out var w) && Equipment.TryWeapon(weapon.Template, out var traits))
+        if (weapon.Count > 0 && TryStatsOf(tx, weapon.Stack, out var w) && (w.Flags & ItemFlags.Broken) == 0
+            && Equipment.TryWeapon(weapon.Template, out var traits))
         {
             gear.Damage = (short)Math.Clamp(w.Stat0, 1, short.MaxValue);
             gear.DelayMs = (short)Math.Clamp(w.Stat1, 1, short.MaxValue);
@@ -354,7 +387,7 @@ public sealed partial class SimBridge
         for (var k = 1; k < EquipSlot.Count; k++)
         {
             var piece = items.Equipped[k];
-            if (piece.Count > 0 && TryStatsOf(tx, piece.Stack, out var a))
+            if (piece.Count > 0 && TryStatsOf(tx, piece.Stack, out var a) && (a.Flags & ItemFlags.Broken) == 0)
             {
                 kinetic += (long)EquipSlot.SharePerMille[k] * a.Stat0;
                 energy += (long)EquipSlot.SharePerMille[k] * a.Stat1;

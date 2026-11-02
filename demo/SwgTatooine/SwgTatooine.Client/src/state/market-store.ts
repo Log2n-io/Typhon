@@ -118,8 +118,8 @@ export interface MarketState {
   readonly list: () => void;
   /** Sells the stack picked to the vendor, the form's quantity. */
   readonly vendor: () => void;
-  /** Buys one standard-issue item from the vendor at the price shown (crafting-catalog.md § 15.3). */
-  readonly buyStandard: (template: number, price: number) => void;
+  /** Buys standard issue from the vendor at the price shown (crafting-catalog.md § 15.3): one item, or a quantity of a material. */
+  readonly buyStandard: (template: number, price: number, quantity?: number) => void;
   /** Wears an item with stats (crafting-build.md § 2.2); its refusal shows on the `'gear'` row. */
   readonly equip: (itemId: string) => void;
   /** Sends a command as the panels' buttons do: held while one of its row is in flight, its refusal shown on its row. False when not sent. */
@@ -404,8 +404,12 @@ export const useMarket = create<MarketState>((set, get) => {
           : { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: 1, item: stack.id },
       );
     },
-    buyStandard: (template, price) => {
-      send({ kind: 'standard', template, price });
+    buyStandard: (template, price, quantity) => {
+      send(
+        quantity === undefined
+          ? { kind: 'standard', template, price }
+          : { kind: 'standard', template, price, quantity },
+      );
     },
     sendCommand: (command) => send(command),
     equip: (itemId) => {

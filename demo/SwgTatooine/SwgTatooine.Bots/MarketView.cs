@@ -26,16 +26,43 @@ public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int 
 {
     /// <summary>Whether it is worn: in an equip slot, out of the grid.</summary>
     public bool Worn => Slot > 100;
+
+    /// <summary>Its condition and max (crafting-catalog.md § 9.1), its repairs used and whether it is broken (§ 9.2); a new item's when unread.</summary>
+    public int Condition { get; init; } = 1;
+
+    public int MaxCondition { get; init; } = 1;
+
+    public int Repairs { get; init; }
+
+    public bool Broken { get; init; }
+
+    /// <summary>Worn down (crafting-build.md § 6): broken, or under 20 % of its max — time to repair it or replace it.</summary>
+    public bool WornDown => Broken || (MaxCondition > 0 && Condition * 5L < MaxCondition);
 }
 
 /// <summary>A standard-issue item the vendor sells (<c>GET /swg/market/standard</c>): its template, asset, price and the slot it is worn in.</summary>
-public readonly record struct StandardOffer(ushort Template, string Item, long Price, int Wears);
+public readonly record struct StandardOffer(ushort Template, string Item, long Price, int Wears)
+{
+    /// <summary>A vendor material's price a unit, milli-credits (a quantity's price is its total rounded down); 0 for an item with stats.</summary>
+    public long PriceMilli { get; init; }
+}
 
 /// <summary>A bazaar buy collected into the character: the listing it came from (the <c>buy</c> row's <c>ref</c>), and what and how many.</summary>
 public readonly record struct WonListing(ulong Listing, ushort Template, string Item, int Mk, int Count);
 
 /// <summary>One listing of a browse page (bazaar.md § 5): <c>{"id","city","item","category","mk","qty","unit","total","seller",…}</c>.</summary>
-public readonly record struct BrowseRow(ulong Id, int City, string Item, MarketCategory Category, int Mk, int Quantity, long Unit, long Total, ulong Seller);
+public readonly record struct BrowseRow(ulong Id, int City, string Item, MarketCategory Category, int Mk, int Quantity, long Unit, long Total, ulong Seller)
+{
+    /// <summary>An item with stats' condition, its max and whether it is broken (crafting-catalog.md § 9); a new item's for units.</summary>
+    public int Condition { get; init; } = 1;
+
+    public int MaxCondition { get; init; } = 1;
+
+    public bool Broken { get; init; }
+
+    /// <summary>Broken, or under 20 % of its max: not worth buying to wear (crafting-build.md § 6, Gear).</summary>
+    public bool WornDown => Broken || (MaxCondition > 0 && Condition * 5L < MaxCondition);
+}
 
 /// <summary>The tradeable templates by asset, for an answer that names an item by its asset only.</summary>
 /// <remarks>
@@ -129,7 +156,10 @@ public static class MarketJson
         foreach (var o in doc.RootElement.GetProperty("items").EnumerateArray())
         {
             var wears = o.TryGetProperty("stats", out var s) && s.TryGetProperty("wears", out var w) ? w.GetInt32() : 0;
-            offers.Add(new StandardOffer((ushort)o.GetProperty("template").GetInt32(), o.GetProperty("item").GetString(), (long)Number(o, "price"), wears));
+            offers.Add(new StandardOffer((ushort)o.GetProperty("template").GetInt32(), o.GetProperty("item").GetString(), (long)Number(o, "price"), wears)
+            {
+                PriceMilli = o.TryGetProperty("priceMilli", out var milli) ? milli.GetInt64() : 0,
+            });
         }
 
         return offers;
@@ -151,7 +181,12 @@ public static class MarketJson
                 l.GetProperty("qty").GetInt32(),
                 (long)Number(l, "unit"),
                 (long)Number(l, "total"),
-                l.TryGetProperty("seller", out var s) ? Id(s) : 0));
+                l.TryGetProperty("seller", out var s) ? Id(s) : 0)
+            {
+                Condition = l.TryGetProperty("stats", out var st) && st.TryGetProperty("condition", out var cond) ? cond.GetInt32() : 1,
+                MaxCondition = st.ValueKind == JsonValueKind.Object && st.TryGetProperty("maxCondition", out var max) ? max.GetInt32() : 1,
+                Broken = st.ValueKind == JsonValueKind.Object && st.TryGetProperty("broken", out var broken) && broken.ValueKind == JsonValueKind.True,
+            });
         }
 
         return rows;

@@ -2496,7 +2496,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
             var band = MarketPlan.Band(_brain.CombatLevel);
             if (!ReferenceEquals(gear, _wearGear) || band != _wearBand)
             {
-                (_wearGear, _wearBand, _wearNext) = (gear, band, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster));
+                (_wearGear, _wearBand, _wearNext) = (gear, band, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster, _held));
             }
 
             return _wearNext;

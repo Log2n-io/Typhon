@@ -121,8 +121,14 @@ public readonly struct Perceived
     /// <summary>Whether it holds the inputs of a craft it would make (crafting-build.md § 6): a crafter's errand to a station.</summary>
     public bool CraftReady { get; init; }
 
-    /// <summary>Whether its craft is still going out: the bot stands at the station until the finish is sent.</summary>
+    /// <summary>Whether its craft or its repairs are still going out: the bot stands at the station until the last is sent.</summary>
     public bool Crafting { get; init; }
+
+    /// <summary>Whether a crafter can make nothing and its next target lacks an input (crafting-build.md § 6, Inputs): an errand to the bazaar.</summary>
+    public bool InputWanted { get; init; }
+
+    /// <summary>Whether something it wears is worn down with a repair left and a kit held (crafting-build.md § 6, Repair): an errand to a station.</summary>
+    public bool RepairDue { get; init; }
 
     /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
     public IStructureView Structures { get; init; }

@@ -159,7 +159,7 @@ public static class Schematics
     private const ushort Bone = ItemCatalog.Bone;
     private const ushort Gland = ItemCatalog.Gland;
     private const ushort Venom = ItemCatalog.Venom;
-    private const ushort Water = 2;
+    private const ushort Water = ItemCatalog.Water;
 
     private static SchematicSlot Q(ushort family, int n) => new(SlotKind.Quality, family, n);
 

@@ -24,15 +24,17 @@ public sealed partial class BotSwarm
     private const string CraftExperimentCommand = "CraftExperiment";
     private const string CraftEnhanceCommand = "CraftEnhance";
     private const string CraftFinishCommand = "CraftFinish";
+    private const string RepairCommand = "RepairItem";
 
-    /// <summary>The workshop's crafting refusals, <c>CraftNotAtStation</c> … <c>CraftNoAddon</c>: the first application reason + 41 … + 49.</summary>
+    /// <summary>The workshop's refusals, <c>CraftNotAtStation</c> … <c>RepairNotWorn</c>: the first application reason + 41 … + 54.</summary>
     public const byte CraftFirstReason = AckReasons.FirstApplicationReason + 41;
 
-    public const int CraftReasons = 9;
+    public const int CraftReasons = 14;
 
     /// <summary>The refusals' names, by offset from <see cref="CraftFirstReason"/>.</summary>
     public static readonly string[] CraftReasonNames =
-        ["notAtStation", "busy", "none", "badInputs", "noPoints", "noRoom", "notEnough", "failed", "noAddon"];
+        ["notAtStation", "busy", "none", "badInputs", "noPoints", "noRoom", "notEnough", "failed", "noAddon", "repairBadItem", "repairNoKit", "repairSpent",
+            "salvageBadItem", "repairNotWorn"];
 
     /// <summary>A craft's commands, in order: the start, a point per line listed, the add-on when it has one, the finish.</summary>
     public static List<CraftCommand> Encode(CraftJob job)
@@ -85,6 +87,7 @@ public sealed partial class BotSwarm
             t.Enhanced += Volatile.Read(ref bot.CraftsEnhanced);
             t.Finished += Volatile.Read(ref bot.CraftsFinishSent);
             t.InputsBought += Volatile.Read(ref bot.CraftInputsBought);
+            t.Repairs += Volatile.Read(ref bot.RepairsSent);
             t.GearBought += Volatile.Read(ref bot.GearBought);
             t.ItemsListed += Volatile.Read(ref bot.ItemsListed);
             for (var i = 0; i < CraftReasons; i++)
@@ -108,6 +111,9 @@ public sealed partial class BotSwarm
 
         /// <summary>Bazaar buys of an input its next craft lacks (§ 6, Inputs).</summary>
         public long CraftInputsBought;
+
+        /// <summary>Repairs sent (§ 6, Repair): any trading bot's, not only the crafters'.</summary>
+        public long RepairsSent;
         public readonly long[] CraftRefused = new long[CraftReasons];
 
         private CraftBook _book;
@@ -136,6 +142,11 @@ public sealed partial class BotSwarm
         /// </summary>
         private void SetUpCraft(int index, BotSwarmOptions options, CraftBook book)
         {
+            if (_trades && _missionsUri != null)
+            {
+                _craftUri = new Uri(_missionsUri, "/swg/craft");   // every trader may stand at a station to repair
+            }
+
             if (!_trades || _rush || book == null || book.Count == 0 || index % 100 >= options.CraftPercent)
             {
                 return;
@@ -152,18 +163,52 @@ public sealed partial class BotSwarm
         /// <summary>The crafting half of an inventory read: the craft it can make now, from the stacks and the parts held in the grid.</summary>
         private void SawCraftInputs(List<HeldStack> held, List<GearItem> gear)
         {
-            if (!Crafts)
+            if (_trades)
             {
-                return;
+                _repairsDue = MarketPlan.RepairsDue(gear, held);
             }
 
-            _craftJob = CraftPlan.Next(_book, _craftTargets, _craftTurn, held, CraftPlan.PartsOf(gear));
+            if (Crafts)
+            {
+                var parts = CraftPlan.PartsOf(gear);
+                _craftJob = CraftPlan.Next(_book, _craftTargets, _craftTurn, held, parts);
+
+                // Only an input it can buy — one the vendor sells; Hide and Bone it hunts — and not again soon after a visit that bought none.
+                var wanted = false;
+                if (_craftJob == null)
+                {
+                    foreach (var (template, _) in CraftPlan.Deficits(_book, _craftTargets[_craftTurn % _craftTargets.Length], held, parts))
+                    {
+                        wanted |= MarketPlan.VendorSells(template);
+                    }
+                }
+
+                _inputWanted = wanted;
+            }
         }
 
-        /// <summary>What the brain is told of crafting: whether a craft can be made, and whether one is still going out.</summary>
+        /// <summary>Its next target lacks an input the vendor sells and it can make nothing: an errand to the bazaar to buy it (§ 6, Inputs).</summary>
+        private volatile bool _inputWanted;
+
+        /// <summary>A trade that bought none of its inputs (no money, nothing to buy): the input errand waits this long, ms, before it is asked again.
+        /// </summary>
+        private const long InputBackoffMs = 10 * 60_000;
+
+        private long _inputBackoffUntil;
+
+        /// <summary>The worn items its last inventory read says to repair (crafting-build.md § 6, Repair).</summary>
+        private volatile List<ulong> _repairsDue = [];
+
+        /// <summary>What the brain is told of the station: a craft it can make, repairs due, and whether its commands are still going out.</summary>
         private Perceived WithCraft(Perceived world) =>
-            Crafts
-                ? world with { CraftReady = _craftJob != null, Crafting = Volatile.Read(ref _craftBusy) != 0 || _craftSender.Busy }
+            _trades
+                ? world with
+                {
+                    CraftReady = Crafts && _craftJob != null,
+                    InputWanted = Crafts && _inputWanted && Environment.TickCount64 >= Volatile.Read(ref _inputBackoffUntil),
+                    RepairDue = _repairsDue.Count > 0,
+                    Crafting = Volatile.Read(ref _craftBusy) != 0 || _craftSender.Busy,
+                }
                 : world;
 
         /// <summary>
@@ -172,20 +217,39 @@ public sealed partial class BotSwarm
         /// </summary>
         private void BeginCraft()
         {
-            if (!Crafts || Interlocked.CompareExchange(ref _craftBusy, 1, 0) != 0)
+            if (!_trades || Interlocked.CompareExchange(ref _craftBusy, 1, 0) != 0)
             {
                 return;
             }
 
-            var job = _craftJob;
+            var job = Crafts ? _craftJob : null;
             _craftJob = null;
-            _ = CraftAsync(job, _brain.VisitSerial);
+            var repairs = _repairsDue;
+            _repairsDue = [];
+            _ = CraftAsync(job, repairs, _brain.VisitSerial);
         }
 
-        private async Task CraftAsync(CraftJob job, long visit)
+        private async Task CraftAsync(CraftJob job, List<ulong> repairs, long visit)
         {
             try
             {
+                // Repairs first (crafting-build.md § 6, Repair), each a command of its own; then the craft.
+                var plan = new List<CraftCommand>();
+                foreach (var item in repairs)
+                {
+                    plan.Add(new CraftCommand(RepairCommand, new RecordValues { ["item"] = FieldValue.OfUInt64(item) }));
+                }
+
+                if (!Crafts)
+                {
+                    if (plan.Count > 0)
+                    {
+                        _craftSender.Offer(visit, plan);
+                    }
+
+                    return;
+                }
+
                 using var doc = JsonDocument.Parse(await GetAsync(_craftUri).ConfigureAwait(false));
                 if (doc.RootElement.GetProperty("craft") is { ValueKind: JsonValueKind.Object } c)
                 {
@@ -199,14 +263,20 @@ public sealed partial class BotSwarm
                     }
 
                     Interlocked.Increment(ref CraftsResumed);
-                    _craftSender.Offer(visit, Rest(schematic, points, 0));
+                    plan.AddRange(Rest(schematic, points, 0));
+                    _craftSender.Offer(visit, plan);
                     return;
                 }
 
                 if (job != null)
                 {
                     _craftTurn++;
-                    _craftSender.Offer(visit, Encode(job));
+                    plan.AddRange(Encode(job));
+                }
+
+                if (plan.Count > 0)
+                {
+                    _craftSender.Offer(visit, plan);
                 }
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
@@ -223,7 +293,7 @@ public sealed partial class BotSwarm
         /// <summary>Sends the craft's next command, at the commands' rate, while the bot stands at the station of the visit it was planned for.</summary>
         private async Task SendCraftAsync(long tick, CancellationToken ct)
         {
-            if (!Crafts || _craftSender.Next(_brain.AtStation, _brain.VisitSerial, tick, Math.Max(1L, _ticksPerSecond / 2)) is not { } c)
+            if (!_trades || _craftSender.Next(_brain.AtStation, _brain.VisitSerial, tick, Math.Max(1L, _ticksPerSecond / 2)) is not { } c)
             {
                 return;
             }
@@ -246,6 +316,9 @@ public sealed partial class BotSwarm
                 case CraftEnhanceCommand:
                     Interlocked.Increment(ref CraftsEnhanced);
                     break;
+                case RepairCommand:
+                    Interlocked.Increment(ref RepairsSent);
+                    break;
                 default:
                     Interlocked.Increment(ref CraftsFinishSent);
                     break;
@@ -254,7 +327,7 @@ public sealed partial class BotSwarm
             IntentsSent++;
         }
 
-        /// <summary>Counts the workshop's crafting refusals of this session's commands, from each applied frame's <c>ACKS</c>.</summary>
+        /// <summary>Counts the workshop's refusals of this session's commands, from each applied frame's <c>ACKS</c>: any trader's — repairs too.</summary>
         private void CountCraftRefusals(WorldStore store)
         {
             var acks = store.Acks;
@@ -300,6 +373,7 @@ public struct CraftTotals
     public long Enhanced;
     public long Finished;
     public long InputsBought;
+    public long Repairs;
 
     /// <summary>Every trading bot's, not only the crafters': gear of its band bought off the board, items with stats listed.</summary>
     public long GearBought;

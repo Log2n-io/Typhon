@@ -28,6 +28,9 @@ export interface CraftStore {
   readonly point: (line: number) => void;
   readonly enhance: (mk: number) => void;
   readonly finish: () => void;
+  /** Repair, or salvage, an item at the station (crafting-build.md C3). */
+  readonly repair: (item: string) => void;
+  readonly salvage: (item: string) => void;
   /** A new session: nothing of the last character's craft or picks survives. */
   readonly reset: () => void;
 }
@@ -122,6 +125,12 @@ export const useCraft = create<CraftStore>((set, get) => ({
     if (craft !== null) {
       send({ kind: 'craftFinish', schematic: craft.schematic });
     }
+  },
+  repair: (item) => {
+    send({ kind: 'repair', item });
+  },
+  salvage: (item) => {
+    send({ kind: 'salvage', item });
   },
   reset: () => {
     refreshGeneration++;

@@ -111,6 +111,7 @@ public sealed partial class BotSwarm
         {
             ["template"] = FieldValue.Of((double)c.Template),
             ["price"] = FieldValue.Of((double)c.UnitPrice),
+            ["quantity"] = FieldValue.Of((double)Math.Max(1, c.Quantity)),
         }),
         _ => (MarketBuyCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing), ["unitPrice"] = FieldValue.Of((double)c.UnitPrice) }),
     };
@@ -222,7 +223,7 @@ public sealed partial class BotSwarm
                 Client.FrameApplied += CountRefusals;
             }
 
-            if (Crafts)
+            if (_trades)
             {
                 Client.FrameApplied += CountCraftRefusals;
             }
@@ -309,6 +310,7 @@ public sealed partial class BotSwarm
             var prices = await PricesAsync().ConfigureAwait(false);
             var listMaterial = MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.ListMaterialPercent;
             BrowseRow? buy = null;
+            List<MarketCommand> inputsFromVendor = [];
             var band = MarketPlan.Band(level);
             var gear = _gear;
             long? wallet = null;
@@ -321,7 +323,7 @@ public sealed partial class BotSwarm
             {
                 // Gear of its band first (crafting-build.md § 6, Gear): the best-value listing above what it has, the vendor's standard issue failing it.
                 _standard ??= await Optional(async () => MarketJson.Standard(await GetAsync(_standardUri).ConfigureAwait(false))).ConfigureAwait(false);
-                if (MarketPlan.GearWanted(gear, _standard, band) is { } piece
+                if (MarketPlan.GearWanted(gear, _standard, band, _held) is { } piece
                     && await Optional(async () => await Page($"item={piece.Item}").ConfigureAwait(false)).ConfigureAwait(false) is { } page)
                 {
                     if (piece.Item.StartsWith("armor_padded_", StringComparison.Ordinal))
@@ -341,10 +343,23 @@ public sealed partial class BotSwarm
                 {
                     buy = CraftPlan.ChooseInput(inputs, prices, want, await Wallet().ConfigureAwait(false), mine.ListedIds);
                     CraftInputsBought += buy != null ? 1 : 0;
+
+                    // None on the board: the vendor's Mk I, every material its next target lacks that the vendor sells (Loïc, 2026-11-02).
+                    if (buy == null)
+                    {
+                        inputsFromVendor = CraftPlan.FromVendorAll(_book, _craftTargets[_craftTurn % _craftTargets.Length], _held, CraftPlan.PartsOf(_gear),
+                            _standard, await Wallet().ConfigureAwait(false));
+                        CraftInputsBought += inputsFromVendor.Count;
+                    }
+
+                    if (buy == null && inputsFromVendor.Count == 0)
+                    {
+                        Volatile.Write(ref _inputBackoffUntil, Environment.TickCount64 + InputBackoffMs);
+                    }
                 }
             }
 
-            if (buy == null && region != 0 && MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.BuyPercent)
+            if (buy == null && inputsFromVendor.Count == 0 && region != 0 && MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.BuyPercent)
             {
                 // The cheapest of its band in this city: the browser's first page, filtered by Mk.
                 buy = MarketPlan.ChooseBuy(await Page($"mk={band}").ConfigureAwait(false), prices, band, await Wallet().ConfigureAwait(false), mine.ListedIds);
@@ -357,14 +372,16 @@ public sealed partial class BotSwarm
             // Surplus): before the buy, which comes last.
             var gone = plan.FindAll(c => c.Step is MarketStep.List or MarketStep.Vendor).Count;
             var surplus = MarketPlan.Surplus(gear, prices, mine.Listed + plan.FindAll(c => c.Step == MarketStep.List).Count, band, ref _marketRng,
-                CraftPlan.Blaster, grid - gone > MarketPlan.KeepStacks);
+                CraftPlan.Blaster, grid - gone > MarketPlan.KeepStacks, _held);
             ItemsListed += surplus.Count;
             plan.InsertRange(buy != null ? plan.Count - 1 : plan.Count, surplus);
 
+            plan.AddRange(inputsFromVendor);
+
             // Standard issue for an armour slot it has nothing for, when nothing else is bought — not while goods wait for it, which may be the piece the
             // board sold it.
-            if (region != 0 && buy == null && mine.Reserved == 0
-                && MarketPlan.ChooseStandard(_standard, gear, await Wallet().ConfigureAwait(false)) is { } issue)
+            if (region != 0 && buy == null && inputsFromVendor.Count == 0 && mine.Reserved == 0
+                && MarketPlan.ChooseStandard(_standard, gear, await Wallet().ConfigureAwait(false), _held, CraftPlan.Blaster) is { } issue)
             {
                 plan.Add(issue);
             }

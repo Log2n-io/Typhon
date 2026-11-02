@@ -1,7 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 import { ceiling, lineValue, SCALE, type CraftInput, type Schematic, type SchematicBook } from '../data/craft';
-import { mkNumeral, type InventoryItem } from '../data/items';
+import { ITEM_ICON_PX, itemInitials, MAX_REPAIRS, mkNumeral, repairKitOf, type InventoryItem } from '../data/items';
 import { useCraft } from '../state/craft-store';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
@@ -51,8 +51,57 @@ export function CraftPanel() {
       ) : (
         <UnderWay book={book} />
       )}
+      <Upkeep />
     </div>
   );
+}
+
+/** An item's icon at the catalogue's 32 px, as the inventory draws it; the name's initials without one (no `--assets`). */
+function ItemIcon({ asset, name }: { readonly asset: string; readonly name: string }) {
+  const icon = useItems((s) => s.icons[asset]) as string | undefined;
+  return icon === undefined ? (
+    <span className="inventory-initials" title={name}>
+      {itemInitials(name)}
+    </span>
+  ) : (
+    <img
+      className="inventory-icon"
+      src={icon}
+      width={ITEM_ICON_PX}
+      height={ITEM_ICON_PX}
+      alt={name}
+      title={name}
+      draggable={false}
+    />
+  );
+}
+
+/**
+ * How many times a schematic can be crafted from what is held: per material or core slot, the most whole counts one Mk's units cover; per part slot,
+ * the parts that fit, by the slot's count; the fewest of all. A slot's needs are counted on their own, so two slots of one material may overcount.
+ */
+export function craftableCount(s: Schematic, items: readonly InventoryItem[]): number {
+  let n = Number.MAX_SAFE_INTEGER;
+  for (const slot of s.slots) {
+    if (slot.kind === 'part') {
+      const fit = items.filter((i) =>
+        slot.template === 0
+          ? i.template === PADDED_SEGMENT || i.template === COMPOSITE_SEGMENT
+          : i.template === slot.template,
+      ).length;
+      n = Math.min(n, Math.floor(fit / slot.count));
+      continue;
+    }
+
+    let best = 0;
+    for (let mk = 1; mk <= 5; mk++) {
+      best = Math.max(best, Math.floor(unitsOf(items, slot.template, mk) / slot.count));
+    }
+
+    n = Math.min(n, best);
+  }
+
+  return s.slots.length === 0 ? 0 : n;
 }
 
 function unitsOf(items: readonly InventoryItem[], template: number, mk: number): number {
@@ -173,12 +222,16 @@ function Pick({ book }: { readonly book: SchematicBook }) {
         <option value="">Choose a schematic…</option>
         {book.schematics.map((x) => (
           <option key={x.id} value={x.id}>
-            {x.name} ({x.kind})
+            {x.name} ({x.kind}) ({String(craftableCount(x, items))})
           </option>
         ))}
       </select>
       {s === undefined ? null : (
         <>
+          <div className="craft-what">
+            <ItemIcon asset={s.item} name={s.name} />
+            <span>{s.name}</span>
+          </div>
           <div className="craft-slots">
             {s.slots.map((slot, k) => {
               if (slot.kind === 'part') {
@@ -190,6 +243,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
                 );
                 return (
                   <div key={k} className="craft-slot">
+                    <ItemIcon asset={slot.item} name={slot.template === 0 ? 'Segment' : slot.item} />
                     <span>{slot.template === 0 ? 'Segment' : slot.item}</span>
                     {Array.from({ length: slot.count }, (_, n) => (
                       <select
@@ -214,6 +268,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
               const index = at[k];
               return (
                 <div key={k} className="craft-slot">
+                  <ItemIcon asset={slot.item} name={slot.item} />
                   <span>
                     {slot.item} ×{slot.count}{' '}
                     {slot.kind === 'bulk' ? '(bulk)' : slot.kind === 'core' ? '(core)' : '(quality)'}
@@ -259,7 +314,8 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
   const addon = ADDONS[s.kind] as number | undefined;
   return (
     <div className="craft-underway">
-      <div className="hud-title">
+      <div className="hud-title craft-what">
+        <ItemIcon asset={s.item} name={s.name} />
         {s.name}
         {craft.mk > 0 ? ` · Mk ${mkNumeral(craft.mk)}` : ''} · {String(craft.pointsLeft)} point(s) left
       </div>
@@ -292,6 +348,87 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
       <button type="button" onClick={finish}>
         Finish
       </button>
+    </div>
+  );
+}
+
+/**
+ * Repair and salvage (crafting-build.md C3, crafting-catalog.md § 9.2, Q10), at the station like a craft: each weapon and armour piece held or worn, its
+ * condition — or broken — and its repairs; Repair with a kit of its class, two at most, each to a max × 0.75; Salvage for a crafted item in the grid.
+ */
+function Upkeep() {
+  const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
+  const repair = useCraft((s) => s.repair);
+  const salvage = useCraft((s) => s.salvage);
+  // Salvage destroys the item: a first click asks, a second on the same item does it.
+  const [confirming, setConfirming] = useState<string | null>(null);
+  // What wears (repair), and what a crafter made in the grid — parts included (salvage).
+  const wearing = items.filter(
+    (i) => i.stats !== undefined && (repairKitOf(i) !== undefined || (i.stats.crafter !== '0' && i.slot <= 100)),
+  );
+  if (wearing.length === 0) {
+    return null;
+  }
+
+  const kits = (template: number): number =>
+    items.filter((i) => i.template === template && i.stats === undefined).reduce((n, i) => n + i.count, 0);
+  return (
+    <div className="craft-upkeep" aria-label="Repair and salvage">
+      <div className="hud-title">Repair &amp; salvage</div>
+      {wearing.map((i) => {
+        const s = i.stats;
+        if (s === undefined) {
+          return null;
+        }
+
+        const kit = repairKitOf(i);
+        const left = s.maxCondition > 0 ? Math.round((100 * s.condition) / s.maxCondition) : 0;
+        // A repair restores to max × 0.75: worth it only below that, or broken — the server refuses the rest.
+        const worn = s.broken === true || s.condition * 1000 < s.maxCondition * 750;
+        return (
+          <div key={i.id} className="craft-slot" data-testid={`upkeep-${i.id}`}>
+            <ItemIcon asset={i.item} name={i.name} />
+            <span>
+              {i.name}
+              {i.mk > 0 ? ` · Mk ${mkNumeral(i.mk)}` : ''} · {s.broken === true ? 'broken' : `${String(left)} %`} ·
+              repaired {String(s.repairs)}/{String(MAX_REPAIRS)}
+            </span>
+            {kit === undefined ? null : (
+              <button
+                type="button"
+                disabled={s.repairs >= MAX_REPAIRS || kits(kit) === 0 || !worn}
+                title={
+                  kits(kit) === 0
+                    ? 'No repair kit of its kind'
+                    : !worn
+                      ? 'Not worn down: a repair would lower it to 75 % of its max'
+                      : undefined
+                }
+                onClick={() => {
+                  repair(i.id);
+                }}
+              >
+                Repair
+              </button>
+            )}
+            {s.crafter !== '0' && i.slot <= 100 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirming === i.id) {
+                    setConfirming(null);
+                    salvage(i.id);
+                  } else {
+                    setConfirming(i.id);
+                  }
+                }}
+              >
+                {confirming === i.id ? 'Salvage — sure?' : 'Salvage'}
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

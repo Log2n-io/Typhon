@@ -326,6 +326,23 @@ public sealed partial class SimBridge
         Num(j, "standardSold", StandardSold).Append(',');
         Num(j, "standardPaid", StandardPaid);
         j.Append('}');
+
+        // Decay and repair (crafting-build.md § 8, C3): wear written, items broken and destroyed — by band, C3-4's measure — repairs, their fees, salvage.
+        j.Append(",\"decay\":{");
+        Num(j, "wearWrites", WearWrites).Append(',');
+        Num(j, "broken", ItemsBroken).Append(',');
+        Num(j, "destroyed", ItemsDecayed).Append(',');
+        j.Append("\"destroyedByBand\":[");
+        for (var mk = 1; mk <= 5; mk++)
+        {
+            j.Append(mk == 1 ? "" : ",").Append(ItemsDecayedOfBand(mk).ToString(CultureInfo.InvariantCulture));
+        }
+
+        j.Append("],");
+        Num(j, "repairs", Repairs).Append(',');
+        Num(j, "repairFees", RepairFees).Append(',');
+        Num(j, "salvages", Salvages);
+        j.Append('}');
         return j.Append('}').ToString();
 
         static StringBuilder Bands(StringBuilder b, string name, int[] values)

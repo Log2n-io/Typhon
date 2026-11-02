@@ -204,6 +204,34 @@ internal sealed class BotCraftChecks
         });
     }
 
+    /// <summary>
+    /// Loïc, 2026-11-02: what no low-level creature drops, the vendor sells at Mk I. A crafter with nothing buys, in one visit, every vendor material its
+    /// target's tree lacks — each bought counted as held for the next — within a third of its wallet; the vendor's own price, the total rounded down.
+    /// </summary>
+    [Test]
+    public void ACrafter_BuysWhatItsTreeLacks_FromTheVendor()
+    {
+        var offers = MarketJson.Standard(MarketEndpoints.StandardJson());
+        var buys = CraftPlan.FromVendorAll(Book, ItemCatalog.Blaster, [], [], offers, 10_000);
+        Assert.Multiple(() =>
+        {
+            // The tree: the core (Metal 10, Crystal 5), the barrel (Metal 12, Crystal 4), the cell (Gas 8, Crystal 4, Metal 4), the grip (Hide 6,
+            // Metal 4), the blaster's own Metal 20 — one buy per material the vendor sells, its whole deficit; the Hide the beasts drop.
+            Assert.That(
+                buys.ConvertAll(b => (b.Template, b.Quantity)),
+                Is.EqualTo(new[] { (ItemCatalog.Metal, 50), (ItemCatalog.Crystal, 13), (ItemCatalog.Gas, 8) }));
+            List<HeldStack> held = [Units(ItemCatalog.CoreRanged, 1, 1), Units(ItemCatalog.Metal, 1, 30)];
+            var withCore = CraftPlan.FromVendorAll(Book, ItemCatalog.Blaster, held, [], offers, 10_000);
+            Assert.That(
+                withCore.ConvertAll(b => (b.Template, b.Quantity)),
+                Is.EqualTo(new[] { (ItemCatalog.Metal, 10), (ItemCatalog.Crystal, 8), (ItemCatalog.Gas, 8) }),
+                "a core held: its recipe is not bought, and what is held counts against the rest");
+            Assert.That(buys.ConvertAll(b => b.UnitPrice), Is.EqualTo(buys.ConvertAll(b => Equipment.StandardMaterialPrice(b.Template, b.Quantity))));
+            Assert.That(CraftPlan.FromVendorAll(Book, ItemCatalog.Blaster, [], [], offers, 50), Is.Empty, "a third of 50 cr buys no Metal");
+            Assert.That(offers.FindAll(o => o.PriceMilli > 0).ConvertAll(o => o.Template), Is.EquivalentTo(Equipment.StandardMaterials));
+        });
+    }
+
     [Test]
     public void ACraft_IsSentAsThePanelSendsIt()
     {

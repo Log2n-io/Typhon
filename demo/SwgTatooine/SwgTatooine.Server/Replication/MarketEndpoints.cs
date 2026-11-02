@@ -539,6 +539,21 @@ public static class MarketEndpoints
             first = false;
         }
 
+        // The Mk I bulk materials, by the unit: "priceMilli" a unit, a quantity's price its total rounded down (Equipment.StandardMaterialPrice).
+        foreach (var m in Equipment.StandardMaterials)
+        {
+            ItemCatalog.TryGet(m, out var t);
+            json.Append(",{")
+                .Append("\"template\":").Append(m)
+                .Append(",\"item\":\"").Append(t.Asset).Append('"')
+                .Append(",\"name\":\"").Append(EconomyEndpoints.Escape(t.Name ?? "")).Append('"')
+                .Append(",\"category\":\"").Append(ItemCategory.NameOf(t.Category)).Append('"')
+                .Append(",\"mk\":1")
+                .Append(",\"price\":").Append(Equipment.StandardMaterialPrice(m, 1))
+                .Append(",\"priceMilli\":").Append(Equipment.StandardMaterialMilli(m))
+                .Append('}');
+        }
+
         return json.Append("]}").ToString();
     }
 

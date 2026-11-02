@@ -377,8 +377,11 @@ public struct BuyStandard
     /// <summary>The item template's id: one of <see cref="Equipment.Standard"/>.</summary>
     public ushort Template;
 
-    /// <summary>The price the buyer was shown: another is refused <see cref="TatooineReplication.MarketSold"/>, as a listing's is.</summary>
+    /// <summary>The price the buyer was shown, for the quantity: another is refused <see cref="TatooineReplication.MarketSold"/>, as a listing's is.</summary>
     public uint Price;
+
+    /// <summary>Units of a vendor material (<see cref="Equipment.StandardMaterials"/>), 1-99; 0 is one. An item with stats is always one.</summary>
+    public byte Quantity;
 }
 
 /// <summary>
@@ -455,6 +458,23 @@ public struct CraftFinish
 {
     /// <summary>The schematic the client believes it is finishing: another is refused <see cref="TatooineReplication.CraftNone"/>.</summary>
     public ushort Schematic;
+}
+
+/// <summary>
+/// "Repair this" (crafting-build.md C3, crafting-catalog.md § 9.2): a weapon or armour piece, worn or in the grid, at a crafting station, with a repair kit
+/// of its class and a fee; restored to a max × 0.75, two repairs at most.
+/// </summary>
+public struct RepairItem
+{
+    /// <summary>The item's raw id.</summary>
+    public ulong Item;
+}
+
+/// <summary>"Salvage this" (Q10): a crafted item from the grid, at a crafting station, for a quarter of its quality materials at its core's tier.</summary>
+public struct SalvageItem
+{
+    /// <summary>The item's raw id.</summary>
+    public ulong Item;
 }
 
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
@@ -1084,6 +1104,21 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a <see cref="CraftEnhance"/> on a craft that already has its add-on, or of a kind that takes none.</summary>
     public const byte CraftNoAddon = AckReasons.FirstApplicationReason + 49;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="RepairItem"/> of something the character does not hold or wear, or that does not wear.</summary>
+    public const byte RepairBadItem = AckReasons.FirstApplicationReason + 50;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="RepairItem"/> with no repair kit of the item's class held.</summary>
+    public const byte RepairNoKit = AckReasons.FirstApplicationReason + 51;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="RepairItem"/> of an item that has had its two repairs.</summary>
+    public const byte RepairSpent = AckReasons.FirstApplicationReason + 52;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="SalvageItem"/> of something not in the grid, or that no crafter made.</summary>
+    public const byte SalvageBadItem = AckReasons.FirstApplicationReason + 53;
+
+    /// <summary><c>ACKS</c> reason: a <see cref="RepairItem"/> of an item not worn down: a repair to max × 0.75 would lower its condition.</summary>
+    public const byte RepairNotWorn = AckReasons.FirstApplicationReason + 54;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -2098,7 +2133,8 @@ public static partial class TatooineReplication
             .Rate(2, 4)
             .Roles(SessionRole.Player)
             .Field(m => m.Template, Codec.VarUInt, "template")
-            .Field(m => m.Price, Codec.VarUInt, "price"));
+            .Field(m => m.Price, Codec.VarUInt, "price")
+            .Field(m => m.Quantity, Codec.U8, "quantity"));
 
         // The workshop (crafting-build.md C1). Queued, each a move of an item; a few a second, which a person changing a set of armour does not reach.
         subs.Command<Equip>(c => c
@@ -2139,6 +2175,14 @@ public static partial class TatooineReplication
             .Rate(2, 4)
             .Roles(SessionRole.Player)
             .Field(m => m.Schematic, Codec.VarUInt, "schematic"));
+        subs.Command<RepairItem>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item"));
+        subs.Command<SalvageItem>(c => c
+            .Rate(2, 4)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
@@ -67,11 +68,12 @@ internal sealed class InstanceChecks : ServedChecks
         Breathe();
     }
 
-    private static void BuyStandard(FakeLink link, ushort template, long price)
+    private static void BuyStandard(FakeLink link, ushort template, long price, int quantity = 0)
         => link.SendCommand(nameof(Server.BuyStandard), new RecordValues
         {
             ["template"] = FieldValue.Of(template),
             ["price"] = FieldValue.Of((double)price),
+            ["quantity"] = FieldValue.Of((double)quantity),
         });
 
     /// <summary>A character's instances, by id, with their stack and stats.</summary>
@@ -106,6 +108,46 @@ internal sealed class InstanceChecks : ServedChecks
     /// The vendor sells standard issue: one instance minted into a free slot, a typical Mk I craft, new and pristine; the buyer pays World twice its value as
     /// one <c>standard</c> credit row, and the item row names the instance and the credit row. Two of one template are two instances, never a stack.
     /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheVendor_SellsMkIBulkMaterials_ByTheUnit()
+    {
+        using var sim = Start();
+        var a = LogIn(sim, 0x9311, At(Home(sim)), 1);
+        var balance = Ledgers.Balance(sim, a.Character);
+        var creditRows = Ledgers.Rows(sim).Count;
+        var price = Equipment.StandardMaterialPrice(ItemCatalog.Metal, 25);
+
+        BuyStandard(a.Link, ItemCatalog.Metal, price, 25);
+        SessionHarness.Until(() => Market.Units(sim, a.Character, ItemCatalog.Metal, 1) == 25, "the metal");
+        Harness.Ticks(2);
+        var row = Items.Rows(sim).Single(r => r.Template == ItemCatalog.Metal);
+        var credit = Ledgers.Rows(sim).Skip(creditRows).Single();
+        Assert.Multiple(() =>
+        {
+            Assert.That(price, Is.EqualTo(85), "⌊25 × 1.7 cr × 2⌋");
+            Assert.That(
+                (row.Kind, row.From, row.To, row.Count, row.Mk, row.Ref),
+                Is.EqualTo((ItemMoveKind.Standard, ItemLedger.World, a.Key, 25, (byte)1, credit.Seq)));
+            Assert.That((credit.Kind, credit.Amount, credit.Ref), Is.EqualTo((TransferKind.Standard, price, (long)ItemCatalog.Metal)));
+            Assert.That(Ledgers.Balance(sim, a.Character), Is.EqualTo(balance - price));
+        });
+
+        void Expect(Action send, byte reason, string what)
+        {
+            var before = Ledgers.Refusals(a.Link).Count(r => r == reason);
+            send();
+            SessionHarness.Until(() => Ledgers.Refusals(a.Link).Count(r => r == reason) > before, what);
+            Breathe();
+        }
+
+        Expect(() => BuyStandard(a.Link, ItemCatalog.Crystal, Equipment.StandardMaterialPrice(ItemCatalog.Crystal, 10) + 1, 10), TatooineReplication.MarketSold,
+            "another price");
+        Expect(() => BuyStandard(a.Link, ItemCatalog.Crystal, 999, 100), TatooineReplication.MarketBadListing, "past a stack");
+        Expect(() => BuyStandard(a.Link, ItemCatalog.Hide, 3, 1), TatooineReplication.MarketBadListing, "a material the beasts drop is not sold");
+        AuditsOk(sim, "after the materials");
+    }
+
     [Test]
     [CancelAfter(120_000)]
     public void TheVendor_SellsStandardIssue_AsInstancesThatNeverMerge()
@@ -259,9 +301,13 @@ internal sealed class InstanceChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That((stack.Template, stack.Mk), Is.EqualTo((Blaster, (byte)1)));
-            Assert.That(packRows, Has.Count.EqualTo(1));
-            Assert.That((packRows[0].From, packRows[0].ToStack, packRows[0].Ref), Is.EqualTo((ItemLedger.World, unchecked((long)id.RawValue), 0L)));
-            Assert.That(packRows[0].WorldTick, Is.EqualTo(grant.WorldTick), "the pack and the credits are not one commit");
+            Assert.That(
+                packRows.Select(r => (r.Template, r.Mk, r.Count)),
+                Is.EquivalentTo(new[] { (Blaster, (byte)1, 1), (ItemCatalog.KitWeaponRepair, (byte)0, 1) }),
+                "the pack: the blaster and a weapon repair kit (C3)");
+            var blasterRow = packRows.Single(r => r.Template == Blaster);
+            Assert.That((blasterRow.From, blasterRow.ToStack, blasterRow.Ref), Is.EqualTo((ItemLedger.World, unchecked((long)id.RawValue), 0L)));
+            Assert.That(packRows.All(r => r.WorldTick == grant.WorldTick), Is.True, "the pack and the credits are not one commit");
             Assert.That(Ledgers.Balance(sim, a.Character), Is.EqualTo(EconomyLedger.StartingCredits));
         });
         AuditsOk(sim, "after the pack");
@@ -275,7 +321,10 @@ internal sealed class InstanceChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That(again.Character, Is.EqualTo(a.Character));
-            Assert.That(Items.Rows(sim).Count(r => r.To == a.Key && r.Kind == ItemMoveKind.Grant), Is.EqualTo(1), "the pack was granted twice");
+            Assert.That(
+                Items.Rows(sim).Count(r => r.To == a.Key && r.Kind == ItemMoveKind.Grant),
+                Is.EqualTo(2),
+                "the pack (a blaster and a kit) was granted again");
             Assert.That(Instances(sim, a.Character), Has.Count.EqualTo(1));
         });
     }

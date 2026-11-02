@@ -962,6 +962,7 @@ public static partial class TatooineReplication
             if (CharacterOfSession.TryGetValue(sessionValue, out var character))
             {
                 SaveAvatarLocation(players, characters, avatar, character);
+                RetireWear(players, avatar, character);
             }
 
             // The avatar exists for the session and nothing else, so it goes with it. This is the demo's first in-tick Destroy on a
@@ -1001,6 +1002,7 @@ public static partial class TatooineReplication
         if (CharacterOfSession.TryGetValue(sessionValue, out var character))
         {
             SaveAvatarLocation(players, tx.For<CharacterArch>(), hold.Avatar, character);
+            RetireWear(players, hold.Avatar, character);
         }
 
         tx.Destroy(hold.Avatar);
@@ -1035,6 +1037,39 @@ public static partial class TatooineReplication
 
     /// <summary>Scratch: the account holds to drop, collected before the dictionary is written.</summary>
     private static readonly List<ulong> AccountsToDrop = [];
+
+    // The wear a body counted and had not written into its items (crafting-catalog.md § 9.1: "at logout"), taken with it: the Workshop writes it on
+    // its next pass. Written here (Input phase), drained there (Economy phase); a failed pass puts it back.
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<(EntityId Character, PlayerGear Gear)> WearRetired = new();
+
+    private static void RetireWear(ArchetypeAccessor<Player> players, EntityId avatar, EntityId character)
+    {
+        if (players.TryOpen(avatar, out var body) && body.Read(Player.Gear) is { Uses: > 0 } gear)
+        {
+            WearRetired.Enqueue((character, gear));
+        }
+    }
+
+    /// <summary>Whether a body that logged out left wear to write.</summary>
+    internal static bool WearRetiredPending => !WearRetired.IsEmpty;
+
+    /// <summary>Moves the wear left by bodies that logged out into <paramref name="into"/>.</summary>
+    internal static void DrainWearRetired(List<(EntityId Character, PlayerGear Gear)> into)
+    {
+        while (WearRetired.TryDequeue(out var w))
+        {
+            into.Add(w);
+        }
+    }
+
+    /// <summary>Puts back what a failed Workshop pass did not write.</summary>
+    internal static void RequeueWearRetired(List<(EntityId Character, PlayerGear Gear)> from)
+    {
+        foreach (var w in from)
+        {
+            WearRetired.Enqueue(w);
+        }
+    }
 
     /// <summary>
     /// Copies an avatar's position and realm onto its character.
@@ -1382,6 +1417,7 @@ public static partial class TatooineReplication
     private static void ResetAvatarAccounting()
     {
         BodiesBound.Clear();
+        WearRetired.Clear();
         AccountOfSession.Clear();
         CharacterOfSession.Clear();
         SessionOfAccount.Clear();

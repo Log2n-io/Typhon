@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral } from '../data/items';
 import {
@@ -8,11 +8,13 @@ import {
   formatAge,
   MAX_UNIT_PRICE,
   priceOf,
+  standardMaterialPrice,
   vendorPayout,
   type BazaarTab,
   type MarketCategory,
   type MarketListing,
   type MarketSort,
+  type StandardOffer,
 } from '../data/market';
 import { formatCredits } from '../data/wallet';
 import { CITIES } from '../data/world-data';
@@ -330,6 +332,19 @@ function IssueTab() {
       )}
       {standard.length === 0 ? <div className="hint">Nothing for sale.</div> : null}
       {standard.map((o) => {
+        if (o.priceMilli !== undefined) {
+          return (
+            <MaterialRow
+              key={o.template}
+              offer={o}
+              icon={icons[o.item]}
+              disabled={here === 0 || pending}
+              credits={credits}
+              buy={buyStandard}
+            />
+          );
+        }
+
         const icon = icons[o.item] as string | undefined;
         const tip = itemTooltip({
           id: '',
@@ -340,7 +355,7 @@ function IssueTab() {
           template: o.template,
           mk: o.mk,
           count: 1,
-          stats: o.stats,
+          ...(o.stats === undefined ? {} : { stats: o.stats }),
         });
         return (
           <div key={o.template} className="bazaar-row" title={tip} data-testid={`issue-${o.item}`}>
@@ -373,6 +388,69 @@ function IssueTab() {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** A vendor material (Loïc, 2026-11-02): Mk I by the unit, a quantity of 1-99, the total rounded down as the server prices it. */
+function MaterialRow({
+  offer,
+  icon,
+  disabled,
+  credits,
+  buy,
+}: {
+  readonly offer: StandardOffer;
+  readonly icon: string | undefined;
+  readonly disabled: boolean;
+  readonly credits: number | null;
+  readonly buy: (template: number, price: number, quantity?: number) => void;
+}) {
+  // The field's text as typed — clamped to 1-99 only for the price and the buy, so clearing it or typing "25" never jumps (review, 2026-11-02).
+  const [typed, setTyped] = useState('10');
+  const quantity = Math.min(99, Math.max(1, Math.floor(Number(typed)) || 1));
+  const price = standardMaterialPrice(offer, quantity);
+  return (
+    <div className="bazaar-row" data-testid={`issue-${offer.item}`}>
+      {icon === undefined ? (
+        <span className="inventory-initials">{itemInitials(offer.name)}</span>
+      ) : (
+        <img
+          className="inventory-icon"
+          src={icon}
+          width={ITEM_ICON_PX}
+          height={ITEM_ICON_PX}
+          alt=""
+          draggable={false}
+        />
+      )}
+      <span className="bazaar-what">
+        {offer.name} · Mk {mkNumeral(offer.mk)} ×
+        <input
+          type="number"
+          min={1}
+          max={99}
+          value={typed}
+          aria-label={`${offer.name} quantity`}
+          onChange={(e) => {
+            setTyped(e.target.value);
+          }}
+          onBlur={() => {
+            setTyped(String(quantity));
+          }}
+        />
+      </span>
+      <span className="bazaar-price">{formatCredits(price)}</span>
+      <button
+        type="button"
+        disabled={disabled || price <= 0 || (credits !== null && credits < price)}
+        title={disabled ? NOT_HERE : undefined}
+        onClick={() => {
+          buy(offer.template, price, quantity);
+        }}
+      >
+        Buy
+      </button>
     </div>
   );
 }

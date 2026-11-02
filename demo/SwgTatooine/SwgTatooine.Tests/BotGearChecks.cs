@@ -19,7 +19,7 @@ internal sealed class BotGearChecks
     {
         Assert.Multiple(() =>
         {
-            Assert.That(Offers, Has.Count.EqualTo(Equipment.Standard.Length));
+            Assert.That(Offers, Has.Count.EqualTo(Equipment.Standard.Length + Equipment.StandardMaterials.Length), "the items and the Mk I materials");
             Assert.That(Offers.Find(o => o.Template == ItemCatalog.Blaster).Wears, Is.EqualTo(EquipSlot.Weapon));
             Assert.That(Offers.Find(o => o.Template == ItemCatalog.PaddedHelmet + 4).Price, Is.EqualTo(Equipment.StandardPrice(ItemCatalog.PaddedHelmet + 4)));
         });
@@ -181,13 +181,100 @@ internal sealed class BotGearChecks
         });
     }
 
+    private static GearItem Worn(ulong id, int slot, int mk, int condition, int max, int repairs = 0, bool broken = false, string item = "blaster_dl44")
+        => new(id, slot == 101 ? ItemCatalog.Blaster : ItemCatalog.PaddedHelmet, slot, slot, 0, item, mk)
+        {
+            Condition = condition,
+            MaxCondition = max,
+            Repairs = repairs,
+            Broken = broken,
+        };
+
+    private static HeldStack Kits(ushort kit, int n)
+        => new(kit, kit == MarketPlan.KitWeapon ? "kit_weapon_repair" : "kit_armor_repair", MarketCategory.Other, 0, n);
+
+    /// <summary>
+    /// § 6, Repair: a worn item broken or under 20 % with a repair left is repaired when a kit of its class is held — one kit each, in slot order; not one
+    /// above 20 %, not one with its two repairs used.
+    /// </summary>
+    [Test]
+    public void ABot_RepairsWhatIsWornDown_WithAKitOfItsClass()
+    {
+        var gear = new List<GearItem>
+        {
+            Worn(1, 101, 1, 0, 1000, broken: true),
+            Worn(2, 102, 1, 150, 1000, item: "armor_padded_helmet"),
+            Worn(3, 103, 1, 199, 1000, item: "armor_padded_torso"),
+            Worn(4, 104, 1, 201, 1000, item: "armor_padded_arms"),
+            Worn(5, 105, 1, 100, 1000, repairs: 2, item: "armor_padded_legs"),
+        };
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.RepairsDue(gear, [Kits(MarketPlan.KitWeapon, 1), Kits(MarketPlan.KitArmor, 1)]), Is.EqualTo(new ulong[] { 1, 2 }),
+                "one armour kit: the head first; the arms are above 20 %, the legs spent");
+            Assert.That(MarketPlan.RepairsDue(gear, [Kits(MarketPlan.KitArmor, 5)]), Is.EqualTo(new ulong[] { 2, 3 }), "no weapon kit: the blaster waits");
+            Assert.That(MarketPlan.RepairsDue(gear, []), Is.Empty);
+        });
+    }
+
+    /// <summary>
+    /// § 6, Gear: a worn item worn down with no repair left — or no kit to make one — is to be replaced: its slot is wanted as if empty, and a sound piece
+    /// is put on over it, even of the same Mk.
+    /// </summary>
+    [Test]
+    public void ABot_ReplacesWhatIsWornDownAndPastRepair()
+    {
+        var spent = Worn(1, 101, 1, 100, 1000, repairs: 2);
+        var spare = new GearItem(9, ItemCatalog.Blaster, 4, 101, 0, "blaster_dl44", 1) { Condition = 1000, MaxCondition = 1000 };
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.Spent(spent, []), Is.True);
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 0, 1000, broken: true), [Kits(MarketPlan.KitWeapon, 1)]), Is.False, "a repair left, a kit held");
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 0, 1000, broken: true), []), Is.True, "a repair left but no kit");
+            Assert.That(MarketPlan.GearWanted([spent], null, 1, []), Is.EqualTo(("blaster_dl44", 101, 0)), "the same piece, any Mk of its band");
+            Assert.That(MarketPlan.NextToWear([spent, spare], 1, ItemCatalog.Blaster, []), Is.EqualTo(9UL), "a sound spare over the spent one");
+            Assert.That(MarketPlan.NextToWear([spent, spare], 1, ItemCatalog.Blaster), Is.Zero, "the premise: without the held stacks, no replacement");
+            var downSpare = spare with { Broken = true, Condition = 0 };
+            Assert.That(MarketPlan.NextToWear([Worn(1, 101, 1, 900, 1000), downSpare], 3, ItemCatalog.Blaster), Is.Zero, "never a worn-down spare");
+        });
+    }
+
+    /// <summary>
+    /// Review, 2026-11-02: worn-down gear leaves the economy — a bot never buys a worn-down listing, and sells its own worn-down spare to the vendor
+    /// instead of listing it — and the vendor's standard issue covers a slot whose worn piece is spent, the bot's weapon included.
+    /// </summary>
+    [Test]
+    public void WornDownGear_IsNeitherBoughtNorListed_AndTheVendorReplacesASpentPiece()
+    {
+        var prices = MarketPrices.None.With("blaster_dl44", 1, 1_000d).With("blaster_dl44", 2, 2_000d);
+        BrowseRow Row(ulong id, int condition, bool broken = false)
+            => new(id, 1, "blaster_dl44", MarketCategory.Other, 1, 1, 900, 900, 99) { Condition = condition, MaxCondition = 1000, Broken = broken };
+        var spent = Worn(1, 101, 1, 100, 1000, repairs: 2);
+        var spare = new GearItem(2, ItemCatalog.Blaster, 3, 101, 0, "blaster_dl44", 1) { Condition = 50, MaxCondition = 1000 };
+        var rng = 1u;
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.ChooseGear([Row(1, 100), Row(2, 0, broken: true)], prices, 0, 1, 10_000, []), Is.Null, "a worn-down listing bought");
+            Assert.That(MarketPlan.ChooseGear([Row(1, 100), Row(3, 900)], prices, 0, 1, 10_000, [])?.Id, Is.EqualTo(3UL));
+            var gone = MarketPlan.Surplus([spent, spare], prices, 0, 1, ref rng, ItemCatalog.Blaster, false, []);
+            Assert.That(gone.ConvertAll(c => (c.Step, c.Item)), Is.EqualTo(new[] { (MarketStep.Vendor, 2UL) }), "the worn-down spare is listed");
+            Assert.That(MarketPlan.ChooseStandard(Offers, [spent], 10_000, [], ItemCatalog.Blaster)?.Template, Is.EqualTo(ItemCatalog.Blaster),
+                "the spent blaster covers its slot");
+            Assert.That(
+                MarketPlan.ChooseStandard(Offers, [spent], 10_000)?.Template,
+                Is.Not.EqualTo(ItemCatalog.Blaster),
+                "the premise: by default, no weapon");
+        });
+    }
+
     [Test]
     public void TheInventoryRead_KeepsGearOutOfTheBazaarsGoods_AndTheWornOutOfTheGrid()
     {
         var json = """
             {"open":true,"slots":40,"items":[
               {"id":"5","slot":101,"item":"blaster_dl44","name":"DL-44 Blaster","category":"weapon","template":69,"mk":1,"count":1,
-               "stats":{"damage":81,"delayMs":1021,"rangeDm":300,"wears":101,"condition":1,"maxCondition":1,"lifeMilli":1000,"repairs":0,"crafter":"0"}},
+               "stats":{"damage":81,"delayMs":1021,"rangeDm":300,"wears":101,"condition":0,"maxCondition":1000,"lifeMilli":1000,"repairs":1,
+                        "broken":true,"crafter":"0"}},
               {"id":"6","slot":1,"item":"mat_hide","name":"Hide","category":"material","template":8,"mk":2,"count":7}],
              "lost":[]}
             """;
@@ -198,7 +285,13 @@ internal sealed class BotGearChecks
         {
             Assert.That(view.Stacks, Is.EqualTo(1), "the grid counts only the hide: the worn blaster is not in it");
             Assert.That(held.ConvertAll(h => h.Item), Is.EqualTo(new[] { "mat_hide" }));
-            Assert.That(gear, Is.EqualTo(new[] { new GearItem(5, ItemCatalog.Blaster, EquipSlot.Weapon, EquipSlot.Weapon, 0, "blaster_dl44", 1) }));
+            Assert.That(gear, Is.EqualTo(new[]
+            {
+                new GearItem(5, ItemCatalog.Blaster, EquipSlot.Weapon, EquipSlot.Weapon, 0, "blaster_dl44", 1)
+                {
+                    Condition = 0, MaxCondition = 1000, Repairs = 1, Broken = true,
+                },
+            }));
         });
     }
 }

@@ -115,6 +115,7 @@ public sealed partial class SimBridge
             var vitals = cluster.GetReadOnlySpan(Player.Vitals);
             var sessions = cluster.GetReadOnlySpan(Player.Session);
             Span<PlayerVitals> vitalsRw = default;
+            Span<PlayerGear> gearsRw = default;
             Span<PlayerSession> sessionsRw = default;
 
             // The players whose health this pass gave back, replicated once per cluster (ADR-067).
@@ -267,6 +268,12 @@ public sealed partial class SimBridge
                     AttackerLevel = possessed ? looks[idx].Level : (byte)TatooineData.CrowdLevel,
                     DamageType = possessed ? arms.Type : DamageType.Kinetic,
                 });
+
+                // The weapon's use, counted on the body (crafting-catalog.md § 9.1): only a weapon a person fights with, not the fist nor the crowd's.
+                if (possessed && gears[idx].Stance == stance && !gears[idx].IsFist && SimBridge.CountAttack(ref PlayerGearRw(in cluster, ref gearsRw)[idx]))
+                {
+                    WearDue(cluster.GetEntityId(idx));
+                }
 
                 // A weapon strikes on its own steady beat, which a client plays one attack clip per hit to; the crowd keeps its random weapon delay.
                 var key = cluster.GetEntityId(idx).EntityKey;
@@ -736,9 +743,11 @@ public sealed partial class SimBridge
             // The B4 level factor (character-level.md § 6), then the rolls and the armour (crafting-catalog.md § 9.3), here where the target is open: the
             // blow, the health removed and the Attack a client draws all carry the final amount.
             var crit = false;
+            var hitDamage = 0;
             if (ev.Kind == CombatEventKind.Damage)
             {
                 var scaled = ScaleByLevel(ev.Amount, ev.AttackerLevel, LevelOf(ref target, ev.TargetKind));
+                hitDamage = scaled;
                 events[i].Amount = RollBlow(scaled, ev.Attacker, ev.Target, ctx.TickNumber, ev.TargetKind == CombatTargetKind.Player ? MitigationOf(ref target, ev.DamageType) : 0,
                     out crit);
                 if (crit)
@@ -775,6 +784,7 @@ public sealed partial class SimBridge
                     if (landed)
                     {
                         damageApplied++;
+                        WearHit(ref target, in ev, hitDamage);
                     }
                     else
                     {
@@ -859,6 +869,36 @@ public sealed partial class SimBridge
 
     /// <summary>Blows that rolled a critical since start: with <see cref="DamageApplied"/>, the crit rate.</summary>
     public long Crits => Interlocked.Read(ref _crits);
+
+    /// <summary>
+    /// A blow that landed on a person's body wears its armour by its damage before mitigation (crafting-catalog.md § 9.1); its fall wears everything it
+    /// wears. The crowd, whose gear the Workshop never wrote, wears nothing.
+    /// </summary>
+    private void WearHit(ref EntityRefMut target, in CombatEvent ev, int damage)
+    {
+        var gear = target.Read(Player.Gear);
+        if (gear.Stance == 0)
+        {
+            return;
+        }
+
+        var due = false;
+        if (damage > 0)
+        {
+            due = CountHit(ref gear, damage);
+            target.Set(Player.Gear, gear);
+        }
+
+        var down = target.Read(Player.Vitals).Down;
+        if (down != Downed.Up)
+        {
+            FallDue(ev.Target, down == Downed.Dead);
+        }
+        else if (due)
+        {
+            WearDue(ev.Target);
+        }
+    }
 
     /// <summary>
     /// Withdraws every <see cref="CombatEventKind.Damage"/> still to be drained that names a player just cloned.
@@ -1524,6 +1564,17 @@ public sealed partial class SimBridge
         if (rw.IsEmpty)
         {
             rw = cluster.GetSpan(Creature.Ai);
+        }
+
+        return rw;
+    }
+
+    /// <summary>The cluster's mutable player gear (its wear counters), handed out on the first write of this cluster's walk and not before.</summary>
+    private static Span<PlayerGear> PlayerGearRw(in ClusterRef<Player> cluster, ref Span<PlayerGear> rw)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Player.Gear);
         }
 
         return rw;

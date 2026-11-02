@@ -34,7 +34,7 @@ public readonly record struct MarketCommand(MarketStep Step, ushort Template, in
 
     public static MarketCommand Buy(ulong listing, long unit) => new(MarketStep.Buy, 0, 0, 0, unit, listing);
 
-    public static MarketCommand Standard(ushort template, long price) => new(MarketStep.Standard, template, 1, 1, price, 0);
+    public static MarketCommand Standard(ushort template, long price, int quantity = 1) => new(MarketStep.Standard, template, 1, quantity, price, 0);
 }
 
 /// <summary>
@@ -89,11 +89,11 @@ public static class MarketPlan
     /// there is none; a band of 0 never upgrades. With a <paramref name="weapon"/> template, the weapon slot takes only that weapon: a bot that fights
     /// with a pistol does not disarm itself with a sword (review, 2026-11-02).
     /// </summary>
-    public static ulong NextToWear(IReadOnlyList<GearItem> gear, int band = 0, ushort weapon = 0)
+    public static ulong NextToWear(IReadOnlyList<GearItem> gear, int band = 0, ushort weapon = 0, IReadOnlyList<HeldStack> held = null)
     {
         foreach (var g in gear)
         {
-            if (g.Worn || g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon))
+            if (g.Worn || g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon) || g.WornDown)
             {
                 continue;
             }
@@ -104,7 +104,8 @@ public static class MarketPlan
             {
                 if (w.Worn && w.Slot == g.Wears)
                 {
-                    free = false;
+                    // A worn item to be replaced leaves its slot free for any (crafting-build.md § 6, Gear).
+                    free = held != null && Spent(w, held);
                     better = band > 0 && g.Mk > w.Mk;
                 }
             }
@@ -116,6 +117,94 @@ public static class MarketPlan
         }
 
         return 0;
+    }
+
+    // Nothing to repair: one list, never written.
+    private static readonly List<ulong> NoRepairs = [];
+
+    /// <summary>The bulk materials the vendor sells at Mk I (Loïc, 2026-11-02): Ore, Water, Metal, Crystal, Gas, Chemical, Fiber — ItemCatalog's ids.</summary>
+    public static bool VendorSells(ushort template) => template is >= 1 and <= 7;
+
+    /// <summary>Repairs an item takes at most (crafting-catalog.md § 9.2).</summary>
+    public const int MaxRepairs = 2;
+
+    /// <summary>The repair kits: a weapon's, an armour piece's (ItemCatalog's ids).</summary>
+    public const ushort KitWeapon = 62;
+
+    public const ushort KitArmor = 63;
+
+    /// <summary>The kit an item of slot <paramref name="wears"/> is repaired with.</summary>
+    public static ushort KitFor(int wears) => wears == 101 ? KitWeapon : KitArmor;
+
+    /// <summary>
+    /// The worn items to repair now (crafting-build.md § 6, Repair): worn down, a repair left, and a kit of its class held for each — the kits shared out
+    /// in slot order.
+    /// </summary>
+    public static List<ulong> RepairsDue(IReadOnlyList<GearItem> gear, IReadOnlyList<HeldStack> held)
+    {
+        var any = false;
+        foreach (var g in gear)
+        {
+            any |= g.Worn && g.WornDown && g.Repairs < MaxRepairs;
+        }
+
+        if (!any)
+        {
+            return NoRepairs;   // the common case: nothing allocated on every inventory read
+        }
+
+        var due = new List<ulong>();
+        int weaponKits = 0, armorKits = 0;
+        foreach (var h in held)
+        {
+            weaponKits += h.Template == KitWeapon ? h.Count : 0;
+            armorKits += h.Template == KitArmor ? h.Count : 0;
+        }
+
+        foreach (var g in gear)
+        {
+            if (!g.Worn || !g.WornDown || g.Repairs >= MaxRepairs)
+            {
+                continue;
+            }
+
+            ref var kits = ref g.Wears == 101 ? ref weaponKits : ref armorKits;
+            if (kits > 0)
+            {
+                kits--;
+                due.Add(g.Id);
+            }
+        }
+
+        return due;
+    }
+
+    /// <summary>
+    /// Whether a worn item is to be replaced (crafting-build.md § 6, Gear): worn down with no repair left, or none it can make — no kit of its class held.
+    /// Its slot counts as empty: the board's piece or the vendor's is bought, and put on over it.
+    /// </summary>
+    public static bool Spent(GearItem g, IReadOnlyList<HeldStack> held)
+    {
+        if (!g.Worn || !g.WornDown)
+        {
+            return false;
+        }
+
+        if (g.Repairs >= MaxRepairs)
+        {
+            return true;
+        }
+
+        var kit = KitFor(g.Wears);
+        foreach (var h in held)
+        {
+            if (h.Template == kit && h.Count > 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>What it lists is listed at its value times a draw in this range (crafting-build.md § 6, Surplus).</summary>
@@ -133,16 +222,27 @@ public static class MarketPlan
     /// Surplus: "then sell to the vendor"): an item it will never use must not hold a slot the next quest's drops need.
     /// </remarks>
     public static List<MarketCommand> Surplus(IReadOnlyList<GearItem> gear, MarketPrices prices, int listed, int band, ref uint rng, ushort weapon = 0,
-        bool vendorRest = false)
+        bool vendorRest = false, IReadOnlyList<HeldStack> held = null)
     {
         var plan = new List<MarketCommand>();
-        var wear = NextToWear(gear, band, weapon);
+        var wear = NextToWear(gear, band, weapon, held);
         foreach (var g in gear)
         {
             var value = prices.ValueOf(g.Item, g.Mk);
             if (g.Worn || g.Id == wear || g.Template is >= CraftPlan.FirstPart and <= CraftPlan.LastPart || value <= 0d
                 || Wanted(gear, g, band, weapon))
             {
+                continue;
+            }
+
+            // Worn down — what a replacement took off: never listed for another bot to buy and never wear; the vendor takes it (review, 2026-11-02).
+            if (g.WornDown)
+            {
+                if (VendorPayout(1, value) > 0)
+                {
+                    plan.Add(new MarketCommand(MarketStep.Vendor, g.Template, g.Mk, 1, 0, 0, g.Id));
+                }
+
                 continue;
             }
 
@@ -166,7 +266,7 @@ public static class MarketPlan
     // Whether an unworn item would still be put on: its slot's worn Mk is lower and it is within the band — the next read's NextToWear takes it.
     private static bool Wanted(IReadOnlyList<GearItem> gear, GearItem g, int band, ushort weapon)
     {
-        if (g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon))
+        if (g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon) || g.WornDown)
         {
             return false;
         }
@@ -187,20 +287,39 @@ public static class MarketPlan
     /// (102-107) it has nothing for, as the padded piece; else the first armour slot whose best is below its band, as the piece it wears. The asset to
     /// browse, the slot, and the best Mk it already has there (0 for none); null when its gear is of its band.
     /// </summary>
-    public static (string Item, int Slot, int HaveMk)? GearWanted(IReadOnlyList<GearItem> gear, IReadOnlyList<StandardOffer> offers, int band)
+    public static (string Item, int Slot, int HaveMk)? GearWanted(IReadOnlyList<GearItem> gear, IReadOnlyList<StandardOffer> offers, int band,
+        IReadOnlyList<HeldStack> held = null)
     {
         (string, int, int)? below = null;
         for (var slot = 101; slot <= 107; slot++)
         {
             var have = 0;
             string item = null;
+            string spent = null;
             foreach (var g in gear)
             {
-                if (g.Wears == slot && g.Mk > have)
+                if (g.Wears != slot)
+                {
+                    continue;
+                }
+
+                // Worn down and past repair (or held so): it counts as nothing — its replacement is wanted, the same piece.
+                if (g.WornDown && (held == null ? g.Repairs >= MaxRepairs : g.Worn ? Spent(g, held) : true))
+                {
+                    spent ??= g.Item;
+                    continue;
+                }
+
+                if (g.Mk > have)
                 {
                     have = g.Mk;
                     item = g.Item;
                 }
+            }
+
+            if (have == 0 && spent != null)
+            {
+                return (spent, slot, 0);
             }
 
             if (have == 0 && slot > 101 && offers != null)
@@ -241,7 +360,7 @@ public static class MarketPlan
         {
             var value = prices.ValueOf(r.Item, r.Mk);
             if (r.Mk <= haveMk || r.Mk > Math.Max(1, band) || value <= 0d || r.Unit > BuyOverValue * value || wallet - r.Total < StandardReserve
-                || Contains(own, r.Id))
+                || Contains(own, r.Id) || r.WornDown)
             {
                 continue;
             }
@@ -264,7 +383,12 @@ public static class MarketPlan
     /// The standard-issue armour piece a bot buys (crafting-build.md § 6, C1's gear rule): the cheapest padded one for an armour slot nothing worn or held
     /// covers, if the wallet keeps <see cref="StandardReserve"/> after it; none when every slot is covered or it cannot afford one.
     /// </summary>
-    public static MarketCommand? ChooseStandard(IReadOnlyList<StandardOffer> offers, IReadOnlyList<GearItem> gear, long credits)
+    /// <remarks>
+    /// With the stacks held, a worn piece to be replaced (<see cref="Spent"/>) or a worn-down one in the grid covers nothing, and the bot's own weapon
+    /// (<paramref name="weapon"/>) is bought too when its slot is so: the vendor is the fallback of the replacement rule (review, 2026-11-02).
+    /// </remarks>
+    public static MarketCommand? ChooseStandard(IReadOnlyList<StandardOffer> offers, IReadOnlyList<GearItem> gear, long credits,
+        IReadOnlyList<HeldStack> held = null, ushort weapon = 0)
     {
         if (offers == null)
         {
@@ -274,7 +398,9 @@ public static class MarketPlan
         StandardOffer? best = null;
         foreach (var o in offers)
         {
-            if (o.Wears is < 102 or > 107 || !o.Item.StartsWith("armor_padded_", StringComparison.Ordinal) || credits - o.Price < StandardReserve)
+            var piece = o.Wears is >= 102 and <= 107 && o.Item.StartsWith("armor_padded_", StringComparison.Ordinal);
+            var arms = o.Wears == 101 && weapon != 0 && o.Template == weapon;
+            if ((!piece && !arms) || credits - o.Price < StandardReserve)
             {
                 continue;
             }
@@ -282,10 +408,11 @@ public static class MarketPlan
             var covered = false;
             foreach (var g in gear)
             {
-                covered |= g.Wears == o.Wears;
+                covered |= g.Wears == o.Wears && (held == null || (g.Worn ? !Spent(g, held) : !g.WornDown));
             }
 
-            if (!covered && (best == null || o.Price < best.Value.Price))
+            // The weapon first — a bot fighting with its fist is worse off than one short of gloves — then the cheapest piece.
+            if (!covered && (best == null || (arms && best.Value.Wears != 101) || (arms == (best.Value.Wears == 101) && o.Price < best.Value.Price)))
             {
                 best = o;
             }

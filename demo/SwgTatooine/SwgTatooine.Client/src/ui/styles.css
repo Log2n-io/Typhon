@@ -1765,3 +1765,16 @@ button.active {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
+
+/* The crafting panel (crafting-build.md C2-C3): an item's icon beside its name, on the schematic's line, each slot's and each repairable item's. */
+.craft-what,
+.craft-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.craft-what {
+  margin: 4px 0;
+}

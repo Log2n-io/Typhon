@@ -296,6 +296,7 @@ public static class ItemEndpoints
             .Append(",\"maxCondition\":").Append(s.MaxCondition)
             .Append(",\"lifeMilli\":").Append(s.LifeMilli)
             .Append(",\"repairs\":").Append(s.Repairs)
+            .Append(",\"broken\":").Append((s.Flags & ItemFlags.Broken) != 0 ? "true" : "false")
             .Append(",\"crafter\":\"").Append(s.Crafter.ToString(CultureInfo.InvariantCulture)).Append("\"}");
     }
 
@@ -737,9 +738,32 @@ public static class ItemEndpoints
                 break;
             case ItemMoveKind.Vendor:
             case ItemMoveKind.Craft:
+            case ItemMoveKind.Decay:
+            case ItemMoveKind.Repair:
                 if (r.From == ItemLedger.World || isListing(r.From) || r.To != ItemLedger.World)
                 {
-                    result.Violation($"seq {r.Seq}: a vendor row must go from a character to World, not {r.From} to {r.To}");
+                    result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a character to World, not {r.From} to {r.To}");
+                }
+
+                // A worn-out item is one instance; a repair consumes one kit of its class, naming the item it repaired.
+                if (r.Kind == ItemMoveKind.Decay && (!ItemCatalog.HasStats(r.Template) || r.Count != 1))
+                {
+                    result.Violation($"seq {r.Seq}: a decay row must destroy one item with stats, not {r.Count} of template {r.Template}");
+                }
+
+                if (r.Kind == ItemMoveKind.Repair
+                    && (r.Template is not (ItemCatalog.KitWeaponRepair or ItemCatalog.KitArmorRepair) || r.Count != 1 || r.Ref == 0))
+                {
+                    result.Violation($"seq {r.Seq}: a repair row must consume one repair kit naming the item, not {r.Count} of template {r.Template}");
+                }
+
+                break;
+            case ItemMoveKind.Salvage:
+                // The item destroyed, a character to World; the quality materials it gives back, World to that character — every row naming the item.
+                if (isListing(r.From) || isListing(r.To) || (r.From == ItemLedger.World) == (r.To == ItemLedger.World) || r.Ref == 0
+                    || (r.From == ItemLedger.World ? t.Category != ItemCategory.Material : !ItemCatalog.HasStats(r.Template) || r.Count != 1))
+                {
+                    result.Violation($"seq {r.Seq}: a salvage row must destroy one crafted item or give back its materials, naming it, not {r.From} to {r.To}");
                 }
 
                 break;
@@ -749,7 +773,7 @@ public static class ItemEndpoints
         }
 
         // Only a mission cache MINTS Mk V — and a craft, from a Mk V core that came from one; units already held may be listed, bought, returned or sold.
-        if (r.Mk == 5 && r.From == ItemLedger.World && r.Kind is not (ItemMoveKind.Mission or ItemMoveKind.Make))
+        if (r.Mk == 5 && r.From == ItemLedger.World && r.Kind is not (ItemMoveKind.Mission or ItemMoveKind.Make or ItemMoveKind.Salvage))
         {
             result.Violation($"seq {r.Seq}: Mk V in a {ItemMoveKind.NameOf(r.Kind)} row - only a mission cache holds Mk V");
         }

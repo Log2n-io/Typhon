@@ -1415,6 +1415,12 @@ public sealed partial class SimBridge
         }
 
         var v = command.Value;
+        if (Equipment.IsStandardMaterial(v.Template))
+        {
+            StandardMaterialFromCommand(tx, subs, in command, buyer, worldTick);
+            return;
+        }
+
         if (!Equipment.TryStandard(v.Template, out var issue))
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
@@ -1444,6 +1450,56 @@ public sealed partial class SimBridge
         var stats = StandardStats(in issue);
         var creditSeq = _head.LastSeq + 1;
         if (MintInstance(tx, buyer, v.Template, 1, in stats, ItemMoveKind.Standard, creditSeq, worldTick).IsNull
+            || !Transfer(tx, buyer, EconomyLedger.World, price, TransferKind.Standard, v.Template, worldTick))
+        {
+            _marketAbort = true;
+            RefuseMarket(subs, in command, TatooineReplication.MarketFailed);
+            return;
+        }
+
+        _marketCounts.StandardSold++;
+        _marketCounts.StandardPaid += price;
+        _marketWalletsMoved.Add(buyer);
+        _marketItemsMoved.Add(buyer);
+        _standardApplied.Add(command);
+    }
+
+    /// <summary>
+    /// Mk I bulk material from the vendor (Loïc, 2026-11-02): units minted into the grid as <see cref="ItemMoveKind.Standard"/> rows naming the sale's credit
+    /// row, the price — twice the value a unit, the total rounded down — paid to World. Validated whole: the quantity, the price shown, the room, the credits.
+    /// </summary>
+    private void StandardMaterialFromCommand(Transaction tx, SubscriptionsCommands subs, in ClientCommand<BuyStandard> command, long buyer, long worldTick)
+    {
+        var v = command.Value;
+        var quantity = Math.Max(1, (int)v.Quantity);
+        var price = Equipment.StandardMaterialPrice(v.Template, quantity);
+        if (quantity > ItemLedger.StackMax || price <= 0)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
+            return;
+        }
+
+        if (v.Price != price)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketSold);
+            return;
+        }
+
+        if (RoomFor(ItemsOf(buyer), v.Template, 1) < quantity)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketNoRoom);
+            return;
+        }
+
+        if (BalanceOf(tx, buyer) < price)
+        {
+            RefuseMarket(subs, in command, TatooineReplication.MarketNotEnough);
+            return;
+        }
+
+        _marketWritten = true;
+        var creditSeq = _head.LastSeq + 1;
+        if (ItemTransfer(tx, ItemLedger.World, buyer, v.Template, 1, quantity, ItemMoveKind.Standard, creditSeq, worldTick) != quantity
             || !Transfer(tx, buyer, EconomyLedger.World, price, TransferKind.Standard, v.Template, worldTick))
         {
             _marketAbort = true;

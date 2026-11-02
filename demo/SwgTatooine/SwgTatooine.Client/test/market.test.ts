@@ -107,8 +107,8 @@ describe('the fees', () => {
 });
 
 describe('a refusal', () => {
-  it('reads every reason of § 3.1, 151-163 in order, the workshop 164-177, and NotInWorld reused', () => {
-    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 27 }, (_, i) => 151 + i)]);
+  it('reads every reason of § 3.1, 151-163 in order, the workshop 164-182, and NotInWorld reused', () => {
+    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 32 }, (_, i) => 151 + i)]);
     expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
     expect(marketRefusal(MarketReason.StanceNoWeapon)).toContain('weapon');
     expect(marketRefusal(MarketReason.Sold)).toBe('Sold to someone else first');
@@ -136,10 +136,16 @@ describe('a command', () => {
     });
     expect(marketWire({ kind: 'standard', template: 69, price: 1812 })).toEqual({
       name: 'BuyStandard',
-      values: { template: 69, price: 1812 },
+      values: { template: 69, price: 1812, quantity: 1 },
+    });
+    expect(marketWire({ kind: 'standard', template: 3, price: 85, quantity: 25 })).toEqual({
+      name: 'BuyStandard',
+      values: { template: 3, price: 85, quantity: 25 },
     });
     expect(marketWire({ kind: 'equip', item: '65544' })).toEqual({ name: 'Equip', values: { item: 65544n } });
     expect(marketWire({ kind: 'unequip', slot: 101 })).toEqual({ name: 'Unequip', values: { slot: 101 } });
+    expect(marketWire({ kind: 'repair', item: '65544' })).toEqual({ name: 'RepairItem', values: { item: 65544n } });
+    expect(marketWire({ kind: 'salvage', item: '65544' })).toEqual({ name: 'SalvageItem', values: { item: 65544n } });
     expect(marketWire({ kind: 'buy', listing: '18446744073709551615', unitPrice: 3 })).toEqual({
       name: 'MarketBuy',
       values: { listing: 18446744073709551615n, unitPrice: 3 },
@@ -158,6 +164,7 @@ describe('a command', () => {
     expect(commandRow({ kind: 'unequip', slot: 101 })).toBe('gear');
     expect(commandRow({ kind: 'craftPoint', line: 2 })).toBe('craft');
     expect(commandRow({ kind: 'craftFinish', schematic: 69 })).toBe('craft');
+    expect(commandRow({ kind: 'repair', item: '1' })).toBe('craft');
   });
 });
 

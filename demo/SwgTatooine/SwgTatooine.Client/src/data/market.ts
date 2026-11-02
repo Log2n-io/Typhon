@@ -303,9 +303,14 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   172: 'Those inputs are not in your inventory',
   173: 'No point left, or no such line',
   174: 'No room in your inventory for the result',
-  175: 'Not enough credits for the bench fee',
+  175: 'Not enough credits for the fee',
   176: 'The server could not apply it — nothing changed, try again',
   177: 'This craft already has its add-on, or takes none',
+  178: 'That item cannot be repaired',
+  179: 'You need a repair kit of its kind',
+  180: 'It has had its two repairs',
+  181: 'Only a crafted item in your inventory can be salvaged',
+  182: 'Not worn down enough to repair: it would lower its condition',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -365,8 +370,8 @@ export type MarketCommand =
       readonly quantity: number;
       readonly item?: string;
     }
-  /** Standard issue from the vendor (crafting-catalog.md § 15.3), at the price it was shown. */
-  | { readonly kind: 'standard'; readonly template: number; readonly price: number }
+  /** Standard issue from the vendor (crafting-catalog.md § 15.3), at the price it was shown; a material by the quantity (1-99), one otherwise. */
+  | { readonly kind: 'standard'; readonly template: number; readonly price: number; readonly quantity?: number }
   /** Wear an item with stats (crafting-build.md § 2.2), by its id. */
   | { readonly kind: 'equip'; readonly item: string }
   /** Take off what is worn in an equip slot, 101-107. */
@@ -383,7 +388,11 @@ export type MarketCommand =
   /** The add-on, at a Mk. */
   | { readonly kind: 'craftEnhance'; readonly mk: number }
   /** Finish the craft of this schematic. */
-  | { readonly kind: 'craftFinish'; readonly schematic: number };
+  | { readonly kind: 'craftFinish'; readonly schematic: number }
+  /** Repair an item at a station with a kit of its class (crafting-build.md C3). */
+  | { readonly kind: 'repair'; readonly item: string }
+  /** Salvage a crafted item at a station for a quarter of its quality materials. */
+  | { readonly kind: 'salvage'; readonly item: string };
 
 /** The command's name in the server's catalog, and its fields as the codec names them. `null` for a malformed one. */
 export function marketWire(
@@ -420,7 +429,10 @@ export function marketWire(
     }
 
     case 'standard':
-      return { name: 'BuyStandard', values: { template: command.template, price: command.price } };
+      return {
+        name: 'BuyStandard',
+        values: { template: command.template, price: command.price, quantity: command.quantity ?? 1 },
+      };
     case 'equip': {
       const item = idOf(command.item);
       return item === null ? null : { name: 'Equip', values: { item } };
@@ -444,6 +456,10 @@ export function marketWire(
       return { name: 'CraftEnhance', values: { mk: command.mk } };
     case 'craftFinish':
       return { name: 'CraftFinish', values: { schematic: command.schematic } };
+    case 'repair':
+      return { name: 'RepairItem', values: { item: itemOf(command.item) } };
+    case 'salvage':
+      return { name: 'SalvageItem', values: { item: itemOf(command.item) } };
   }
 }
 
@@ -465,7 +481,9 @@ export function commandRow(command: MarketCommand): string {
     case 'craftPoint':
     case 'craftEnhance':
     case 'craftFinish':
-      // One row for the whole craft: its refusals show on the panel, and a command in flight holds the next — a double click spends one point.
+    case 'repair':
+    case 'salvage':
+      // One row for the workshop: its refusals show on the panel, and a command in flight holds the next — a double click spends one point.
       return 'craft';
     case 'collect':
       return command.listing === '0' ? 'all' : command.listing;
@@ -487,7 +505,10 @@ function itemOf(text: string | undefined): bigint {
 /** The bazaar panel's tabs (§ 6), and the vendor's standard issue (crafting-catalog.md § 15.3). */
 export type BazaarTab = 'browse' | 'sell' | 'mine' | 'reserved' | 'issue';
 
-/** One standard-issue item the vendor sells, as `GET /swg/market/standard` answers it: Mk I, at twice its value. */
+/**
+ * One thing the vendor sells, as `GET /swg/market/standard` answers it, Mk I at twice its value: an item with stats, one at a time; or a bulk material by
+ * the unit (Loïc, 2026-11-02), `priceMilli` a unit — what no low-level creature drops, so a new crafter can start.
+ */
 export interface StandardOffer {
   readonly template: number;
   readonly item: string;
@@ -495,7 +516,13 @@ export interface StandardOffer {
   readonly category: string;
   readonly mk: number;
   readonly price: number;
-  readonly stats: ItemStats;
+  readonly stats?: ItemStats;
+  readonly priceMilli?: number;
+}
+
+/** What `quantity` units of a vendor material cost, whole credits: the total rounded down, as the server prices it. */
+export function standardMaterialPrice(offer: StandardOffer, quantity: number): number {
+  return Math.floor(((offer.priceMilli ?? 0) * quantity) / 1000);
 }
 
 /** `GET /swg/market/standard` checked; `null` for anything else. A malformed row is dropped, not the answer. */
@@ -515,8 +542,7 @@ export function parseStandard(answer: unknown): readonly StandardOffer[] | null 
       typeof o.item === 'string' &&
       typeof o.name === 'string' &&
       typeof o.price === 'number' &&
-      typeof o.stats === 'object' &&
-      o.stats !== null
+      ((typeof o.stats === 'object' && o.stats !== null) || typeof o.priceMilli === 'number')
     );
   });
 }

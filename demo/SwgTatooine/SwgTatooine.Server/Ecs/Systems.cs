@@ -379,8 +379,8 @@ internal sealed class PlayerCombatSystem : QuerySystem
         .Writes<PlayerVitals>()
         .Writes<PlayerSession>()
 
-        // What it fights with: the worn weapon's damage, delay and reach (crafting-build.md § 2.3).
-        .Reads<PlayerGear>()
+        // What it fights with: the worn weapon's damage, delay and reach (crafting-build.md § 2.3); and the weapon's wear, counted at each shot (C3).
+        .Writes<PlayerGear>()
 
         // What the acquisition query and the target check read: a candidate must be alive, a lair must still belong to a live mission, and both must be within
         // weapon range of the shooter.
@@ -442,8 +442,8 @@ internal sealed class CombatResolveSystem : CallbackSystem
         // The level a blow lands on, for the level factor (character-level.md § 6).
         .Reads<PlayerLook>()
 
-        // The armour a creature's blow lands on: its mitigation by damage type (crafting-build.md § 4).
-        .Reads<PlayerGear>()
+        // The armour a creature's blow lands on: its mitigation by damage type (crafting-build.md § 4), and the piece it wears (C3).
+        .Writes<PlayerGear>()
 
         // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
         .Writes<PlayerVitals>()

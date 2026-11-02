@@ -9,12 +9,13 @@ import {
   lostLines,
   mkNumeral,
   parseInventory,
+  repairKitOf,
   slotGrid,
   type InventoryItem,
   type InventorySnapshot,
   type LostNote,
 } from '../src/data/items';
-import { parseStandard } from '../src/data/market';
+import { parseStandard, standardMaterialPrice } from '../src/data/market';
 import { useChat } from '../src/state/chat-store';
 import { useItems } from '../src/state/items-store';
 
@@ -212,6 +213,14 @@ describe('items with stats (crafting-build.md C1)', () => {
     expect(snapshot?.items[1].stats).toBeUndefined();
   });
 
+  it('says a broken item broken, its repairs, and which kit repairs it (crafting-build.md C3)', () => {
+    const broken = { ...blaster, stats: { ...blaster.stats, condition: 0, repairs: 1, broken: true, wears: 101 } };
+    expect(itemTooltip(broken)).toBe('DL-44 Blaster · Mk I · 81 dmg · 1.02 s · 30 m · broken · repaired 1/2');
+    expect(repairKitOf(broken)).toBe(62);
+    expect(repairKitOf({ ...blaster, stats: { ...blaster.stats, wears: 106 } })).toBe(63);
+    expect(repairKitOf({ ...blaster, stats: { ...blaster.stats, wears: 0 } })).toBeUndefined();
+  });
+
   it('says a weapon by its numbers and its condition, not a count', () => {
     expect(itemTooltip(blaster)).toBe('DL-44 Blaster · Mk I · 81 dmg · 1.02 s · 30 m · condition 100 %');
     const gloves = {
@@ -251,9 +260,11 @@ describe('items with stats (crafting-build.md C1)', () => {
           stats: blaster.stats,
         },
         { template: 1 },
+        { template: 3, item: 'mat_metal', name: 'Metal', category: 'material', mk: 1, price: 3, priceMilli: 3400 },
       ],
     });
-    expect(offers?.map((o) => o.price)).toEqual([1812]);
+    expect(offers?.map((o) => o.price)).toEqual([1812, 3]);
+    expect(offers === null ? 0 : standardMaterialPrice(offers[1], 25)).toBe(85);
     expect(parseStandard({ nope: true })).toBeNull();
   });
 });

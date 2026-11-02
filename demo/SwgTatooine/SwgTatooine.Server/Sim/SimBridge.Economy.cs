@@ -343,7 +343,8 @@ public sealed partial class SimBridge
 
     /// <summary>
     /// The welcome pack (crafting-build.md O-1), minted with the wallet in its transaction: a standard-issue blaster, as <see cref="ItemMoveKind.Grant"/>
-    /// rows, <b>worn</b> — a new character can fight at once — so the body's gear is due. C2 adds three Mk I stims, C3 a Mk I repair kit.
+    /// rows, <b>worn</b> — a new character can fight at once — so the body's gear is due; and a weapon repair kit (C3). The three stims wait for potions
+    /// to have a use (C2-6, #1394).
     /// </summary>
     private void GrantPack(Transaction tx, long character, long worldTick)
     {
@@ -358,6 +359,8 @@ public sealed partial class SimBridge
         {
             WearOnGrant(tx, character, id);
         }
+
+        ItemTransfer(tx, ItemLedger.World, character, ItemCatalog.KitWeaponRepair, 0, 1, ItemMoveKind.Grant, 0, worldTick);
     }
 
     /// <summary>

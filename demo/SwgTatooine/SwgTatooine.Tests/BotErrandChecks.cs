@@ -1507,6 +1507,19 @@ public sealed class BotErrandChecks
         });
     }
 
+    /// <summary>§ 6, Inputs: a crafter with room and nothing reserved still goes to the bazaar when its next craft lacks an input — to buy it.</summary>
+    [Test]
+    public void ACrafterLackingAnInput_GoesToTheBazaar_BeforeTheDesk()
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.Decide(sim.View() with { InputWanted = true }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not the bazaar");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1));
+        });
+    }
+
     /// <summary>A bot full enough to be losing drops says so: <see cref="GoalWhy.MarketFull"/>, the telemetry's measure of too little headroom.</summary>
     [TestCase(BotBrain.MarketFullStacks, GoalWhy.MarketFull)]
     [TestCase(BotBrain.MarketFullStacks - 1, GoalWhy.MarketChosen)]
@@ -1760,6 +1773,27 @@ public sealed class BotErrandChecks
             Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: an errand first");
             Assert.That(brain.VisitTarget, Is.EqualTo(toStation ? (Here.X, Here.Z + 30f) : (Here.X - 60f, Here.Z)), "not the station, or not the desk");
             Assert.That(brain.Counters.Why[(int)GoalWhy.CraftChosen], Is.EqualTo(toStation ? 1 : 0));
+        });
+    }
+
+    /// <summary>§ 6, Repair: any bot, not only a crafter, with a repair due goes to its city's station and asks the swarm there (a Craft intent).</summary>
+    [Test]
+    public void ABotWithARepairDue_GoesToAStation_EvenIfItDoesNotCraft()
+    {
+        var (brain, sim) = Crafter();
+        brain.Crafts = false;
+        Intent asked = default;
+        for (var tick = 1L; tick < 400 && asked.Kind != IntentKind.Craft; tick++)
+        {
+            var intent = brain.Decide(sim.View() with { RepairDue = true }, tick);
+            sim.Apply(intent);
+            asked = intent.Kind == IntentKind.Craft ? intent : asked;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CraftChosen], Is.EqualTo(1), "not the station first");
+            Assert.That(asked.Kind, Is.EqualTo(IntentKind.Craft), "nothing asked at the station");
         });
     }
 

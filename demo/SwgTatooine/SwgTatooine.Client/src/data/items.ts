@@ -44,12 +44,25 @@ export interface ItemStats {
   /** A potion's potency and duration (ms). */
   readonly potency?: number;
   readonly durationMs?: number;
+  /** The equip slot it is worn in, 101-107; 0 for a part or a potion. */
+  readonly wears?: number;
   readonly condition: number;
   readonly maxCondition: number;
   readonly lifeMilli: number;
   readonly repairs: number;
+  /** At 0 condition with a repair left (crafting-catalog.md § 9.2): worn, but it does nothing until repaired. Absent from older servers. */
+  readonly broken?: boolean;
   /** The crafter's raw id, `'0'` for standard issue and loot. */
   readonly crafter: string;
+}
+
+/** Repairs an item takes at most (§ 9.2), each to a max × 0.75. */
+export const MAX_REPAIRS = 2;
+
+/** The kit a worn item is repaired with: a weapon's (62) or an armour piece's (63); `undefined` for anything that does not wear. */
+export function repairKitOf(item: InventoryItem): number | undefined {
+  const wears = item.stats?.wears;
+  return wears === undefined || wears === 0 ? undefined : wears === 101 ? 62 : 63;
 }
 
 /** The equip slots (crafting-build.md § 2.2): 101 the weapon, then the six armour pieces; what each is called on the equipment strip. */
@@ -166,7 +179,11 @@ export function itemTooltip(item: InventoryItem): string {
   }
 
   const condition = s.maxCondition > 0 ? Math.round((100 * s.condition) / s.maxCondition) : 0;
-  parts.push(`condition ${String(condition)} %`);
+  parts.push(s.broken === true ? 'broken' : `condition ${String(condition)} %`);
+  if (s.repairs > 0) {
+    parts.push(`repaired ${String(s.repairs)}/${String(MAX_REPAIRS)}`);
+  }
+
   return parts.join(' · ');
 }
 

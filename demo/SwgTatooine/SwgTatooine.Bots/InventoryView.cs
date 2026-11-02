@@ -59,7 +59,13 @@ public sealed record InventoryView(int Stacks, int LastLost)
                     stats.TryGetProperty("wears", out var w) ? w.GetInt32() : 0,
                     stats.TryGetProperty("grade", out var g) ? g.GetInt32() : 0,
                     item,
-                    s.TryGetProperty("mk", out var mk) ? mk.GetInt32() : 0));
+                    s.TryGetProperty("mk", out var mk) ? mk.GetInt32() : 0)
+                {
+                    Condition = stats.TryGetProperty("condition", out var cond) ? cond.GetInt32() : 1,
+                    MaxCondition = stats.TryGetProperty("maxCondition", out var m) ? m.GetInt32() : 1,
+                    Repairs = stats.TryGetProperty("repairs", out var r) ? r.GetInt32() : 0,
+                    Broken = stats.TryGetProperty("broken", out var b) && b.ValueKind == JsonValueKind.True,
+                });
                 continue;
             }
 

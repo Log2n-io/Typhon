@@ -205,6 +205,24 @@ public static class Equipment
     public static long StandardPrice(ushort template)
         => TryStandard(template, out _) ? MarketValues.MilliOf(template, 1) * TatooineData.VendorSellsPerMille / 1000 / 1000 : 0;
 
+    /// <summary>
+    /// The bulk materials the vendor sells at Mk I (Loïc, 2026-11-02): the ones no low-level creature drops — Metal, Crystal, Gas and Chemical only from
+    /// the camps (CL 25+), Fiber from one CL 18+ beast, Ore and Water from nothing before the extractors (C5) — so a new crafter can start. Higher Mks
+    /// still come from loot.
+    /// </summary>
+    public static readonly ushort[] StandardMaterials =
+        [ItemCatalog.Ore, ItemCatalog.Water, ItemCatalog.Metal, ItemCatalog.Crystal, ItemCatalog.Gas, ItemCatalog.Chemical, ItemCatalog.Fiber];
+
+    /// <summary>Whether the vendor sells units of <paramref name="template"/> at Mk I.</summary>
+    public static bool IsStandardMaterial(ushort template) => Array.IndexOf(StandardMaterials, template) >= 0;
+
+    /// <summary>One unit's vendor price in milli-credits: twice its Mk I value (§ 15.3); 0 for a material it does not sell.</summary>
+    public static long StandardMaterialMilli(ushort template)
+        => IsStandardMaterial(template) ? MarketValues.MilliOf(template, 1) * TatooineData.VendorSellsPerMille / 1000 : 0;
+
+    /// <summary>What <paramref name="quantity"/> units cost, whole credits, rounded down; 0 for none or a material it does not sell.</summary>
+    public static long StandardMaterialPrice(ushort template, int quantity) => StandardMaterialMilli(template) * Math.Max(0, quantity) / 1000;
+
     // Weapons: damage ÷ 1.025 (crits' mean gain), delay ms, range dm; condition in combat-milliseconds, a Mk I's hour (§ 9.1).
     // Armour: kinetic and energy ‰; condition in damage points, the Mk I set's 120 combat-minutes at 15 hits a minute of a CL 5 beast's 36, by share.
     private static readonly StandardIssue[] StandardItems =

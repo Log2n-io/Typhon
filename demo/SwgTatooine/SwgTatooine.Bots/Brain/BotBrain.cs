@@ -351,7 +351,10 @@ public sealed partial class BotBrain
     /// <summary>The load test's city, as a region (<c>--market-rush</c>, bazaar.md § 8), or 0: a rush bot goes there, stands at a bazaar and trades.</summary>
     public int RushRegion { get; set; }
 
-    /// <summary>Whether this bot crafts (crafting-build.md § 6, profiles): holding a craft's inputs, it goes to its city's nearest crafting station.</summary>
+    /// <summary>
+    /// Whether this bot crafts (crafting-build.md § 6, profiles): holding a craft's inputs, it goes to its city's nearest crafting station. Any bot goes
+    /// there to repair (<see cref="Perceived.RepairDue"/>).
+    /// </summary>
     public bool Crafts { get; set; }
 
     /// <summary>Whether it stands at a crafting station using it, within <see cref="MarketReachM"/> of it: the server's reach is 6 m too.</summary>
@@ -680,7 +683,7 @@ public sealed partial class BotBrain
 
         // Nearly full, or goods waiting for it: its city's bazaar, before the desk — a quest taken now would lose its drops (the remarks).
         // A bazaar out of errand reach — the bot is back from a quest's lair, kilometres out — is no try: it goes when back in reach, not 120 s later.
-        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0)
+        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0 || world.InputWanted)
             && Bazaar(in world, here) is { } bazaar && Routing.Distance(world.X, world.Z, bazaar.At.X, bazaar.At.Z) <= ErrandReachM)
         {
             _marketAt = tick + Ticks(MarketRetrySeconds);
@@ -692,7 +695,7 @@ public sealed partial class BotBrain
         }
 
         // A crafter holding a craft's inputs: its city's nearest station, before the desk — a quest's drops are what it crafts with (crafting-build.md § 6).
-        if (Crafts && _assets != null && world.CraftReady && tick >= _craftAt
+        if (_assets != null && ((Crafts && world.CraftReady) || world.RepairDue) && tick >= _craftAt
             && Station(in world, here) is { } station && Routing.Distance(world.X, world.Z, station.At.X, station.At.Z) <= ErrandReachM)
         {
             _craftAt = tick + Ticks(CraftRetrySeconds);
@@ -1469,8 +1472,8 @@ public sealed partial class BotBrain
                     return Intent.Trade(_visitRegion);
                 }
 
-                // At a station, a crafter crafts: the swarm sends the craft at the commands' rate, so it stays that long.
-                if (_visitKind == Routing.CraftingStationKind && Crafts)
+                // At a station, a crafter crafts and any bot repairs: the swarm sends the commands at their rate, so it stays that long.
+                if (_visitKind == Routing.CraftingStationKind && (Crafts || world.RepairDue))
                 {
                     _until += Ticks(TradeSeconds);
                     _tradeCap = _until + Ticks(MaxTradeHoldSeconds);

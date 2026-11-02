@@ -117,6 +117,8 @@ public static class ItemCatalog
         new(69, "blaster_dl44", "DL-44 Blaster", ItemCategory.Weapon, true, false),
     ];
 
+    public const ushort Ore = 1;
+    public const ushort Water = 2;
     public const ushort Metal = 3;
     public const ushort Crystal = 4;
     public const ushort Gas = 5;
@@ -136,6 +138,11 @@ public static class ItemCatalog
     public const ushort AddonAdditive = 19;
     public const ushort PaddedHelmet = 44;
     public const ushort CompositeHelmet = 50;
+    /// <summary>The repair kits (crafting-catalog.md § 9.2): a weapon's, an armour piece's.</summary>
+    public const ushort KitWeaponRepair = 62;
+
+    public const ushort KitArmorRepair = 63;
+
     public const ushort Knuckler = 67;
     public const ushort Sword = 68;
     public const ushort Blaster = 69;

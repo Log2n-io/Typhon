@@ -43,8 +43,11 @@ public static class TransferKind
     /// <summary>The bench fee (crafting-catalog.md § 15.4): 3 % of a crafted item's value, the crafter to World. <see cref="LedgerEntry.Ref"/> is the craft's raw id.</summary>
     public const byte Bench = 10;
 
+    /// <summary>A repair's fee (crafting-build.md C3): the owner → World. <see cref="LedgerEntry.Ref"/> is the repaired item's raw id.</summary>
+    public const byte Repair = 11;
+
     /// <summary>The first kind past the last one: what a per-kind counter is sized by.</summary>
-    public const byte Count = 11;
+    public const byte Count = 12;
 
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
@@ -59,6 +62,7 @@ public static class TransferKind
         Standard => "standard",
         Fare => "fare",
         Bench => "bench",
+        Repair => "repair",
         _ => "unknown",
     };
 }

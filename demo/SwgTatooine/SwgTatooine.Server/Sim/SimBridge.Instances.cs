@@ -204,6 +204,32 @@ public sealed partial class SimBridge
         return s != 0 && items.Slots[s].Instance && items.Slots[s].Template == template && items.Slots[s].Mk == mk;
     }
 
+    /// <summary>
+    /// Destroys what a character wears in equip slot <c>First + k</c>, to World with one row — an item worn out (crafting-catalog.md § 9.2). The grid is
+    /// untouched: the slot is emptied.
+    /// </summary>
+    private bool DestroyWorn(Transaction tx, long owner, int k, byte kind, long reference, long worldTick)
+    {
+        var items = ItemsOf(owner);
+        var worn = items.Equipped[k];
+        if (worn.Count != 1 || !worn.Instance)
+        {
+            Interlocked.Increment(ref _itemsRefused);
+            return false;
+        }
+
+        var key = KeyOf(worn.Template, worn.Mk);
+        items.Equipped[k] = default;
+        _pendingHeld[key]--;
+        _pendingStacks--;
+        tx.Destroy(worn.Stack);
+        AppendItemRow(tx, owner, ItemLedger.World, (long)worn.Stack.RawValue, 0, 0, 0, 1, worn.Template, worn.Mk, kind, reference, worldTick);
+        _itemHead.Destroyed++;
+        _pendingDestroyed[key]++;
+        _itemHeadDirty = true;
+        return true;
+    }
+
     /// <summary>The grid slot holding <paramref name="item"/>; 0 when it is not in the grid.</summary>
     private static int SlotOf(OwnerItems items, EntityId item)
     {

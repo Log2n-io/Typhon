@@ -45,6 +45,18 @@ public static class ItemMoveKind
     /// <summary>A craft's result: World → the crafter, minted when it finishes. <see cref="ItemLedgerEntry.Ref"/> is the craft's raw id.</summary>
     public const byte Make = 11;
 
+    /// <summary>Worn out with no repair left (crafting-catalog.md § 9.2): the owner → World, destroyed. <see cref="ItemLedgerEntry.Ref"/> is 0.</summary>
+    public const byte Decay = 12;
+
+    /// <summary>A repair kit consumed by a repair: the owner → World. <see cref="ItemLedgerEntry.Ref"/> is the repaired item's raw id.</summary>
+    public const byte Repair = 13;
+
+    /// <summary>
+    /// A salvage (Q10): the item, owner → World, destroyed; and the materials it gives back, World → the owner. <see cref="ItemLedgerEntry.Ref"/> is the
+    /// salvaged item's raw id on every row.
+    /// </summary>
+    public const byte Salvage = 14;
+
     /// <summary>A cancelled or expired listing collected: the listing → its seller. <see cref="ItemLedgerEntry.Ref"/> is the listing's raw id.</summary>
     public const byte Return = 16;
 
@@ -61,6 +73,9 @@ public static class ItemMoveKind
         Grant => "grant",
         Craft => "craft",
         Make => "make",
+        Decay => "decay",
+        Repair => "repair",
+        Salvage => "salvage",
         Return => "return",
         _ => "unknown",
     };

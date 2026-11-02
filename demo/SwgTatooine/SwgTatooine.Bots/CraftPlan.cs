@@ -271,6 +271,117 @@ public static class CraftPlan
         return uses;
     }
 
+    /// <summary>
+    /// The vendor's Mk I units of a material it lacks (Loïc, 2026-11-02): the slot's count, priced as the vendor prices it — the total, rounded down —
+    /// within <paramref name="budget"/>; null when the vendor does not sell it or it costs more.
+    /// </summary>
+    public static MarketCommand? FromVendor(IReadOnlyList<StandardOffer> offers, BookSlot want, long budget)
+    {
+        if (offers == null)
+        {
+            return null;
+        }
+
+        foreach (var o in offers)
+        {
+            if (o.Template != want.Template || o.PriceMilli <= 0)
+            {
+                continue;
+            }
+
+            var quantity = Math.Clamp(want.Count, 1, MarketPlan.StackMax);
+            var price = o.PriceMilli * quantity / 1000;
+            return price > 0 && price <= budget ? MarketCommand.Standard(o.Template, price, quantity) : null;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// What its target's whole tree still needs of each material (Loïc, 2026-11-02; review, 2026-11-02): the target's slots, the parts it lacks — the
+    /// held ones taken first — and the core when none is held, each from its own schematic; less what it holds of each, every Mk counted. Positive
+    /// deficits only, by template.
+    /// </summary>
+    public static SortedDictionary<ushort, int> Deficits(CraftBook book, ushort target, IReadOnlyList<HeldStack> held, IReadOnlyList<HeldPart> parts)
+    {
+        var need = new Dictionary<ushort, int>();
+        var spare = new List<HeldPart>(parts);
+        Needs(book, book.Of(target), held, spare, need, 0);
+        var deficits = new SortedDictionary<ushort, int>();
+        foreach (var (template, count) in need)
+        {
+            var have = 0;
+            foreach (var h in held)
+            {
+                have += h.Template == template ? h.Count : 0;
+            }
+
+            if (count > have)
+            {
+                deficits[template] = count - have;
+            }
+        }
+
+        return deficits;
+    }
+
+    private static void Needs(CraftBook book, BookSchematic s, IReadOnlyList<HeldStack> held, List<HeldPart> spare, Dictionary<ushort, int> need, int depth)
+    {
+        if (s == null || depth > 3)
+        {
+            return;
+        }
+
+        foreach (var slot in s.Slots)
+        {
+            if (slot.IsPart)
+            {
+                for (var n = 0; n < slot.Count; n++)
+                {
+                    var at = spare.FindIndex(p => slot.Template == 0 ? p.Template is PaddedSegment or CompositeSegment : p.Template == slot.Template);
+                    if (at >= 0)
+                    {
+                        spare.RemoveAt(at);
+                    }
+                    else
+                    {
+                        Needs(book, book.Of(slot.Template != 0 ? slot.Template : PaddedSegment), held, spare, need, depth + 1);
+                    }
+                }
+            }
+            else if (slot.Kind == "core" && Units(held, slot.Template, 1, 5, slot.Count) == 0)
+            {
+                Needs(book, book.Of(slot.Template), held, spare, need, depth + 1);
+            }
+            else if (slot.Kind != "core")
+            {
+                need[slot.Template] = (need.TryGetValue(slot.Template, out var c) ? c : 0) + slot.Count;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The vendor's Mk I units of every material its target's tree lacks and the vendor sells (Loïc, 2026-11-02): one buy per material, its deficit (at
+    /// most a stack), within <paramref name="wallet"/> × <see cref="MarketPlan.BuyWalletShare"/> in all; what the vendor does not sell — Hide, Bone —
+    /// is skipped, not a stop.
+    /// </summary>
+    public static List<MarketCommand> FromVendorAll(CraftBook book, ushort target, IReadOnlyList<HeldStack> held, IReadOnlyList<HeldPart> parts,
+        IReadOnlyList<StandardOffer> offers, long wallet)
+    {
+        var buys = new List<MarketCommand>();
+        var budget = (long)(MarketPlan.BuyWalletShare * wallet);
+        foreach (var (template, deficit) in Deficits(book, target, held, parts))
+        {
+            if (buys.Count < 6 && FromVendor(offers, new BookSlot("bulk", template, null, deficit), budget) is { } buy)
+            {
+                buys.Add(buy);
+                budget -= buy.UnitPrice;
+            }
+        }
+
+        return buys;
+    }
+
     /// <summary>The parts in an inventory's grid: its items with stats of a part's template, with their grades.</summary>
     public static List<HeldPart> PartsOf(IReadOnlyList<GearItem> gear)
     {
