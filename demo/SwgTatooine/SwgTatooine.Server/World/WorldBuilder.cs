@@ -269,7 +269,16 @@ public static class WorldBuilder
     public const float GateFacilityZ = GateOutsideZ + 2.3f;
 
     /// <summary>
-    /// The bazaar and the mission terminal at a shuttleport's gate, and the corridor between them kept clear of buildings.
+    /// The crafting station beside the gate's bazaar (Loïc, 2026-11-02), west of it on the same line: 4.5 m centre to centre, the two footprints
+    /// (1.4 + 0.8 m) and the planner's street (<see cref="StructureFootprint.MarginM"/>) with 0.3 m to spare — 1.7 m between the published station's side
+    /// (1.38 m half-width) and the bazaar's footprint. The bazaar's stand point is 4.6 m from the station's centre, inside its 6 m reach
+    /// (<see cref="TatooineData.StationReachM"/>), so what is bought at the bazaar is crafted without a step.
+    /// </summary>
+    public const float GateStationX = GateFacilityX + 4.5f;
+
+    /// <summary>
+    /// The bazaar and the mission terminal at a shuttleport's gate, a crafting station beside the bazaar, and the corridor between them kept clear of
+    /// buildings.
     /// </summary>
     /// <remarks>
     /// Both face north (yaw 0), so the point a user stands at is on the far side from the gate and the passengers walking out between them. Beyond them
@@ -288,11 +297,15 @@ public static class WorldBuilder
         plan.PlaceAt(mx, z, StructureFootprint.HalfExtentM(StructureKind.MissionTerminal));
         SpawnStructure(tx, mx, z, terrain.GroundAt(mx, z), StructureFootprint.HalfExtentM(StructureKind.MissionTerminal), StructureKind.MissionTerminal,
             ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
+        var sx = portX - GateStationX;
+        plan.PlaceAt(sx, z, StructureFootprint.HalfExtentM(StructureKind.CraftingStation));
+        SpawnStructure(tx, sx, z, terrain.GroundAt(sx, z), StructureFootprint.HalfExtentM(StructureKind.CraftingStation), StructureKind.CraftingStation,
+            ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
         // The corridor passengers land in (SimBridge.Shuttles: GateOutsideZ + 2, ±2.4 m), reserved: the margins of the pair and the dome leave a crafting
         // station's width of room in it, and one was free to be planted exactly where a session's passenger is set down (review). Reserved rather than
         // placed, because it stands inside those margins by design.
         plan.Reserve(portX, portZ + GateOutsideZ + 2f, 2.5f);
-        census.StaticObjects += 2;
+        census.StaticObjects += 3;
     }
 
     /// <summary>What a city's structure <paramref name="i"/> is: the shuttleport first, its town hall second, then a crafting station every ninth.</summary>
