@@ -83,6 +83,13 @@ internal sealed class EquipChecks : ServedChecks
 
     private static int Count(FakeLink link, byte reason) => Ledgers.Refusals(link).Count(r => r == reason);
 
+    private static int StanceOf(TatooineSim sim, EntityId body)
+    {
+        var stance = 0;
+        sim.WriteInTick(tx => stance = tx.Open(body).Read(Server.Player.State).Stance);
+        return stance;
+    }
+
     /// <summary>
     /// A new character's pack blaster is worn (crafting-build.md O-1): the body's damage, delay, reach, type and stance are its. Unequipped, the fist; worn
     /// again, the blaster; gloves and a torso add Σ share × protection. Every move a slot change and no ledger row.
@@ -105,8 +112,12 @@ internal sealed class EquipChecks : ServedChecks
         });
 
         var rows = Items.Rows(sim).Count;
+        a.Link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
+        SessionHarness.Until(() => StanceOf(sim, a.Body) == Stances.Pistol, "the pistol stance");
         Unequip(a.Link, EquipSlot.Weapon);
         SessionHarness.Until(() => GearOf(sim, a.Body).Gear.Stance == Stances.Unarmed, "the fist");
+        Harness.Ticks(1);
+        Assert.That(StanceOf(sim, a.Body), Is.EqualTo(Stances.Unarmed), "the stance stayed on a weapon no longer worn: a body that cannot fight");
         var (fist, fistDamage) = GearOf(sim, a.Body);
         Assert.That((fistDamage, fist.DelayMs, fist.RangeDm), Is.EqualTo((40, (short)1200, (short)10)), "the fist's numbers");
         Equip(a.Link, Of(sim, a, Blaster).Id);

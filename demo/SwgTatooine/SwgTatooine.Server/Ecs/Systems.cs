@@ -379,6 +379,9 @@ internal sealed class PlayerCombatSystem : QuerySystem
         .Writes<PlayerVitals>()
         .Writes<PlayerSession>()
 
+        // What it fights with: the worn weapon's damage, delay and reach (crafting-build.md § 2.3).
+        .Reads<PlayerGear>()
+
         // What the acquisition query and the target check read: a candidate must be alive, a lair must still belong to a live mission, and both must be within
         // weapon range of the shooter.
         .Reads<CreaturePlacement>()
@@ -438,6 +441,9 @@ internal sealed class CombatResolveSystem : CallbackSystem
 
         // The level a blow lands on, for the level factor (character-level.md § 6).
         .Reads<PlayerLook>()
+
+        // The armour a creature's blow lands on: its mitigation by damage type (crafting-build.md § 4).
+        .Reads<PlayerGear>()
 
         // The player's: health, the clone's teleport and the recovery it wakes up in, and the target that died with it.
         .Writes<PlayerVitals>()
@@ -721,7 +727,7 @@ internal sealed class NoticesSystem : CallbackSystem
     protected override void Configure(SystemBuilder b) => b
         .Name("Notices")
         .Phase(SimPhases.Economy)
-        .AfterAll("Missions", "Ledger", "Loot", "Market")
+        .AfterAll("Missions", "Ledger", "Loot", "Market", "Workshop")
         .Reads<Character>();
 
     protected override void Execute(TickContext ctx) => _bridge.NoticesTick(ctx);
@@ -957,6 +963,9 @@ internal sealed class PlayerSessionSystem : CallbackSystem
         .Writes<PlayerRealm>()
         .Writes<PlayerLook>()
 
+        // A body spawns with the fist's gear (crafting-build.md § 2.3); the Workshop writes the rest.
+        .Writes<PlayerGear>()
+
         // A6 saves the avatar's position onto its character, and a first login creates the character, both on this tick — dressed in the outfit its
         // account chose at sign-up.
         .Writes<Character>()
@@ -987,7 +996,10 @@ internal sealed class PlayerIntentSystem : CallbackSystem
         .After("PlayerSessions")
         .Writes<PlayerMotion>()
         .Writes<PlayerState>()
-        .Writes<PlayerSession>();
+        .Writes<PlayerSession>()
+
+        // A stance needs its weapon worn (crafting-build.md C1): SetStance reads the gear, fresh — after PlayerSessions spawned this tick's bodies.
+        .ReadsFresh<PlayerGear>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.IntentTick(ctx);
 }

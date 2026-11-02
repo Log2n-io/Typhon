@@ -10,6 +10,9 @@ import { useMarket } from '../state/market-store';
 const PADDED_SEGMENT = 29;
 const COMPOSITE_SEGMENT = 30;
 
+/** No inventory read yet: one array for every render, so a selector never returns a new one (zustand 5 re-renders on every new reference). */
+const NO_ITEMS: readonly InventoryItem[] = [];
+
 /** An add-on by the schematic's kind (§ 13.3). */
 const ADDONS: Readonly<Record<string, number>> = { weapon: 16, armor: 17, potion: 19 };
 
@@ -117,7 +120,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
   const setMk = useCraft((s) => s.setMk);
   const setPart = useCraft((s) => s.setPart);
   const start = useCraft((s) => s.start);
-  const items = useItems((s) => s.snapshot?.items ?? []);
+  const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
   const s = book.schematics.find((x) => x.id === selected);
   const setChoice = useCraft((x) => x.setChoice);
 
@@ -247,7 +250,7 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
   const point = useCraft((s) => s.point);
   const enhance = useCraft((s) => s.enhance);
   const finish = useCraft((s) => s.finish);
-  const items = useItems((s) => s.snapshot?.items ?? []);
+  const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
   const s = craft === null ? undefined : book.schematics.find((x) => x.id === craft.schematic);
   if (craft === null || s === undefined) {
     return null;

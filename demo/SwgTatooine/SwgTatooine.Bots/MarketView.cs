@@ -18,7 +18,6 @@ public enum MarketCategory : byte
 /// <summary>One stack an inventory holds, as <c>GET /swg/inventory</c> said: its template, asset, category, Mk and count.</summary>
 public readonly record struct HeldStack(ushort Template, string Item, MarketCategory Category, int Mk, int Count);
 
-/// <summary>A bazaar buy collected into the character: the listing it came from (the <c>buy</c> row's <c>ref</c>), and what and how many.</summary>
 /// <summary>
 /// An item with stats in a bot's inventory (crafting-build.md § 2.1): its id, template, the slot it sits in, the equip slot it is worn in (0 for none: a part,
 /// a potion), a part's grade per mille, its asset and its Mk — what a crafter picks parts by and prices its surplus with.
@@ -32,6 +31,7 @@ public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int 
 /// <summary>A standard-issue item the vendor sells (<c>GET /swg/market/standard</c>): its template, asset, price and the slot it is worn in.</summary>
 public readonly record struct StandardOffer(ushort Template, string Item, long Price, int Wears);
 
+/// <summary>A bazaar buy collected into the character: the listing it came from (the <c>buy</c> row's <c>ref</c>), and what and how many.</summary>
 public readonly record struct WonListing(ulong Listing, ushort Template, string Item, int Mk, int Count);
 
 /// <summary>One listing of a browse page (bazaar.md § 5): <c>{"id","city","item","category","mk","qty","unit","total","seller",…}</c>.</summary>

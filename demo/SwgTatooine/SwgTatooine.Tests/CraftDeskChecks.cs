@@ -300,7 +300,7 @@ internal sealed class CraftDeskChecks : ServedChecks
         Experiment(c.Link, 0);
         SessionHarness.Until(() => sim.Bridge.CraftPoints == 2, "both points");
         Expect(() => Experiment(c.Link, 0), TatooineReplication.CraftNoPoints, "no point left");
-        Expect(() => Enhance(c.Link, 1), TatooineReplication.CraftNoPoints, "a part takes no add-on");
+        Expect(() => Enhance(c.Link, 1), TatooineReplication.CraftNoAddon, "a part takes no add-on");
         Expect(() => Finish(c.Link, Schematics.Grip), TatooineReplication.CraftNone, "another schematic");
 
         Worlds.Park(sim, c.Link.Session, sim.Index.Stations[0].X + 60f, sim.Index.Stations[0].Z);

@@ -316,17 +316,19 @@ public sealed partial class BotSwarm
             async Task<List<BrowseRow>> Page(string query) =>
                 MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&{query}&sort=price&page=1")).ConfigureAwait(false));
 
-            if (region != 0)
+            // Not while goods wait for it: the piece or the input it bought last time is among them, and its gear and stacks are read before the collect.
+            if (region != 0 && mine.Reserved == 0)
             {
                 // Gear of its band first (crafting-build.md § 6, Gear): the best-value listing above what it has, the vendor's standard issue failing it.
-                _standard ??= MarketJson.Standard(await GetAsync(_standardUri).ConfigureAwait(false));
-                if (MarketPlan.GearWanted(gear, _standard, band) is { } piece)
+                _standard ??= await Optional(async () => MarketJson.Standard(await GetAsync(_standardUri).ConfigureAwait(false))).ConfigureAwait(false);
+                if (MarketPlan.GearWanted(gear, _standard, band) is { } piece
+                    && await Optional(async () => await Page($"item={piece.Item}").ConfigureAwait(false)).ConfigureAwait(false) is { } page)
                 {
-                    var page = await Page($"item={piece.Item}").ConfigureAwait(false);
                     if (piece.Item.StartsWith("armor_padded_", StringComparison.Ordinal))
                     {
                         // A piece it has nothing for: padded or composite, whichever the crafters made.
-                        page.AddRange(await Page($"item={piece.Item.Replace("_padded_", "_composite_", StringComparison.Ordinal)}").ConfigureAwait(false));
+                        var composite = piece.Item.Replace("_padded_", "_composite_", StringComparison.Ordinal);
+                        page.AddRange(await Optional(async () => await Page($"item={composite}").ConfigureAwait(false)).ConfigureAwait(false) ?? []);
                     }
 
                     buy = MarketPlan.ChooseGear(page, prices, piece.HaveMk, band, await Wallet().ConfigureAwait(false), mine.ListedIds);
@@ -334,10 +336,10 @@ public sealed partial class BotSwarm
                 }
 
                 // Then what its next craft lacks (§ 6, Inputs): demand from the recipe, not a roll.
-                if (buy == null && CraftWant() is { } want)
+                if (buy == null && CraftWant() is { } want
+                    && await Optional(async () => await Page($"item={want.Item}").ConfigureAwait(false)).ConfigureAwait(false) is { } inputs)
                 {
-                    buy = CraftPlan.ChooseInput(await Page($"item={want.Item}").ConfigureAwait(false), prices, want, await Wallet().ConfigureAwait(false),
-                        mine.ListedIds);
+                    buy = CraftPlan.ChooseInput(inputs, prices, want, await Wallet().ConfigureAwait(false), mine.ListedIds);
                     CraftInputsBought += buy != null ? 1 : 0;
                 }
             }
@@ -348,15 +350,21 @@ public sealed partial class BotSwarm
                 buy = MarketPlan.ChooseBuy(await Page($"mk={band}").ConfigureAwait(false), prices, band, await Wallet().ConfigureAwait(false), mine.ListedIds);
             }
 
-            var plan = MarketPlan.Plan(Tradeable(_held), mine, prices, ref _marketRng, listMaterial, buy);
+            var grid = _inventory.Stacks;
+            var plan = MarketPlan.Plan(Tradeable(_held), mine, prices, ref _marketRng, listMaterial, buy, grid);
 
-            // The items it will not use go on the board where the plan left room (§ 6, Surplus): listed before the buy, which comes last.
-            var surplus = MarketPlan.Surplus(gear, prices, mine.Listed + plan.FindAll(c => c.Step == MarketStep.List).Count, band, ref _marketRng);
+            // The items it will not use go on the board where the plan left room, and to the vendor past it while the grid is over its floor (§ 6,
+            // Surplus): before the buy, which comes last.
+            var gone = plan.FindAll(c => c.Step is MarketStep.List or MarketStep.Vendor).Count;
+            var surplus = MarketPlan.Surplus(gear, prices, mine.Listed + plan.FindAll(c => c.Step == MarketStep.List).Count, band, ref _marketRng,
+                CraftPlan.Blaster, grid - gone > MarketPlan.KeepStacks);
             ItemsListed += surplus.Count;
             plan.InsertRange(buy != null ? plan.Count - 1 : plan.Count, surplus);
 
-            // Standard issue for an armour slot it has nothing for — not while goods wait for it, which may be the piece the board sold it.
-            if (region != 0 && mine.Reserved == 0 && MarketPlan.ChooseStandard(_standard, gear, await Wallet().ConfigureAwait(false)) is { } issue)
+            // Standard issue for an armour slot it has nothing for, when nothing else is bought — not while goods wait for it, which may be the piece the
+            // board sold it.
+            if (region != 0 && buy == null && mine.Reserved == 0
+                && MarketPlan.ChooseStandard(_standard, gear, await Wallet().ConfigureAwait(false)) is { } issue)
             {
                 plan.Add(issue);
             }
@@ -552,6 +560,20 @@ public sealed partial class BotSwarm
         }
 
         /// <summary>A GET with the bot's own token, as the browser's; a refusal throws, and the trade is planned again next visit.</summary>
+        /// <summary>An optional read of a trade: its failure costs that part of the plan, not the visit's collect and vendoring.</summary>
+        private static async Task<T> Optional<T>(Func<Task<T>> read) where T : class
+        {
+            try
+            {
+                return await read().ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException)
+            {
+                return null;
+            }
+        }
+
         private async Task<string> GetAsync(Uri uri)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
@@ -607,6 +629,11 @@ public class PlanSender<T> where T : struct
 {
     private sealed record Offered(long Visit, List<T> Plan);
 
+    private int _abort;
+
+    /// <summary>Drops what is still queued, at the next <see cref="Next"/>; any thread — a refusal read off the driver.</summary>
+    public void Abort() => Volatile.Write(ref _abort, 1);
+
     private readonly Queue<T> _queue = new();
     private Offered _offered;
     private long _visit;
@@ -637,6 +664,12 @@ public class PlanSender<T> where T : struct
             {
                 _queue.Enqueue(c);
             }
+        }
+
+        if (Interlocked.Exchange(ref _abort, 0) != 0)
+        {
+            Dropped += _queue.Count;
+            _queue.Clear();
         }
 
         if (_queue.Count == 0)

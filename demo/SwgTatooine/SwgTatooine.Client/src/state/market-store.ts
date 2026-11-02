@@ -122,6 +122,8 @@ export interface MarketState {
   readonly buyStandard: (template: number, price: number) => void;
   /** Wears an item with stats (crafting-build.md § 2.2); its refusal shows on the `'gear'` row. */
   readonly equip: (itemId: string) => void;
+  /** Sends a command as the panels' buttons do: held while one of its row is in flight, its refusal shown on its row. False when not sent. */
+  readonly sendCommand: (command: MarketCommand) => boolean;
   /** Takes off what is worn in an equip slot, 101-107. */
   readonly unequip: (slot: number) => void;
   /** The server refused `command` with `reason`. */
@@ -405,6 +407,7 @@ export const useMarket = create<MarketState>((set, get) => {
     buyStandard: (template, price) => {
       send({ kind: 'standard', template, price });
     },
+    sendCommand: (command) => send(command),
     equip: (itemId) => {
       send({ kind: 'equip', item: itemId });
     },

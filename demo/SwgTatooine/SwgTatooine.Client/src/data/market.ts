@@ -305,6 +305,7 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   174: 'No room in your inventory for the result',
   175: 'Not enough credits for the bench fee',
   176: 'The server could not apply it — nothing changed, try again',
+  177: 'This craft already has its add-on, or takes none',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -461,11 +462,11 @@ export function commandRow(command: MarketCommand): string {
     case 'unequip':
       return 'gear';
     case 'craftStart':
+    case 'craftPoint':
     case 'craftEnhance':
     case 'craftFinish':
+      // One row for the whole craft: its refusals show on the panel, and a command in flight holds the next — a double click spends one point.
       return 'craft';
-    case 'craftPoint':
-      return `craft-line-${String(command.line)}`;
     case 'collect':
       return command.listing === '0' ? 'all' : command.listing;
     default:

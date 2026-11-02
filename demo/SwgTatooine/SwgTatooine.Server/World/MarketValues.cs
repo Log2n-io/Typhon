@@ -34,7 +34,8 @@ public static class MarketValues
             ItemCategory.Material => MaterialMilli[mk],
             ItemCategory.Core or ItemCategory.Addon => CoreMilli[mk],
             ItemCategory.Weapon => WeaponMilli[mk],
-            ItemCategory.Armor => ArmorSetMilli[mk] * EquipSlot.SharePerMille[Equipment.SlotOf(template) - EquipSlot.First] / 1000,
+            ItemCategory.Armor when Equipment.SlotOf(template) != 0
+                => ArmorSetMilli[mk] * EquipSlot.SharePerMille[Equipment.SlotOf(template) - EquipSlot.First] / 1000,
             _ => 0,
         };
     }

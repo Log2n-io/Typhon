@@ -48,6 +48,11 @@ public sealed partial class SimBridge
     /// <summary>Crafts finished since start: results minted.</summary>
     public long CraftsFinished => Interlocked.Read(ref _craftsFinished);
 
+    private long _craftsEnhanced;
+
+    /// <summary>Add-ons applied to crafts.</summary>
+    public long CraftsEnhanced => Interlocked.Read(ref _craftsEnhanced);
+
     /// <summary>Experimentation points spent since start.</summary>
     public long CraftPoints => Interlocked.Read(ref _craftPoints);
 
@@ -95,6 +100,7 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _craftsStarted, _craftCounts.Started);
             Interlocked.Add(ref _craftsFinished, _craftCounts.Finished);
             Interlocked.Add(ref _craftPoints, _craftCounts.Points);
+            Interlocked.Add(ref _craftsEnhanced, _craftCounts.Enhanced);
             Interlocked.Add(ref _craftFees, _craftCounts.Fees);
         }
         else if (_craftsApplied.Count > 0)
@@ -175,6 +181,14 @@ public sealed partial class SimBridge
         if (!Schematics.TryGet(v.Schematic, out var s) || !ResolveInputs(tx, s, in v, crafter, out var plan))
         {
             RefuseCraft(subs, in command, TatooineReplication.CraftBadInputs);
+            return;
+        }
+
+        // The bench fee is paid at the finish, but a crafter who cannot pay it is refused here, before its inputs are consumed: a craft it could never
+        // finish would hold them for good (crafting-catalog.md § 15.4).
+        if (BalanceOf(tx, crafter) < BenchFee(plan.Output, plan.Mk))
+        {
+            RefuseCraft(subs, in command, TatooineReplication.CraftNotEnough);
             return;
         }
 
@@ -371,7 +385,13 @@ public sealed partial class SimBridge
             return;
         }
 
-        Schematics.TryGet(craft.S.Schematic, out var s);
+        // A craft of a schematic this build does not know (a later build renumbered it) is refused, never thrown on: the tick does not throw.
+        if (!Schematics.TryGet(craft.S.Schematic, out var s))
+        {
+            RefuseCraft(subs, in command, TatooineReplication.CraftNone);
+            return;
+        }
+
         var line = command.Value.Line;
         if (craft.S.PointsLeft == 0 || line >= s.Lines.Length)
         {
@@ -408,11 +428,16 @@ public sealed partial class SimBridge
             return;
         }
 
-        Schematics.TryGet(craft.S.Schematic, out var s);
+        if (!Schematics.TryGet(craft.S.Schematic, out var s))
+        {
+            RefuseCraft(subs, in command, TatooineReplication.CraftNone);
+            return;
+        }
+
         var addon = AddonOf(s.Kind);
         if (craft.S.AddonMk != 0 || addon == 0)
         {
-            RefuseCraft(subs, in command, TatooineReplication.CraftNoPoints);
+            RefuseCraft(subs, in command, TatooineReplication.CraftNoAddon);
             return;
         }
 
@@ -440,6 +465,9 @@ public sealed partial class SimBridge
         _craftsApplied.Add((command.Session, command.Seq));
     }
 
+    /// <summary>The bench fee of a result, whole credits: 3 % of its market value, rounded down (crafting-catalog.md § 15.4).</summary>
+    private static long BenchFee(ushort output, byte mk) => MarketValues.MilliOf(output, mk) * Schematics.BenchFeePerMille / 1000 / 1000;
+
     /// <summary>The add-on a schematic's kind takes (§ 13.3); 0 for none.</summary>
     private static ushort AddonOf(SchematicKind kind) => kind switch
     {
@@ -462,7 +490,12 @@ public sealed partial class SimBridge
 
         var state = craft.S;
         var crafter = state.Crafter;
-        Schematics.TryGet(state.Schematic, out var s);
+        if (!Schematics.TryGet(state.Schematic, out var s))
+        {
+            RefuseCraft(subs, in command, TatooineReplication.CraftNone);
+            return;
+        }
+
         var items = ItemsOf(crafter);
         if (s.MakesInstance ? FreeSlot(items) == 0 : RoomFor(items, state.Output, state.Mk) < 1)
         {
@@ -470,7 +503,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        var fee = MarketValues.MilliOf(state.Output, state.Mk) * Schematics.BenchFeePerMille / 1000 / 1000;
+        var fee = BenchFee(state.Output, state.Mk);
         if (fee > 0 && BalanceOf(tx, crafter) < fee)
         {
             RefuseCraft(subs, in command, TatooineReplication.CraftNotEnough);

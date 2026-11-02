@@ -131,6 +131,12 @@ public static class CraftPlan
     /// <summary>Stacks of one kept template a crafter keeps: about its next two crafts' worth; the rest are traded like anyone's (§ 6, Surplus).</summary>
     public const int KeptStacksPerTemplate = 2;
 
+    /// <summary>
+    /// The lines crafters work today: weapons and armour, in halves. Potions wait for a use and a value — no bot drinks one, the vendor refuses them and
+    /// they cannot be listed — so a potion crafter would only fill its grid (review, 2026-11-02; potions usable is C2-6, #1394).
+    /// </summary>
+    public static readonly CraftLine[] Lines = [CraftLine.Weapon, CraftLine.Armor];
+
     /// <summary>What a line's crafters make, in the order they try them.</summary>
     public static ushort[] Targets(CraftLine line) => line switch
     {
@@ -178,12 +184,19 @@ public static class CraftPlan
     /// The stacks a crafter trades (§ 6, Surplus): every stack but, of each template its recipes take (<see cref="Keeps"/>), the
     /// <see cref="KeptStacksPerTemplate"/> largest — the highest Mk of equal ones. Bounded, so the kept stacks never fill the grid.
     /// </summary>
-    public static List<HeldStack> Tradeable(IReadOnlyList<HeldStack> held, HashSet<ushort> keeps)
+    /// <remarks>The stacks its planned craft takes (<paramref name="uses"/>) are kept first, whatever their size: a small high-Mk stack a quality slot
+    /// fills from is what the craft is for.</remarks>
+    public static List<HeldStack> Tradeable(IReadOnlyList<HeldStack> held, HashSet<ushort> keeps, HashSet<(ushort, int)> uses = null)
     {
         var kept = new List<HeldStack>();
         var trade = new List<HeldStack>();
         foreach (var s in held)
         {
+            if (uses != null && uses.Contains((s.Template, s.Mk)))
+            {
+                continue;   // the planned craft's: kept, and counted against nothing
+            }
+
             (keeps.Contains(s.Template) ? kept : trade).Add(s);
         }
 
@@ -230,6 +243,32 @@ public static class CraftPlan
         }
 
         return best;
+    }
+
+    /// <summary>The (template, Mk) of every material and core a job takes from the grid: what its craft is waiting for.</summary>
+    public static HashSet<(ushort, int)> Uses(CraftBook book, CraftJob job)
+    {
+        var uses = new HashSet<(ushort, int)>();
+        if (job == null || book.Of(job.Schematic) is not { } s)
+        {
+            return uses;
+        }
+
+        var k = 0;
+        foreach (var slot in s.Slots)
+        {
+            if (!slot.IsPart && k < job.Mks.Length)
+            {
+                uses.Add((slot.Template, job.Mks[k++]));
+            }
+        }
+
+        if (job.AddonMk != 0)
+        {
+            uses.Add((s.Kind switch { "weapon" => AddonWeapon, "armor" => AddonArmor, _ => AddonAdditive }, job.AddonMk));
+        }
+
+        return uses;
     }
 
     /// <summary>The parts in an inventory's grid: its items with stats of a part's template, with their grades.</summary>

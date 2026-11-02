@@ -2484,6 +2484,24 @@ public sealed partial class BotSwarm : IAsyncDisposable
         private long _equipAskedAt = long.MinValue / 2;
         private ulong _equipAskedItem;
 
+        // What it puts on next, for the inventory read and the band it was computed for: once a read, not once a tick.
+        private List<GearItem> _wearGear;
+        private int _wearBand;
+        private ulong _wearNext;
+
+        /// <summary>The item it puts on next (<see cref="MarketPlan.NextToWear"/>): the pistol it fights with, armour, an upgrade within its band.</summary>
+        private ulong NextToWear()
+        {
+            var gear = _gear;
+            var band = MarketPlan.Band(_brain.CombatLevel);
+            if (!ReferenceEquals(gear, _wearGear) || band != _wearBand)
+            {
+                (_wearGear, _wearBand, _wearNext) = (gear, band, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster));
+            }
+
+            return _wearNext;
+        }
+
         /// <summary>The target last named, and when: an attack re-names it only when it changes, or every two seconds in case the server let it go.</summary>
         private uint _targetNamed;
         private long _targetNamedAt = long.MinValue / 2;
@@ -2819,8 +2837,8 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
             // Wear what it holds (crafting-build.md § 6): an item with stats in the grid whose slot nothing is worn in, or an upgrade within its band, one
             // every two seconds, and the same one not again before ten — the inventory read that shows it worn comes after the command.
-            if (tick - _equipAskedAt >= 8 && MarketPlan.NextToWear(_gear, MarketPlan.Band(_brain.CombatLevel)) is var wear && wear != 0
-                && (wear != _equipAskedItem || tick - _equipAskedAt >= 40) && Client.Plan.CommandByName(EquipCommand) != null)
+            if (tick - _equipAskedAt >= 2 * _ticksPerSecond && NextToWear() is var wear && wear != 0
+                && (wear != _equipAskedItem || tick - _equipAskedAt >= 10 * _ticksPerSecond) && Client.Plan.CommandByName(EquipCommand) != null)
             {
                 _equipAskedAt = tick;
                 _equipAskedItem = wear;

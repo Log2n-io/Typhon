@@ -28,6 +28,8 @@ export interface CraftStore {
   readonly point: (line: number) => void;
   readonly enhance: (mk: number) => void;
   readonly finish: () => void;
+  /** A new session: nothing of the last character's craft or picks survives. */
+  readonly reset: () => void;
 }
 
 const fetchJson = async (url: string): Promise<unknown> => {
@@ -49,8 +51,11 @@ const fetchJson = async (url: string): Promise<unknown> => {
 };
 
 const send = (command: MarketCommand): void => {
-  useMarket.getState().actions?.send(command);
+  useMarket.getState().sendCommand(command);
 };
+
+/** The latest refresh: an older answer landing after a newer one is dropped. */
+let refreshGeneration = 0;
 
 export const useCraft = create<CraftStore>((set, get) => ({
   open: false,
@@ -86,6 +91,7 @@ export const useCraft = create<CraftStore>((set, get) => ({
     set({ mks, parts });
   },
   refresh: async () => {
+    const generation = ++refreshGeneration;
     if (get().book === null) {
       const book = parseSchematics(await fetchJson('swg/schematics'));
       if (book !== null) {
@@ -93,7 +99,11 @@ export const useCraft = create<CraftStore>((set, get) => ({
       }
     }
 
-    set({ craft: parseCraft(await fetchJson('swg/craft')) });
+    // A failed read keeps what was shown: `{"craft":null}` says there is none, a failure says nothing.
+    const json = await fetchJson('swg/craft');
+    if (json !== null && generation === refreshGeneration) {
+      set({ craft: parseCraft(json) });
+    }
   },
   start: () => {
     const { selected, mks, parts } = get();
@@ -112,5 +122,9 @@ export const useCraft = create<CraftStore>((set, get) => ({
     if (craft !== null) {
       send({ kind: 'craftFinish', schematic: craft.schematic });
     }
+  },
+  reset: () => {
+    refreshGeneration++;
+    set({ open: false, craft: null, selected: null, mks: [], parts: [] });
   },
 }));

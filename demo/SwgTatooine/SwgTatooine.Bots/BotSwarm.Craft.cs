@@ -25,13 +25,14 @@ public sealed partial class BotSwarm
     private const string CraftEnhanceCommand = "CraftEnhance";
     private const string CraftFinishCommand = "CraftFinish";
 
-    /// <summary>The workshop's crafting refusals, <c>CraftNotAtStation</c> … <c>CraftFailed</c>: the first application reason + 41 … + 48.</summary>
+    /// <summary>The workshop's crafting refusals, <c>CraftNotAtStation</c> … <c>CraftNoAddon</c>: the first application reason + 41 … + 49.</summary>
     public const byte CraftFirstReason = AckReasons.FirstApplicationReason + 41;
 
-    public const int CraftReasons = 8;
+    public const int CraftReasons = 9;
 
     /// <summary>The refusals' names, by offset from <see cref="CraftFirstReason"/>.</summary>
-    public static readonly string[] CraftReasonNames = ["notAtStation", "busy", "none", "badInputs", "noPoints", "noRoom", "notEnough", "failed"];
+    public static readonly string[] CraftReasonNames =
+        ["notAtStation", "busy", "none", "badInputs", "noPoints", "noRoom", "notEnough", "failed", "noAddon"];
 
     /// <summary>A craft's commands, in order: the start, a point per line listed, the add-on when it has one, the finish.</summary>
     public static List<CraftCommand> Encode(CraftJob job)
@@ -120,6 +121,9 @@ public sealed partial class BotSwarm
         private volatile CraftJob _craftJob;
 
         private Uri _craftUri;
+
+        // The sequence of the last start sent: a refusal naming it drops the rest of its craft.
+        private int _craftStartSeq;
         private int _craftBusy;
         private readonly PlanSender<CraftCommand> _craftSender = new();
 
@@ -139,7 +143,7 @@ public sealed partial class BotSwarm
 
             Crafts = true;
             _book = book;
-            _craftTargets = CraftPlan.Targets((CraftLine)(index % 3));
+            _craftTargets = CraftPlan.Targets(CraftPlan.Lines[index % CraftPlan.Lines.Length]);
             _craftKeeps = CraftPlan.Keeps(book, _craftTargets);
             _craftUri = new Uri(_missionsUri, "/swg/craft");
             _brain.Crafts = true;
@@ -229,10 +233,11 @@ public sealed partial class BotSwarm
                 return;   // a server without crafting
             }
 
-            await Client.SendCommandAsync(c.Name, c.Values, ct).ConfigureAwait(false);
+            var seq = await Client.SendCommandAsync(c.Name, c.Values, ct).ConfigureAwait(false);
             switch (c.Name)
             {
                 case CraftStartCommand:
+                    Volatile.Write(ref _craftStartSeq, seq);
                     Interlocked.Increment(ref CraftsStarted);
                     break;
                 case CraftExperimentCommand:
@@ -253,12 +258,19 @@ public sealed partial class BotSwarm
         private void CountCraftRefusals(WorldStore store)
         {
             var acks = store.Acks;
+            var start = Volatile.Read(ref _craftStartSeq);
             for (var i = 0; i < acks.Count; i++)
             {
                 var offset = acks[i].Reason - CraftFirstReason;
                 if (offset is >= 0 and < CraftReasons)
                 {
                     Interlocked.Increment(ref CraftRefused[offset]);
+                }
+
+                // Its start refused: the rest of that craft would be refused too, one command at a time — dropped instead.
+                if (start != 0 && acks[i].Seq == start && acks[i].Reason != 0)
+                {
+                    _craftSender.Abort();
                 }
             }
         }
@@ -267,7 +279,8 @@ public sealed partial class BotSwarm
         /// A crafter's stacks as the bazaar plan sees them (§ 6, Surplus): its recipes' inputs are kept — neither listed nor sold to the vendor — so what
         /// it loots and buys is crafted with (<see cref="CraftPlan.Tradeable"/>).
         /// </summary>
-        private List<HeldStack> Tradeable(List<HeldStack> held) => Crafts ? CraftPlan.Tradeable(held, _craftKeeps) : held;
+        private List<HeldStack> Tradeable(List<HeldStack> held) =>
+            Crafts ? CraftPlan.Tradeable(held, _craftKeeps, CraftPlan.Uses(_book, _craftJob)) : held;
 
         /// <summary>The input its next target lacks first, to buy at this visit's bazaar; null for a bot that does not craft or lacks nothing.</summary>
         private BookSlot? CraftWant() =>

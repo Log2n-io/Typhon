@@ -107,8 +107,8 @@ describe('the fees', () => {
 });
 
 describe('a refusal', () => {
-  it('reads every reason of § 3.1, 151-163 in order, the workshop 164-176, and NotInWorld reused', () => {
-    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 26 }, (_, i) => 151 + i)]);
+  it('reads every reason of § 3.1, 151-163 in order, the workshop 164-177, and NotInWorld reused', () => {
+    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 27 }, (_, i) => 151 + i)]);
     expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
     expect(marketRefusal(MarketReason.StanceNoWeapon)).toContain('weapon');
     expect(marketRefusal(MarketReason.Sold)).toBe('Sold to someone else first');
@@ -156,6 +156,8 @@ describe('a command', () => {
     expect(commandRow({ kind: 'vendor', template: 8, mk: 1, quantity: 1 })).toBe('sell');
     expect(commandRow({ kind: 'standard', template: 69, price: 1812 })).toBe('issue');
     expect(commandRow({ kind: 'unequip', slot: 101 })).toBe('gear');
+    expect(commandRow({ kind: 'craftPoint', line: 2 })).toBe('craft');
+    expect(commandRow({ kind: 'craftFinish', schematic: 69 })).toBe('craft');
   });
 });
 

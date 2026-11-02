@@ -86,13 +86,14 @@ public static class MarketPlan
     /// <summary>
     /// The item with stats a bot puts on next: the first in its grid whose equip slot nothing is worn in; else, from its <paramref name="band"/>, the first
     /// of a higher Mk than what is worn there and no higher than the band — an upgrade, which the server swaps in (crafting-build.md § 6, Gear). 0 when
-    /// there is none; a band of 0 never upgrades.
+    /// there is none; a band of 0 never upgrades. With a <paramref name="weapon"/> template, the weapon slot takes only that weapon: a bot that fights
+    /// with a pistol does not disarm itself with a sword (review, 2026-11-02).
     /// </summary>
-    public static ulong NextToWear(IReadOnlyList<GearItem> gear, int band = 0)
+    public static ulong NextToWear(IReadOnlyList<GearItem> gear, int band = 0, ushort weapon = 0)
     {
         foreach (var g in gear)
         {
-            if (g.Worn || g.Wears == 0 || g.Mk > Math.Max(1, band))
+            if (g.Worn || g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon))
             {
                 continue;
             }
@@ -127,34 +128,45 @@ public static class MarketPlan
     /// puts on next, nor of a slot it would still wear them in, at value × U(<see cref="SurplusLow"/>, <see cref="SurplusHigh"/>), while it has fewer than
     /// <see cref="MaxListed"/> listings. What it made, what an upgrade took off, what it cannot wear at its level.
     /// </summary>
-    public static List<MarketCommand> Surplus(IReadOnlyList<GearItem> gear, MarketPrices prices, int listed, int band, ref uint rng)
+    /// <remarks>
+    /// With <paramref name="vendorRest"/> — the grid past its floor — what the listing cap leaves over goes to the vendor, one item at a time (§ 6,
+    /// Surplus: "then sell to the vendor"): an item it will never use must not hold a slot the next quest's drops need.
+    /// </remarks>
+    public static List<MarketCommand> Surplus(IReadOnlyList<GearItem> gear, MarketPrices prices, int listed, int band, ref uint rng, ushort weapon = 0,
+        bool vendorRest = false)
     {
         var plan = new List<MarketCommand>();
-        var wear = NextToWear(gear, band);
+        var wear = NextToWear(gear, band, weapon);
         foreach (var g in gear)
         {
-            if (listed >= MaxListed)
-            {
-                break;
-            }
-
             var value = prices.ValueOf(g.Item, g.Mk);
-            if (g.Worn || g.Id == wear || g.Template is >= CraftPlan.FirstPart and <= CraftPlan.LastPart || value <= 0d || Wanted(gear, g, band))
+            if (g.Worn || g.Id == wear || g.Template is >= CraftPlan.FirstPart and <= CraftPlan.LastPart || value <= 0d
+                || Wanted(gear, g, band, weapon))
             {
                 continue;
             }
 
-            plan.Add(new MarketCommand(MarketStep.List, g.Template, g.Mk, 1, Price(value, SurplusLow, SurplusHigh, ref rng), 0, g.Id));
-            listed++;
+            if (listed < MaxListed)
+            {
+                plan.Add(new MarketCommand(MarketStep.List, g.Template, g.Mk, 1, Price(value, SurplusLow, SurplusHigh, ref rng), 0, g.Id));
+                listed++;
+            }
+            else if (vendorRest && VendorPayout(1, value) > 0)
+            {
+                plan.Add(new MarketCommand(MarketStep.Vendor, g.Template, g.Mk, 1, 0, 0, g.Id));
+            }
         }
 
         return plan;
     }
 
+    // Whether an item may go in its slot: any armour; the weapon slot only the bot's weapon, when it names one.
+    private static bool Fits(GearItem g, ushort weapon) => weapon == 0 || g.Wears != 101 || g.Template == weapon;
+
     // Whether an unworn item would still be put on: its slot's worn Mk is lower and it is within the band — the next read's NextToWear takes it.
-    private static bool Wanted(IReadOnlyList<GearItem> gear, GearItem g, int band)
+    private static bool Wanted(IReadOnlyList<GearItem> gear, GearItem g, int band, ushort weapon)
     {
-        if (g.Wears == 0 || g.Mk > Math.Max(1, band))
+        if (g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon))
         {
             return false;
         }
@@ -322,7 +334,7 @@ public static class MarketPlan
     /// <param name="buy">The listing to buy, or null (<see cref="ChooseBuy"/>).</param>
     /// <returns>The commands, in the order they are sent.</returns>
     public static List<MarketCommand> Plan(IReadOnlyList<HeldStack> held, MarketMine mine, MarketPrices prices, ref uint rng, bool listMaterial,
-        BrowseRow? buy)
+        BrowseRow? buy, int gridStacks = -1)
     {
         var plan = new List<MarketCommand>();
         if (mine.Reserved > 0)
@@ -364,7 +376,9 @@ public static class MarketPlan
             var byValue = prices.ValueOf(a.Item, a.Mk).CompareTo(prices.ValueOf(b.Item, b.Mk));
             return byValue != 0 ? byValue : a.Mk != b.Mk ? a.Mk.CompareTo(b.Mk) : a.Count.CompareTo(b.Count);
         });
-        var stacks = left.Count;
+        // The floor counts the whole grid when it is known — a crafter's kept inputs, its parts and its items too — not only what this plan may sell: a
+        // grid full of what it keeps sends the bot back here for good, freeing nothing (review, 2026-11-02).
+        var stacks = gridStacks >= 0 ? gridStacks - (held.Count - left.Count) : left.Count;
         foreach (var s in materials)
         {
             if (stacks <= KeepStacks)

@@ -82,6 +82,64 @@ internal sealed class BotGearChecks
         });
     }
 
+    /// <summary>A bot that fights with a pistol never puts a sword on over it, at any band, and lists the sword instead (review, 2026-11-02).</summary>
+    [Test]
+    public void ABotThatFightsWithAPistol_NeverWearsASword_AndListsIt()
+    {
+        var prices = MarketPrices.None.With("sword_vibroblade", 2, 1_000d);
+        var gear = new List<GearItem>
+        {
+            new(1, ItemCatalog.Blaster, EquipSlot.Weapon, EquipSlot.Weapon, 0, "blaster_dl44", 1),
+            new(2, ItemCatalog.Sword, 3, EquipSlot.Weapon, 0, "sword_vibroblade", 2),
+        };
+        var rng = 3u;
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.NextToWear(gear, 2), Is.EqualTo(2UL), "the premise: with no weapon named, the sword is an upgrade");
+            Assert.That(MarketPlan.NextToWear(gear, 2, ItemCatalog.Blaster), Is.Zero);
+            Assert.That(MarketPlan.Surplus(gear, prices, 0, 2, ref rng, ItemCatalog.Blaster).ConvertAll(c => c.Item), Is.EqualTo(new ulong[] { 2 }));
+        });
+    }
+
+    /// <summary>§ 6, Surplus: past the listing cap, an item it will not use goes to the vendor — only while the grid is over its floor.</summary>
+    [Test]
+    public void SurplusPastTheListingCap_GoesToTheVendor_OnlyOverTheFloor()
+    {
+        var prices = MarketPrices.None.With("sword_vibroblade", 2, 1_000d);
+        var gear = new List<GearItem> { new(2, ItemCatalog.Sword, 3, EquipSlot.Weapon, 0, "sword_vibroblade", 2) };
+        var rng = 3u;
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.Surplus(gear, prices, MarketPlan.MaxListed, 1, ref rng), Is.Empty, "under the floor it waits for a listing slot");
+            var vendored = MarketPlan.Surplus(gear, prices, MarketPlan.MaxListed, 1, ref rng, vendorRest: true);
+            Assert.That(vendored.ConvertAll(c => (c.Step, c.Item, c.Quantity)), Is.EqualTo(new[] { (MarketStep.Vendor, 2UL, 1) }));
+        });
+    }
+
+    /// <summary>
+    /// The vendor's floor counts the whole grid when it is known: kept inputs, parts and items too. Ten tradeable stacks in a grid of 30 are sold down
+    /// until 8 stacks are left in the grid, not in the tradeable list.
+    /// </summary>
+    [Test]
+    public void TheVendorFloor_CountsTheWholeGrid()
+    {
+        var prices = MarketPrices.None.With("mat_metal", 1, 10d);
+        var held = new List<HeldStack>();
+        for (var i = 0; i < 10; i++)
+        {
+            held.Add(new HeldStack(ItemCatalog.Metal, "mat_metal", MarketCategory.Material, 1, 50));
+        }
+
+        var rng = 1u;
+        var mine = new MarketMine([], 0);
+        Assert.Multiple(() =>
+        {
+            Assert.That(MarketPlan.Plan(held, mine, prices, ref rng, false, null), Has.Count.EqualTo(10 - MarketPlan.KeepStacks), "the premise");
+            Assert.That(MarketPlan.Plan(held, mine, prices, ref rng, false, null, gridStacks: 30), Has.Count.EqualTo(10), "kept stacks and items held it");
+            Assert.That(MarketPlan.Plan(held, mine, prices, ref rng, false, null, gridStacks: 12), Has.Count.EqualTo(4));
+        });
+    }
+
     /// <summary>
     /// § 6, Gear: what a bot looks for on the board — its weapon below its band first, then an armour slot it has nothing for (the padded piece), then
     /// one whose best is below its band; nothing when all of it is of its band.
@@ -138,7 +196,7 @@ internal sealed class BotGearChecks
         var view = InventoryView.Parse(json, InventoryView.None, false, out _, held, gear);
         Assert.Multiple(() =>
         {
-            Assert.That(view.Stacks, Is.EqualTo(1), "the worn blaster counted in the grid");
+            Assert.That(view.Stacks, Is.EqualTo(1), "the grid counts only the hide: the worn blaster is not in it");
             Assert.That(held.ConvertAll(h => h.Item), Is.EqualTo(new[] { "mat_hide" }));
             Assert.That(gear, Is.EqualTo(new[] { new GearItem(5, ItemCatalog.Blaster, EquipSlot.Weapon, EquipSlot.Weapon, 0, "blaster_dl44", 1) }));
         });

@@ -1463,6 +1463,7 @@ export class ClientApp {
     this.items.clear();
     this.itemsVersion = -1;
     useItems.getState().reset();
+    useCraft.getState().reset();
     this.mine.clear();
     this.mineVersion = -1;
     useMarket.getState().reset();
@@ -4102,8 +4103,11 @@ export class ClientApp {
         useItems.getState().setSnapshot(items);
         // What is worn is not for sale until it is taken off (crafting-build.md § 2.2).
         useMarket.getState().setStacks(items.items.filter((i) => !isEquipSlot(i.slot)));
-        // A craft's steps move the items revision: its state is read again with them (crafting-build.md C2).
-        void useCraft.getState().refresh();
+        // A craft's steps move the items revision: its state is read again with them while the panel shows it (crafting-build.md C2) — opening it
+        // reads it too.
+        if (useCraft.getState().open) {
+          void useCraft.getState().refresh();
+        }
       }
     }
 

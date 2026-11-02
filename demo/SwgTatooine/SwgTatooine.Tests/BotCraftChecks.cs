@@ -163,6 +163,47 @@ internal sealed class BotCraftChecks
         });
     }
 
+    /// <summary>The stacks its planned craft takes are kept whatever their size: a small Mk IV stack a quality slot fills from is not sold.</summary>
+    [Test]
+    public void ThePlannedCraftsStacks_AreKept_SmallOnesToo()
+    {
+        var keeps = CraftPlan.Keeps(Book, CraftPlan.Targets(CraftLine.Weapon));
+        var held = new List<HeldStack>
+        {
+            Units(ItemCatalog.Metal, 1, 90), Units(ItemCatalog.Metal, 2, 80), Units(ItemCatalog.Metal, 4, 12), Units(ItemCatalog.Crystal, 3, 4),
+        };
+        var job = CraftPlan.Next(Book, [ItemCatalog.Blaster], 0, held, []);
+        Assert.Multiple(() =>
+        {
+            Assert.That(job?.Schematic, Is.EqualTo(Schematics.BarrelPistol), "the premise: the barrel, from the Mk IV Metal");
+            Assert.That(CraftPlan.Tradeable(held, keeps), Does.Contain(Units(ItemCatalog.Metal, 4, 12)), "the premise: by size alone it is sold");
+            Assert.That(CraftPlan.Tradeable(held, keeps, CraftPlan.Uses(Book, job)), Is.Empty);
+        });
+    }
+
+    /// <summary>No bot crafts potions until they have a use and a value: it could never sell one, and would fill its grid.</summary>
+    [Test]
+    public void NoCrafterMakesPotions_UntilTheyHaveAUse()
+    {
+        Assert.That(CraftPlan.Lines, Is.EqualTo(new[] { CraftLine.Weapon, CraftLine.Armor }));
+    }
+
+    /// <summary>A refusal of a craft's start drops the rest of it: its points and finish would each be refused in turn.</summary>
+    [Test]
+    public void ARefusedStart_DropsTheRestOfItsCraft()
+    {
+        var sender = new PlanSender<int>();
+        sender.Offer(1, [0, 1, 2, 3]);
+        Assert.That(sender.Next(true, 1, 0, 1), Is.EqualTo(0));
+        sender.Abort();
+        Assert.Multiple(() =>
+        {
+            Assert.That(sender.Next(true, 1, 1, 1), Is.Null);
+            Assert.That(sender.Dropped, Is.EqualTo(3));
+            Assert.That(sender.Busy, Is.False, "the bot would stand at the station for a craft that is not coming");
+        });
+    }
+
     [Test]
     public void ACraft_IsSentAsThePanelSendsIt()
     {

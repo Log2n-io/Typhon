@@ -382,9 +382,25 @@ public sealed partial class SimBridge
         gear.DamageType = computed.DamageType;
         gear.Stance = computed.Stance;
         player.Set(Player.Gear, gear);
+
+        // A stance whose weapon was taken off or swapped for another kind follows what is worn now — its stance, or the fists — rather than leaving a
+        // body that cannot fight and is not told (review, 2026-11-02).
+        var state = player.Read(Player.State);
+        if (state.Stance > Stances.Unarmed && state.Stance != gear.Stance)
+        {
+            state.Stance = gear.Stance != 0 ? gear.Stance : Stances.Unarmed;
+            player.Set(Player.State, state);
+            Interlocked.Increment(ref _stancesFollowed);
+        }
+
         Interlocked.Increment(ref _gearWrites);
         BumpItems(tick0, body);
     }
+
+    private long _stancesFollowed;
+
+    /// <summary>Stances moved to what is worn after an equip took their weapon away.</summary>
+    public long StancesFollowed => Interlocked.Read(ref _stancesFollowed);
 
     private void RefuseWorkshop<T>(SubscriptionsCommands subs, in ClientCommand<T> command, byte reason) where T : unmanaged
     {

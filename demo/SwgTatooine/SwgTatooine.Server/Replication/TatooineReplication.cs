@@ -1082,6 +1082,9 @@ public static partial class TatooineReplication
     /// <summary><c>ACKS</c> reason: a craft step applied and lost with the workshop's transaction, which did not commit: nothing changed.</summary>
     public const byte CraftFailed = AckReasons.FirstApplicationReason + 48;
 
+    /// <summary><c>ACKS</c> reason: a <see cref="CraftEnhance"/> on a craft that already has its add-on, or of a kind that takes none.</summary>
+    public const byte CraftNoAddon = AckReasons.FirstApplicationReason + 49;
+
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
     /// Measured from the port's centre: its ring wall stands about 20 m out and its ticket terminal 21.4 m, so 30 m takes in the terminal and the gate
