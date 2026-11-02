@@ -225,28 +225,21 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
         return ids.Count(id => t.Open(id).Read(SvTestArchetype.SvComp).Value == -1);
     }
 
-    /// <summary>Three data segments, then the power cut; <paramref name="packed"/> lays the first one's frames mid-page, so the last can tear with others below it.</summary>
-    private string[] ThreeSegmentsThenACrash(bool packed)
+    /// <summary>
+    /// Three data segments, then the power cut; <paramref name="earlierCommits"/> precede the first segment's last commit, each waiting for the disk, so each is
+    /// a frame of its own and the last can tear with others below it.
+    /// </summary>
+    private string[] ThreeSegmentsThenACrash(int earlierCommits = 0)
     {
         using var scope = ServiceProvider.CreateScope();
         var dbe = Open(scope);
         var walDir = WalDirectoryOf(dbe);
-        if (packed)
+        for (var i = 0; i < earlierCommits; i++)
         {
-            for (var i = 0; i < 200; i++)
-            {
-                using var t = dbe.CreateQuickTransaction(i < 199 ? DurabilityMode.Deferred : DurabilityMode.Immediate);
-                t.Spawn<CompAArch>(CompAArch.A.Set(new CompA(10 + i)));
-                t.Commit();
-            }
-
-            Switch(dbe);
-        }
-        else
-        {
-            SpawnAndSeal(dbe, 10, 0);
+            Spawn(dbe, 1, 300 + i);
         }
 
+        SpawnAndSeal(dbe, 10, 0);
         SpawnAndSeal(dbe, 10, 100);
         Spawn(dbe, 10, 200);
         dbe.SimulateHardCrash();
@@ -261,7 +254,7 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
     [CancelAfter(60_000)]
     public void AMidLogBreak_IsLeftUnsealed()
     {
-        var segments = ThreeSegmentsThenACrash(packed: false);
+        var segments = ThreeSegmentsThenACrash();
         var broken = segments[0];
         Tear(broken, FrameInside(File.ReadAllBytes(broken)));
         var before = File.ReadAllBytes(broken);
@@ -279,11 +272,11 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
     [VerifiesRule("WR-01")]
     public void AMidLogBreak_IsSealedOnceWhatFollowsItIsSetAside()
     {
-        var segments = ThreeSegmentsThenACrash(packed: true);
+        var segments = ThreeSegmentsThenACrash(earlierCommits: 2);
         var broken = segments[0];
-        var last = WalFrames.Read(File.ReadAllBytes(broken), out _).LastOrDefault(f => f.Start % 4096 != 0);
-        Assert.That(last, Is.Not.Null, "premise: a frame starts mid-page");
-        Tear(broken, last.Start + WalFrameHeader.SizeInBytes + 8);
+        var frames = WalFrames.Read(File.ReadAllBytes(broken), out _);
+        Assert.That(frames, Has.Count.GreaterThanOrEqualTo(2), "premise: frames below the last one");
+        Tear(broken, frames[^1].Start + WalFrameHeader.SizeInBytes + 8);
 
         using var scope = ServiceProvider.CreateScope();
         var dbe = Open(scope);
@@ -298,7 +291,7 @@ class ArchiveTornTailTests : ArchiveTestBase<ArchiveTornTailTests>
     [VerifiesRule("WR-01")]
     public void ABreakOnASegmentsFirstFrame_SetsItAsideWithItsBytes()
     {
-        var segments = ThreeSegmentsThenACrash(packed: false);
+        var segments = ThreeSegmentsThenACrash();
         var broken = segments[0];
         Tear(broken, FrameInside(File.ReadAllBytes(broken)));
         var before = File.ReadAllBytes(broken);
