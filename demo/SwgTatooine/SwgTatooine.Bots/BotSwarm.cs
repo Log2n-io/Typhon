@@ -119,6 +119,12 @@ public sealed class BotSwarmOptions
     /// </summary>
     public bool Market { get; init; } = true;
 
+    /// <summary>
+    /// Thinking bots that craft, in hundredths by index (crafting-build.md § 6, O-7: 30 %): those that trade, weapons, armour and potions in thirds.
+    /// <c>--crafters 0</c> is the A/B arm.
+    /// </summary>
+    public int CraftPercent { get; init; } = 30;
+
     /// <summary>The load test's city by name (<c>--market-rush</c>, bazaar.md § 8), or null: every thinking bot goes there and does nothing but trade.</summary>
     public string MarketRush { get; init; }
 
@@ -353,6 +359,9 @@ public sealed partial class BotSwarm : IAsyncDisposable
     /// Every facility in the world (<c>GET /swg/facilities</c>), read once per fleet; null when the server lists none — the brains then learn by looking.
     /// </summary>
     private List<ListedFacility> _facilities;
+
+    /// <summary>The schematics (<c>GET /swg/schematics</c>), read once per fleet; null when the server has none — then no bot crafts.</summary>
+    private CraftBook _book;
 
     /// <summary>Bots driven concurrently within one tick.</summary>
     /// <remarks>
@@ -1284,6 +1293,20 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 {
                     Console.WriteLine($"  !! brain: the facility list could not be read ({e.Message}); bots learn them by looking");
                 }
+
+                if (_options.CraftPercent > 0)
+                {
+                    try
+                    {
+                        _book = CraftBook.Parse(await http.GetStringAsync(new Uri(server, "swg/schematics"), ct).ConfigureAwait(false));
+                        Console.WriteLine($"  brain: {_book.Count} schematics read; {_options.CraftPercent} % of the trading bots craft");
+                    }
+                    catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
+                        or InvalidOperationException or FormatException)
+                    {
+                        Console.WriteLine($"  !! brain: the schematics could not be read ({e.Message}); no bot crafts");
+                    }
+                }
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or KeyNotFoundException
                 or InvalidOperationException or FormatException)
@@ -1938,7 +1961,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
     /// </remarks>
     private async Task<Bot> OpenOneAsync(int index, CancellationToken ct)
     {
-        var bot = new Bot(index, _options, _assets, _facilities);
+        var bot = new Bot(index, _options, _assets, _facilities, _book);
         bot.Client.Disconnected += (code, _) => Note(code, bot.Client.CloseDetail);
 
         // Interlocked, because Fault is raised from each client's OWN receive loop: with N bots these are N threads, and `Faults++` is a
@@ -2509,7 +2532,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
         private static readonly bool TraceAll = Environment.GetEnvironmentVariable("SWG_BOT_TRACE") == "all";
         public readonly BotEvents Heard = new();
 
-        public Bot(int index, BotSwarmOptions options, BotAssets assets = null, IReadOnlyList<ListedFacility> facilities = null)
+        public Bot(int index, BotSwarmOptions options, BotAssets assets = null, IReadOnlyList<ListedFacility> facilities = null, CraftBook book = null)
         {
             // Deterministic from the index, so a run is reproducible and two bots are never in the same place. The golden ratio keeps successive angles from
             // clustering, which a plain index × constant does not.
@@ -2556,6 +2579,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 _takesMissions = options.Missions && _missionsUri != null && !string.IsNullOrEmpty(_token);
                 _brain.TakesMissions = _takesMissions;
                 SetUpMarket(index, options);
+                SetUpCraft(index, options, book);
                 TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
@@ -2728,7 +2752,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
             PollInventory(tick);
             PollMine(tick);
             var missions = _missions;
-            world = WithMarket(world) with
+            world = WithCraft(WithMarket(world)) with
             {
                 MissionsHeld = missions.Held,
                 HasMissionLair = missions.LairKnown,
@@ -2793,10 +2817,10 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 IntentsSent++;
             }
 
-            // Wear what it holds (crafting-build.md § 6): an item with stats in the grid whose slot nothing is worn in, one every two seconds, and the
-            // same one not again before ten — the inventory read that shows it worn comes after the command.
-            if (tick - _equipAskedAt >= 8 && MarketPlan.NextToWear(_gear) is var wear && wear != 0 && (wear != _equipAskedItem || tick - _equipAskedAt >= 40)
-                && Client.Plan.CommandByName(EquipCommand) != null)
+            // Wear what it holds (crafting-build.md § 6): an item with stats in the grid whose slot nothing is worn in, or an upgrade within its band, one
+            // every two seconds, and the same one not again before ten — the inventory read that shows it worn comes after the command.
+            if (tick - _equipAskedAt >= 8 && MarketPlan.NextToWear(_gear, MarketPlan.Band(_brain.CombatLevel)) is var wear && wear != 0
+                && (wear != _equipAskedItem || tick - _equipAskedAt >= 40) && Client.Plan.CommandByName(EquipCommand) != null)
             {
                 _equipAskedAt = tick;
                 _equipAskedItem = wear;
@@ -2900,6 +2924,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     BeginTrade(tick, intent.Region);
                     break;
 
+                case IntentKind.Craft:
+                    // At a crafting station: the craft under way read off the driver, then sent below at the commands' rate (BotSwarm.Craft.cs).
+                    BeginCraft();
+                    break;
+
                 case IntentKind.AbandonMission when Client.Plan.CommandByName(AbandonMissionCommand) != null:
                     if (missions.FirstId != 0)
                     {
@@ -2918,6 +2947,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
             }
 
             await SendMarketAsync(tick, ct).ConfigureAwait(false);
+            await SendCraftAsync(tick, ct).ConfigureAwait(false);
             await TipAsync(tick, world, ct).ConfigureAwait(false);
         }
 
@@ -3057,6 +3087,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     gear);
                 SawInventory(held);
                 _gear = gear;
+                SawCraftInputs(held, gear);
                 _itemsPrimed = true;
                 _inventory = view;
                 Interlocked.Add(ref ItemsLost, lost);

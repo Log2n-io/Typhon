@@ -56,7 +56,10 @@ public sealed record InventoryView(int Stacks, int LastLost)
                     MarketJson.Id(s.GetProperty("id")),
                     MarketCatalog.TemplateOf(s, item),
                     slot,
-                    stats.TryGetProperty("wears", out var w) ? w.GetInt32() : 0));
+                    stats.TryGetProperty("wears", out var w) ? w.GetInt32() : 0,
+                    stats.TryGetProperty("grade", out var g) ? g.GetInt32() : 0,
+                    item,
+                    s.TryGetProperty("mk", out var mk) ? mk.GetInt32() : 0));
                 continue;
             }
 

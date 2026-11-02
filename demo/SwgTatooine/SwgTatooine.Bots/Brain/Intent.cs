@@ -44,6 +44,12 @@ public enum IntentKind
     /// commands a browser's bazaar panel sends. <see cref="Intent.Region"/> is the bazaar's city, as a region.
     /// </summary>
     Trade,
+
+    /// <summary>
+    /// Craft at the crafting station it stands at (crafting-build.md C2): the swarm sends the craft it planned — start, a point at a time, the add-on, the
+    /// finish — as the crafting panel sends it.
+    /// </summary>
+    Craft,
 }
 
 /// <summary>One decision.</summary>
@@ -105,6 +111,9 @@ public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedC
     /// <param name="region">The bazaar's city, as a city plus one: the city a browse reads and a buy is collected in.</param>
     /// <returns>The intent.</returns>
     public static Intent Trade(int region) => new(IntentKind.Trade, 0f, 0, 0, region);
+
+    /// <summary>Craft at the station it stands at.</summary>
+    public static Intent Craft => new(IntentKind.Craft, 0f, 0, 0, 0);
 
     /// <summary>Queue for a shuttle to a region's city.</summary>
     /// <param name="region">The destination, as a city plus one.</param>

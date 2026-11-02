@@ -83,29 +83,166 @@ public static class MarketPlan
 
     public const int BuyPercent = 25;
 
-    /// <summary>The item with stats a bot puts on next: the first in its grid whose equip slot nothing is worn in; 0 when there is none.</summary>
-    public static ulong NextToWear(IReadOnlyList<GearItem> gear)
+    /// <summary>
+    /// The item with stats a bot puts on next: the first in its grid whose equip slot nothing is worn in; else, from its <paramref name="band"/>, the first
+    /// of a higher Mk than what is worn there and no higher than the band — an upgrade, which the server swaps in (crafting-build.md § 6, Gear). 0 when
+    /// there is none; a band of 0 never upgrades.
+    /// </summary>
+    public static ulong NextToWear(IReadOnlyList<GearItem> gear, int band = 0)
     {
         foreach (var g in gear)
         {
-            if (g.Worn || g.Wears == 0)
+            if (g.Worn || g.Wears == 0 || g.Mk > Math.Max(1, band))
             {
                 continue;
             }
 
             var free = true;
+            var better = false;
             foreach (var w in gear)
             {
-                free &= !(w.Worn && w.Slot == g.Wears);
+                if (w.Worn && w.Slot == g.Wears)
+                {
+                    free = false;
+                    better = band > 0 && g.Mk > w.Mk;
+                }
             }
 
-            if (free)
+            if (free || better)
             {
                 return g.Id;
             }
         }
 
         return 0;
+    }
+
+    /// <summary>What it lists is listed at its value times a draw in this range (crafting-build.md § 6, Surplus).</summary>
+    public const double SurplusLow = 0.9;
+
+    public const double SurplusHigh = 1.1;
+
+    /// <summary>
+    /// The items with stats it will not use, to list (§ 6, Surplus): those in its grid that are neither a part — a crafter crafts with them — nor the one it
+    /// puts on next, nor of a slot it would still wear them in, at value × U(<see cref="SurplusLow"/>, <see cref="SurplusHigh"/>), while it has fewer than
+    /// <see cref="MaxListed"/> listings. What it made, what an upgrade took off, what it cannot wear at its level.
+    /// </summary>
+    public static List<MarketCommand> Surplus(IReadOnlyList<GearItem> gear, MarketPrices prices, int listed, int band, ref uint rng)
+    {
+        var plan = new List<MarketCommand>();
+        var wear = NextToWear(gear, band);
+        foreach (var g in gear)
+        {
+            if (listed >= MaxListed)
+            {
+                break;
+            }
+
+            var value = prices.ValueOf(g.Item, g.Mk);
+            if (g.Worn || g.Id == wear || g.Template is >= CraftPlan.FirstPart and <= CraftPlan.LastPart || value <= 0d || Wanted(gear, g, band))
+            {
+                continue;
+            }
+
+            plan.Add(new MarketCommand(MarketStep.List, g.Template, g.Mk, 1, Price(value, SurplusLow, SurplusHigh, ref rng), 0, g.Id));
+            listed++;
+        }
+
+        return plan;
+    }
+
+    // Whether an unworn item would still be put on: its slot's worn Mk is lower and it is within the band — the next read's NextToWear takes it.
+    private static bool Wanted(IReadOnlyList<GearItem> gear, GearItem g, int band)
+    {
+        if (g.Wears == 0 || g.Mk > Math.Max(1, band))
+        {
+            return false;
+        }
+
+        foreach (var w in gear)
+        {
+            if (w.Worn && w.Slot == g.Wears)
+            {
+                return g.Mk > w.Mk;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The piece a bot looks for on the board (crafting-build.md § 6, Gear): its weapon when the best it has is below its band; else the first armour slot
+    /// (102-107) it has nothing for, as the padded piece; else the first armour slot whose best is below its band, as the piece it wears. The asset to
+    /// browse, the slot, and the best Mk it already has there (0 for none); null when its gear is of its band.
+    /// </summary>
+    public static (string Item, int Slot, int HaveMk)? GearWanted(IReadOnlyList<GearItem> gear, IReadOnlyList<StandardOffer> offers, int band)
+    {
+        (string, int, int)? below = null;
+        for (var slot = 101; slot <= 107; slot++)
+        {
+            var have = 0;
+            string item = null;
+            foreach (var g in gear)
+            {
+                if (g.Wears == slot && g.Mk > have)
+                {
+                    have = g.Mk;
+                    item = g.Item;
+                }
+            }
+
+            if (have == 0 && slot > 101 && offers != null)
+            {
+                foreach (var o in offers)
+                {
+                    if (o.Wears == slot && o.Item.StartsWith("armor_padded_", StringComparison.Ordinal))
+                    {
+                        return (o.Item, slot, 0);
+                    }
+                }
+            }
+
+            if (have > 0 && have < band && item != null && (slot == 101 || below == null))
+            {
+                if (slot == 101)
+                {
+                    return (item, slot, have);
+                }
+
+                below = (item, slot, have);
+            }
+        }
+
+        return below;
+    }
+
+    /// <summary>
+    /// The listing to buy for a piece it wants (§ 6, Gear): of a browse page of that piece, the highest Mk above what it has and within its band, the best
+    /// value of those (the lowest price to value), at ≤ <see cref="BuyOverValue"/> × its value, keeping <see cref="StandardReserve"/> in the wallet, not
+    /// its own; null when none is — the vendor's standard issue is the fallback.
+    /// </summary>
+    public static BrowseRow? ChooseGear(IReadOnlyList<BrowseRow> rows, MarketPrices prices, int haveMk, int band, long wallet, IReadOnlyCollection<ulong> own)
+    {
+        BrowseRow? best = null;
+        var bestRatio = double.MaxValue;
+        foreach (var r in rows)
+        {
+            var value = prices.ValueOf(r.Item, r.Mk);
+            if (r.Mk <= haveMk || r.Mk > Math.Max(1, band) || value <= 0d || r.Unit > BuyOverValue * value || wallet - r.Total < StandardReserve
+                || Contains(own, r.Id))
+            {
+                continue;
+            }
+
+            var ratio = r.Unit / value;
+            if (best is not { } b || r.Mk > b.Mk || (r.Mk == b.Mk && ratio < bestRatio))
+            {
+                best = r;
+                bestRatio = ratio;
+            }
+        }
+
+        return best;
     }
 
     /// <summary>What a bot keeps in its wallet after buying standard issue: a few repairs' and fees' worth (crafting-build.md § 6).</summary>

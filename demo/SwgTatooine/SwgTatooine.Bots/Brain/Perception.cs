@@ -375,7 +375,7 @@ public sealed class Perception
             // props carry a region too, and theirs are numbered above the cities' (WorldBuilder starts poiIndex at
             // Cities.Count), so they are never confused with a city's facilities.
             var kind = (int)kinds[slot];
-            if (kind != Routing.ShuttleportKind && kind != Routing.BazaarKind && kind != Routing.MissionTerminalKind)
+            if (kind != Routing.ShuttleportKind && kind != Routing.BazaarKind && kind != Routing.MissionTerminalKind && kind != Routing.CraftingStationKind)
             {
                 continue;
             }

@@ -59,6 +59,12 @@ public enum GoalWhy : byte
 
     /// <summary>Off to trade with <see cref="BotBrain.MarketFullStacks"/> stacks or more: already losing drops — how often is the measure of too little headroom.</summary>
     MarketFull,
+
+    /// <summary>A crafter holding the inputs of a craft: off to its city's nearest crafting station (crafting-build.md § 6).</summary>
+    CraftChosen,
+
+    /// <summary>The craft sent: back to the day's loop.</summary>
+    CraftDone,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>

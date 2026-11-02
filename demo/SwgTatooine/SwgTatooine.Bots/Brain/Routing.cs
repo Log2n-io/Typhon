@@ -68,6 +68,9 @@ public static class Routing
     /// <summary>`StructureKind.MissionTerminal`.</summary>
     public const int MissionTerminalKind = 10;
 
+    /// <summary>`StructureKind.CraftingStation`: where a craft is started (crafting-build.md C2).</summary>
+    public const int CraftingStationKind = 1;
+
     /// <summary>`SpeedClasses.Swoop`, granted only while mounted.</summary>
     public const byte SwoopClass = 3;
 

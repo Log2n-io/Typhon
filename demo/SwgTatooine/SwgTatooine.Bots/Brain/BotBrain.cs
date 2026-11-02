@@ -351,6 +351,19 @@ public sealed partial class BotBrain
     /// <summary>The load test's city, as a region (<c>--market-rush</c>, bazaar.md § 8), or 0: a rush bot goes there, stands at a bazaar and trades.</summary>
     public int RushRegion { get; set; }
 
+    /// <summary>Whether this bot crafts (crafting-build.md § 6, profiles): holding a craft's inputs, it goes to its city's nearest crafting station.</summary>
+    public bool Crafts { get; set; }
+
+    /// <summary>Whether it stands at a crafting station using it, within <see cref="MarketReachM"/> of it: the server's reach is 6 m too.</summary>
+    public bool AtStation => Goal == Goal.Visiting && _using && _visitKind == Routing.CraftingStationKind
+        && Routing.Distance(_seenX, _seenZ, _visitAt.X, _visitAt.Z) <= MarketReachM;
+
+    /// <summary>Crafting-station visits it crafted at: each one an <see cref="IntentKind.Craft"/>.</summary>
+    public long CraftsAsked { get; private set; }
+
+    /// <summary>The craft errand is tried at most this often, seconds: a station it cannot walk to is not searched again every decision.</summary>
+    public const int CraftRetrySeconds = 60;
+
     /// <summary>Whether it stands at a bazaar's terminal using it: the only time a market command can be taken (the server's 6 m).</summary>
     /// <remarks>
     /// <b>And within <see cref="MarketReachM"/> of it, by where the body was last seen.</b> Using a terminal is a goal's state; where the body stands is the
@@ -533,8 +546,14 @@ public sealed partial class BotBrain
     /// <summary>When the bazaar errand may be chosen again: set whenever it is tried, made or not.</summary>
     private long _marketAt;
 
-    /// <summary>The errand under way is the bazaar errand (<see cref="GoalWhy.MarketChosen"/>), not an errand that happens to end at a bazaar.</summary>
+    /// <summary>
+    /// The errand under way is the bazaar errand (<see cref="GoalWhy.MarketChosen"/>) or the craft errand (<see cref="GoalWhy.CraftChosen"/>), not an
+    /// errand that happens to end at a bazaar: done, it goes back to the day's loop.
+    /// </summary>
     private bool _marketErrand;
+
+    /// <summary>When the craft errand may be chosen again.</summary>
+    private long _craftAt;
 
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
@@ -667,6 +686,17 @@ public sealed partial class BotBrain
             _marketAt = tick + Ticks(MarketRetrySeconds);
             var why = world.InventoryStacks >= MarketFullStacks ? GoalWhy.MarketFull : GoalWhy.MarketChosen;
             if (StartVisitAt(in world, tick, Routing.BazaarKind, why, bazaar))
+            {
+                return Visit(in world, tick);
+            }
+        }
+
+        // A crafter holding a craft's inputs: its city's nearest station, before the desk — a quest's drops are what it crafts with (crafting-build.md § 6).
+        if (Crafts && _assets != null && world.CraftReady && tick >= _craftAt
+            && Station(in world, here) is { } station && Routing.Distance(world.X, world.Z, station.At.X, station.At.Z) <= ErrandReachM)
+        {
+            _craftAt = tick + Ticks(CraftRetrySeconds);
+            if (StartVisitAt(in world, tick, Routing.CraftingStationKind, GoalWhy.CraftChosen, station))
             {
                 return Visit(in world, tick);
             }
@@ -1222,7 +1252,7 @@ public sealed partial class BotBrain
         _leg.FinalReach = UseReachM;
         _visitAt = (found.X, found.Z);
         _visitRegion = to.Region;
-        _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull;
+        _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull or GoalWhy.CraftChosen;
         VisitSerial++;
 
         Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
@@ -1288,6 +1318,16 @@ public sealed partial class BotBrain
             : Facilities.TryNearest(Routing.BazaarKind, world.X, world.Z, out _, out var nearest) ? nearest : 0;
         Span<Facility> near = stackalloc Facility[1];
         return region != 0 && Facilities.NearestIn(region, Routing.BazaarKind, world.X, world.Z, [], near) > 0 ? (near[0], region) : null;
+    }
+
+    /// <summary>The crafting station to craft at: the nearest of its home's city, the city it stands in, or in the desert the nearest one's; or null.</summary>
+    private (Facility At, int Region)? Station(in Perceived world, int here)
+    {
+        var region = HomeRegion != 0 ? HomeRegion
+            : here != 0 ? here
+            : Facilities.TryNearest(Routing.CraftingStationKind, world.X, world.Z, out _, out var nearest) ? nearest : 0;
+        Span<Facility> near = stackalloc Facility[1];
+        return region != 0 && Facilities.NearestIn(region, Routing.CraftingStationKind, world.X, world.Z, [], near) > 0 ? (near[0], region) : null;
     }
 
     /// <summary>
@@ -1358,6 +1398,11 @@ public sealed partial class BotBrain
                 return Intent.None;
             }
 
+            if (world.Crafting && _visitKind == Routing.CraftingStationKind && tick < _tradeCap)
+            {
+                return Intent.None;   // the craft still going out: its start needs the station within 6 m
+            }
+
             if (RushRegion != 0 && _visitKind == Routing.BazaarKind)
             {
                 // The load test stands at its bazaar for good: the next round.
@@ -1371,7 +1416,7 @@ public sealed partial class BotBrain
                 // Traded: back to the day's loop — the desk, a quest — and not off on a flight the way an errand to look at a bazaar often is.
                 _marketErrand = false;
                 _flyNext = false;
-                Become(Goal.Choosing, GoalWhy.MarketDone, tick);
+                Become(Goal.Choosing, _visitKind == Routing.CraftingStationKind ? GoalWhy.CraftDone : GoalWhy.MarketDone, tick);
                 return Choose(in world, tick);
             }
 
@@ -1422,6 +1467,15 @@ public sealed partial class BotBrain
                     _tradeCap = _until + Ticks(MaxTradeHoldSeconds);
                     TradesAsked++;
                     return Intent.Trade(_visitRegion);
+                }
+
+                // At a station, a crafter crafts: the swarm sends the craft at the commands' rate, so it stays that long.
+                if (_visitKind == Routing.CraftingStationKind && Crafts)
+                {
+                    _until += Ticks(TradeSeconds);
+                    _tradeCap = _until + Ticks(MaxTradeHoldSeconds);
+                    CraftsAsked++;
+                    return Intent.Craft;
                 }
 
                 return Intent.None;

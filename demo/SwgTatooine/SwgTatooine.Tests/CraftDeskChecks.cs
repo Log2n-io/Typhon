@@ -156,6 +156,54 @@ internal sealed class CraftDeskChecks : ServedChecks
     }
 
     /// <summary>
+    /// A crafter bot's plan, through the workshop (crafting-build.md § 6, C2-4's bots): from Metal, Crystal, Gas, Hide and a core, read from the real
+    /// inventory answer as a bot reads it, <see cref="CraftPlan.Next"/> makes the barrel, the power cell and the grip, then the blaster — every command the
+    /// bot sends accepted, the audits clean.
+    /// </summary>
+    [Test]
+    [CancelAfter(180_000)]
+    public void ABotsCraftPlan_IsAcceptedByTheWorkshop_PartsThenTheItem()
+    {
+        using var sim = Start();
+        var c = LogIn(sim, 0x9531, 1);
+        Stage(sim, c, ItemCatalog.CoreRanged, 2, 1);
+        Stage(sim, c, ItemCatalog.Metal, 1, 40);
+        Stage(sim, c, ItemCatalog.Crystal, 1, 8);
+        Stage(sim, c, ItemCatalog.Gas, 1, 8);
+        Stage(sim, c, ItemCatalog.Hide, 2, 6);
+        Harness.Ticks(1);
+        var book = Bots.CraftBook.Parse(CraftEndpoints.SchematicsJson());
+
+        var made = new List<ushort>();
+        for (var craft = 1; craft <= 4; craft++)
+        {
+            var held = new List<Bots.HeldStack>();
+            var gear = new List<Bots.GearItem>();
+            Bots.InventoryView.Parse(ItemEndpoints.InventoryJson(sim.Dbe, c.Character), Bots.InventoryView.None, false, out _, held, gear);
+            var job = Bots.CraftPlan.Next(book, [ItemCatalog.Blaster], 0, held, Bots.CraftPlan.PartsOf(gear));
+            Assert.That(job, Is.Not.Null, $"craft {craft}: nothing to make");
+            made.Add(job.Schematic);
+            foreach (var command in Bots.BotSwarm.Encode(job))
+            {
+                c.Link.SendCommand(command.Name, command.Values);
+                Breathe();
+            }
+
+            var finished = craft;
+            SessionHarness.Until(() => sim.Bridge.CraftsFinished == finished, $"craft {craft} finished");
+            Harness.Ticks(2);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(made, Is.EqualTo(new[] { Schematics.BarrelPistol, Schematics.PowerCell, Schematics.Grip, ItemCatalog.Blaster }));
+            Assert.That(Items.Stacks(sim, c.Character).Count(s => s.Stack.Template == ItemCatalog.Blaster), Is.EqualTo(1));
+            Assert.That(Ledgers.Refusals(c.Link), Is.Empty, "a command the bot sent was refused");
+        });
+        AuditsOk(sim, "after the bot's crafts");
+    }
+
+    /// <summary>
     /// A blaster from a Mk III core, three parts, six points (3, 2, 1) and a Mk II enhancement: its stats the pure craft's to the bit, Mk III by its core,
     /// and the bench fee 3 % of a Mk III weapon's value paid to World as one <c>bench</c> row.
     /// </summary>

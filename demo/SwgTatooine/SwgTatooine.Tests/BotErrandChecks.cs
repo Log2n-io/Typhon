@@ -1733,6 +1733,89 @@ public sealed class BotErrandChecks
         });
     }
 
+    /// <summary>A home crafter in Port Sable: a crafting station 30 m north, its bazaar 40 m east, a mission terminal 60 m west.</summary>
+    private static (BotBrain Brain, Sim Sim) Crafter()
+    {
+        var (brain, sim) = Trader(0, 0);
+        brain.Crafts = true;
+        brain.Facilities.Observe(1, Routing.CraftingStationKind, Here.X, Here.Z + 30f, TerminalAsset + 1, 0);
+        sim.Planet = [.. sim.Planet, new SeenStructure(Here.X, Here.Z + 30f, Routing.CraftingStationKind, TerminalAsset, 0, 1)];
+        return (brain, sim);
+    }
+
+    /// <summary>
+    /// crafting-build.md § 6: a crafter holding a craft's inputs goes to its city's nearest station before the desk; one with nothing to make, or a bot
+    /// that does not craft, goes to the desk.
+    /// </summary>
+    [TestCase(true, true, true)]
+    [TestCase(true, false, false)]
+    [TestCase(false, true, false)]
+    public void ACrafterWithInputs_GoesToAStation_BeforeTheDesk(bool crafts, bool ready, bool toStation)
+    {
+        var (brain, sim) = Crafter();
+        brain.Crafts = crafts;
+        brain.Decide(sim.View() with { CraftReady = ready }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: an errand first");
+            Assert.That(brain.VisitTarget, Is.EqualTo(toStation ? (Here.X, Here.Z + 30f) : (Here.X - 60f, Here.Z)), "not the station, or not the desk");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CraftChosen], Is.EqualTo(toStation ? 1 : 0));
+        });
+    }
+
+    /// <summary>
+    /// The craft errand end to end: walked to, one <see cref="IntentKind.Craft"/>, every command of the craft sent from within the station's reach while
+    /// it is still going out, <see cref="GoalWhy.CraftDone"/>, then the desk — and not the station again before its retry.
+    /// </summary>
+    [Test]
+    public void ACrafter_CraftsAtTheStation_StaysWhileItsCraftGoesOut_ThenTheDesk()
+    {
+        const double StationReachM = 6d;
+        var (brain, sim) = Crafter();
+        var sender = new PlanSender<int>();
+        var ready = true;
+        var crafts = new List<long>();
+        var sent = new List<double>();
+        var targets = new List<(float X, float Z)>();
+        var was = brain.Goal;
+        for (var tick = 1L; tick < 900 && targets.Count < 2; tick++)
+        {
+            var intent = brain.Decide(sim.View() with { CraftReady = ready, Crafting = sender.Busy }, tick);
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.Craft)
+            {
+                crafts.Add(tick);
+                ready = false;
+
+                // A whole item's craft: start, six points, an add-on, the finish — at one command a tick and a half.
+                sender.Offer(brain.VisitSerial, [.. Enumerable.Range(0, 9)]);
+            }
+
+            if (sender.Next(brain.AtStation, brain.VisitSerial, tick, 6) is { })
+            {
+                sent.Add(Routing.Distance(sim.X, sim.Z, Here.X, Here.Z + 30f));
+            }
+
+            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            {
+                targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
+            }
+
+            was = brain.Goal;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(targets, Is.EqualTo(new[] { (0f, 30f), (-60f, 0f) }), "not the station, then the desk");
+            Assert.That(crafts, Has.Count.EqualTo(1));
+            Assert.That(brain.CraftsAsked, Is.EqualTo(1));
+            Assert.That(sent, Has.Count.EqualTo(9), "the craft was not all sent before the bot left");
+            Assert.That(sent.Count == 0 ? 0d : sent.Max(), Is.LessThanOrEqualTo(StationReachM), "a command was sent from beyond the station's reach");
+            Assert.That(sender.Dropped, Is.Zero);
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CraftDone], Is.EqualTo(1));
+        });
+    }
+
     /// <summary>A rush bot anywhere else goes to the rush city first, saying why — a home bot included.</summary>
     [Test]
     public void ARushBotElsewhere_TravelsToTheRushCity()

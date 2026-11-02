@@ -19,8 +19,11 @@ public enum MarketCategory : byte
 public readonly record struct HeldStack(ushort Template, string Item, MarketCategory Category, int Mk, int Count);
 
 /// <summary>A bazaar buy collected into the character: the listing it came from (the <c>buy</c> row's <c>ref</c>), and what and how many.</summary>
-/// <summary>An item with stats in a bot's inventory (crafting-build.md § 2.1): its id, template, the slot it sits in, the equip slot it is worn in.</summary>
-public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int Wears)
+/// <summary>
+/// An item with stats in a bot's inventory (crafting-build.md § 2.1): its id, template, the slot it sits in, the equip slot it is worn in (0 for none: a part,
+/// a potion), a part's grade per mille, its asset and its Mk — what a crafter picks parts by and prices its surplus with.
+/// </summary>
+public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int Wears, int Grade = 0, string Item = null, int Mk = 0)
 {
     /// <summary>Whether it is worn: in an equip slot, out of the grid.</summary>
     public bool Worn => Slot > 100;
