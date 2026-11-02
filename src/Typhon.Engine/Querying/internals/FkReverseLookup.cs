@@ -261,7 +261,7 @@ internal static unsafe class FkReverseLookup
         }
 
         var layout = clusterState.Layout;
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();   // EP-02: one per target, over a whole archetype of targets
 
         // A SingleVersion slot is re-checked against the target by ProcessClusterLocation; these are what it needs to do it.
         var fkInSlot = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[componentSlot].StorageMode == StorageMode.SingleVersion;
@@ -278,46 +278,47 @@ internal static unsafe class FkReverseLookup
             {
                 // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
                 // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
+                // The cursor closes before them too: a target's sources are unbounded, and under a live cursor an action's reads never refresh the epoch.
                 var values = Array.Empty<int>();
-                var synced = false;
-                var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
+                var count = 0;
                 try
                 {
-                    while (enumerator.MoveNextKey())
+                    var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
+                    try
                     {
-                        var count = enumerator.DrainCurrentKey(ref values);
-
-                        // At a snapshot: the key's entries read, a destroy or key move counted since the last look is read before any is decided — once:
-                        // a look after rows were decided would add again an entity they returned.
-                        if (entry != null && !synced)
+                        if (enumerator.MoveNextKey())
                         {
-                            snapshot.Sync(entry);
-                            synced = true;
+                            count = enumerator.DrainCurrentKey(ref values);
                         }
+                    }
+                    finally
+                    {
+                        enumerator.Dispose();
+                    }
 
-                        for (var j = 0; j < count; j++)
+                    // At a snapshot: the key's entries read, a destroy or key move counted since the last look is read before any is decided — once: a look
+                    // after rows were decided would add again an entity they returned. With no entry for the target, the side may still hold one of its
+                    // sources, destroyed or re-keyed since the last look.
+                    if (entry != null)
+                    {
+                        snapshot.Sync(entry);
+                    }
+
+                    for (var j = 0; j < count; j++)
+                    {
+                        if (!ProcessClusterLocation(values[j], ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride, targetPK, ref action,
+                                snapshot, entry))
                         {
-                            if (!ProcessClusterLocation(values[j], ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride, targetPK,
-                                    ref action, snapshot, entry))
-                            {
-                                return false;
-                            }
+                            return false;
                         }
                     }
                 }
                 finally
                 {
-                    enumerator.Dispose();
                     if (values.Length > 0)
                     {
                         System.Buffers.ArrayPool<int>.Shared.Return(values);
                     }
-                }
-
-                // No entry for the target: the side may still hold one of its sources, destroyed or re-keyed since the last look.
-                if (entry != null && !synced)
-                {
-                    snapshot.Sync(entry);
                 }
             }
             else

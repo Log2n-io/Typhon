@@ -260,6 +260,34 @@ internal sealed class VsbsEmptyChunkTests : TestBase<VsbsEmptyChunkTests>
     }
 
     /// <summary>
+    /// An index walk reads its value buffers through scan readers, and range reads are most of what gives an emptied chunk back outside a fence: a scan reader
+    /// unlinks as any reader does, under the page latches, or a key under churn keeps a chain that grows with its history.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void AScanReaderOverAnEmptyChunk_UnlinksIt()
+    {
+        var vsbs = _dbe.GetComponentCollectionVSBS<int>();
+        var perChunk = vsbs.ElementCountPerChunk;
+        var (buffer, chunks) = NewBuffer(vsbs, perChunk * 3, i => i);
+        Empty(vsbs, buffer, chunks[1].Chunk);
+
+        var read = 0;
+        using (EpochGuard.Enter(_dbe.EpochManager))
+        {
+            using var reader = vsbs.GetScanAccessor(buffer);
+            do
+            {
+                read += reader.ReadOnlyElements.Length;
+            }
+            while (reader.NextChunk());
+        }
+
+        Assert.That(read, Is.EqualTo(perChunk * 2), "the elements of the other chunks");
+        Assert.That(Chain(vsbs, buffer).ConvertAll(c => c.Chunk), Does.Not.Contain(chunks[1].Chunk), "the empty chunk was unlinked");
+    }
+
+    /// <summary>
     /// #1280: the reader's unlinks go through an accessor with no change set, so they leave their pages clean, unless something else makes them owed —
     /// as a chunk freed on the same page does. Here the predecessor's link is on one page and the freed chunks on the next: the free reaches the disk,
     /// the link does not, and the chain read back links freed chunks — chunks the segment can hand to another buffer.

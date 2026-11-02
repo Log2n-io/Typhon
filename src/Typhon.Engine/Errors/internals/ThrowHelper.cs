@@ -117,9 +117,9 @@ internal static class ThrowHelper
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static void ThrowPageCacheBackpressureTimeout(int dirtyPageCount, int epochProtectedCount, TimeSpan waitDuration, int pinnedThreads,
-        long oldestPinLag, int markedPageCount, int epochOnlyCount)
+        long oldestPinLag, int markedPageCount, int epochOnlyCount, int slotReferencedCount)
         => throw new PageCacheBackpressureTimeoutException(dirtyPageCount, epochProtectedCount, waitDuration, pinnedThreads, oldestPinLag, markedPageCount,
-            epochOnlyCount);
+            epochOnlyCount, slotReferencedCount);
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]

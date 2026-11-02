@@ -90,7 +90,6 @@ public unsafe ref struct AabbClusterEnumerator
     // return is ignored, and a copy's use after the return throws.
     private SpatialQueryAccessorCache.Entry _warmEntry;
     private int _warmToken;
-    private ref ChunkAccessor<PersistentStore> _warm;
 
     /// <summary>
     /// When set, <see cref="NextCluster"/> names the next admitted cluster without opening its page.
@@ -660,7 +659,7 @@ public unsafe ref struct AabbClusterEnumerator
     {
         ThrowIfRentStale();
         EnsureAccessor();
-        return _warm.GetChunkAddress(chunkId);
+        return Open(chunkId);
     }
 
     /// <summary>Byte offset of the spatial field's column from a cluster's base.</summary>
@@ -1204,7 +1203,7 @@ public unsafe ref struct AabbClusterEnumerator
                     }
 
                     EnsureAccessor();
-                    _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
+                    _currentClusterBase = Open(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
                     OpenOccupancy();
                     return true;
@@ -1233,7 +1232,7 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 EnsureAccessor();
-                _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
+                _currentClusterBase = Open(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
                 OpenOccupancy();
                 return true;
@@ -1289,7 +1288,7 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 EnsureAccessor();
-                _currentClusterBase = _warm.GetChunkAddress(chunkId);
+                _currentClusterBase = Open(chunkId);
                 _currentClusterChunkId = chunkId;
                 OpenOccupancy();
                 return true;
@@ -1422,7 +1421,7 @@ public unsafe ref struct AabbClusterEnumerator
             }
 
             EnsureAccessor();
-            _currentClusterBase = _warm.GetChunkAddress(chunkId);
+            _currentClusterBase = Open(chunkId);
             _currentClusterChunkId = chunkId;
             OpenOccupancy();
             return true;
@@ -1506,17 +1505,17 @@ public unsafe ref struct AabbClusterEnumerator
         }
     }
 
+    /// <summary>A cluster's base, through the window this query is on. Good until the next call.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private byte* Open(int chunkId) => _warmEntry.OpenCluster(chunkId);
+
     /// <summary>
     /// Borrow this thread's warm window over the cluster segment. Out of line so nothing of the rent enters the frames of the per-entity drains: an
     /// accessor built inline left a 448-byte temporary holding managed references in the caller's frame, which a fully interruptible method zeroes in its
     /// prologue on every call.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void RentAccessor()
-    {
-        _warmEntry = SpatialQueryAccessorCache.Instance.Rent(_state.ClusterSegment, out _warmToken);
-        _warm = ref _warmEntry.Accessor;
-    }
+    private void RentAccessor() => _warmEntry = SpatialQueryAccessorCache.Instance.Rent(_state.ClusterSegment, out _warmToken);
 
     /// <summary>
     /// Hand the window back, if this enumerator holds one, and add the query's tally to its archetype's (SO-02). The token makes a second return — a
@@ -1538,7 +1537,6 @@ public unsafe ref struct AabbClusterEnumerator
         {
             HandBack(entry, _warmToken, _state, _tallyClusters, _tallyCandidates, _tallyHits);
             _warmEntry = null;
-            _warm = ref Unsafe.NullRef<ChunkAccessor<PersistentStore>>();
         }
     }
 

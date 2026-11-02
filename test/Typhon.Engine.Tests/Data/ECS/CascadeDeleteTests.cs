@@ -235,6 +235,32 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         Assert.That(itemMeta._cascadeTargets == null || itemMeta._cascadeTargets.Count == 0, Is.True);
     }
 
+    /// <summary>A cascade reads a cluster and a record per child, from one <c>Destroy</c>: the count of a loop of destroys has to see its children too (EP-03).</summary>
+    [Test]
+    [VerifiesRule("EP-03")]
+    public void Destroy_OfAParentWithManyChildren_MovesItsEpoch()
+    {
+        using var dbe = SetupEngine();
+        EntityId bagId;
+        using (var t = dbe.CreateQuickTransaction())
+        {
+            var bagData = new BagData { Capacity = 10 };
+            bagId = t.Spawn<CascadeBag>(CascadeBag.Bag.Set(in bagData));
+            for (var i = 0; i < 2 * EntityAccessor.EpochRefreshInterval; i++)
+            {
+                var item = new ItemData { Owner = bagId, Weight = i };
+                t.Spawn<CascadeItem>(CascadeItem.Item.Set(in item));
+            }
+
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        using var tx = dbe.CreateQuickTransaction();
+        var pinned = dbe.EpochManager.CurrentThreadPinnedEpoch;
+        tx.Destroy(bagId);
+        Assert.That(dbe.EpochManager.CurrentThreadPinnedEpoch, Is.GreaterThan(pinned), "the cascade ran under one epoch");
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Cascade delete execution tests
     // ═══════════════════════════════════════════════════════════════════════

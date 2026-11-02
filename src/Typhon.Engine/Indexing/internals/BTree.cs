@@ -582,6 +582,9 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// <summary>Retired buffers whose free threw, left allocated rather than failing the write that reclaimed them (#1399). Diagnostic.</summary>
     internal static long RetiredBufferFreeFailures;
 
+    // Leaves this tree has retired: what lets a range cursor keep its leaf across a refresh when none went (BTree.RangeEnumerator).
+    private int _leafRetirements;
+
     // Batching counter for DeferredReclaim: only reclaim every 64 mutations to reduce MinActiveEpoch calls.
     // Non-atomic by design — racy reads are harmless (DeferredReclaim is idempotent, serialized by _deferredLock).
     private int _deferredReclaimSkip;

@@ -130,6 +130,212 @@ class BTreeRangeScanRestartTests
         }
     }
 
+    /// <summary>
+    /// A cursor parked on a leaf across its thread's epoch refresh does not protect that leaf. The leaf can be merged away, reclaimed and handed to a new
+    /// node, and a new node's version restarts at 4: at the version the cursor remembers, the node validates and the scan reads somebody else's entries.
+    /// </summary>
+    /// <remarks>
+    /// The writes are all this thread's and everything happens between two MoveNext calls, so the interleaving is exact. The recycled node's version is walked
+    /// up to the cursor's by adding and removing a key in it: the coincidence a real walk reaches by chance, made certain.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("EP-02")]
+    unsafe public void ACursorAcrossAnEpochRefresh_NeverReadsTheNodeItsLeafBecame()
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor);
+            }
+
+            var emitted = new List<int>();
+            var e = tree.EnumerateRange(0, int.MaxValue);
+            try
+            {
+                // Park on the second leaf, one row in.
+                Assert.That(e.MoveNext(), Is.True);
+                var firstLeaf = e.CurrentLeaf.ChunkId;
+                emitted.Add(e.Current.Key);
+                while (e.CurrentLeaf.ChunkId == firstLeaf)
+                {
+                    Assert.That(e.MoveNext(), Is.True);
+                    emitted.Add(e.Current.Key);
+                }
+
+                var leaf = e.CurrentLeaf;
+                var parkedVersion = leaf.GetLatch(ref accessor).ReadVersion();
+                Assert.That(parkedVersion, Is.GreaterThan(4), "the parked leaf must have taken writes, or a recycled node starts past its version");
+
+                // Everything from the bottom of the tree to half way up goes, so the parked leaf merges away; what stays is what the scan must still emit.
+                const int keepFrom = SeedCount;   // a key: half way up the seeded range
+                for (var key = 0; key < keepFrom; key += 2)
+                {
+                    tree.Remove(key, out _, ref accessor);
+                }
+
+                Assert.That(IsObsolete(leaf, ref accessor), Is.True, "the parked leaf was not retired: the test would assert nothing");
+
+                // The pin moves past the retire stamp, as a refresh during a walk moves it, and the writer's next reclaim frees the leaf.
+                epochManager.RefreshScope();
+                tree.FlushDeferredNodes();
+                epochManager.RefreshScope();
+                tree.FlushDeferredNodes();
+
+                // Writes far above the walk: the allocation cursor comes round to the freed chunk, for a new node.
+                var high = SeedCount * 4 + 1;
+                while (leaf.GetLatch(ref accessor).ReadVersion() == 0)
+                {
+                    tree.Add(high, high, ref accessor);
+                    high += 2;
+                    Assert.That(high, Is.LessThan(SeedCount * 400), "no new node took the freed chunk");
+                }
+
+                // Walked to the version the cursor remembers.
+                for (var guard = 0; leaf.GetLatch(ref accessor).ReadVersion() < parkedVersion; guard++)
+                {
+                    Assert.That(guard, Is.LessThan(10_000), "the recycled leaf's version never reached the parked one");
+                    var inLeaf = leaf.GetItem(0, ref accessor).Key + 1;
+                    tree.Add(inLeaf, inLeaf, ref accessor);
+                    if (leaf.GetLatch(ref accessor).ReadVersion() < parkedVersion)
+                    {
+                        tree.Remove(inLeaf, out _, ref accessor);
+                    }
+                }
+
+                Assert.That(leaf.GetLatch(ref accessor).ReadVersion(), Is.EqualTo(parkedVersion), "the test must land exactly on the parked version");
+
+                while (e.MoveNext())
+                {
+                    emitted.Add(e.Current.Key);
+                }
+            }
+            finally
+            {
+                e.Dispose();
+            }
+
+            accessor.Dispose();
+            AssertStrictlyOrdered(emitted, ascending: true);
+            for (var key = SeedCount; key < SeedCount * 2; key += 2)
+            {
+                Assert.That(emitted, Does.Contain(key), $"key {key} stayed in the tree for the whole walk and the walk never returned it");
+            }
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>
+    /// The ordered merge's cursor parks a leaf's chunk id between fills, and a merge's own opens can refresh the epoch between two of them. Each fill reads a
+    /// fresh version, so what stands on the chunk by then validates, whatever it is, and the merge reads its entries for the leaf it left.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    unsafe public void AnOrderedFillAcrossAnEpochRefresh_NeverReadsTheNodeItsLeafBecame()
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor);
+            }
+
+            var state = new LeafPageCursorState
+            {
+                MinKeyBits = OrderedKeyEncoding.ToRawBits(0),
+                MaxKeyBits = OrderedKeyEncoding.ToRawBits(int.MaxValue),
+                KeyType = KeyType.Int,
+            };
+
+            // A page smaller than a leaf: the fill stops inside it, and the next one is owed the rest from the parked chunk.
+            var keys = new long[4];
+            var values = new int[4];
+            var emitted = new List<int>();
+            void Fill(ref ChunkAccessor<PersistentStore> a, ref LeafPageCursorState s)
+            {
+                var written = tree.FillOrderedPage(ref s, keys, values, ref a);
+                for (var i = 0; i < written; i++)
+                {
+                    emitted.Add(values[i] * 2);   // the seed's value is its index: the key, unencoded
+                }
+            }
+
+            Fill(ref accessor, ref state);
+            var firstLeaf = state.NodeChunkId;
+            while (state.NodeChunkId == firstLeaf)
+            {
+                Fill(ref accessor, ref state);
+            }
+
+            // A fill into the second leaf, so that it is parked inside it.
+            Fill(ref accessor, ref state);
+
+            // The parked leaf goes, with everything up to half way, and its chunk comes back as a node far above the walk.
+            var probe = tree.EnumerateRange(emitted[^1], emitted[^1]);
+            try
+            {
+                Assert.That(probe.MoveNext(), Is.True);
+                var leaf = probe.CurrentLeaf;
+                Assert.That(leaf.ChunkId, Is.EqualTo(state.NodeChunkId), "premise: the cursor is parked on the leaf of its last key");
+                probe.Dispose();
+                for (var key = 0; key < SeedCount; key += 2)
+                {
+                    tree.Remove(key, out _, ref accessor);
+                }
+
+                Assert.That(IsObsolete(leaf, ref accessor), Is.True, "the parked leaf was not retired: the test would assert nothing");
+                epochManager.RefreshScope();
+                tree.FlushDeferredNodes();
+                epochManager.RefreshScope();
+                tree.FlushDeferredNodes();
+                var high = SeedCount * 4 + 1;
+                while (leaf.GetLatch(ref accessor).ReadVersion() == 0)
+                {
+                    tree.Add(high, high, ref accessor);
+                    high += 2;
+                    Assert.That(high, Is.LessThan(SeedCount * 400), "no new node took the freed chunk");
+                }
+            }
+            finally
+            {
+                probe.Dispose();
+            }
+
+            while (!state.Exhausted)
+            {
+                Fill(ref accessor, ref state);
+            }
+
+            accessor.Dispose();
+            for (var key = SeedCount; key < SeedCount * 2; key += 2)
+            {
+                Assert.That(emitted, Does.Contain(key), $"key {key} stayed in the tree for the whole walk and the walk never returned it");
+            }
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    private static bool IsObsolete(BTree<int, PersistentStore>.NodeWrapper node, ref ChunkAccessor<PersistentStore> accessor) =>
+        node.GetLatch(ref accessor).IsObsolete;
+
     // ── helpers ─────────────────────────────────────────────────────────────
 
     private const int SeedCount = 4_000;
@@ -194,6 +400,210 @@ class BTreeRangeScanRestartTests
             }
 
             writeAccessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>
+    /// A re-seek can throw (a back-pressure timeout, transient), and leaves the cursor between leaves: stepped on from there, it validated one leaf against
+    /// another's version. The caller's retry must seek again.
+    /// </summary>
+    [Test]
+    [NonParallelizable]   // SeekProbe is process-wide
+    [VerifiesRule("EP-02")]
+    unsafe public void AReSeekThatThrows_SeeksAgainWhenTheCallerRetries()
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        var seeks = 0;
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor);
+            }
+
+            var emitted = new List<int>();
+            var e = tree.EnumerateRange(0, int.MaxValue);
+            try
+            {
+                // Onto the last row of a leaf, the next leaf locked: the step off it finds that leaf unreadable and re-seeks.
+                Assert.That(e.MoveNext(), Is.True);
+                emitted.Add(e.Current.Key);
+                var leaf = e.CurrentLeaf;
+                for (var left = leaf.GetCount(ref accessor) - 1; left > 0; left--)
+                {
+                    Assert.That(e.MoveNext(), Is.True);
+                    emitted.Add(e.Current.Key);
+                }
+
+                var next = leaf.GetNext(ref accessor);
+                Assert.That(next.GetLatch(ref accessor).TryWriteLock(), Is.True);
+                BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = () =>
+                {
+                    if (++seeks == 1)
+                    {
+                        throw new InvalidOperationException("staged timeout");
+                    }
+                };
+
+                var threw = false;
+                try
+                {
+                    e.MoveNext();
+                }
+                catch (InvalidOperationException)
+                {
+                    threw = true;
+                }
+
+                next.GetLatch(ref accessor).AbortWriteLock();
+                Assert.That(threw, Is.True, "premise: the step off the leaf re-sought");
+
+                while (e.MoveNext())
+                {
+                    emitted.Add(e.Current.Key);
+                }
+
+                Assert.That(seeks, Is.EqualTo(2), "the retry stepped on from where the seek left the cursor");
+                Assert.That(emitted, Has.Count.EqualTo(SeedCount));
+                AssertStrictlyOrdered(emitted, ascending: true);
+            }
+            finally
+            {
+                BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = null;
+                e.Dispose();
+            }
+
+            accessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>A refresh in a tree that retired no leaf costs a cursor nothing: what it stands on is still the tree's, and it does not go back down.</summary>
+    [Test]
+    [NonParallelizable]   // SeekProbe is process-wide
+    [VerifiesRule("EP-02")]
+    unsafe public void ACursorAcrossARefresh_InATreeThatRetiredNoLeaf_StaysOnItsLeaf()
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        var seeks = 0;
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor);
+            }
+
+            var emitted = new List<int>();
+            var e = tree.EnumerateRange(0, int.MaxValue);
+            try
+            {
+                BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = () => seeks++;
+                while (e.MoveNext())
+                {
+                    emitted.Add(e.Current.Key);
+                    if (emitted.Count % 16 == 0)
+                    {
+                        epochManager.RefreshScope();
+                    }
+                }
+            }
+            finally
+            {
+                BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = null;
+                e.Dispose();
+            }
+
+            Assert.That(seeks, Is.Zero, "the cursor went back down with nothing to find again");
+            Assert.That(emitted, Has.Count.EqualTo(SeedCount));
+            accessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    public enum Walk
+    {
+        Reverse,
+        FromTheHeadOfTheChain,
+    }
+
+    /// <summary>
+    /// A cursor finds its place again the way it was going, from a last key or, with none, from where it started: a reverse scan past its last key, and an
+    /// unbounded scan that has emitted nothing, at the head of the chain.
+    /// </summary>
+    [TestCase(Walk.Reverse)]
+    [TestCase(Walk.FromTheHeadOfTheChain)]
+    [VerifiesRule("EP-02")]
+    unsafe public void ACursorWhoseLeafIsRetiredAcrossARefresh_ResumesAsItWasGoing(Walk walk)
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor);
+            }
+
+            var reverse = walk == Walk.Reverse;
+            var emitted = new List<int>();
+            var e = reverse ? tree.EnumerateRangeDescending(0, int.MaxValue) : tree.EnumerateLeaves();
+            try
+            {
+                if (reverse)
+                {
+                    Assert.That(e.MoveNext(), Is.True);
+                    emitted.Add(e.Current.Key);
+                }
+
+                // The half of the tree the cursor stands in goes, its leaf with it. What stays is what it must still emit.
+                for (var i = 0; i < SeedCount / 2; i++)
+                {
+                    var key = reverse ? (SeedCount - 2 - i) * 2 : i * 2;
+                    tree.Remove(key, out _, ref accessor);
+                }
+
+                epochManager.RefreshScope();
+                tree.FlushDeferredNodes();
+                epochManager.RefreshScope();
+                tree.FlushDeferredNodes();
+
+                while (e.MoveNext())
+                {
+                    emitted.Add(e.Current.Key);
+                }
+            }
+            finally
+            {
+                e.Dispose();
+            }
+
+            Assert.That(emitted, Has.Count.EqualTo(SeedCount / 2), "the keys that stayed, each once: a reverse scan emitted its first before the removals, which left it");
+            AssertStrictlyOrdered(emitted, ascending: !reverse);
+            accessor.Dispose();
         }
         finally
         {

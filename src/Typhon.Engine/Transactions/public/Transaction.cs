@@ -64,6 +64,9 @@ public unsafe partial class Transaction : EntityAccessor
     private bool _batchIndexActive;
     private int _batchEntityCount;
 
+    /// <summary>A spawn batch's writes so far, for its epoch cadence (<see cref="RefreshBetweenBatchWrites"/>).</summary>
+    private int _batchWriteCount;
+
     // Lazy-cached accessors for CommitClusterVersionedSlot — persists across calls within same commit, keyed by archetype ID
     private ushort _clusterCommitArchId;
     private ChunkAccessor<PersistentStore> _clusterCommitMapAccessor;
@@ -122,6 +125,9 @@ public unsafe partial class Transaction : EntityAccessor
 
     /// <summary>The commit's steps so far, for its pressured epoch refresh cadence (<see cref="RefreshBetweenCommitSteps"/>).</summary>
     private int _publishStepCount;
+
+    /// <summary>The step of the last time <see cref="RefreshBetweenCommitSteps"/> gave anything back.</summary>
+    private int _publishGaveBackAt;
 
     /// <summary>
     /// Blittable per-component-entry publish descriptor recorded by <see cref="PrepareComponent"/> and consumed by <see cref="PublishComponent"/>
@@ -752,6 +758,7 @@ public unsafe partial class Transaction : EntityAccessor
     {
         AssertThreadAffinity();
         indexRef.Validate();
+        NoteEntityOpen();   // a lookup is an operation: the enumerator's own count starts again with each one, and a loop of them never reached a refresh
 
         var ct = indexRef.Table;
 
@@ -1300,7 +1307,7 @@ public unsafe partial class Transaction : EntityAccessor
                 if (_side != null && _side.TryPeek(out var sideKey) && (!_hasPending || comparer.Compare(sideKey, _pendingKey) <= 0))
                 {
                     _currentComponentSpan = _side.Take(out _currentPK, out _currentKey);
-                    CountEmitted();
+                    CountExamined();
                     return true;
                 }
 
@@ -1310,16 +1317,20 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 _hasPending = false;
-                if (TryResolve(_pendingKey, _pendingLocation, _pendingSource, recordBuf))
+                var resolved = TryResolve(_pendingKey, _pendingLocation, _pendingSource, recordBuf);
+                CountExamined();
+                if (resolved)
                 {
-                    CountEmitted();
                     return true;
                 }
             }
         }
 
-        /// <summary>EP-03: every EpochRefreshInterval entities, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230).</summary>
-        private void CountEmitted()
+        /// <summary>
+        /// EP-03: every EpochRefreshInterval entries, or every PressuredEpochRefreshInterval while the cache is under pressure (#1230). Entries examined, not
+        /// rows emitted: a row the snapshot cannot see costs the walk the same pages. The cursor of this walk is live: it finds its place again (EP-02).
+        /// </summary>
+        private void CountExamined()
         {
             if ((++_entityCount & (PressuredEpochRefreshInterval - 1)) == 0
                 && ((_entityCount & (EpochRefreshInterval - 1)) == 0 || _tx.DBE.MMF.UnderPressure))
@@ -2905,18 +2916,36 @@ public unsafe partial class Transaction : EntityAccessor
     /// (AP-03); the marks kept the publish's whole write set resident, and a publish larger than the cache — 10 000 updates of a component with three
     /// indexes into 8 MiB, 300 000 into 256 MiB — waited out its bound and stopped the engine. Every entry would bump the global epoch 1.3 million times a
     /// storm, each one sending every other thread's warm accessors down their cold path. Never under a live index cursor of this thread's (#1199): a
-    /// commit made inside an index scan.
+    /// commit made inside an index scan, whose marks still go back. Past the pressure flag, it moves by <see cref="CommitStepsGiveBack"/>: the flag is raised
+    /// by a wall already met, and an entry that meets one cannot step out to give back what it holds. A publish waiting on its own marks stopped the engine (30
+    /// 000 destroys into 2 MiB, one run in three), and a rollback the flag had expired for waited on its own pin (a spawn batch, 8 runs in 8 on a loaded box).
     /// </summary>
     private void RefreshBetweenCommitSteps()
     {
-        if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0 && _dbe.MMF.UnderPressure
-            && EntityAccessor.LiveIndexCursors == 0)
+        if ((++_publishStepCount & (EntityAccessor.PressuredEpochRefreshInterval - 1)) == 0
+            && (_dbe.MMF.UnderPressure
+                || CommitStepsGiveBack(_publishStepCount - _publishGaveBackAt, _changeSet?.MarkedPageCount ?? 0, _dbe.MMF.CacheSlotCount)))
         {
-            ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+            _publishGaveBackAt = _publishStepCount;
+            if (EntityAccessor.LiveIndexCursors == 0)
+            {
+                ChunkBasedSegment<PersistentStore>.RefreshWarmCacheEpoch(_epochManager.RefreshScope());
+                Interlocked.Increment(ref PagedMMF.PublishStepRefreshes);
+            }
+
+            // Under a cursor too, which depends on neither: a commit made inside an index scan kept every mark, and met the same wall.
+            _changeSet?.FlushDeferredEvictions();   // the windows' releases: kept, a rollback of 4M entries held the whole cache by slot reference
             _changeSet?.ReleaseDirtyMarks();
-            Interlocked.Increment(ref PagedMMF.PublishStepRefreshes);
         }
     }
+
+    /// <summary>
+    /// Whether a commit gives back what it holds with no pressure flag up: a sixteenth of the cache in entries since it last did, which is what a rollback goes
+    /// by, as it takes no marks and still pins what it reads; or a quarter of the cache under its marks, as an entry can touch many pages (one of eight indexes,
+    /// each removing and inserting in another leaf, reaches a whole small cache before a sixteenth of it in entries).
+    /// </summary>
+    internal static bool CommitStepsGiveBack(int stepsSinceLast, int markedPages, int cacheSlots) =>
+        stepsSinceLast >= Math.Max(cacheSlots / 16, EntityAccessor.PressuredEpochRefreshInterval) || markedPages >= cacheSlots / 4;
 
     /// <summary>
     /// Drains the prepared component publish descriptors (AP-01 PUBLISH pass). Runs after the WAL Append. Also releases any retained handler locks.

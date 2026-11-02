@@ -77,7 +77,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             }
 
             using var scanGuard = EpochGuard.Enter(_sourceTable.DBE.EpochManager);
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
+            var accessor = engineState.EntityMap.Segment.CreateScanAccessor();   // EP-02: a whole map, however large
             var collector = new SourceCollector
             {
                 RoutingId = _sourceTable.DBE.RoutingIdOf(meta),
@@ -85,8 +85,14 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
                 Tx = tx,
                 Map = engineState.EntityMap,
             };
-            engineState.EntityMap.ForEachEntry(ref accessor, ref collector);
-            accessor.Dispose();
+            try
+            {
+                engineState.EntityMap.ForEachEntry(ref accessor, ref collector, tx.BeginScanYield());
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
         }
     }
 
@@ -107,7 +113,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             var entityId = new EntityId(key, RoutingId);
             var sourcePK = (long)entityId.RawValue;
 
-            if (View.EvaluateFullPredicate(sourcePK, Tx))
+            if (View.EvaluateFullPredicate(sourcePK, Tx))   // TryReadCommitted zeroes RefreshableWaitDepth for its reads (EP-02)
             {
                 View.AddEntityDirect(sourcePK);
             }
@@ -158,6 +164,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
             while (DeltaBuffer.TryPeek(targetTSN, out var entry, out var flags, out var tsn, out var componentTag))
             {
                 DeltaBuffer.Advance();
+                tx.NoteEntityOpen();   // EP-03: between two entries the refresh holds no address, and each reads through the transaction
                 ProcessEntry(ref entry, flags & 0x3F, (flags & 0x40) != 0, (flags & 0x80) != 0, componentTag, tx);
                 SetLastRefreshTSN(tsn);
             }
@@ -489,6 +496,7 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
 
         public bool Process(long sourcePK, ArchetypeMetadata meta)
         {
+            Tx.NoteEntityOpen();   // EP-03: a target's sources are unbounded, and between two the lookup holds no address
             var wasInView = View._entityIds.Contains(sourcePK);
             var shouldBeInView = TargetPasses && View.EvaluateSourcePredicates(sourcePK, Tx);
             View.ApplyDelta(sourcePK, wasInView, shouldBeInView);

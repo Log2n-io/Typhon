@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -85,6 +86,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     private bool _filtering;    // any of the three above, or the gate: TryAdmitCurrent tests the row
     private ChunkAccessor<PersistentStore> _mapAccessor;
     private bool _mapOpen;
+    private int _windowSlots;
 
     public bool HasCurrent
     {
@@ -127,9 +129,10 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     /// <param name="gate">The query's enabled gate on this archetype (QENABLE-01); <c>null</c> admits every slot.</param>
     /// <param name="snapshot">The reader's snapshot, for a Versioned archetype (#1347): a row born after it, or died at or before it, is dropped, and a row
     /// whose slot a destroy hid since the tree read is decided by its record. <c>null</c> streams HEAD.</param>
+    /// <param name="windowSlots">The width of each of this stream's windows (<see cref="KWayMergeState.WindowSlots"/>).</param>
     public static ArchetypeSortedStream Create(BTreeBase<PersistentStore> tree, KeyType keyType, long scanMin, long scanMax, bool descending,
         ArchetypeClusterState clusterState, ArchetypeClusterInfo layout, FieldEvaluator[] evaluators = null, int componentSlot = -1,
-        EnabledGate? gate = null, StreamSnapshot? snapshot = null)
+        EnabledGate? gate = null, StreamSnapshot? snapshot = null, int windowSlots = ChunkAccessor<PersistentStore>.MaxWindowSlots)
     {
         // Bool and String64 have no typed B+Tree. Dispatch is virtual now, so such a tree would not fall out of a switch
         // — it would fill pages whose keys all encode to 0, comparing equal, and the merge would return this archetype's
@@ -160,8 +163,10 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
             _evaluators = evaluators,
             _compOffset = componentSlot >= 0 ? layout.ComponentOffset(componentSlot) : 0,
             _compSize = componentSlot >= 0 ? layout.ComponentSize(componentSlot) : 0,
-            _clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(),
-            _indexAccessor = tree.Segment.CreateChunkAccessor(),
+            // EP-02: a merge reads its whole range, however large, and keeps no address past the call that read it.
+            _clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor(windowSlots),
+            _indexAccessor = tree.Segment.CreateScanAccessor(windowSlots),
+            _windowSlots = windowSlots,
             _hasAccessors = true,
             _orderedKeys = ArrayPool<long>.Shared.Rent(InitialPageCapacity),
             _locations = ArrayPool<int>.Shared.Rent(InitialPageCapacity),
@@ -464,7 +469,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
     {
         if (!_mapOpen)
         {
-            _mapAccessor = state.EntityMap.Segment.CreateScanAccessor();
+            _mapAccessor = state.EntityMap.Segment.CreateScanAccessor(_windowSlots);
             _mapOpen = true;
         }
     }
@@ -578,6 +583,23 @@ internal struct KWayMergeState : IDisposable
     private int _heapSize;
     private bool _descending;
     private bool _ownsStreamsArray; // True if _streams was rented from ArrayPool
+
+    /// <summary>Most windows a stream holds at once: the index's, the clusters' and the entity map's.</summary>
+    private const int WindowsPerStream = 3;
+
+    /// <summary>
+    /// The width of each window of a merge of <paramref name="streams"/> streams (EP-02). A window pins its pages, and a merge has no point at which to
+    /// let go of them: 64 archetypes at full width pin 6,144 slots, more than a 32 MiB cache has. So the windows share a quarter of the cache, and stay at
+    /// full width unless that is too little: a merge that fits pays nothing. A cache too small for the narrowest window of every stream is out of reach of
+    /// this, and is what the back-pressure timeout is for.
+    /// </summary>
+    internal static int WindowSlots(int streams, int cacheSlots)
+    {
+        var share = cacheSlots / 4 / Math.Max(streams * WindowsPerStream, 1);
+        return share >= ChunkAccessor<PersistentStore>.MaxWindowSlots ? ChunkAccessor<PersistentStore>.MaxWindowSlots
+            : share < 2 ? 2
+            : 1 << BitOperations.Log2((uint)share);
+    }
 
     /// <summary>
     /// Initialize the merge state from K pre-filled streams.

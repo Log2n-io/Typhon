@@ -591,7 +591,7 @@ internal static unsafe class ClusterRadiusBatch
         private void Open<TDrain>(int chunkId, ulong need, ref TDrain drain) where TDrain : struct, IMemberDrain, allows ref struct
         {
             EnsureRent();
-            byte* clusterBase = _entry.Accessor.GetChunkAddress(chunkId);
+            byte* clusterBase = _entry.OpenCluster(chunkId);
             ulong occupancy = _ownDestroys.ReadOccupancy(chunkId, clusterBase, _state, out var pendingDeaths);
             if (_layout.RealmKeyColumn >= 0)
             {

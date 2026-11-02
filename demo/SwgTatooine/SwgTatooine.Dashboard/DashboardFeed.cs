@@ -97,7 +97,8 @@ public sealed class DashboardFeed : BackgroundService
 
     /// <summary>
     /// Whether the economy, item and market consistency audits run, from <c>SWG_DASH_CONSISTENCY=1</c>; off by default (Loïc, 2026-10-28). Each is one read
-    /// transaction over the whole database, and on a grown database it pins an epoch long enough to fill the server's page cache.
+    /// transaction over the whole database: it holds a bounded set of pages, but on a grown database a walk that long pushes what the game keeps hot out of
+    /// the page cache.
     /// </summary>
     private static readonly bool ConsistencyAudits = Environment.GetEnvironmentVariable("SWG_DASH_CONSISTENCY") == "1";
 
