@@ -13,7 +13,7 @@ description: 'Single-threaded open-addressing hash set/map — the default repla
 Most hot-path sets and maps in the engine are touched by exactly one thread at a time — a query's result set, a view's tracked entity-ID set, a per-system dirty-entity map rebuilt every tick. `Dictionary`/`HashSet` work, but each entry is a separate heap-tracked node and every lookup pays a `GetHashCode()`/modulo cost that's overkill for blittable keys like `long` entity IDs. `HashMap<TKey>` and `HashMap<TKey, TValue>` give the same semantics over a single flat, contiguous array with no per-entry allocation.
 
 ## ⚙️ How it works (in brief)
-Entries are packed `[hash | key]` (set) or `[hash | key | value]` (map) in one array on the Pinned Object Heap, sized to a power of two and grown by doubling once the 0.75 load factor is crossed. Lookups probe linearly from the key's hash bucket; deletes use backward-shift to avoid leaving tombstones behind. If `TValue` contains managed references, values are stored in a parallel array instead of inline — transparent to the caller, just slightly slower than the fully-inline unmanaged path.
+Entries are packed `[hash | key]` (set) or `[hash | key | value]` (map) in one ordinary managed array, sized to a power of two and grown by doubling once the 0.75 load factor is crossed. Lookups probe linearly from the key's hash bucket; deletes use backward-shift to avoid leaving tombstones behind. If `TValue` contains managed references, values are stored in a parallel array instead of inline — transparent to the caller, just slightly slower than the fully-inline unmanaged path.
 
 ## 💻 Usage
 ```csharp
