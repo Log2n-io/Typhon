@@ -122,6 +122,9 @@ class WalBackupTouchTests : TestBase<WalBackupTouchTests>
         var wal = dbe.WalManager;
         var cm = dbe.CheckpointManager;
 
+        // Hold everything while the segments are built: a background cycle finishing before the floor is set would reclaim A before anything held it,
+        // and a floor cannot bring back a deleted segment (#1564). Raised to lsnA once A and B exist.
+        cm.SetReclaimFloor(1);
         var lsnA = Commit(dbe, 3);
         var segA = wal.SegmentManager.ActiveSegment.SegmentId;
         Serve(wal, wal.RequestSegmentSwitch());

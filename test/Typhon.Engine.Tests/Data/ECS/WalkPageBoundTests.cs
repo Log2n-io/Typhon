@@ -591,7 +591,7 @@ class WalkPageBoundTests : TestBase<WalkPageBoundTests>
             EntityAccessor.ScanYieldProbe = null;
         }
 
-        dbe.ForceCheckpoint();
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(System.TimeSpan.FromSeconds(10)), Is.True);
         Assert.That(dbe.MMF.EvictEvictablePagesForTest(), Is.GreaterThan(0), "premise: pages left the cache, so what follows is read back");
 
         using var read = dbe.CreateReadOnlyTransaction();

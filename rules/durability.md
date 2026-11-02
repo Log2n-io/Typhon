@@ -1598,7 +1598,8 @@ either durability, recoverability, or consistency.
   scope: WalWriter.cs (WaitForDurableSlow, WaitForDurabilitySignal, PulseDurabilityWaiters, AdvanceDurable, Dispose)
   verified: WalWriterTests.WaitForDurable_ConcurrentWaiters_EachWakesAsSoonAsItsLsnIsDurable [VerifiesRule] (8 waiters, 800 one-LSN advances,
             every wake within 10 ms; the old Wait(1)+Reset loop measured 16.5 ms to 1.4 s worst on 2026-10-28, the fix under 1 ms typical);
-            WalWriterTests.WaitForDurable_NeverDurable_TimesOutAtItsDeadline, WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce,
+            WalWriterTests.WaitForDurable_NeverDurable_TimesOutAtItsDeadline (counts the slices it sleeps: none longer than the deadline),
+            WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce,
             WaitForDurable_TokenCancelled_WakesTheBlockedWaiterAtOnce, WaitForDurable_WriterDisposed_WakesTheBlockedWaiter [VerifiesRule]
 
 ---
