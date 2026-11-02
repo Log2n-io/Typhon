@@ -1653,11 +1653,13 @@ button.active {
 
 /* The bazaar (bazaar.md § 6): near the top, right of the toolbar, and clear of the inventory window (whose stacks are picked
    from it to sell). Deliberately plain: the mission table's rows, a strip of tabs, a refusal under the row it was about. */
+/* Left 342 px: the toolbar is 300 px wide plus its padding and border, so 322 px from its left edge at 10 px — 320 px overlapped it (Loïc,
+   2026-11-02). */
 .bazaar {
   top: 70px;
-  left: 320px;
+  left: 342px;
   width: 640px;
-  max-width: calc(100% - 340px);
+  max-width: calc(100% - 352px);
   max-height: 65%;
   overflow-y: auto;
 }
@@ -1678,6 +1680,14 @@ button.active {
     left: 50%;
     transform: translateX(-50%);
     max-height: 38%;
+  }
+
+  /* The crafting panel stays right of the toolbar at every width: it opens at a station, where nothing is picked from the inventory beside it. */
+  .bazaar.craft {
+    left: 342px;
+    transform: none;
+    max-width: calc(100% - 352px);
+    max-height: 65%;
   }
 }
 
@@ -1777,4 +1787,53 @@ button.active {
 
 .craft-what {
   margin: 4px 0;
+}
+
+/* What the last click is doing (CraftStatus): one line always, so the panel does not jump; a sweep in flight, then what was done, fading. */
+.craft-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  margin: 2px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.craft-progress {
+  position: relative;
+  width: 90px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.craft-progress > span {
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: terrain-loading-sweep 0.9s ease-in-out infinite;
+}
+
+.craft-done {
+  color: #9fd88a;
+  animation: craft-done-fade 4s ease-in forwards;
+}
+
+.craft-warn {
+  color: var(--accent);
+}
+
+@keyframes craft-done-fade {
+  0%,
+  75% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
 }

@@ -85,6 +85,35 @@ describe('the notice lines', () => {
   });
 });
 
+describe('the vendor, the bench and salvage (Loïc, 2026-11-02: a vendor buy said nothing)', () => {
+  it('say a standard-issue buy with the price it paid on its tick, one line per buy', () => {
+    const batch = [
+      drop('standard', 'Metal', 1, 10, '901', 20),
+      credits('standard', 68, false, null, '3', 20),
+      drop('standard', 'DL-44 Blaster', 1, 1, '905', 21),
+      credits('standard', 1240, false, null, '60', 21),
+    ];
+    expect(noticeLines(batch)).toEqual([
+      'Bought from the vendor: Metal Mk I ×10 for 68 cr',
+      'Bought from the vendor: DL-44 Blaster Mk I for 1,240 cr',
+    ]);
+  });
+
+  it('say a buy without its price when the credit row is not in the batch, and the credit row alone not at all', () => {
+    expect(noticeLines([drop('standard', 'Gas', 1, 5, '9', 30)])).toEqual(['Bought from the vendor: Gas Mk I ×5']);
+    expect(noticeLines([credits('standard', 68, false, null, '3', 20)])).toEqual([]);
+  });
+
+  it('say what a craft made and what a salvage gave back, and nothing of the inputs a craft spent', () => {
+    const batch = [
+      drop('craft', 'Metal', 2, 10, '7', 40, false),
+      drop('make', 'Ranged Core', 2, 1, '7', 40),
+      drop('salvage', 'Metal', 2, 3, '8', 41),
+    ];
+    expect(noticeLines(batch)).toEqual(['Crafted: Ranged Core Mk II', 'Salvaged: Metal Mk II ×3']);
+  });
+});
+
 describe('the announced notices', () => {
   afterEach(() => {
     useChat.getState().clear();

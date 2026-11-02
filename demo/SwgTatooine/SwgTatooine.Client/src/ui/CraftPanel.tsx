@@ -17,7 +17,7 @@ const NO_ITEMS: readonly InventoryItem[] = [];
 const ADDONS: Readonly<Record<string, number>> = { weapon: 16, armor: 17, potion: 19 };
 
 /**
- * The crafting panel (crafting-build.md C2, crafting-catalog.md § 3.4), toggled by <kbd>C</kbd>. Before a craft: a schematic, its inputs picked slot by
+ * The crafting panel (crafting-build.md C2, crafting-catalog.md § 3.4), at a station: its context menu, or <kbd>C</kbd> beside it. Before a craft: a schematic, its inputs picked slot by
  * slot from the inventory, and each line's <b>ceiling</b> computed as the server will (`data/craft.ts`) — so poor inputs show before the first click.
  * During one: each line's value and ceiling, a point at a time, an optional add-on, and the finish. The server rolls; the panel shows.
  */
@@ -39,6 +39,7 @@ export function CraftPanel() {
           ✕
         </button>
       </div>
+      <CraftStatus />
       {notice === undefined ? null : (
         <div className="hint" role="alert">
           {notice}
@@ -54,6 +55,38 @@ export function CraftPanel() {
       <Upkeep />
     </div>
   );
+}
+
+/**
+ * What the last click is doing (Loïc, 2026-11-02: a click sometimes did nothing, and nothing said so): a sweeping bar while a step is in flight —
+ * from the click to the read that shows it, a tick and a read, typically well under a second — then a line saying what was done, or that the server
+ * did not answer. Always one line high, so the panel does not jump.
+ */
+function CraftStatus() {
+  const busy = useMarket((s) => s.pending.includes('craft'));
+  const done = useCraft((s) => s.done);
+  return (
+    <div className="craft-status" role="status" aria-live="polite">
+      {busy ? (
+        <>
+          <span className="craft-progress" aria-hidden="true">
+            <span />
+          </span>
+          Working…
+        </>
+      ) : done === null ? null : (
+        <span key={done.seq} className={done.ok ? 'craft-done' : 'craft-warn'}>
+          {done.ok ? '✓ ' : ''}
+          {done.text}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Whether a workshop command is in flight: every button that sends one is off meanwhile, so a click is either sent or visibly refused. */
+function useBusy(): boolean {
+  return useMarket((s) => s.pending.includes('craft'));
 }
 
 /** An item's icon at the catalogue's 32 px, as the inventory draws it; the name's initials without one (no `--assets`). */
@@ -169,6 +202,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
   const setMk = useCraft((s) => s.setMk);
   const setPart = useCraft((s) => s.setPart);
   const start = useCraft((s) => s.start);
+  const busy = useBusy();
   const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
   const s = book.schematics.find((x) => x.id === selected);
   const setChoice = useCraft((x) => x.setChoice);
@@ -291,7 +325,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
             })}
           </div>
           <Lines book={book} s={s} q={s.lines.map((line) => ceiling(book, s, line, inputs))} f={null} addonMk={0} />
-          <button type="button" onClick={start}>
+          <button type="button" onClick={start} disabled={busy}>
             Start
           </button>
         </>
@@ -305,6 +339,7 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
   const point = useCraft((s) => s.point);
   const enhance = useCraft((s) => s.enhance);
   const finish = useCraft((s) => s.finish);
+  const busy = useBusy();
   const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
   const s = craft === null ? undefined : book.schematics.find((x) => x.id === craft.schematic);
   if (craft === null || s === undefined) {
@@ -326,6 +361,7 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
         f={craft.lines.map((l) => l.f)}
         addonMk={craft.addonMk}
         onPoint={craft.pointsLeft > 0 ? point : undefined}
+        busy={busy}
       />
       {addon === undefined || craft.addonMk > 0 ? null : (
         <div className="craft-slot">
@@ -336,6 +372,7 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
               <button
                 key={mk}
                 type="button"
+                disabled={busy}
                 onClick={() => {
                   enhance(mk);
                 }}
@@ -345,7 +382,7 @@ function UnderWay({ book }: { readonly book: SchematicBook }) {
             ))}
         </div>
       )}
-      <button type="button" onClick={finish}>
+      <button type="button" onClick={finish} disabled={busy}>
         Finish
       </button>
     </div>
@@ -360,6 +397,7 @@ function Upkeep() {
   const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
   const repair = useCraft((s) => s.repair);
   const salvage = useCraft((s) => s.salvage);
+  const busy = useBusy();
   // Salvage destroys the item: a first click asks, a second on the same item does it.
   const [confirming, setConfirming] = useState<string | null>(null);
   // What wears (repair), and what a crafter made in the grid — parts included (salvage).
@@ -396,7 +434,7 @@ function Upkeep() {
             {kit === undefined ? null : (
               <button
                 type="button"
-                disabled={s.repairs >= MAX_REPAIRS || kits(kit) === 0 || !worn}
+                disabled={busy || s.repairs >= MAX_REPAIRS || kits(kit) === 0 || !worn}
                 title={
                   kits(kit) === 0
                     ? 'No repair kit of its kind'
@@ -414,6 +452,7 @@ function Upkeep() {
             {s.crafter !== '0' && i.slot <= 100 ? (
               <button
                 type="button"
+                disabled={busy}
                 onClick={() => {
                   if (confirming === i.id) {
                     setConfirming(null);
@@ -440,6 +479,7 @@ function Lines({
   f,
   addonMk,
   onPoint,
+  busy = false,
 }: {
   readonly book: SchematicBook;
   readonly s: Schematic;
@@ -447,6 +487,7 @@ function Lines({
   readonly f: readonly number[] | null;
   readonly addonMk: number;
   readonly onPoint?: ((line: number) => void) | undefined;
+  readonly busy?: boolean;
 }) {
   return (
     <div className="craft-lines">
@@ -463,6 +504,7 @@ function Lines({
             {onPoint === undefined ? null : (
               <button
                 type="button"
+                disabled={busy}
                 onClick={() => {
                   onPoint(i);
                 }}

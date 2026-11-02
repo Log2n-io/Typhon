@@ -44,7 +44,15 @@ const DROP_PREFIX: Readonly<Partial<Record<string, string>>> = {
   // Out of a bazaar listing into the inventory (bazaar.md § 6): bought, or one's own listing back.
   buy: 'Collected',
   return: 'Collected',
+  // The vendor's standard issue (Loïc, 2026-11-02: a buy said nothing), said with the price its credit row paid; what a craft made (`make`: `craft` is
+  // the inputs it spent), and what a salvage gave back (crafting-build.md C2-C3).
+  standard: 'Bought from the vendor',
+  make: 'Crafted',
+  salvage: 'Salvaged',
 };
+
+/** The drop kinds whose line names the credits the same kind paid on the same tick: a vendor buy's price. */
+const PRICED_DROPS: ReadonlySet<string> = new Set(['standard']);
 
 /**
  * The chat lines of one batch of notices — every notice of one frame — oldest first.
@@ -84,9 +92,15 @@ export function noticeLines(
     }
   });
 
+  // A priced drop takes the first credits of its kind it paid on its tick: the item row and the credit row of one buy share no ref (the item's names the
+  // sale's credit row, the credit's the template), but they are written in one transaction, so on one tick.
+  const paid = batch.filter((n) => !n.items && !n.incoming && PRICED_DROPS.has(n.kind));
   for (const drop of drops.values()) {
     const entries = drop.items.map((i) => ({ item: String(i.template), name: i.name, mk: i.mk, count: i.count }));
-    lines.push({ tick: drop.tick, order: drop.order, text: `${drop.prefix}: ${itemList(entries)}` });
+    const kind = drop.items[0].kind;
+    const price = PRICED_DROPS.has(kind) ? paid.findIndex((n) => n.kind === kind && n.tick === drop.tick) : -1;
+    const cost = price < 0 ? '' : ` for ${formatCredits(paid.splice(price, 1)[0].amount)}`;
+    lines.push({ tick: drop.tick, order: drop.order, text: `${drop.prefix}: ${itemList(entries)}${cost}` });
   }
 
   lines.sort((a, b) => a.tick - b.tick || a.order - b.order);

@@ -22,6 +22,15 @@ export const MISSION_INTERACTION = 'mission';
 /** The interaction's kind on the published bazaar terminal (bazaar.md § 6; `bazaar_terminal` rev 3, `reach_m` 3.3). */
 export const BAZAAR_INTERACTION = 'bazaar';
 
+/** The interaction's kind on the published crafting station (crafting-build.md C2). */
+export const CRAFT_INTERACTION = 'crafting';
+
+/**
+ * How far from a crafting station's centre it is usable, metres: the server's `TatooineData.StationReachM`, past which it refuses a craft, a repair
+ * or a salvage. The asset publishes no `reach_m`, and its stand point's 1.8 m disc would shut the panel where the server still allows it.
+ */
+export const STATION_REACH_M = 6;
+
 /** How far beyond its published radius the terminal still counts as in reach: the radius is a disc on the stand point. */
 export const TICKET_SLACK_M = 0.5;
 
@@ -113,6 +122,21 @@ export function bazaarTerminalOf(
   return standingTerminalOf(terminal, BAZAAR_INTERACTION, x, y, z, quarters);
 }
 
+/**
+ * A placed crafting station's stand point and box, or `null` when its asset publishes no `crafting` interaction: a structure of its own, usable
+ * within {@link STATION_REACH_M} of where it stands, from any side — the server's rule.
+ */
+export function craftingStationOf(
+  station: Descriptor,
+  x: number,
+  y: number,
+  z: number,
+  quarters: number,
+): TicketTerminal | null {
+  const use = standingTerminalOf(station, CRAFT_INTERACTION, x, y, z, quarters);
+  return use === null ? null : { ...use, reachX: x, reachZ: z, reachM: STATION_REACH_M };
+}
+
 /** A terminal that is a structure of its own: its interaction of `kind` placed by its own pose. */
 function standingTerminalOf(
   terminal: Descriptor,
@@ -189,6 +213,25 @@ export function bazaarMenuItems(reserved: number): ContextMenuItem[] {
       action: { kind: 'bazaar', tab: 'reserved' },
     },
   ];
+}
+
+/**
+ * The crafting station's context menu (crafting-build.md C2-C3): the crafting panel, whose key the hint names — <kbd>C</kbd> opens it too, at a
+ * station (Loïc, 2026-11-02: the key alone was not to be found).
+ */
+export function craftMenuItems(): ContextMenuItem[] {
+  return [
+    { label: 'Craft, repair, salvage…', hint: 'The crafting panel (C, at a station)', action: { kind: 'craft' } },
+  ];
+}
+
+/** Whether a crafting station in view is usable from (`x`, `z`): where the crafting panel opens, and stays open. */
+export function craftingStationAt(
+  parts: readonly { readonly kind: string; readonly use: TicketTerminal }[],
+  x: number,
+  z: number,
+): boolean {
+  return parts.some((p) => p.kind === 'craft' && canUseAt(p.use, x, z));
 }
 
 /**

@@ -131,6 +131,9 @@ import {
   bazaarMenuItems,
   bazaarRegionAt,
   bazaarTerminalOf,
+  craftingStationAt,
+  craftingStationOf,
+  craftMenuItems,
   crowdsTerminal,
   missionTerminalAction,
   missionTerminalOf,
@@ -434,6 +437,13 @@ const BAZAAR_TERMINAL_ASSET = 'bazaar_terminal';
 const BAZAAR_TERMINAL_LABEL = 'Bazaar';
 const BAZAAR_TERMINAL_TAG: EntityTag = entityTag(BAZAAR_TERMINAL_LABEL, 0, null);
 
+/** The crafting station's asset: its `crafting` interaction is where crafting, repair and salvage are done from (crafting-build.md C2-C3). */
+const CRAFTING_STATION_ASSET = 'crafting_station';
+
+/** What a selected crafting station is tagged. */
+const CRAFTING_STATION_LABEL = 'Crafting station';
+const CRAFTING_STATION_TAG: EntityTag = entityTag(CRAFTING_STATION_LABEL, 0, null);
+
 /** A tag before anything was tagged. */
 const NO_TAG: EntityTag = entityTag('', 0, null);
 
@@ -448,8 +458,8 @@ const MISSION_NAV_KIND = 1000;
 
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
-  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5) or a bazaar terminal (bazaar.md § 6). */
-  readonly kind: 'ticket' | 'mission' | 'bazaar';
+  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5), a bazaar terminal (bazaar.md § 6) or a crafting station. */
+  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft';
   /** The shuttleport's netId, or the mission or bazaar terminal's own. */
   readonly owner: number;
   readonly use: TicketTerminal;
@@ -1149,6 +1159,7 @@ export class ClientApp {
       void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(MISSION_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(BAZAAR_TERMINAL_ASSET).catch(() => undefined);
+      void mount.library.describe(CRAFTING_STATION_ASSET).catch(() => undefined);
 
       // <b>Nothing above waited for anything but the catalogue</b> (Loïc, 2026-10-26: what is lazy loads asynchronously,
       // and what waits on it is not drawn). The buildings ask for their own GLBs from the next frame, and the crowds build
@@ -3426,6 +3437,7 @@ export class ClientApp {
     this.activeAltitude = cam.altitude;
     this.updateMissions(now);
     this.updateMarket(now);
+    this.updateCraft();
     this.updateNav(now);
     this.paintNav(cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
@@ -3889,13 +3901,15 @@ export class ClientApp {
     const ticket = library?.described(TICKET_TERMINAL_ASSET) ?? null;
     const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
     const bazaar = library?.described(BAZAAR_TERMINAL_ASSET) ?? null;
+    const station = library?.described(CRAFTING_STATION_ASSET) ?? null;
     if (
       this.partsEpoch === this.structureEpoch &&
       this.partsSet === this.assetSet &&
       this.partsFrom[0] === port &&
       this.partsFrom[1] === ticket &&
       this.partsFrom[2] === mission &&
-      this.partsFrom[3] === bazaar
+      this.partsFrom[3] === bazaar &&
+      this.partsFrom[4] === station
     ) {
       return this.terminalParts;
     }
@@ -3903,7 +3917,7 @@ export class ClientApp {
     this.terminalParts = [];
     this.partsEpoch = this.structureEpoch;
     this.partsSet = this.assetSet;
-    this.partsFrom = [port, ticket, mission, bazaar];
+    this.partsFrom = [port, ticket, mission, bazaar, station];
 
     const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
@@ -3915,7 +3929,9 @@ export class ClientApp {
             ? missionTerminalOf(mission, s.x, s.y, s.z, s.yaw)
             : s.kind === StructureKind.Bazaar && bazaar !== null
               ? bazaarTerminalOf(bazaar, s.x, s.y, s.z, s.yaw)
-              : null;
+              : s.kind === StructureKind.CraftingStation && station !== null
+                ? craftingStationOf(station, s.x, s.y, s.z, s.yaw)
+                : null;
       if (use === null || use.corners === null) {
         continue;
       }
@@ -3930,7 +3946,13 @@ export class ClientApp {
       }
 
       const kind =
-        s.kind === StructureKind.Shuttleport ? 'ticket' : s.kind === StructureKind.Bazaar ? 'bazaar' : 'mission';
+        s.kind === StructureKind.Shuttleport
+          ? 'ticket'
+          : s.kind === StructureKind.Bazaar
+            ? 'bazaar'
+            : s.kind === StructureKind.CraftingStation
+              ? 'craft'
+              : 'mission';
       this.terminalParts.push({ kind, owner: s.netId, use, min, max });
     }
 
@@ -4001,6 +4023,33 @@ export class ClientApp {
   private mineVersion = -1;
   /** The bazaar terminal whose context menu is open, for closing it when the body walks away. */
   private bazaarMenuOwner = 0;
+  /** The crafting station whose context menu is open, likewise. */
+  private craftMenuOwner = 0;
+
+  /**
+   * The crafting station, every frame: whether the body stands within one's reach — the only place the crafting panel opens, and it closes when
+   * the body walks away, as a mission terminal's list does — and the station's menu closed likewise.
+   */
+  private updateCraft(): void {
+    const source = this.source;
+    const at =
+      source !== null &&
+      source.canPlay &&
+      source.selfNetId !== 0 &&
+      craftingStationAt(
+        this.terminalsInView(),
+        this.predictor.active ? this.predictor.x : this.eyeX,
+        this.predictor.active ? this.predictor.z : this.eyeZ,
+      );
+    useCraft.getState().setAtStation(at);
+    const ui = useUi.getState();
+    if (ui.contextMenu?.source === 'craft') {
+      const menuPart = this.terminalPart(this.craftMenuOwner);
+      if (menuPart === null || !this.canUse(menuPart)) {
+        ui.closeContextMenu();
+      }
+    }
+  }
 
   /**
    * The bazaar, every frame: where the body stands (the region of a bazaar terminal in reach, which is where list, buy,
@@ -4316,6 +4365,18 @@ export class ClientApp {
 
     ui.selectPart({ owner: part.owner, kind: part.kind });
     this.bazaarMenuOwner = part.kind === 'bazaar' ? part.owner : 0;
+    this.craftMenuOwner = part.kind === 'craft' ? part.owner : 0;
+    if (part.kind === 'craft') {
+      ui.openContextMenu({
+        x: press.x,
+        y: press.y,
+        title: CRAFTING_STATION_LABEL,
+        source: 'craft',
+        items: craftMenuItems(),
+      });
+      return false;
+    }
+
     if (part.kind === 'bazaar') {
       ui.openContextMenu({
         x: press.x,
@@ -4351,7 +4412,9 @@ export class ClientApp {
       ? MISSION_TERMINAL_TAG
       : part.kind === 'bazaar'
         ? BAZAAR_TERMINAL_TAG
-        : TICKET_TERMINAL_TAG;
+        : part.kind === 'craft'
+          ? CRAFTING_STATION_TAG
+          : TICKET_TERMINAL_TAG;
   }
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */

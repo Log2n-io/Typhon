@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { panelKey } from '../app/panel-keys';
+import { useChat } from '../state/chat-store';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
 import { useMissions } from '../state/mission-store';
@@ -14,8 +15,9 @@ import { useWallet } from '../state/wallet-store';
  * no wallet — except the inventory's against the mock, whose own character has one (`data/mock/inventory.ts`).
  *
  * <b>And their keys</b> (Loïc, 2026-10-26): <kbd>J</kbd> toggles the journal, <kbd>I</kbd> the inventory, <kbd>B</kbd> the
- * bazaar (bazaar.md § 6: browsing and cancelling work anywhere; the rest at a bazaar terminal) — not while typing, not with
- * a modifier held, and not while a context menu is open, whose keys are its own.
+ * bazaar (bazaar.md § 6: browsing and cancelling work anywhere; the rest at a bazaar terminal), <kbd>C</kbd> the crafting panel
+ * at a station only (the server refuses everything in it elsewhere) — not while typing, not with a modifier held, and not while
+ * a context menu is open, whose keys are its own.
  */
 export function BottomBar() {
   const playing = useSessionStore((s) => s.grant !== null);
@@ -53,7 +55,12 @@ export function BottomBar() {
       } else if (panel === 'bazaar') {
         useMarket.getState().toggle();
       } else if (panel === 'craft') {
-        useCraft.getState().toggle();
+        const craft = useCraft.getState();
+        if (craft.open || craft.atStation) {
+          craft.toggle();
+        } else {
+          useChat.getState().notice('Crafting needs a crafting station: hold-click one, or press C beside it.');
+        }
       } else {
         useWallet.getState().toggleInventory();
       }

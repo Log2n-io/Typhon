@@ -124,6 +124,11 @@ export interface MarketState {
   readonly equip: (itemId: string) => void;
   /** Sends a command as the panels' buttons do: held while one of its row is in flight, its refusal shown on its row. False when not sent. */
   readonly sendCommand: (command: MarketCommand) => boolean;
+  /**
+   * A row's command was seen to land — an accepted command is never acked, so the caller that saw its effect says so: its buttons are back at once
+   * rather than after {@link MARKET_ANSWER_MS}.
+   */
+  readonly settle: (row: string) => void;
   /** Takes off what is worn in an equip slot, 101-107. */
   readonly unequip: (slot: number) => void;
   /** The server refused `command` with `reason`. */
@@ -412,6 +417,9 @@ export const useMarket = create<MarketState>((set, get) => {
       );
     },
     sendCommand: (command) => send(command),
+    settle: (row) => {
+      clearPending(row);
+    },
     equip: (itemId) => {
       send({ kind: 'equip', item: itemId });
     },
