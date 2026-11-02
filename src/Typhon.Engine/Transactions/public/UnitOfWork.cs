@@ -1,6 +1,5 @@
 using JetBrains.Annotations;
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Schema.Definition;
@@ -56,7 +55,7 @@ public sealed class UnitOfWork : IDisposable
     /// <summary>Number of transactions created within this UoW.</summary>
     public int TransactionCount => _transactionCount;
 
-    /// <summary>Number of transactions that have been committed within this UoW.</summary>
+    /// <summary>Number of transactions of this UoW that committed with records to log: the ones whose durability its flush waits for (#1376).</summary>
     public int CommittedTransactionCount => _committedTransactionCount;
 
     /// <summary>Whether this UoW has been disposed.</summary>
@@ -160,7 +159,8 @@ public sealed class UnitOfWork : IDisposable
     }
 
     /// <summary>
-    /// Records that a transaction within this UoW has committed.
+    /// Records that a transaction within this UoW appended its records: the commit is past its point of no return (AP-02), and the UoW's flush has
+    /// something to make durable.
     /// </summary>
     internal void RecordTransactionCommitted() => Interlocked.Increment(ref _committedTransactionCount);
 
@@ -236,24 +236,6 @@ public sealed class UnitOfWork : IDisposable
         return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// Gives back a unit of work that never hosted a transaction, without the durability flush a non-Deferred dispose makes (#1267).
-    /// </summary>
-    /// <remarks>
-    /// For <c>CreateQuickTransaction</c>'s refusal path. There is nothing to make durable, and the flush is harmful there: <see cref="Dispose"/> releases the
-    /// registry slot BEFORE it flushes, and the flush ends by recording the UoW committed — into a slot that is free again, and may already be another
-    /// UoW's — after waiting on the durability of records that are not this UoW's.
-    /// </remarks>
-    internal void DisposeUnused()
-    {
-        Debug.Assert(_transactionCount == 0, "only a unit of work that hosted no transaction has nothing to flush");
-        _skipDisposeFlush = true;
-        Dispose();
-    }
-
-    /// <summary>Set by <see cref="DisposeUnused"/>: the dispose gives the slot back without flushing.</summary>
-    private bool _skipDisposeFlush;
-
     /// <summary>Admitted by the storage gate (<see cref="DatabaseEngine.CreateUnitOfWork"/>, S4 of #1382): its dispose lets the next one in.</summary>
     internal bool Admitted
     {
@@ -278,21 +260,31 @@ public sealed class UnitOfWork : IDisposable
         // its ChangeSet marked stayed unevictable for good (#1382). The exception surfaces after.
         try
         {
-            // Release the UoW registry slot. For Deferred/GroupCommit the mutation goes into the
-            // shared ChangeSet so it will be included in whatever flush path runs next.
-            if (_uowId != 0)
+            try
             {
-                // The marks first: a commit larger than the cache, refused or not, can end with all of it under them, and the registry write needs a page. They
-                // hold nothing the pages' write debt does not (PS-10).
+                // The marks first: a commit larger than the cache, refused or not, can end with all of it under them, and the flush's and the release's
+                // registry writes each need a page. They hold nothing the pages' write debt does not (PS-10).
                 ChangeSet?.ReleaseDirtyMarks();
-                _dbe.UowRegistry.Release(_uowId, ChangeSet);
-            }
 
-            // WAL is mandatory. Deferred UoWs skip flush — WAL records are already in the commit buffer and will be written by the WAL writer thread
-            // asynchronously. Non-Deferred modes flush for the durability guarantee on dispose.
-            if (_durabilityMode != DurabilityMode.Deferred && !_skipDisposeFlush)
+                // WAL is mandatory. Deferred UoWs skip flush — WAL records are already in the commit buffer and will be written by the WAL writer thread
+                // asynchronously. Non-Deferred modes flush for the durability guarantee on dispose, when a transaction appended something to make
+                // durable: an empty one, a rollback included, waited on records not its own, and an expired deadline's timeout replaced the exception it
+                // was unwinding on (#1376).
+                if (_durabilityMode != DurabilityMode.Deferred && _committedTransactionCount > 0)
+                {
+                    _ = FlushAsync();
+                }
+            }
+            finally
             {
-                _ = FlushAsync();
+                // Release the UoW registry slot LAST (UR-09): the flush ends by recording the UoW committed in its slot, and released first, that write
+                // landed in a free slot — another UoW's by then — and stayed set across every reopen (#1376). For Deferred/GroupCommit the mutation goes
+                // into the shared ChangeSet so it will be included in whatever flush path runs next.
+                if (_uowId != 0)
+                {
+                    ChangeSet?.ReleaseDirtyMarks();
+                    _dbe.UowRegistry.Release(_uowId, ChangeSet);
+                }
             }
         }
         finally

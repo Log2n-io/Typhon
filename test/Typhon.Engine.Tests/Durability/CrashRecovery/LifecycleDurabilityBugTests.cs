@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Typhon.Engine.Tests;
@@ -151,6 +152,99 @@ internal sealed class LifecycleDurabilityBugTests
             var enabled = tx.Open(id).IsEnabled(1);
             Assert.That(enabled, Is.False, "CompB was disabled before a clean shutdown — it must read back disabled after reopen");
         }
+    }
+
+    /// <summary>
+    /// #398: a disable consolidated by a checkpoint, then a hard crash, nothing left in the log's window. The crash open rebuilds the entity map from the
+    /// clusters, whose copy of the enabled bits every commit keeps equal to the record (ENABLE-01); with the persisted map torn too, the cluster is the
+    /// only source left.
+    /// </summary>
+    [Test]
+    [CancelAfter(15_000)]
+    [VerifiesRule("ENABLE-01")]
+    public void ADisabledComponent_SurvivesAConsolidatingCheckpointAndACrash([Values] bool tornMapPages)
+    {
+        const int Count = 2_000;
+        var ids = new List<EntityId>(Count);
+        int[] mapPages;
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            Register(dbe);
+            dbe.InitializeArchetypes();
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                using (var tx = uow.CreateTransaction())
+                {
+                    for (var i = 0; i < Count; i++)
+                    {
+                        ids.Add(tx.Spawn<CompABArch>(CompABArch.A.Set(new CompA(i, 1, 1)), CompABArch.B.Set(new CompB(2, 2))));
+                    }
+
+                    tx.Commit();
+                }
+
+                using (var tx = uow.CreateTransaction())
+                {
+                    for (var i = 0; i < Count; i += 2)
+                    {
+                        tx.OpenMut(ids[i]).Disable(CompABArch.B);
+                    }
+
+                    tx.Commit();
+                }
+
+                uow.Flush();
+            }
+
+            var disabledAt = dbe.WalManager.LastPublishedLsn;
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.GreaterThanOrEqualTo(disabledAt), "premise: the disables are consolidated, none left to replay");
+            mapPages = dbe._archetypeStates[Archetype<CompABArch>.Metadata.ArchetypeId].EntityMap.Segment.Pages.ToArray();
+            dbe.SimulateHardCrash();
+        }
+
+        if (tornMapPages)
+        {
+            Assert.That(mapPages.Length, Is.GreaterThan(1), "premise: an entity map past its root page");
+            for (var p = 1; p < mapPages.Length; p++)
+            {
+                TearDataFilePage(mapPages[p]);
+            }
+        }
+
+        using var scope2 = _serviceProvider.CreateScope();
+        var reopened = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Register(reopened);
+        reopened.InitializeArchetypes();
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        using var read = reopened.CreateQuickTransaction();
+        var wrong = 0;
+        for (var i = 0; i < Count; i++)
+        {
+            if (read.Open(ids[i]).IsEnabled(1) != (i % 2 != 0))
+            {
+                wrong++;
+            }
+        }
+
+        Assert.That(wrong, Is.Zero, "entities whose CompB reads back with the wrong enabled state");
+    }
+
+    /// <summary>Damages page <paramref name="filePageIndex"/> of the data file past its header: its stored CRC no longer matches.</summary>
+    private void TearDataFilePage(int filePageIndex)
+    {
+        var dbPath = Path.Combine(_dbDir, $"{CurrentDatabaseName}.typhon", "data");
+        using var fs = new FileStream(dbPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        fs.Seek((long)filePageIndex * PagedMMF.PageSize + PagedMMF.PageHeaderSize + 32, SeekOrigin.Begin);
+        var garbage = new byte[256];
+        for (var i = 0; i < garbage.Length; i++)
+        {
+            garbage[i] = (byte)(0xA5 ^ i);
+        }
+
+        fs.Write(garbage, 0, garbage.Length);
+        fs.Flush(true);
     }
 
     // ── Bug 2: hard-crash chain-head revert ─────────────────────────────────

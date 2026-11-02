@@ -797,8 +797,10 @@ second copy is not derived on demand, so every path that changes one copy has to
             writes the occupant's full mask, clearing as well as setting — `PlaceSpawns`, `ApplySpawnedEntityToCluster`,
             and a cluster migration's transcription to its destination slot (`ExecuteMigrations`, step 6). A freed slot is
             therefore never trusted to be clean. The migration rebuild writes the bits from the pre-migration record
-            (`RebuildClusterFromChains`); the crash rebuild without a snapshot goes the other way and copies the cluster bits
-            INTO the record (`RebuildClusterEntityMapEntries`), which is why the cluster copy has to be exact.
+            (`RebuildClusterFromChains`); the crash rebuild goes the other way and copies the cluster bits INTO the record
+            (`RebuildClusterEntityMapEntries`), which is why the cluster copy has to be exact: it is the only source a crash open reads
+            (#398). Two transactions changing one entity's enabled state, last writer wins, can leave the copies unequal; the rebuild
+            then keeps the cluster's value, the other committed writer's, and those commits have no defined order.
   never writing a slot the entity no longer occupies. The record a commit reads can be a TOMBSTONE — another transaction
         destroyed the entity and committed first, releasing the slot at commit — and a spawn may already hold that slot.
         The publish writes only while the slot's occupancy bit is set and its EntityIds tail holds this entity's id.

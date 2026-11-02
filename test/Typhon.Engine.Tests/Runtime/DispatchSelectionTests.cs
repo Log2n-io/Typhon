@@ -137,6 +137,82 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
     // Non-parallel path
     // ═══════════════════════════════════════════════════════════════════════
 
+    // ═════════════════════════════════════════════════════════════
+    // DSEL-05: one cluster walk on every path (#908)
+    // ═════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Runs one QuerySystem whose body walks its clusters through <c>ctx.Accessor</c> over <c>ctx.ClusterIds[Start, End)</c>, and returns, per run, the
+    /// entities the walk visited and the entities the context listed.
+    /// </summary>
+    private static List<(HashSet<EntityId> Walked, HashSet<EntityId> Listed, bool HasClusterIds)> RunClusterWalk(DatabaseEngine dbe, ViewBase view, bool parallel,
+        SimTier tier, int runs)
+    {
+        var results = new ConcurrentDictionary<long, (HashSet<EntityId> Walked, HashSet<EntityId> Listed, bool HasClusterIds)>();
+        using (var runtime = TyphonRuntime.Create(dbe, schedule =>
+               {
+                   schedule.PublicTrack.DeclareDag("Test").QuerySystem("Walk", ctx =>
+                   {
+                       var run = results.GetOrAdd(ctx.TickNumber, _ => ([], [], ctx.ClusterIds != null));
+                       lock (run.Walked)
+                       {
+                           foreach (var id in ctx.Entities)
+                           {
+                               run.Listed.Add(id);
+                           }
+
+                           if (ctx.ClusterIds != null)
+                           {
+                               foreach (var cluster in ctx.Accessor.GetClusterEnumerator<TierUnit>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex))
+                               {
+                                   var bits = cluster.OccupancyBits;
+                                   while (bits != 0)
+                                   {
+                                       run.Walked.Add(cluster.GetEntityId(BitOperations.TrailingZeroCount(bits)));
+                                       bits &= bits - 1;
+                                   }
+                               }
+                           }
+                       }
+                   }, input: () => view, tier: tier, parallel: parallel);
+               }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }))
+        {
+            runtime.Start();
+            WaitFor(() => results.Count > runs);
+            runtime.Shutdown();
+        }
+
+        return results.Keys.OrderBy(t => t).Take(runs).Select(t => results[t]).ToList();
+    }
+
+    /// <summary>
+    /// #908: a serial QuerySystem's context carried no selection — <c>ClusterIds</c> null, the range (0, 0), <c>Accessor</c> null — so the cluster walk the
+    /// parallel path is written with threw on <c>ctx.Accessor</c>, or walked nothing over <c>ctx.Transaction</c>. One body now walks the selection on both.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("DSEL-05")]
+    public void OneClusterWalk_VisitsTheSelection_SerialAndParallel([Values] bool parallel, [Values(SimTier.All, SimTier.Tier0)] SimTier tier)
+    {
+        using var dbe = SetupEngineWithGrid();
+        var near = SpawnRow(dbe, 3, SimTier.Tier0);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(55f, 55f)));
+            tx.Commit();
+        }
+
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier3);
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<TierUnit>().ToView();
+        foreach (var (walked, listed, hasClusterIds) in RunClusterWalk(dbe, view, parallel, tier, runs: 3))
+        {
+            Assert.That(hasClusterIds, Is.True, "the context names the selection");
+            Assert.That(walked, Is.EquivalentTo(listed), "the walk visits the entities the system was given");
+            Assert.That(walked.Count, Is.EqualTo(tier == SimTier.Tier0 ? near.Length : near.Length + 1), "every selected entity");
+        }
+    }
+
     [Test]
     [VerifiesRule("DSEL-01")]
     public void NonParallelTier_OnlyTheTiersEntities()

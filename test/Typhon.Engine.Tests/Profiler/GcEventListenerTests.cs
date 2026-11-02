@@ -77,6 +77,12 @@ public class GcEventListenerTests
     /// managed thread, so it used to stamp SuspendEEBegin and RestartEEEnd back to back after the restart, often after <c>GC.Collect</c> had returned:
     /// every pause measured ~0.03 ms. Bracketed by the collection call, every record must fall inside it, in order.
     /// </summary>
+    /// <remarks>
+    /// <para>The pause's length is what the regression broke, so it is what this measures: a blocking gen-2 pause stamped when it was raised lasts
+    /// milliseconds (8 to 15 measured), one stamped at dispatch a few microseconds. The floor is 0.5 ms.</para>
+    /// <para>The bracket against the call takes 5 ms of slack: a record's stamp maps the event's wall-clock time onto the Stopwatch, and measured on
+    /// Windows the whole sequence sat 0.05 to 1.3 ms early, by one offset per process. A 1 ms slack failed 1 run in 4 (#1549).</para>
+    /// </remarks>
     [Test]
     [CancelAfter(15_000)]
     public void A_forced_collection_is_stamped_inside_the_collection_call_in_order()
@@ -85,6 +91,8 @@ public class GcEventListenerTests
         var queue = new GcEventQueue(4096, wake);
         using var listener = new GcEventListener(queue);
 
+        // The wall clock behind TimeStamp and the Stopwatch are different counters, mapped through one anchor (see the remarks).
+        var slack = Stopwatch.Frequency * 5 / 1000;
         var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 10;
         while (Stopwatch.GetTimestamp() < deadline)
         {
@@ -98,24 +106,32 @@ public class GcEventListenerTests
             Thread.Sleep(100);
 
             long suspend = 0, start = 0, end = 0, restart = 0;
+            long candidateSuspend = 0, candidateStart = 0, candidateEnd = 0;
             while (queue.TryDequeue(out var r))
             {
                 switch (r.Kind)
                 {
-                    case GcEventRecordKind.SuspendBegin when suspend == 0 && r.Reason == (byte)GcSuspendReason.ForGC: suspend = r.Timestamp; break;
-                    case GcEventRecordKind.GcStart when suspend != 0 && start == 0: start = r.Timestamp; break;
-                    case GcEventRecordKind.GcEnd when start != 0 && end == 0: end = r.Timestamp; break;
-                    case GcEventRecordKind.RestartEnd when end != 0 && restart == 0: restart = r.Timestamp; break;
+                    case GcEventRecordKind.SuspendBegin when r.Reason == (byte)GcSuspendReason.ForGC:
+                        (candidateSuspend, candidateStart, candidateEnd) = (r.Timestamp, 0, 0);
+                        break;
+                    case GcEventRecordKind.GcStart when candidateSuspend != 0 && candidateStart == 0: candidateStart = r.Timestamp; break;
+                    case GcEventRecordKind.GcEnd when candidateStart != 0 && candidateEnd == 0: candidateEnd = r.Timestamp; break;
+                    case GcEventRecordKind.RestartEnd when candidateEnd != 0:
+                        if (restart == 0 && candidateStart >= t0 - slack && candidateStart <= t1 + slack)
+                        {
+                            (suspend, start, end, restart) = (candidateSuspend, candidateStart, candidateEnd, r.Timestamp);
+                        }
+
+                        candidateSuspend = 0;
+                        break;
                 }
             }
 
             if (restart == 0)
             {
-                continue; // a GC raced in from elsewhere or the events are late: try again
+                continue; // no sequence of this collection's: a GC raced in from elsewhere or the events are late, try again
             }
 
-            // 1 ms slack on each side: the wall clock behind TimeStamp and the Stopwatch are different counters.
-            var slack = Stopwatch.Frequency / 1000;
             Assert.Multiple(() =>
             {
                 Assert.That(suspend, Is.GreaterThanOrEqualTo(t0 - slack), "suspend before the call");
@@ -123,6 +139,8 @@ public class GcEventListenerTests
                 Assert.That(end, Is.GreaterThanOrEqualTo(start));
                 Assert.That(restart, Is.GreaterThanOrEqualTo(end));
                 Assert.That(restart, Is.LessThanOrEqualTo(t1 + slack), "restart stamped after GC.Collect returned: the dispatch time, not the event's");
+                Assert.That(restart - suspend, Is.GreaterThanOrEqualTo(Stopwatch.Frequency / 2000),
+                    "a blocking gen-2 pause lasts milliseconds: stamped at dispatch, it lasted microseconds");
             });
             return;
         }
