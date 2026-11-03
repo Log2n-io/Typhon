@@ -25,6 +25,7 @@ ICONS = {
     "sword_vibroblade": (Vector((1.0, 0.0, 0.0)), 45.0, None),     # weapons: side view of the grip frame (th_weapons.py)
     "blaster_dl44": (Vector((1.0, 0.0, 0.0)), 0.0, None),
     "vibroknuckler": (Vector((1.0, 0.0, 0.0)), 0.0, None),
+    "resource_extractor": (Vector((0.55, 1.0, -0.75)), 0.0, None),   # the extractor kit (item template 70) in inventory
 }
 ITEM_VIEW = (Vector((0.55, 1.0, -0.75)), 0.0, None)          # every item (kind "item") not in ICONS: 3/4 from front-left
 LIGHTS = (("key", 6.0, (0.55, -0.55, -0.63)), ("fill", 0.7, (-0.75, 0.15, -0.65)), ("rim", 5.0, (-0.25, -0.55, 0.8)))
