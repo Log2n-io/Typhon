@@ -4324,7 +4324,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
     /// <summary>
     /// Get an enumerator for foreach support. It streams: the matching entities are read from each archetype's entity map in batches, as the loop consumes
-    /// them, so memory and the pages held do not grow with the result (<see cref="EcsQueryEnumerator"/>).
+    /// them, so memory and the pages held do not grow with the result (<see cref="EcsQueryEnumerator"/>). A query with <c>WhereField</c> streams too, in
+    /// storage order: each archetype's clusters at the transaction's snapshot, the predicates evaluated per cluster (<see cref="FillFieldBatch"/>).
     /// <para>
     /// Caller-attribute capture is NOT available here — the C# foreach pattern requires <c>GetEnumerator</c> to have zero parameters (optional parameters don't
     /// satisfy the pattern). Execution-site attribution for foreach loops falls back to the query's construction site (captured at <c>tx.Query&lt;T&gt;()</c>).
@@ -4334,12 +4335,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     public EcsQueryEnumerator GetEnumerator()
     {
         CheckRealmScope();
-        // foreach runs a broad archetype scan + the .Where(lambda) post-filter only. It does NOT apply WhereField, spatial, or OrderBy/Skip/Take — guard
-        // against silently iterating the wrong set.
-        if (HasFieldPredicates)
-        {
-            throw new InvalidOperationException("foreach does not apply WhereField predicates — call .Execute() to materialise the matches (or .ToView()).");
-        }
+        // foreach streams a broad archetype scan, or a field query's matches, plus the .Where(lambda) post-filter. It does NOT apply spatial predicates or
+        // OrderBy/Skip/Take — guard against silently iterating the wrong set.
         if (_spatialQueryType != SpatialQueryType.None)
         {
             throw new InvalidOperationException(
@@ -4348,6 +4345,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (_orderBy.HasValue)
         {
             throw new InvalidOperationException("foreach does not apply OrderBy / Skip / Take — call .ExecuteOrdered().");
+        }
+
+        if (HasFieldPredicates)
+        {
+            return GetFieldEnumerator();
         }
 
         // Own pending spawns are captured now, as they always were: the loop visits those made before it, never those made during it. They are not in the
@@ -4367,6 +4369,421 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         return new EcsQueryEnumerator(this, spawns);
+    }
+
+    /// <summary>
+    /// The enumerator of a field query: the plan built once, as <see cref="ExecuteTargeted"/> builds it, and the transaction's own pending spawns that pass
+    /// the predicate captured now — those made before the loop, never those made during it.
+    /// </summary>
+    private EcsQueryEnumerator GetFieldEnumerator()
+    {
+        var ct = _whereComponentTable;
+        var evaluators = QueryResolverHelper.ResolveEvaluators(SingleBranchOrThrow("foreach"), ct, 0);
+        var plan = PlanBuilder.Instance.BuildPlanAttributed(evaluators, ct, PlannerStats(ct), AdvancedSelectivityEstimator.Instance, null, 1, (uint)EcsQueryId,
+            SourceFile, SourceLine, SourceMethod, null, 0, null);
+
+        var simdEligible = new bool[evaluators.Length];
+        var anySimd = false;
+        if (Avx2.IsSupported)
+        {
+            for (var e = 0; e < evaluators.Length; e++)
+            {
+                simdEligible[e] = SimdPredicateEvaluator.IsSimdEligible(evaluators[e].KeyType);
+                anySimd |= simdEligible[e];
+            }
+        }
+
+        List<EntityId> spawns = null;
+        if (!MaskIsEmpty && _tx.PendingSpawns is { Count: > 0 })
+        {
+            var matching = new HashSet<EntityId>();
+            CollectPendingSpawnsWithFieldFilter(matching);
+            if (matching.Count > 0)
+            {
+                spawns = [.. matching];
+            }
+        }
+
+        if (!MaskIsEmpty)
+        {
+            if (_useLargeMask)
+            {
+                ThrowIfAnArchetypeHasNoIndex(_maskLarge, ct);
+            }
+            else
+            {
+                ThrowIfAnArchetypeHasNoIndex(_mask256, ct);
+            }
+        }
+
+        var field = new FieldWalk { Table = ct, Evaluators = evaluators, Plan = plan, SimdEligible = simdEligible, AnySimd = anySimd };
+        return new EcsQueryEnumerator(this, spawns, field);
+    }
+
+    /// <summary>
+    /// Throws, before the loop yields anything, when an archetype of the mask carries the predicate's component with no index for it — as
+    /// <see cref="ScanAllArchetypes"/> throws before <see cref="Execute"/> returns.
+    /// </summary>
+    private void ThrowIfAnArchetypeHasNoIndex<TMask>(TMask mask, ComponentTable ct) where TMask : struct, IArchetypeMask<TMask>
+    {
+        var dbe = _tx.DBE;
+        for (var bit = 0; bit <= mask.MaxId; bit++)
+        {
+            if (!mask.Test((ushort)bit) || ArchetypeRegistry.GetMetadata((ushort)bit) is not { } meta)
+            {
+                continue;
+            }
+
+            var engineState = dbe._archetypeStates[meta.ArchetypeId];
+            if (!ArchetypeCarries(engineState, ct))
+            {
+                continue;
+            }
+
+            var clusterState = engineState.ClusterState;
+            if (!meta.HasClusterIndexes || clusterState == null || FindClusterIndexSlot(clusterState, meta, out _) < 0)
+            {
+                ThrowHelper.ThrowInvalidOp(
+                    $"Query on '{ct?.Definition?.Name}' matched an archetype that CARRIES the where-component but has no per-archetype index for it. There "
+                    + "is no longer a shared index home to fall back to, and answering from the cluster scan alone would silently omit that archetype's "
+                    + "entities.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Fills <paramref name="walk"/>'s batch with the next matches of a field query: entity keys of one archetype, in storage order. Each archetype carrying
+    /// the predicate's component is walked at the transaction's snapshot (<see cref="SnapshotWalker"/>), every predicate evaluated on each cluster's column
+    /// at that snapshot and the enabled gate applied (QENABLE-01) — <see cref="ScanClusterSoa"/>'s answer, read a cluster at a time. When the planner picks
+    /// the index (Path A), the tree's hits mark the clusters to read first, as <see cref="ScanPerArchetypeBTreeSelective"/> marks them; the walk then
+    /// reads only those, and the clusters a change above the snapshot touched.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every predicate is evaluated on every row read, the indexed one included. The selective scan skips it, as the tree's range enforced it — but the
+    /// tree was read before the walk, and a fence between two batches may reclaim a cluster and reissue its chunk id to new entities, which only the values
+    /// can then reject.
+    /// </para>
+    /// <para>
+    /// A spatial archetype's matches are collected whole, as <see cref="Execute"/> collects them, then handed out in batches: its entities change cluster at
+    /// fences, so a cluster-order walk spanning one could meet an entity twice or never (WALK-01), and a gather walk would read every entity whatever the
+    /// predicate.
+    /// </para>
+    /// </remarks>
+    private bool FillFieldBatch(FieldWalk field, ref ForeachWalk walk)
+    {
+        _tx.ResumeIfSuspended();
+        if (MaskIsEmpty)
+        {
+            return false;
+        }
+
+        return _useLargeMask ? FillFieldBatchCore(_maskLarge, field, ref walk) : FillFieldBatchCore(_mask256, field, ref walk);
+    }
+
+    private bool FillFieldBatchCore<TMask>(TMask mask, FieldWalk field, ref ForeachWalk walk) where TMask : struct, IArchetypeMask<TMask>
+    {
+        while (true)
+        {
+            if (field.Walker == null && field.Collected == null && !NextFieldArchetype(mask, field, ref walk))
+            {
+                return false;
+            }
+
+            walk.Count = 0;
+            walk.Index = 0;
+            if (walk.Keys == null || walk.Keys.Length < walk.NextFillSize)
+            {
+                walk.ReturnKeys();
+                walk.Keys = ArrayPool<long>.Shared.Rent(walk.NextFillSize);
+            }
+
+            if (field.Collected != null)
+            {
+                var n = Math.Min(walk.NextFillSize, field.CollectedCount - field.CollectedIndex);
+                Array.Copy(field.Collected, field.CollectedIndex, walk.Keys, 0, n);
+                field.CollectedIndex += n;
+                walk.Count = n;
+                if (field.CollectedIndex >= field.CollectedCount)
+                {
+                    field.EndArchetype();
+                }
+            }
+            else
+            {
+                while (walk.Count < walk.NextFillSize)
+                {
+                    if (!field.Walker.MoveNext())
+                    {
+                        field.EndArchetype();
+                        break;
+                    }
+
+                    EmitFieldMatches(field, ref walk);
+                }
+            }
+
+            ForeachWalk.FillsForTest++;
+            walk.NextFillSize = Math.Min(walk.NextFillSize * 4, ForeachWalk.MaxBatch);
+            if (walk.Count > 0)
+            {
+                return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens the walk of the mask's next archetype carrying the predicate's component: its gate, its plan, and either its snapshot walk or, for a spatial
+    /// archetype, its matches collected whole. False once every archetype is done. An archetype that carries the component with no index for it throws, as
+    /// <see cref="ScanAllArchetypes"/> does.
+    /// </summary>
+    private bool NextFieldArchetype<TMask>(TMask mask, FieldWalk field, ref ForeachWalk walk) where TMask : struct, IArchetypeMask<TMask>
+    {
+        var dbe = _tx.DBE;
+        while (true)
+        {
+            field.ArchBit++;
+            if (field.ArchBit > mask.MaxId)
+            {
+                return false;
+            }
+
+            if (!mask.Test((ushort)field.ArchBit))
+            {
+                continue;
+            }
+
+            var meta = ArchetypeRegistry.GetMetadata((ushort)field.ArchBit);
+            if (meta == null)
+            {
+                continue;
+            }
+
+            var engineState = dbe._archetypeStates[meta.ArchetypeId];
+            if (!ArchetypeCarries(engineState, field.Table))
+            {
+                continue;
+            }
+
+            // GetFieldEnumerator checked every archetype has its index.
+            var clusterState = engineState.ClusterState;
+            var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
+
+            var compSlot = transientHome ? clusterState.TransientIndexSlots[ixSlotIdx].Slot : clusterState.IndexSlots[ixSlotIdx].Slot;
+            if (!TryCreateEnabledGate(meta, clusterState.Layout, compSlot, out var gate))
+            {
+                continue;
+            }
+
+            walk.RoutingId = dbe.RoutingIdOf(meta);
+            // As ScanPerArchetypeBTreeSelective falls back to the SoA scan when the plan's primary field is not among the slot's.
+            var selective = ChooseSelectivePath(field.Plan, clusterState, engineState, ixSlotIdx, transientHome)
+                            && (uint)field.Plan.PrimaryFieldIndex < (uint)clusterState.IndexSlots[ixSlotIdx].Fields.Length;
+            if (selective)
+            {
+                QueryPathProbe.SelectiveScans++;
+            }
+            else
+            {
+                QueryPathProbe.FullScans++;
+            }
+
+            if (clusterState.SpatialSlot.HasSpatialIndex)
+            {
+                var sink = new EntityKeyListSink(64);
+                try
+                {
+                    if (selective)
+                    {
+                        ScanPerArchetypeBTreeSelective(field.Plan, field.Evaluators, clusterState, meta, ref sink);
+                    }
+                    else
+                    {
+                        ScanPerArchetypeBTree(field.Evaluators, clusterState, meta, ref sink);
+                    }
+                }
+                catch
+                {
+                    sink.Return();
+                    throw;
+                }
+
+                if (sink.Count == 0)
+                {
+                    sink.Return();
+                    continue;
+                }
+
+                field.Collected = sink.Keys;
+                field.CollectedCount = sink.Count;
+                field.CollectedIndex = 0;
+                return true;
+            }
+
+            field.Gate = gate;
+            field.CompSlot = (byte)compSlot;
+            field.CompSize = clusterState.Layout.ComponentSize(compSlot);
+            field.ClusterSize = clusterState.Layout.ClusterSize;
+            field.State = engineState;
+            if (selective)
+            {
+                field.Candidates = CollectCandidateClusters(field.Plan, clusterState, ixSlotIdx);
+            }
+
+            // The full scan prunes as the SoA scan does, by the zone maps, read at each cluster.
+            var filter = selective
+                ? null
+                : transientHome
+                    ? ZoneMapFilter(clusterState.TransientIndexSlots[ixSlotIdx].Fields, field.Evaluators)
+                    : ZoneMapFilter(clusterState.IndexSlots[ixSlotIdx].Fields, field.Evaluators);
+            field.Walker = new SnapshotWalker(_tx, meta, engineState) { CandidateClusters = field.Candidates, ClusterFilter = filter };
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The SoA scan's zone-map pruning as a cluster filter (<see cref="SnapshotWalker.ClusterFilter"/>): a cluster passes unless one predicate's range
+    /// misses its field's zone map. Null when no predicate has a zone map. The walker admits a cluster an update above the snapshot touched regardless
+    /// (VIS-12), as <see cref="ScanClusterSoa"/> re-reads the watermark after a skip.
+    /// </summary>
+    private static Func<int, bool> ZoneMapFilter<TStore>(ClusterIndexField<TStore>[] fields, FieldEvaluator[] evaluators) where TStore : struct, IPageStore
+    {
+        List<(ZoneMapArray Map, long Min, long Max)> bounds = null;
+        for (var e = 0; e < evaluators.Length && e < 64; e++)
+        {
+            foreach (var field in fields)
+            {
+                if (field.ZoneMap != null && field.FieldOffset == evaluators[e].FieldOffset && field.FieldSize == evaluators[e].FieldSize)
+                {
+                    if (ZoneMapArray.TryGetQueryBounds(ref evaluators[e], out var min, out var max))
+                    {
+                        (bounds ??= []).Add((field.ZoneMap, min, max));
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        if (bounds == null)
+        {
+            return null;
+        }
+
+        var maps = bounds.ToArray();
+        return chunkId =>
+        {
+            foreach (var (map, min, max) in maps)
+            {
+                if (!map.MayContain(chunkId, min, max))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        };
+    }
+
+    /// <summary>
+    /// The selective plan's first step, as <see cref="ScanPerArchetypeBTreeSelective"/> takes it: the primary predicate's range read from the tree into one
+    /// word of slot bits per cluster, indexed by chunk id, from the pool. The walk reads only the clusters with a word set, and those a change above the
+    /// snapshot touched (<see cref="SnapshotWalker.CandidateClusters"/>).
+    /// </summary>
+    private static ulong[] CollectCandidateClusters(ExecutionPlan plan, ArchetypeClusterState clusterState, int ixSlotIdx)
+    {
+        ref var primaryField = ref clusterState.IndexSlots[ixSlotIdx].Fields[plan.PrimaryFieldIndex];
+        var candidates = ArrayPool<ulong>.Shared.Rent(clusterState.ClusterSegment.ChunkCapacity);
+        Array.Clear(candidates);   // whole: a cluster created since the capacity read indexes past it, into what the last renter left
+        var hasAny = false;
+        CollectClusterLocationsFromBTree(primaryField.Index, plan.PrimaryKeyType, plan.PrimaryScanMin, plan.PrimaryScanMax, primaryField.AllowMultiple,
+            candidates, ref hasAny);
+
+        // The clusters' words are read after the tree, each by acquire (SnapshotWalker.IsCandidate): a change folds its watermark before it moves the
+        // entries, so one the tree missed shows above the snapshot. The barrier keeps the leaf loads from sinking below them on arm64; JIT-folded on x64.
+        if (!X86Base.IsSupported)
+        {
+            Interlocked.MemoryBarrier();
+        }
+
+        return candidates;
+    }
+
+    /// <summary>
+    /// The current step's matches, appended to <paramref name="walk"/>'s keys: the rows the walk yields (visible at the snapshot, not destroyed by the
+    /// transaction), through the enabled gate, whose component at the snapshot satisfies every predicate.
+    /// </summary>
+    private void EmitFieldMatches(FieldWalk field, ref ForeachWalk walk)
+    {
+        var walker = field.Walker;
+        var reserved = walker.ReservedRows;
+        var clusterBase = walker.ClusterBase;
+
+        // A hidden destroy's enabled state is its record's (VIS-09): the cluster's words are the live slots'.
+        var remaining = walker.Rows & ~reserved & field.Gate.ClusterMask(clusterBase, out var exact);
+        if (remaining == 0 && reserved == 0)
+        {
+            return;
+        }
+
+        // A Versioned component first supplied after the snapshot has no value there: the row cannot match, as the SoA scan's `present` decides.
+        var compBase = walker.ColumnAddress(field.CompSlot, out var present);
+        remaining &= present;
+        reserved &= present;
+        var matching = MatchingSlots(field.Evaluators, field.SimdEligible, field.AnySimd, compBase, field.CompSize, field.ClusterSize, remaining, ~0UL,
+            int.MinValue);
+        var hiddenMatching = reserved == 0
+            ? 0
+            : MatchingSlots(field.Evaluators, field.SimdEligible, field.AnySimd, compBase, field.CompSize, field.ClusterSize, reserved, ~0UL, int.MinValue);
+        if (matching == 0 && hiddenMatching == 0)
+        {
+            return;
+        }
+
+        var ids = walker.EntityIds();
+        var perSlot = field.Gate.NeedsPerSlot(exact);
+
+        // The presence probe and a hidden slot's record read chains and the map through the transaction: its scope comes back, at the current epoch.
+        if ((perSlot && field.Gate.NeedsRecords) || hiddenMatching != 0)
+        {
+            _tx.ResumeIfSuspended();
+        }
+
+        while (matching != 0)
+        {
+            var slot = System.Numerics.BitOperations.TrailingZeroCount(matching);
+            matching &= matching - 1;
+            var rawId = ids[slot];
+            if (!perSlot || field.Gate.Admits(rawId, clusterBase, slot, exact, walker.RecordBuffer, ref walker.MapAccessor))
+            {
+                AppendKey(ref walk, EntityId.FromRaw(rawId).EntityKey);
+            }
+        }
+
+        while (hiddenMatching != 0)
+        {
+            var slot = System.Numerics.BitOperations.TrailingZeroCount(hiddenMatching);
+            hiddenMatching &= hiddenMatching - 1;
+            var rawId = ids[slot];
+            var key = EntityId.FromRaw(rawId).EntityKey;
+            if (field.State.EntityMap.TryGet(key, walker.RecordBuffer, ref walker.MapAccessor) && field.Gate.AdmitsRecord(rawId, walker.RecordBuffer))
+            {
+                AppendKey(ref walk, key);
+            }
+        }
+    }
+
+    private static void AppendKey(ref ForeachWalk walk, long key)
+    {
+        if (walk.Count == walk.Keys.Length)
+        {
+            var grown = ArrayPool<long>.Shared.Rent(walk.Keys.Length * 2);
+            Array.Copy(walk.Keys, grown, walk.Count);
+            ArrayPool<long>.Shared.Return(walk.Keys);
+            walk.Keys = grown;
+        }
+
+        walk.Keys[walk.Count++] = key;
     }
 
     /// <summary>
@@ -5153,6 +5570,90 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
     }
 
+    /// <summary>
+    /// Where a streaming <c>foreach</c> over a field query stands (<see cref="FillFieldBatch"/>): the plan, built once, and the archetype under walk — its
+    /// snapshot walk, the enabled gate, and the index's candidate clusters when the plan is selective — or a spatial archetype's matches, collected whole.
+    /// </summary>
+    [MustDispose(Reason = "owns a snapshot walk, whose scan accessors keep their pages pinned until it is disposed")]
+    internal sealed class FieldWalk
+    {
+        internal ComponentTable Table;
+        internal FieldEvaluator[] Evaluators;
+        internal ExecutionPlan Plan;
+        internal bool[] SimdEligible;
+        internal bool AnySimd;
+
+        internal int ArchBit = -1;
+        internal SnapshotWalker Walker;   // null between archetypes, and on a spatial one
+        internal EnabledGate Gate;
+        internal byte CompSlot;
+        internal int CompSize;
+        internal int ClusterSize;
+        internal ArchetypeEngineState State;
+        internal ulong[] Candidates;   // pooled; null unless the plan is selective
+
+        // A spatial archetype's matches, collected whole (pooled).
+        internal long[] Collected;
+        internal int CollectedCount;
+        internal int CollectedIndex;
+
+        /// <summary>Gives back what the archetype under walk holds; the next fill opens the next archetype.</summary>
+        internal void EndArchetype()
+        {
+            Walker?.Dispose();
+            Walker = null;
+            if (Candidates != null)
+            {
+                ArrayPool<ulong>.Shared.Return(Candidates);
+                Candidates = null;
+            }
+
+            if (Collected != null)
+            {
+                ArrayPool<long>.Shared.Return(Collected);
+                Collected = null;
+            }
+        }
+
+        internal void Dispose()
+        {
+            EndArchetype();
+            ArchBit = int.MaxValue - 1;   // a fill after Dispose finds no archetype
+        }
+    }
+
+    /// <summary>Deposits entity keys into a pooled array — one archetype's matches, whose routing id the caller keeps.</summary>
+    private struct EntityKeyListSink : IEntityIdSink
+    {
+        internal long[] Keys;
+        internal int Count;
+
+        internal EntityKeyListSink(int capacity)
+        {
+            Keys = ArrayPool<long>.Shared.Rent(capacity);
+            Count = 0;
+        }
+
+        public void Add(EntityId id)
+        {
+            if (Count == Keys.Length)
+            {
+                var grown = ArrayPool<long>.Shared.Rent(Keys.Length * 2);
+                Array.Copy(Keys, grown, Count);
+                ArrayPool<long>.Shared.Return(Keys);
+                Keys = grown;
+            }
+
+            Keys[Count++] = id.EntityKey;
+        }
+
+        internal void Return()
+        {
+            ArrayPool<long>.Shared.Return(Keys);
+            Keys = null;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Enumerator (streams the entity maps in batches)
     // ═══════════════════════════════════════════════════════════════════════
@@ -5181,18 +5682,20 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         private readonly EntityFilter _whereFilter;
         private readonly DisabledTypeIds _readDisabled;
         private readonly List<EntityId> _spawns;
+        private readonly FieldWalk _field;
         private ForeachWalk _walk;
         private int _spawnIndex;
         private bool _mapsDone;
         private EntityRef _current;
 
-        internal EcsQueryEnumerator(EcsQuery<TArchetype> query, List<EntityId> spawns)
+        internal EcsQueryEnumerator(EcsQuery<TArchetype> query, List<EntityId> spawns, FieldWalk field = null)
         {
             _query = query;
             _tx = query._tx;
             _whereFilter = query._whereFilter;
             _readDisabled = query.DisabledNames;
             _spawns = spawns;
+            _field = field;
             _walk = new ForeachWalk { ArchBit = -1, NextFillSize = ForeachWalk.FirstBatch };
             _spawnIndex = 0;
             _mapsDone = false;
@@ -5214,10 +5717,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 }
                 else if (!_mapsDone)
                 {
-                    if (!_query.FillForeachBatch(ref _walk))
+                    if (!(_field != null ? _query.FillFieldBatch(_field, ref _walk) : _query.FillForeachBatch(ref _walk)))
                     {
                         _mapsDone = true;
                         _walk.ReturnKeys();
+                        _field?.EndArchetype();
                     }
 
                     continue;
@@ -5249,6 +5753,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 #pragma warning disable TYPHON006 // Its transaction is borrowed: the query's, its caller's to dispose
         public void Dispose()
         {
+            _field?.Dispose();
             _walk.Cursor.Dispose();
             _walk.ReturnKeys();
             _walk.Count = 0;

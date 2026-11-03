@@ -2741,6 +2741,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 throw new InvalidOperationException("Simulated teardown-step failure (ThrowInDisposeCoreForTest).");
             }
 
+            // An environment-driven page trace is written first, while every segment is registered (its page types) and before the close's own requests.
+            WriteEnvironmentPageTrace();
+
             // Warm spatial-query windows pin this engine's pages on every thread that queried it. Unpin them while this page cache is still alive, and
             // before the final checkpoint and persistence steps need pages.
             SpatialQueryAccessorCache.Release(MMF);
@@ -4683,6 +4686,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
         where T : unmanaged
     {
+        try
+        {
+            ComponentRegistrationProbe?.Invoke(typeof(T));
+            return RegisterComponentFromAccessorCore<T>(changeSet, schemaValidation);
+        }
+        catch
+        {
+            // CS-04: an open that throws while it registers its components did not complete either. Left unmarked, its dispose ran the full close on a
+            // half-registered engine — drains, final cycle, the clean flag — as if it had opened: a crash open's recovery that timed out on back-pressure
+            // in a component table's lock-word reset then closed with a NullReferenceException in its cleanup drain.
+            _archetypeInitIncomplete = true;
+            throw;
+        }
+    }
+
+    /// <summary>Test seam: runs as each component's registration starts, so a test can make an open fail there (CS-04).</summary>
+    internal Action<Type> ComponentRegistrationProbe { get; set; }
+
+    /// <summary>Whether this engine's dispose will close it as a crash, its open not completed (CS-04; tests).</summary>
+    internal bool OpenIncompleteForTests => _archetypeInitIncomplete;
+
+    /// <summary>The body of <see cref="RegisterComponentFromAccessor{T}"/>.</summary>
+    private bool RegisterComponentFromAccessorCore<T>(ChangeSet changeSet, SchemaValidationMode schemaValidation) where T : unmanaged
+    {
         // Track this component Type for the registry lifecycle pairing in Dispose. Adding even on early-return / failure branches below is safe:
         // UnregisterEngineUse is idempotent on Types it doesn't know about, and any Type the engine touched MAY have ended up in
         // `ArchetypeRegistry.ComponentTypeIds` via the static-constructor + `DeclareComponent` cascade before this method's body inspected anything.
@@ -5150,6 +5177,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         ApplyPendingDeclaringAssemblies();
         _openCompleted = true;
         StartBackupScheduler();
+        try
+        {
+            StartEnvironmentPageTrace();
+        }
+        catch (Exception e)
+        {
+            LogPageTraceStartFailed(e);   // a diagnostic must not fail the open
+        }
 
         // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
         if (CheckpointManager != null)
@@ -6723,6 +6758,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // map being empty, which a map emptied by destroys is too — and every chain still allocated then reopened as a live entity (#1231).
             if (state.EntityMapLoaded)
             {
+                // The crash rebuild above establishes the visibility summary as it walks the clusters; a clean open walks nothing, so it establishes the
+                // summary here, or every snapshot scan of this session probes each entity (#1574, CLUSTERVIS-03). The restored TSN counter bounds every
+                // birth on disk only after a CLEAN close, the one that persists it: an unclean close with no WAL to replay is not a crash open, and its
+                // checkpointed pages can hold births above the stale counter. Nor a forced recovery open, whose replay has yet to run.
+                if (_cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen)
+                {
+                    state.ClusterState?.EstablishVisibilityAfterCleanOpen(TransactionChain.NextFreeId);
+                }
                 continue;
             }
 
@@ -8710,10 +8753,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, is saved — its pages written and
-    /// their marks released — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once the owed pages pass
-    /// the dirty-page threshold a flush-only cycle writes them. A pass calls it only where it holds no page address across the call: the refresh moves the
-    /// pin of every scope on this thread. Samples the epoch-held pages first.
+    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, has its marks released — its pages
+    /// stay owed (PS-10), unevictable until written — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once
+    /// the owed pages pass the dirty-page threshold a flush-only cycle writes them. Released, not saved (#1588): saved, every batch of 1,024 entities wrote
+    /// the pages it dirtied, and the index rebuild's random inserts re-dirtied the same B+Tree pages batch after batch — a 7 GB world's crash open at
+    /// 512 MiB wrote more than 91 GB in 5.5 min without finishing; released, it recovered in 95 s writing 15.3 GB. A pass calls it only where it holds no
+    /// page address across the call: the refresh moves the pin of every scope on this thread. Samples the epoch-held pages first.
     /// </summary>
     internal void RecoveryBatchPoint(ChangeSet changeSet, RecoveryPass pass)
     {
@@ -8736,7 +8781,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
-        changeSet?.SaveChanges();
+        changeSet?.ReleaseDirtyMarks();
         EpochManager.RefreshScope();
         RecoveryBatchPoints++;
         var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;

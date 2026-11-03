@@ -24,7 +24,8 @@ public class TelemetryFlagCatalogTests
         // the subtree grew by 17 more gates elsewhere meanwhile, to 240 — then 240 -> 243 with #1038 D-2's per-session records: FrameProduced (kind 71),
         // FrameSkipped (72) and SessionChanges (73), each gated alone because the first is a per-session-per-tick firehose the other two must not be paid for.
         // 243 -> 244 with #1517's Correlation composite (request roots, command scoping, the ingress/egress lifecycle records).
-        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(244));
+        // 244 -> 245 with the page trace's raw leaf (I7 of the huge-scan assessment), read raw: a capture does not need the profiler.
+        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(245));
 
         var root = TelemetryFlagCatalog.All[0];
         Assert.That(root.Kind, Is.EqualTo(TelemetryFlagKind.Master));

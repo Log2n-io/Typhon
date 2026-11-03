@@ -53,6 +53,7 @@ public unsafe partial class Transaction : EntityAccessor
     public TransactionState State { get; private set; }
 
     private int? _committedOperationCount;
+
     private int _deletedComponentCount;
 
     // Reused across pooled Transaction lifetimes — collects deferred enqueue entries per commit/rollback
@@ -283,6 +284,8 @@ public unsafe partial class Transaction : EntityAccessor
         _link.Tsn = 0;
         var tsn = _dbe.TransactionChain.Register(this);
         TSN = tsn;
+        PagedMMF.EnterOperation(tsn);   // the eviction policy's operation (PS-25), and the page trace's
+
         _dbe.LogTxInitPhase(tsn, "registered");
         initScope.Tsn = tsn;
         // PROFILING-SPAN-NO-THROW-END
@@ -431,7 +434,15 @@ public unsafe partial class Transaction : EntityAccessor
             finally
             {
                 _isDisposed = true;
-                ExitEpochAndRemove();
+                var readOnlyTsn = TSN;   // before Remove pools the object
+                try
+                {
+                    ExitEpochAndRemove();
+                }
+                finally
+                {
+                    PagedMMF.ExitOperation(readOnlyTsn);
+                }
             }
 
             return;
@@ -482,7 +493,14 @@ public unsafe partial class Transaction : EntityAccessor
                 // overwrite the new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
                 _isDisposed = true;
                 dbe.LogTxDispose(tsn, "ExitEpochAndRemove");
-                ExitEpochAndRemove();
+                try
+                {
+                    ExitEpochAndRemove();
+                }
+                finally
+                {
+                    PagedMMF.ExitOperation(tsn);   // last: the rollback, cleanups and flush above are still this transaction's requests (PS-25)
+                }
             }
         }
     }

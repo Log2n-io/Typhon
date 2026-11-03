@@ -100,7 +100,7 @@ foreach (var e in q)                        // stream the matches, no HashSet
 }
 ```
 
-`Execute` is the workhorse; `Count`/`Any` short-circuit when you don't need the entities; the `foreach` form streams: it reads the matches in batches as the loop consumes them, so its memory does not grow with the result and a `break` stops the scan.
+`Execute` is the workhorse; `Count`/`Any` short-circuit when you don't need the entities; the `foreach` form streams: it reads the matches in batches as the loop consumes them, so its memory does not grow with the result and a `break` stops the scan. With a `WhereField` it streams in storage order, a cluster at a time, so a predicate on a key unrelated to where entities are stored — a group, a shuffled id — reads each page once instead of jumping to one per row. `foreach` refuses `OrderByField`, `Skip` and `Take` (use `ExecuteOrdered`), spatial predicates (use `Execute`), and a `WhereField` with an OR, as `Execute` does (use `ToView`).
 
 To process a **whole archetype** in one transaction — an audit, an export, a migration — walk it in batches instead:
 

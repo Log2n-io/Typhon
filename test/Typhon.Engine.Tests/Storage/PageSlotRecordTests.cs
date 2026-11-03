@@ -88,7 +88,8 @@ class PageSlotRecordTests
     public void EverySlotHandleMember_ExposesTheRecordByRef()
     {
         // A member returned by value would be a copy: a lock taken on it, or a counter bumped through it, would change nothing in the slot.
-        string[] encoded = [nameof(PagedMMF.PageInfo.FilePageIndex), nameof(PagedMMF.PageInfo.ClockSweepCounter)];
+        // The read-only ones change only through their methods: the counter by its CAS loops, the probation tag (PS-25) by its set and its CAS clear.
+        string[] encoded = [nameof(PagedMMF.PageInfo.FilePageIndex), nameof(PagedMMF.PageInfo.ClockSweepCounter), nameof(PagedMMF.PageInfo.ProbationTag)];
         var byValue = typeof(PagedMMF.PageInfo).GetProperties(BindingFlags.Instance | BindingFlags.Public)
             .Where(p => !encoded.Contains(p.Name) && !p.PropertyType.IsByRef)
             .Select(p => p.Name)

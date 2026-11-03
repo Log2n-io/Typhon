@@ -64,6 +64,15 @@ public class PagedMMFOptions
     /// lower values checkpoint more often under heavy updates, higher values let segments grow further between checkpoints.
     /// </summary>
     public double FreeQuarantineCacheFraction { get; set; } = 0.125;
+
+    /// <summary>
+    /// Whether a page loaded for the first time waits on probation before it joins the clock (I8, PS-25): it stays there until a different transaction
+    /// or lease asks for it again, and the probation area's size follows the workload — it grows while the pages it lets go keep coming back, and
+    /// shrinks while the clock's do. A walk larger than the cache then recycles its own pages instead of the working set. Default <c>true</c>;
+    /// <c>false</c> is the plain clock, every load marking its page recently used.
+    /// </summary>
+    public bool ScanResistantEviction { get; set; } = true;
+
     /// <summary>
     /// When <c>true</c>, fills a page-cache slot with a recognizable debug pattern when it is assigned. Default <c>false</c>. No longer observable
     /// (PS-14, #1126): a page not read from disk is cleared right after, and a page read from disk is overwritten by the read.

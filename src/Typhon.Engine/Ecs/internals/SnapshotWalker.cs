@@ -48,6 +48,13 @@ internal sealed unsafe class SnapshotWalker
     /// <summary>Mutant seam (WALK-01): a spatial archetype walked in cluster order, across the fence's migrations.</summary>
     internal static bool ForceClusterPathForTest;
 
+    /// <summary>Mutant seam (WALK-02): a cluster-filtered walk reads only the index's candidates, not the clusters changed above its snapshot.</summary>
+    internal static bool IgnoreChangedClustersForTest;
+
+    /// <summary>Clusters read on this thread, all walks (tests).</summary>
+    [ThreadStatic]
+    internal static int ClustersReadForTest;
+
     /// <summary>Entities per batch on the gather path: one cluster's worth, so both paths hand out the same shape.</summary>
     private const int GatherBatch = 64;
 
@@ -79,8 +86,29 @@ internal sealed unsafe class SnapshotWalker
     /// <summary>The current batch's slots.</summary>
     internal ulong Rows;
 
+    /// <summary>
+    /// The current cluster's rows read from a reserved slot — claimed and not occupied: a destroy hidden until its cleanup, which the snapshot still sees
+    /// (VIS-09). Their enabled state is the record's, not the cluster's words. Always 0 on the gather path.
+    /// </summary>
+    internal ulong ReservedRows;
+
+    /// <summary>
+    /// Restricts the cluster path to the clusters with a non-zero word here, indexed by chunk id — a field query's candidates from its index (the bitmap
+    /// <c>CollectClusterLocationsFromBTree</c> fills) — and to any cluster a change above the snapshot touched, whose entries the tree may no longer hold at
+    /// the keys this snapshot sees (#1347, VIS-12). Null walks every cluster. Ignored on the gather path.
+    /// </summary>
+    internal ulong[] CandidateClusters;
+
+    /// <summary>
+    /// With no <see cref="CandidateClusters"/>, restricts the cluster path to the clusters this admits — a field query's zone maps — and to any cluster a
+    /// change above the snapshot touched, whose values the maps, re-tightened from the HEAD at the fence, may no longer cover (VIS-12). Read at each
+    /// cluster, as the SoA scan reads its zone maps. Null walks every cluster.
+    /// </summary>
+    internal Func<int, bool> ClusterFilter;
+
     // Versioned columns read at the snapshot, one native buffer per component slot, and which of them this step filled.
     private readonly nint[] _columns;
+    private readonly ulong[] _present;   // per Versioned slot, the rows its fill found a value for, this step
     private uint _filled;
 
     // ── The cluster path ─────────────────────────────────────────────────
@@ -121,6 +149,7 @@ internal sealed unsafe class SnapshotWalker
         _gather = _cs.SpatialSlot.HasSpatialIndex && !ForceClusterPathForTest;
         _visGated = meta.VersionedSlotMask != 0;
         _columns = new nint[meta.ComponentCount];
+        _present = new ulong[meta.ComponentCount];
         _ownDestroys = new OwnDestroyFilter(tx, meta);
         _refreshedAt = Stopwatch.GetTimestamp();
         _reclaimGeneration = Volatile.Read(ref _cs.ReclaimGeneration);
@@ -181,6 +210,7 @@ internal sealed unsafe class SnapshotWalker
         CheckLive();
         Step++;
         Rows = 0;
+        ReservedRows = 0;
         _filled = 0;
 
         // The fence is waited out before the scope is re-entered: a fence under back-pressure must not wait on this thread's pin while this thread waits on
@@ -225,7 +255,7 @@ internal sealed unsafe class SnapshotWalker
                 // CLUSTERWALK-02: count first, then the array, through the one reader.
                 var ids = _cs.ReadActiveClusterList(out var count);
                 var i = _index;
-                while (i < count && (IsVisited(ids[i]) || !TestBit(_startClusters, ids[i])))
+                while (i < count && (IsVisited(ids[i]) || !TestBit(_startClusters, ids[i]) || !IsCandidate(ids[i])))
                 {
                     i++;
                 }
@@ -243,6 +273,7 @@ internal sealed unsafe class SnapshotWalker
 
                 var chunkId = ids[i];
                 var rows = ReadRows(chunkId, out var clusterBase, out var transientBase);
+                ClustersReadForTest++;
                 AfterReadProbeForTest?.Invoke();
 
                 // A fence overlapped the read: the list may have been compacted under it and the chunk freed. Read this position again.
@@ -270,6 +301,37 @@ internal sealed unsafe class SnapshotWalker
         {
             PagedMMF.RefreshableWaitDepth--;
         }
+    }
+
+    /// <summary>
+    /// Whether <see cref="CandidateClusters"/> admits cluster <paramref name="chunkId"/>: a candidate of the index, or a cluster where a destroy is pending,
+    /// a death or an update landed above the snapshot — read from the cluster's words, no page.
+    /// </summary>
+    private bool IsCandidate(int chunkId)
+    {
+        var candidates = CandidateClusters;
+        if (candidates != null)
+        {
+            if ((uint)chunkId < (uint)candidates.Length && candidates[chunkId] != 0)
+            {
+                return true;
+            }
+        }
+        else if (ClusterFilter == null || ClusterFilter(chunkId))
+        {
+            return true;
+        }
+
+        if (IgnoreChangedClustersForTest)
+        {
+            return false;
+        }
+
+        // The zone map's loads before the watermarks' re-read, on arm64 too (load-load); nothing on x64. The tree's are ordered by the caller's barrier.
+        Volatile.ReadBarrier();
+        ref var words = ref ArchetypeClusterState.SlotWords(_cs.SlotWordTable, chunkId);
+        return ArchetypeClusterState.PendingDeathsOf(ref words) != 0 || ArchetypeClusterState.MaxDiedOf(ref words) > _tsn
+               || ArchetypeClusterState.MaxUpdatedOf(ref words) > _tsn;
     }
 
     /// <summary>
@@ -323,7 +385,9 @@ internal sealed unsafe class SnapshotWalker
         }
 
         // Committed destroys are decided by the snapshot above; only the transaction's own remain.
-        return _ownDestroys.Apply(chunkId, rows, clusterBase, _cs, 0);
+        rows = _ownDestroys.Apply(chunkId, rows, clusterBase, _cs, 0);
+        ReservedRows = rows & reserved;
+        return rows;
     }
 
     /// <summary>The next batch of up to 64 entities in entity-map order; false once the map is walked.</summary>
@@ -433,6 +497,15 @@ internal sealed unsafe class SnapshotWalker
     internal ReadOnlySpan<long> EntityIds() =>
         _gather ? new ReadOnlySpan<long>(_batchIds, GatherBatch) : new ReadOnlySpan<long>(_base + _layout.EntityIdsOffset, _layout.ClusterSize);
 
+    /// <summary>On the cluster path, the base of the current cluster's primary chunk: its occupancy and enabled words, its entity ids.</summary>
+    internal byte* ClusterBase => _base;
+
+    /// <summary>The walk's entity-map scan accessor, for a caller's record reads between steps on the walking thread.</summary>
+    internal ref ChunkAccessor<PersistentStore> MapAccessor => ref _mapAccessor;
+
+    /// <summary>The walk's one-record scratch, the archetype's record size, for a caller's record reads between steps.</summary>
+    internal byte* RecordBuffer => _record;
+
     internal ReadOnlySpan<T> Column<T>(int componentTypeId) where T : unmanaged
     {
         CheckLive();
@@ -444,27 +517,48 @@ internal sealed unsafe class SnapshotWalker
                                        + "The Comp<T> handle most likely names a different component.");
         }
 
+        return new ReadOnlySpan<T>(ColumnAddress(slot, out _), _gather ? GatherBatch : _layout.ClusterSize);
+    }
+
+    /// <summary>
+    /// Component slot <paramref name="slot"/>'s column for the current batch, one value per batch slot at the component's stride: the HEAD for
+    /// SingleVersion and Transient, the value at the snapshot for Versioned. Valid until the next step. <paramref name="present"/> is the rows whose
+    /// component exists at the snapshot: on a Versioned slot, an entity whose component was first supplied after the snapshot has none, and reads zero.
+    /// </summary>
+    internal byte* ColumnAddress(byte slot, out ulong present)
+    {
+        CheckLive();
+        var size = _layout.ComponentSize(slot);
+        present = Rows;
         if (_gather)
         {
-            return new ReadOnlySpan<T>(GatherColumn(slot, size), GatherBatch);
+            return GatherColumn(slot, size);
         }
 
         if ((_meta.VersionedSlotMask & (1 << slot)) == 0)
         {
             // SingleVersion or Transient: the HEAD, zero-copy, on the page the cluster accessor holds for this step.
             var columnBase = _transientBase != null && (_meta.TransientSlotMask & (1 << slot)) != 0 ? _transientBase : _base;
-            return new ReadOnlySpan<T>(columnBase + _layout.ComponentOffset(slot), _layout.ClusterSize);
+            return columnBase + _layout.ComponentOffset(slot);
         }
 
-        var column = ColumnBuffer(slot, size, _layout.ClusterSize);
+        // Rounded up to 16 slots: a SIMD predicate reads whole lanes past the cluster's last slot and masks them afterwards (SimdPredicateEvaluator).
+        var column = ColumnBuffer(slot, size, (_layout.ClusterSize + 15) & ~15);
         if ((_filled & (1u << slot)) == 0)
         {
             // A chain read needs the epoch: the scope comes back for the fill's length, at the epoch it left at.
             _tx.ResumeIfSuspended();
             try
             {
-                var present = SnapshotColumns.Fill(_tx, _meta, _es, _cs, _base, _chunkId, slot, size, Rows, column, _record, ref _mapAccessor);
-                Debug.Assert((present & Rows) == Rows, "an entity visible at the snapshot holds a value there");
+                var filled = SnapshotColumns.Fill(_tx, _meta, _es, _cs, _base, _chunkId, slot, size, Rows, column, _record, ref _mapAccessor) & Rows;
+
+                // A row with no value at the snapshot reads zero, not what the buffer held from another cluster.
+                for (var absent = Rows & ~filled; absent != 0; absent &= absent - 1)
+                {
+                    new Span<byte>(column + BitOperations.TrailingZeroCount(absent) * size, size).Clear();
+                }
+
+                _present[slot] = filled;
             }
             finally
             {
@@ -474,7 +568,8 @@ internal sealed unsafe class SnapshotWalker
             _filled |= 1u << slot;
         }
 
-        return new ReadOnlySpan<T>(column, _layout.ClusterSize);
+        present = _present[slot];
+        return column;
     }
 
     /// <summary>

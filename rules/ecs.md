@@ -768,7 +768,40 @@ structural mutation.
             Mutant_AWalkThatKeepsItsPositionAcrossAReclamation_IsRejected [RuleMutant]. AMigrationBetweenSteps_LosesAndRepeatsNothing [VerifiesRule]
             — the entities the walk saw and as many it had not moved to a corner cell and migrated by the fence between two steps: each yielded
             once, with its own values; Mutant_ASpatialWalkInClusterOrder_IsRejected [RuleMutant]. AFenceDuringAStep_RedoesIt — a fence run while a
-            step reads makes it read again
+            step reads makes it read again. StreamingFieldForeachTests.AReclamationDuringTheLoop_LosesAndRepeatsNothing [VerifiesRule] — the same
+            on a field query's stream, both paths
+
+### WALK-02: A field query's stream yields the matches at its snapshot; a walk filtered to the index's clusters still reads every cluster changed above it `[fatal][silent]`
+  invariant ∀ foreach over Query<TArch>().WhereField(p) in transaction T: the entities yielded are Execute()'s for the same query in T — p evaluated
+            at T's snapshot, the enabled gate (QENABLE-01), T's own pending spawns that match, T's own destroys hidden — each once (WALK-01). One
+            difference, and it is Execute()'s gap: on the selective plan a SingleVersion entity written since the last fence whose new value matches
+            while its tree key has not moved yet (QFENCE-01) is yielded when its cluster is read for another candidate, where Execute() misses it
+  invariant when the planner picks the index (Path A), the walk reads the clusters the tree's range named (SnapshotWalker.CandidateClusters, read
+            when the archetype's walk opens) and, whatever the tree said, every cluster with a pending destroy, a death or an update above the
+            snapshot: a change folds its cluster's watermark before it moves or removes the entity's entries (#1347, VIS-12), so an entity matching
+            at the snapshot that the tree no longer holds at a matching key is in such a cluster. On the full scan the walk prunes by the zone maps
+            at each cluster (SnapshotWalker.ClusterFilter), with the same admission for a cluster changed above the snapshot
+  invariant every predicate is evaluated on every row read, the indexed one included: between two batches a fence may reclaim a cluster and
+            reissue its chunk id, and the tree's verdict on a slot then names another entity. A row whose Versioned component has no value at the
+            snapshot (first supplied after it) never matches
+  invariant a spatial archetype's matches are collected whole, as Execute() collects them (its entities change cluster at fences, WALK-01)
+  invariant an archetype that carries the predicate's component with no index for it throws before the loop yields anything, as Execute() throws
+            before it returns
+  scope: EcsQuery.GetFieldEnumerator, EcsQuery.FillFieldBatch, EcsQuery.NextFieldArchetype, EcsQuery.EmitFieldMatches,
+         EcsQuery.CollectCandidateClusters, EcsQuery.ZoneMapFilter, SnapshotWalker.CandidateClusters, SnapshotWalker.ClusterFilter,
+         SnapshotWalker.ReservedRows
+  on_violation: a stream that skips a changed cluster drops, silently, the entities a concurrent update moved out of the range or a destroy removed
+                from the tree after the reader's snapshot; one that trusts the tree across a reissued chunk id yields entities that do not match
+  requires WALK-01, VIS-12, QENABLE-01
+  verified: StreamingFieldForeachTests.AFieldWalk_YieldsTheSnapshotsMatches_ChangedBeforeAndDuringTheLoop [VerifiesRule] — rows moved out of the
+            range, destroyed, moved in and spawned after the snapshot, on every path: before the loop (the selective plan's candidates are taken
+            after them, the update watermark admits the emptied cluster), and between two batches (after the candidates are taken);
+            Mutant_ACandidateWalkThatSkipsChangedClusters_IsRejected [RuleMutant]. AClusterEmptiedByDestroysAfterTheSnapshot_IsStillRead
+            [VerifiesRule] — the died watermark alone admits a cluster with no candidate left; Mutant_ACandidateWalkThatSkipsAClusterOfDestroys_
+            IsRejected [RuleMutant]. The pending-destroy term is not exercised by a test. AFieldWalk_YieldsWhatExecuteReturns,
+            OwnWrites_AndAWhereLambda_MatchExecute, TheEnabledGate_MatchesExecute (its non-exact half too), ASpatialArchetype_MatchesExecute,
+            AComponentSuppliedAfterTheSnapshot_DoesNotMatch — the stream against Execute(), the planner's own path included.
+            ANarrowRange_ReadsOnlyTheClustersThatCanHoldIt — both plans prune
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
@@ -839,6 +872,34 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
              churning archetype used to latch onto the per-entity probe forever. The cost is that "the bit is cleared at
              destroy" became load-bearing for every caller, and two callers never held it.
   requires CLUSTERVIS-01 (same summary, the publication half)
+
+### CLUSTERVIS-03: A clean open establishes the summary of every active cluster, never below a birth on disk `[fatal][silent]`
+  invariant after a clean open (the last close persisted the TSN counter, and no recovery is forced), before the first transaction,
+            every active cluster's born watermark is established — not `VisibilityUnknown` — at a value no birth on disk exceeds
+  never leaving a cleanly reopened cluster unknown until a spawn lands in it: the gate then denies it, and every snapshot
+        scan of the session (`ScanClusterSoa`, `tx.Walk`'s cluster path, a broad `WhereField`) probes the EntityMap per
+        entity. Measured: `tx.Walk` on Versioned read 3.4× the pages of an unversioned walk after a clean reopen (#1574).
+  never seeding after an unclean close: the TSN counter is persisted only by a clean close and a recovery's seal, so an
+        unclean close with no WAL to replay — not a crash open — reopens with a counter below the births its checkpoints
+        wrote, and a seed from it grants a cluster to snapshots that predate some of its entities: `Count()`'s popcount
+        and the scans count them while a point read hides them.
+  enforce the crash open's rebuild seeds 0 per cluster as it walks the occupancy (`RebuildClusterEntityMapEntries`), and
+          so does the migration's re-placement, since both rewrite every record with `BornTSN = 0`. A clean open walks
+          nothing and keeps the records it loaded, so it seeds every active cluster with the TSN counter the close
+          persisted (`EstablishVisibilityAfterCleanOpen`, gated on `_cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen`):
+          every birth on disk is at or below it, every snapshot of the new session above it. The died watermark stays 0,
+          because no occupancy bit on disk names a dead entity: a destroy clears its bit at publish (VIS-09's hide, or the
+          release), and a replayed destroy releases its slot (#1251). Any other open leaves the summary to its own sites.
+  scope: ArchetypeClusterState.EstablishVisibilityAfterCleanOpen, DatabaseEngine.RebuildEntityMapsFromPersistedData
+  on_violation: left unknown, no wrong result but a Versioned snapshot scan reads the EntityMap for every entity of every
+                cluster no spawn has touched since the open; seeded after an unclean close, `Count()` and the scans
+                disagree with a point read, silently.
+  verified: ClusterVisibilitySummaryIntegrityTests.ACleanReopen_EstablishesEveryActiveCluster_AndStaysExact
+            [VerifiesRule] — also shows the grant is exact: two entities destroyed before the close are neither counted
+            by the popcount nor emitted by the scan. ACleanOpenLeavingTheSummaryUnknown_IsRejected [RuleMutant].
+            AnUncleanReopen_LeavesTheSummaryToItsSites [VerifiesRule] — an unclean close without WAL segments: no cluster
+            is seeded.
+  requires CLUSTERVIS-01, CLUSTERVIS-02
 
 ---
 

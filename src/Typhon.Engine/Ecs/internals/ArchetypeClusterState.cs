@@ -2500,6 +2500,35 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// A clean open's half of the summary (CLUSTERVIS-03): every active cluster's born watermark established at <paramref name="bornBound"/>, the TSN
+    /// counter as the open restored it: every TSN and commit stamp ever issued is at or below it, and every one this session issues is above. Left
+    /// unknown, the gate denies every cluster of a reopened database until a spawn lands in it, and each snapshot scan pays a per-entity probe (#1574).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not 0, as the crash open's rebuild seeds: that rebuild rewrites every record with <c>BornTSN = 0</c>, while a clean open keeps the records it loaded,
+    /// whose births reach up to the counter. The counter bounds them all, as it bounds a migration's fold, so the gate grants each cluster to every
+    /// snapshot this session takes.
+    /// </para>
+    /// <para>
+    /// The died watermark stays at 0, because no occupancy bit on disk names a dead entity: a destroy clears its bit at publish
+    /// (<see cref="HideDestroyedSlot"/>, or the release), and a replayed destroy releases its slot (#1251).
+    /// </para>
+    /// <para>
+    /// Runs at open, before any transaction, so a plain store suffices. It stores rather than going through <see cref="NoteClusterBorn"/>, whose
+    /// structure signal would mark every cluster changed for this session's first tick.
+    /// </para>
+    /// </remarks>
+    internal void EstablishVisibilityAfterCleanOpen(long bornBound)
+    {
+        var ids = ReadActiveClusterList(out var count);   // CLUSTERWALK-02, though nothing else runs at open
+        for (var i = 0; i < count; i++)
+        {
+            Volatile.Write(ref MaxBornWord(ids[i]), bornBound);
+        }
+    }
+
+    /// <summary>
     /// The one way to read the (count, array) pair of the active-cluster list. Count FIRST, then the array, both acquire, then clamp.
     /// </summary>
     /// <remarks>

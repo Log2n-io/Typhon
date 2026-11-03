@@ -68,7 +68,8 @@ internal static class VariableSizedBufferRecovery
 
         for (var steps = 0; next != 0 && steps < segment.AllocatedChunkCount; steps++)
         {
-            if (next < 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next))
+            // Unpinned: a held root's chain may span more pages than the cache, and a tagged check per link would hold every one (LockWordRecovery).
+            if (next < 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocatedUnpinned(next))
             {
                 return false;
             }

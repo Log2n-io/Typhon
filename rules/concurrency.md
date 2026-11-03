@@ -330,8 +330,8 @@ lock ordering and deadlock prevention are still to come.
   invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
             range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
             (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
-            it the moment it leaves the window. It marks the page recently used, as the epoch path does, so the change is only in what holds the
-            page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
+            it the moment it leaves the window. It marks the page recently used, as the epoch path does — for a page on probation, a request
+            from another operation promotes it (PS-25) — so the change is only in what holds the page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
             positioning faults: a window's pins are slot references, and nothing else releases them
   invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator: a transaction's, and any of LongWalkClusters or more; a
             shorter walk on a lease is bounded by the lease; a ClusterRef is valid for its step, EP-03, and MoveNext records a page handed out before it

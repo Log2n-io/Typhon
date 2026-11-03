@@ -109,9 +109,11 @@ GATED_PASSES = (
                              "TYPHON__PROFILER__CONCURRENCY__ENABLED": "true",
                              "TYPHON__PROFILER__SUBSCRIPTIONS__ENABLED": "true",
                              "TYPHON__PROFILER__ECS__ENABLED": "true",
-                             "TYPHON__PROFILER__CORRELATION__ENABLED": "true"},
+                             "TYPHON__PROFILER__CORRELATION__ENABLED": "true",
+                             "TYPHON__PROFILER__PAGETRACE__ENABLED": "true"},
      "telemetry subtrees the suite leaves off: spatial trace records (kinds 65-67), push-replication operator "
-     "records (kinds 68-69) and per-session records (kinds 71-73), concurrency tracing, ECS tracing (view registry register/deregister, #865) and request correlation (#1517)"),
+     "records (kinds 68-69) and per-session records (kinds 71-73), concurrency tracing, ECS tracing (view registry register/deregister, #865), request correlation (#1517) "
+     "and the page trace (I7, PageTraceTests)"),
     # The mirror image of the pass above, and it exists for the same reason read backwards. The suite's own
     # typhon.telemetry.json turns strict mode ON for every fixture, deliberately, so the converted user-facing guards
     # actively catch misuse. The consequence is that NO test runs the configuration the Release NuGet ships, where
