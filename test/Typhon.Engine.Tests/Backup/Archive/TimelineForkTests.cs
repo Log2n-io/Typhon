@@ -65,10 +65,12 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
             dbe.RegisterComponentFromAccessor<CompA>();
             dbe.RegisterComponentFromAccessor<CompSmSingleVersion>();
             Assert.That(forks, Is.Zero, "an unchanged registration forks nothing");
+            var sealedBefore = Sealed(dbe).Count;
             dbe.RegisterComponentFromAccessor<EvoDiskWalV1>();   // new to this database: a component and an archetype
             dbe.InitializeArchetypes();
             dbe.MMF.DataFileWriteProbe = null;
 
+            Assert.That(Sealed(dbe), Has.Count.EqualTo(sealedBefore), "the open's fork switches nothing: its active segment is still empty");
             AssertNoWriteBeforeTheFork(writes);
             Assert.That(forks, Is.EqualTo(1), "the new component and its archetype fork once: nothing was appended between them");
             Assert.That(dbe.TimelineId, Is.Not.EqualTo(genesis));
@@ -154,6 +156,58 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
         }
     }
 
+    /// <summary>
+    /// Two runtime schema changes with commits between them and no point stamped: one fork. With the switch every fork serves, the second change sees
+    /// another origin; folding on the origin alone would fork per component and spend the ancestry the meta keeps (8) on one registration.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("BKP-11")]
+    public void TwoRuntimeSchemaChanges_WithCommitsButNoPointBetweenThem_ForkOnce()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Register(scope, _ => { });
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            var forks = 0;
+            var switches = Sealed(dbe).Count;
+            dbe.AfterTimelineForkProbe = _ => forks++;
+            Spawn(dbe, 3, 1);
+            dbe.RegisterComponentFromAccessor<CompB>();
+            Spawn(dbe, 3, 10);
+            dbe.RegisterComponentFromAccessor<EvoDiskWalV1>();
+            Assert.That(forks, Is.EqualTo(1), "nothing could be restored between the two changes: one timeline holds both");
+            Assert.That(Sealed(dbe), Has.Count.EqualTo(switches + 1), "the folded change switches no segment");
+        }
+    }
+
+    /// <summary>
+    /// A log break is never folded, either way: the archiver reads the fork's reason, and a crash open's break after the open's schema or build change
+    /// must start a timeline of its own reason (its parent's archive may hold the dropped segments), not ride on the change's.
+    /// </summary>
+    [Test]
+    [CancelAfter(20_000)]
+    [VerifiesRule("BKP-11")]
+    public void ALogBreak_IsNeverFoldedIntoAnotherFork_NorAnotherIntoIt()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = Open(scope);
+        var forks = new List<TimelineReason>();
+        dbe.AfterTimelineForkProbe = _ => forks.Add(dbe.TimelineFor(long.MaxValue).Reason);
+
+        dbe.ForkTimeline(TimelineReason.SchemaChange);
+        dbe.ForkTimeline(TimelineReason.LogBreak);
+        dbe.ForkTimeline(TimelineReason.SchemaChange);
+        dbe.ForkTimeline(TimelineReason.BuildChange);
+
+        Assert.That(forks, Is.EqualTo(new[] { TimelineReason.SchemaChange, TimelineReason.LogBreak, TimelineReason.SchemaChange }),
+            "the break forks on its own; the change after it forks again; the build change then folds into that one");
+    }
+
     [Test]
     [CancelAfter(20_000)]
     [VerifiesRule("BKP-11")]
@@ -193,7 +247,7 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
         var store = new FakeBackupStore();
         Capture(dbe, store, BackupKind.Full);
         Spawn(dbe, 3);
-        dbe.ForkTimeline(TimelineReason.SchemaChange, switchSegment: true);
+        dbe.ForkTimeline(TimelineReason.SchemaChange);
         Spawn(dbe, 3, 10);
         var point = Capture(dbe, store);
         Assert.That(point.Kind, Is.EqualTo(BackupKind.Incremental), "BKP-06 accepts a head on the timeline the database forked from");
@@ -297,6 +351,62 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
     }
 
     /// <summary>
+    /// #1484: a runtime schema change with commits on both sides. The fork switches the segment, so its origin is the last LSN written before it and the
+    /// parent's archive reaches it: a restore to that LSN, by LSN or by an instant before the change, restores from the parent's point. Without the switch
+    /// the origin was the active segment's first LSN − 1, and the commits after it were on neither timeline (the child has no base that early: NoBase).
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("BKP-11")]
+    public void ARuntimeSchemaChange_ForksAtTheLastLsnBeforeIt_SoEveryLsnBeforeTheForkRestoresFromTheParent()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Register(scope, _ => { });
+        }
+
+        Dictionary<EntityId, int> expected;
+        uint parentPoint;
+        Guid parent;
+        long beforeFork;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Register(scope, _ => { });
+            var archiver = NewArchiver(dbe);
+            Tick(archiver, 0);
+            parentPoint = CapturePoint(dbe, BackupKind.Full);
+            parent = dbe.TimelineId;
+            var ids = Spawn(dbe, 3, 1);
+            Update(dbe, ids.Take(2), 4_444);
+            beforeFork = dbe.WalManager.DurableLsn;
+            Tick(archiver, 1);
+            Tick(archiver, 2);   // a step pairs the previous step's durable LSN with its clock: a sample of the last LSN before the change, at 2 s
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                expected = ids.ToDictionary(id => id, id => t.Open(id).Read(CompAArch.A).A);
+            }
+
+            dbe.RegisterComponentFromAccessor<CompB>();
+            Assert.That(dbe.TimelineParentId, Is.EqualTo(parent), "premise: the runtime registration forked");
+            Assert.That(dbe.TimelineOriginLsn, Is.EqualTo(beforeFork), "the fork's origin is the last LSN written before it");
+
+            Update(dbe, ids, 9_999);
+            Switch(dbe);
+            Tick(archiver, 3);
+            Tick(archiver, 4);
+        }
+
+        var (byLsn, versioned, _, _) = RestoreAndRead(PointSelector.AtLsn(beforeFork), "before-fork-lsn");
+        Assert.That((byLsn.TimelineId, byLsn.Point.BackupId, byLsn.EffectiveLsn), Is.EqualTo((parent, parentPoint, beforeFork)),
+            "the LSN just before the fork restores from the parent's point");
+        Assert.That(versioned, Is.EqualTo(expected), "the run's state before the change");
+
+        var (byTime, atTime, _, _) = RestoreAndRead(PointSelector.AtTime(Utc(2.5)), "before-fork-time");
+        Assert.That((byTime.TimelineId, byTime.EffectiveLsn), Is.EqualTo((parent, beforeFork)), "an instant before the change resolves to the parent");
+        Assert.That(atTime, Is.EqualTo(expected));
+    }
+
+    /// <summary>
     /// The other runtime schema change: InitializeArchetypes called again, assigning routing ids to the archetypes a runtime component completed. Its fork
     /// flips before the ids are written; a capture then would freeze an image without them while records name them. It is refused: the engine is
     /// opening again until InitializeArchetypes returns (BackupRefusal, checked right before the freeze).
@@ -341,7 +451,7 @@ class TimelineForkTests : ArchiveTestBase<TimelineForkTests>
         var dbe = Open(scope);
         var before = dbe.Timelines;
         var held = before.Current;
-        dbe.ForkTimeline(TimelineReason.SchemaChange, switchSegment: true);
+        dbe.ForkTimeline(TimelineReason.SchemaChange);
         var after = dbe.Timelines;
         Assert.That(after, Is.Not.SameAs(before), "a fork publishes a new value");
         Assert.That(before.Current, Is.EqualTo(held), "the value a reader holds never changes");

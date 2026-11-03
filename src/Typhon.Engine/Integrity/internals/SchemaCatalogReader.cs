@@ -282,6 +282,29 @@ internal sealed class SchemaCatalogReader
     }
 
     /// <summary>
+    /// The schema-assembly manifest's rows (<see cref="AssemblyR1"/>, ADR-055), read from the file without opening it: what a restored bundle expects to be
+    /// opened with (#1485). Empty for a database written before the manifest existed. Never throws on damage.
+    /// </summary>
+    public List<AssemblyR1> ReadAssemblies(BootstrapView bootstrap)
+    {
+        var result = new List<AssemblyR1>();
+        if (bootstrap is not { IsUsable: true } || !bootstrap.TryGet(DatabaseEngine.BK_SysAssemblyR1, out var spi) || spi.IntCount < 1)
+        {
+            return result;
+        }
+
+        foreach (var row in ReadRows<AssemblyR1>(spi.GetInt(0), "assembly manifest"))
+        {
+            if (SafeName(row.SimpleName.AsString).Length > 0)
+            {
+                result.Add(row);   // the segment's reserved sentinel chunk decodes as all-zero
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Maps every component-collection segment by its chunk stride.
     /// </summary>
     /// <remarks>

@@ -62,11 +62,9 @@ public sealed partial class BackupsController
 
     private Action<BackupJobContext> CreateByRequest(string bundle, bool full) => ctx =>
     {
-        // DL-24 / C9: the engine echoes the request's id in its status once its job starts; the outcome is its point or failure count moving after that.
-        var before = _ops.ReadStatus(bundle).Status;
+        // DL-24 / C9, #1483: the engine publishes its answer to this request in its status (Requests), whatever other jobs run meanwhile.
         var id = _ops.RequestBackup(bundle, full);
         var clock = Stopwatch.StartNew();
-        var echoed = false;
         while (true)
         {
             ctx.Token.ThrowIfCancellationRequested();
@@ -77,28 +75,23 @@ public sealed partial class BackupsController
                 throw new BackupJobException("failed", "The engine holding the database stopped before it answered the request.");
             }
 
-            echoed |= s.LastRequestId == id;
-            if (echoed && s.State != BackupRunState.Running)
+            var answer = s.Request(id);
+            switch (answer?.State)
             {
-                if (s.PointsTotal > (before?.PointsTotal ?? 0))
-                {
-                    ctx.SetResult(new BackupJobResult(Create: new BackupCreateResultDto(BackupDtoMapper.Map(s.LastPoint), id)));
+                case BackupRequestState.Published:
+                    ctx.SetResult(new BackupJobResult(Create: new BackupCreateResultDto(BackupDtoMapper.Map(answer.Point), id)));
                     return;
-                }
-
-                if (s.FailuresTotal > (before?.FailuresTotal ?? 0))
-                {
-                    throw new BackupJobException("failed", s.LastFailure?.Message ?? "The engine's backup failed.");
-                }
-
-                // The request's job started (its id is echoed) and ended (the engine runs no job) with neither a point nor a counted failure: the engine
-                // deferred it — its store held by another process, another backup running, or the engine closing (BackupScheduler's Deferred class).
-                throw new BackupJobException("failed",
-                    $"The engine deferred the backup request {id}: no point was taken. Its store was held by another process, another backup was "
-                    + "running, or the engine was closing; try again.");
+                case BackupRequestState.Failed:
+                    throw new BackupJobException("failed", answer.Error ?? "The engine's backup failed.");
+                case BackupRequestState.Refused:
+                    throw new BackupJobException("failed", $"The engine refused the backup request {id}: {answer.Error}");
+                case BackupRequestState.Deferred:
+                    // Its store held by another process, or the engine closing (BackupScheduler's Deferred class).
+                    throw new BackupJobException("failed",
+                        $"The engine deferred the backup request {id}: no point was taken ({answer.Error}); try again.");
             }
 
-            ctx.Report(echoed ? "capture" : "requested", s.ProgressPages, s.ProgressOfPages, s.ProgressOfPages > 0 ? "pages" : null);
+            ctx.Report(answer != null ? "capture" : "requested", s.ProgressPages, s.ProgressOfPages, s.ProgressOfPages > 0 ? "pages" : null);
             if (clock.Elapsed > RequestTimeout)
             {
                 throw new BackupJobException("failed", $"The engine did not answer the backup request {id} within {RequestTimeout.TotalMinutes:F0} minutes.");
@@ -393,6 +386,15 @@ public sealed partial class BackupsController
         return new ObjectResult(problem) { StatusCode = StatusCodes.Status409Conflict };
     }
 
-    /// <summary>The schema assemblies the session on <paramref name="bundle"/> loaded (to replay a WAL tail of its archetypes); none without one.</summary>
-    private string[] SchemaOf(string bundle) => BackupRouting.SessionOn(_sessions, bundle)?.SchemaDllPaths ?? [];
+    /// <summary>
+    /// Where a drill's or a settle's child looks for the application's schema assemblies (#1485): the session's on <paramref name="bundle"/> (each file
+    /// stands for its directory), then the registered schema directories (Options → Schema), before its own default order. The child takes every
+    /// assembly at the exact identity the restored point names, so the build of a point older than the session's is found in a registered directory.
+    /// </summary>
+    private string[] SchemaOf(string bundle)
+    {
+        // A registered directory may not exist yet and a session's file may be gone since: neither is a reason to fail the drill or the settle.
+        string[] all = [.. BackupRouting.SessionOn(_sessions, bundle)?.SchemaDllPaths ?? [], .. _options.Get().Schema?.Directories ?? []];
+        return Array.FindAll(all, p => System.IO.File.Exists(p) || Directory.Exists(p));
+    }
 }

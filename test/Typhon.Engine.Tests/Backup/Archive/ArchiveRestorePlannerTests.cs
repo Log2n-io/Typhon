@@ -156,7 +156,7 @@ class ArchiveRestorePlannerTests : ArchiveTestBase<ArchiveRestorePlannerTests>
             Spawn(dbe, 10, 0);
             ArchiveAll(dbe, archiver);
             Spawn(dbe, 10, 100);
-            dbe.ForkTimeline(TimelineReason.SchemaChange, switchSegment: true);
+            dbe.ForkTimeline(TimelineReason.SchemaChange);
             child = dbe.TimelineId;
             origin = dbe.TimelineOriginLsn;
             Spawn(dbe, 10, 200);

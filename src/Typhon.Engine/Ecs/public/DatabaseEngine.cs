@@ -407,6 +407,12 @@ public class DatabaseEngineOptions
     /// the file untouched (<see cref="ArchetypeSetMigrationPolicy.Refuse"/>, for inspectors).
     /// </summary>
     public ArchetypeSetMigrationPolicy ArchetypeSetMigration { get; set; } = ArchetypeSetMigrationPolicy.Apply;
+
+    /// <summary>
+    /// How the open reconciles the registered schema with the database's (#1485): <see cref="SchemaMatch.Migrate"/> (default), or
+    /// <see cref="SchemaMatch.Exact"/>, which refuses any difference — what drills and restore settles open with.
+    /// </summary>
+    public SchemaMatch SchemaMatch { get; set; }
 }
 
 /// <summary>
@@ -1367,6 +1373,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>The body of <see cref="PersistRealmCatalogEntries"/>, from identities directly — a run-time registration persists before it publishes.</summary>
     private void PersistRealmCatalogRows(List<(ushort Id, SpatialGridConfig Grid)> rowsToWrite)
     {
+        // #1485: an exact open adds no realm the database does not hold.
+        if (ExactSchema && rowsToWrite.Count > 0)
+        {
+            throw new SchemaMismatchException("The realms", [$"{rowsToWrite.Count} realm(s) this open registers are not in the database"]);
+        }
+
         var cs = MMF.CreateChangeSet();
         if (_realmsTable == null)
         {
@@ -2533,6 +2545,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (MMF.IsDatabaseFileCreating)
         {
+            // #1485: an exact open reproduces a database as written — a drill's, a settle's — and so creates none (no catalog, no row).
+            if (ExactSchema)
+            {
+                throw new SchemaMismatchException("The database", ["it does not exist: an exact open reproduces a database as written, it creates none"]);
+            }
+
             CreateSystemSchemaR1();
         }
         else
@@ -3998,7 +4016,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     continue;
                 }
-                if (SystemCrud.Read(_assembliesTable, chunkId, out AssemblyR1 asm, EpochManager))
+                // A row #1485 retired (no catalog row names it) is blank: skipped, as every reader of the manifest skips it.
+                if (SystemCrud.Read(_assembliesTable, chunkId, out AssemblyR1 asm, EpochManager) && asm.SimpleName.AsString.Length > 0)
                 {
                     var id = (ushort)chunkId;
                     _persistedAssemblies[id] = (chunkId, asm);
@@ -4720,6 +4739,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (_persistedComponents != null && _persistedComponents.TryGetValue(persistedKey, out var persisted))
         {
+            // #1485: an exact open (a drill, a restore's settle) refuses any difference before the fork, the migration or a catalog write below. An
+            // ordinary one keeps the manifest naming the build that writes the database, first, so a migration staged below reads its row as now.
+            if (ExactSchema)
+            {
+                ThrowIfComponentNotExact(schemaName, persistedKey, persisted.Comp, persistedFields, resolver, definition);
+            }
+            else
+            {
+                var chunkId = persisted.ChunkId;
+                NoteDeclaringAssembly(definition.POCOType.Assembly, persisted.Comp.AssemblyId, id => RepointComponentAssembly(persistedKey, chunkId, id));
+            }
+
             // Schema validation: compare persisted vs runtime before loading data
             SchemaDiff diff = null;
             MigrationResult? migrationResult = null;
@@ -4742,7 +4773,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // forks before the first byte of the change is written, so no restore replays across it.
                 if (!diff.IsIdentical)
                 {
-                    ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                    ForkTimeline(TimelineReason.SchemaChange);
                 }
 
                 if (diff.HasBreakingChanges && schemaValidation != SchemaValidationMode.Skip)
@@ -4973,10 +5004,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             // Create path: use the provided ChangeSet, or create a new one for standalone registration. A component new to an existing database is a
-            // schema change (Q4): the timeline forks before its table is written.
+            // schema change (Q4): the timeline forks before its table is written. An exact open refuses it instead (#1485).
             if (_componentsTable != null && !MMF.IsDatabaseFileCreating)
             {
-                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                if (ExactSchema)
+                {
+                    throw new SchemaMismatchException($"Component '{schemaName}'", [definition.POCOType.Assembly == typeof(DatabaseEngine).Assembly
+                        ? "the database holds no such engine catalog: this open would create it (a realm or setting the database does not have)"
+                        : "the database holds no such component: this build adds it"]);
+                }
+
+                ForkTimeline(TimelineReason.SchemaChange);
             }
 
             var cs = changeSet ?? MMF.CreateChangeSet();
@@ -5107,6 +5145,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         _archetypeInitIncomplete = false;
+
+        // #1485: the manifest takes the build this open registered only now that nothing refused it (a refused open leaves it, and the timeline, as found).
+        ApplyPendingDeclaringAssemblies();
         _openCompleted = true;
         StartBackupScheduler();
 
@@ -5250,7 +5291,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // belongs at the first open by a build that understands the new shape.
             if (!MMF.Bootstrap.TryGet(BK_SpatialGridConfig, out var stored) || stored.IntCount != SpatialGridConfigIntCount)
             {
+                // #1485: an exact open writes no setting the database does not hold.
+                if (ExactSchema)
+                {
+                    throw new SchemaMismatchException("The spatial grid",
+                        ["the database holds no grid configuration this open could match: it would write one"]);
+                }
+
                 SaveSpatialGridConfig(gridConfig);
+            }
+            else if (ExactSchema && TryLoadSpatialGridConfig(out var storedGrid) && !storedGrid.Equals(gridConfig))
+            {
+                throw new SchemaMismatchException("The spatial grid", ["the configuration this open declares is not the one the database holds"]);
             }
         }
         else if (TryLoadSpatialGridConfig(out var persistedGridConfig))
@@ -5273,6 +5325,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
         _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
         LoadPersistedArchetypes();
+        AfterPersistedArchetypesLoadedForTest?.Invoke();
 
         // Allocate per-engine state array indexed by per-process catalog id, plus the per-DB routing tables. Fixed sizing (RoutingTableSize) so a concurrent
         // registration in a peer engine can never overflow these — removes Face A's IndexOutOfRange sizing coupling.
@@ -5313,6 +5366,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // policy (D4), an archetype that would migrate is skipped before the guard, so a component migrating under it still refuses (R10).
         var classifiedSlots = ClassifyArchetypesBeforeBuild(resolvedSlots, renameMap);
         GuardUnopenedHoldersOfMigratedComponents(resolvedSlots, renameMap);
+
+        // #1485: an exact open refuses an archetype that is not the catalog's — what the passes above would skip, migrate or rewrite, or one they keep
+        // that the catalog lacks — before anything of the archetypes is built, written, forked or replayed.
+        if (ExactSchema)
+        {
+            ThrowIfArchetypesNotExact(resolvedSlots);
+        }
 
         foreach (var meta in OwnArchetypes())
         {
@@ -5455,10 +5515,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // archetype at its open. The timeline forks before the id is used.
             if (!hasPersisted && !MMF.IsDatabaseFileCreating)
             {
-                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                ForkTimeline(TimelineReason.SchemaChange);
             }
 
             var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
+            // #1485: the manifest names the build that writes the database (an exact open verified it already).
+            if (hasPersisted)
+            {
+                var declared = meta;
+                NoteDeclaringAssembly(meta.ArchetypeType?.Assembly, persisted.Arch.AssemblyId, id =>
+                {
+                    if (TryGetPersistedArchetype(declared, out var row))
+                    {
+                        RepointArchetypeAssembly(declared, row, id);
+                    }
+                });
+            }
 
             // A migration invalidates the cluster (new component sizes => new geometry), so the fresh one is allocated below and the old bytes would be
             // orphaned. Capture the old segment at its OWN layout first, as the persisted catalog records it: for a SingleVersion slot those bytes are the
@@ -6215,7 +6287,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // they leave the log: a failure between the two finds the break again on the next open.
         if (_lastRecoveryResult.FirstDroppedSegmentId != 0)
         {
-            ForkTimeline(TimelineReason.LogBreak, false);
+            ForkTimeline(TimelineReason.LogBreak);
         }
 
         WalManager.SegmentManager.RetireSetAsideSegments();

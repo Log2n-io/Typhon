@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.Collections.Generic;
 
 namespace Typhon.Engine;
 
@@ -149,6 +150,35 @@ public enum BackupDrillStage
 [PublicAPI]
 public sealed record BackupFailure(DateTime Utc, string Kind, string Message);
 
+/// <summary>Where the engine is with a <c>backup.request</c> (#1483): its own job's outcome, never another job's.</summary>
+[PublicAPI]
+public enum BackupRequestState
+{
+    /// <summary>Its job runs.</summary>
+    Running = 0,
+
+    /// <summary>Its point is published and verified (<see cref="BackupRequestOutcome.Point"/>; a suspect point is still published).</summary>
+    Published,
+
+    /// <summary>Its job failed.</summary>
+    Failed,
+
+    /// <summary>The engine refused it for good before any job started (write tracking off, an engine fault, a store it cannot write).</summary>
+    Refused,
+
+    /// <summary>Its job ended without a point and without a failure: the store held by another writer, or the engine closing. Ask again.</summary>
+    Deferred,
+}
+
+/// <summary>The last <c>backup.request</c> the engine answered, and how (#1483).</summary>
+/// <param name="Id">The request's id.</param>
+/// <param name="State">Where its job is.</param>
+/// <param name="Point">Its point when <see cref="BackupRequestState.Published"/>, else <c>null</c>.</param>
+/// <param name="Error">Why it failed, was refused or deferred; <c>null</c> otherwise.</param>
+/// <param name="Utc">When it reached <paramref name="State"/>.</param>
+[PublicAPI]
+public sealed record BackupRequestOutcome(Guid Id, BackupRequestState State, BackupPointSummary Point, string Error, DateTime Utc);
+
 /// <summary>One drill, as the status and the listing report it.</summary>
 /// <param name="BackupId">The point drilled.</param>
 /// <param name="Utc">When the drill started.</param>
@@ -250,7 +280,10 @@ public sealed record BackupStatusReport(bool EngineLive, int Pid, string Machine
 /// <param name="LastPassedDrill">The newest drill that passed, or <c>null</c>.</param>
 /// <param name="RetentionBlocked">What the last retention could not meet.</param>
 /// <param name="Archive">The WAL archive.</param>
-/// <param name="LastRequestId">The last <c>backup.request</c> whose job started.</param>
+/// <param name="Requests">
+/// The last <c>backup.request</c>s answered (a job started, or a refusal), oldest first, at most <see cref="KeptRequests"/>: each its own job's outcome. Kept
+/// as a few, not one, so an answer survives the next request's start until its requester reads the status file (#1483).
+/// </param>
 /// <param name="UpdatedUtc">When this snapshot was published.</param>
 [PublicAPI]
 public sealed record BackupStatus(BackupHealth Health, BackupHealthReason Reason, string ReasonText,
@@ -260,10 +293,30 @@ public sealed record BackupStatus(BackupHealth Health, BackupHealthReason Reason
     long PointsTotal, long FailuresTotal, long CbwCopiesTotal, long CbwAbortsTotal, long SuspectPagesTotal,
     int ChainDepth, long StoreBytes, int RestorablePoints, int FreePageSuspects,
     BackupDrillSummary LastDrill, BackupDrillSummary LastPassedDrill, BackupRetentionBlock RetentionBlocked,
-    BackupArchiveStatus Archive, Guid LastRequestId, DateTime UpdatedUtc)
+    BackupArchiveStatus Archive, IReadOnlyList<BackupRequestOutcome> Requests, DateTime UpdatedUtc)
 {
+    /// <summary>How many answered requests <see cref="Requests"/> keeps.</summary>
+    public const int KeptRequests = 8;
+
+    /// <summary>The engine's answer to request <paramref name="id"/>, or <c>null</c> when it has none (not served yet, or long ago).</summary>
+    public BackupRequestOutcome Request(Guid id)
+    {
+        if (Requests != null)
+        {
+            for (var i = Requests.Count - 1; i >= 0; i--)
+            {
+                if (Requests[i].Id == id)
+                {
+                    return Requests[i];
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Backup not configured.</summary>
     public static BackupStatus Off { get; } = new(BackupHealth.Off, BackupHealthReason.NotConfigured, "backup is not configured", BackupRunState.Idle,
         BackupRunPhase.None, 0, 0, 0, null, DateTime.MinValue, DateTime.MinValue, 0, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, null,
-        BackupRetentionBlock.None, BackupArchiveStatus.Off, Guid.Empty, DateTime.MinValue);
+        BackupRetentionBlock.None, BackupArchiveStatus.Off, [], DateTime.MinValue);
 }

@@ -62,6 +62,12 @@ public enum TyphonErrorCode
     /// <summary>A user-supplied migration function failed for one or more entities (see <see cref="SchemaMigrationException"/>).</summary>
     SchemaMigration                 = 3002,
 
+    /// <summary>
+    /// An exact-schema open (<see cref="SchemaMatch.Exact"/>: a drill, a restore's settle) found the registered schema or its assemblies different
+    /// from the database's (see <see cref="SchemaMismatchException"/>).
+    /// </summary>
+    SchemaMismatch                  = 3003,
+
     // 4xxx — Index
 
     /// <summary>An insert or update would create a duplicate key in a unique index (see <see cref="UniqueConstraintViolationException"/>).</summary>

@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.AspNetCore.Mvc;
 using Typhon.Workbench.Backups;
 using Typhon.Workbench.Dtos.Backups;
+using Typhon.Workbench.Hosting;
 using Typhon.Workbench.Middleware;
 using Typhon.Workbench.Sessions;
 
@@ -29,15 +30,17 @@ public sealed partial class BackupsController : ControllerBase
     private readonly BackupJobRegistry _jobs;
     private readonly BackupPlanCache _plans;
     private readonly SessionManager _sessions;
+    private readonly OptionsStore _options;
     private readonly ILogger<BackupsController> _logger;
 
-    public BackupsController(IBackupOperations ops, BackupJobRegistry jobs, BackupPlanCache plans, SessionManager sessions,
+    public BackupsController(IBackupOperations ops, BackupJobRegistry jobs, BackupPlanCache plans, SessionManager sessions, OptionsStore options,
         ILogger<BackupsController> logger)
     {
         _ops = ops;
         _jobs = jobs;
         _plans = plans;
         _sessions = sessions;
+        _options = options;
         _logger = logger;
     }
 

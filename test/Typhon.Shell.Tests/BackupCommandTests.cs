@@ -644,6 +644,53 @@ public sealed class BackupCommandTests
         Assert.That(missing.Code, Is.EqualTo(BackupCli.ExitFailed), "no such bundle: the command failed");
     }
 
+    /// <summary>
+    /// #1483: <c>create --wait</c> reports its own request's outcome. Staged on the engine's manual tick: another job publishes a point while the request
+    /// waits (the counters move), then the engine refuses the request for good. <c>--wait</c> ends at once with the refusal, not with the other job's
+    /// point (as the counter deltas did) and not at its timeout.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void CreateWait_ReportsItsOwnRequestsRefusal_NotAPointAnotherJobPublishedMeanwhile()
+    {
+        var backup = new BackupOptions { StorePath = _store, Interval = TimeSpan.FromHours(1), Retention = null, ManualTickForTest = true };
+        using var provider = Provider(Path.GetDirectoryName(_bundle), yieldable: false, backup);
+        using var scope = provider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.InitializeArchetypes();
+        dbe.BackupScheduler.TickForTest();
+        WaitForStatusFile();
+
+        using var hold = new ManualResetEventSlim();
+        dbe.BackupCoordinator.BeforeTakingRequest = () => hold.Wait(TimeSpan.FromSeconds(20));
+        var other = dbe.Backup.CreateAsync();   // another job, parked before it starts
+
+        var create = new BackupCreateCommand.Settings
+        {
+            Bundle = _bundle, Wait = true, Format = "json", PollInterval = TimeSpan.FromMilliseconds(20), Timeout = "5m",
+        };
+        var waiting = Task.Run(() => Json(Run((c, j) => BackupCreateCommand.Run(create, c, j, CancellationToken.None))));
+        var request = Path.Combine(_bundle, "backup.request");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!File.Exists(request))
+        {
+            Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the command never wrote its request");
+            Task.Delay(10).Wait();
+        }
+
+        dbe.BackupCoordinator.BeforeTakingRequest = null;
+        hold.Set();
+        Assert.That(other.Wait(TimeSpan.FromSeconds(10)), Is.True, "premise: the other job published its point");
+
+        dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: the commit pipeline stopped"));
+        dbe.BackupScheduler.TickForTest();   // the request's submit is refused for good: answered, written to the status file
+        Assert.That(waiting.Wait(TimeSpan.FromSeconds(10)), Is.True, "--wait did not end at the refusal");
+        var result = waiting.Result;
+        var error = result.GetProperty("error");
+        Assert.That(error.GetProperty("exitCode").GetInt32(), Is.EqualTo(BackupCli.ExitFailed), result.ToString());
+        Assert.That(error.GetProperty("message").GetString(), Does.Contain("refused"), result.ToString());
+    }
+
     [Test]
     [CancelAfter(30_000)]
     public void StaleAfter_DegradesAStoresStatus()

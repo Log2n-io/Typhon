@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -339,8 +341,162 @@ class BackupSchedulerTests : SchedulerTestBase<BackupSchedulerTests>
         });
         Assert.That(api.Wait(Budget), Is.True);
         Assert.That(Tick(dbe)?.Kind, Is.EqualTo(BackupKind.Full), "served once the API job ended: the request's kind");
-        Assert.That(dbe.Backup.Status.LastRequestId, Is.EqualTo(id));
+        Assert.That(dbe.Backup.Status.Requests[^1].Id, Is.EqualTo(id));
         Assert.That(File.Exists(request), Is.False, "retired when its job started");
+    }
+
+    /// <summary>Writes a <c>backup.request</c> the way <see cref="BackupOperations.RequestBackup"/> does; returns its id.</summary>
+    private static Guid WriteRequest(DatabaseEngine dbe)
+    {
+        var id = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(dbe.MMF.BundleDirectory, "backup.request"),
+            $$"""{"formatVersion":1,"requestId":"{{id}}","kind":"auto","requestedBy":"test"}""");
+        return id;
+    }
+
+    /// <summary>
+    /// Ticks once, with a scheduled point submitted and parked before its job starts; <paramref name="whileParked"/> runs then, and the scheduled job is let
+    /// go and waited for. A request written in <paramref name="whileParked"/> waits behind another job, as one from <c>create --wait</c> does.
+    /// </summary>
+    private void ScheduledJobParked(DatabaseEngine dbe, Action whileParked)
+    {
+        using var hold = new ManualResetEventSlim();
+        dbe.BackupCoordinator.BeforeTakingRequest = () => hold.Wait(Budget);
+        var before = dbe.BackupScheduler.LastJob;
+        Clock.Advance(Interval);
+        dbe.BackupScheduler.TickForTest();
+        Assert.That(dbe.BackupScheduler.LastJob, Is.Not.SameAs(before), "premise: the schedule submitted a point");
+        whileParked();
+        AwaitJobEnd(dbe, () =>
+        {
+            dbe.BackupCoordinator.BeforeTakingRequest = null;
+            hold.Set();
+        });
+    }
+
+    /// <summary>
+    /// #1483: a scheduled point published while a request waits is not the request's outcome. The request's own job then fails, and that is what the status
+    /// answers it with (the point counter moved, the request has no point).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-16")]
+    public void AScheduledPointPublishedWhileARequestWaits_IsNotItsOutcome_ItsOwnFailureIs()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        Clock.Advance(TimeSpan.FromSeconds(31));
+        Assert.That(Tick(dbe), Is.Not.Null, "premise: the first point");
+
+        var id = Guid.Empty;
+        ScheduledJobParked(dbe, () => id = WriteRequest(dbe));
+        Assert.That(dbe.Backup.Status.PointsTotal, Is.EqualTo(2), "premise: the scheduled point was published while the request waited");
+        Assert.That(dbe.Backup.Status.Requests, Is.Empty, "another job's point answers no request");
+
+        StoreFs.Fault = (op, _) => op == nameof(IStoreFileSystem.TryLockExclusive) ? new IOException("the share is gone") : null;
+        Assert.That(Tick(dbe), Is.Null, "premise: the request's job fails");
+        var answer = dbe.Backup.Status.Requests.LastOrDefault();
+        Assert.That((answer?.Id, answer?.State, answer?.Point), Is.EqualTo((id, BackupRequestState.Failed, (BackupPointSummary)null)));
+        Assert.That(answer.Error, Does.Contain("the share is gone"));
+    }
+
+    /// <summary>#1483: a scheduled point failing while a request waits is not the request's outcome; the request's own point is.</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-16")]
+    public void AScheduledPointFailingWhileARequestWaits_IsNotItsOutcome_ItsOwnPointIs()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        Clock.Advance(TimeSpan.FromSeconds(31));
+        Assert.That(Tick(dbe), Is.Not.Null, "premise: the first point");
+
+        var id = Guid.Empty;
+        ScheduledJobParked(dbe, () =>
+        {
+            id = WriteRequest(dbe);
+            StoreFs.Fault = (op, _) => op == nameof(IStoreFileSystem.TryLockExclusive) ? new IOException("the share is gone") : null;
+        });
+        Assert.That(dbe.Backup.Status.FailuresTotal, Is.EqualTo(1), "premise: the scheduled point failed while the request waited");
+        Assert.That(dbe.Backup.Status.Requests, Is.Empty, "another job's failure answers no request");
+
+        StoreFs.Fault = null;
+        var point = Tick(dbe);
+        Assert.That(point, Is.Not.Null, "premise: the request's job publishes");
+        var answer = dbe.Backup.Status.Requests.LastOrDefault();
+        Assert.That((answer?.Id, answer?.State, answer?.Point?.BackupId, answer?.Error),
+            Is.EqualTo((id, BackupRequestState.Published, point.Value.BackupId, (string)null)));
+    }
+
+    /// <summary>
+    /// #1483: two requesters. The second request's job starts (and ends) before the first requester reads the status: the first answer is still there,
+    /// beside the second — one slot would have lost it, and its requester would have waited out its timeout for a point that was published.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("BKP-16")]
+    public void TwoRequests_EachKeepsItsOwnAnswer_WhenTheSecondRunsBeforeTheFirstIsRead()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        var first = WriteRequest(dbe);
+        var firstPoint = Tick(dbe);
+        var second = WriteRequest(dbe);
+        Spawn(dbe, 5, 100);
+        var secondPoint = Tick(dbe);
+        Assert.That(firstPoint, Is.Not.Null, "premise: the first request took a point");
+        Assert.That(secondPoint, Is.Not.Null, "premise: the second request took a point");
+
+        var status = dbe.Backup.Status;
+        Assert.That((status.Request(first)?.State, status.Request(first)?.Point?.BackupId),
+            Is.EqualTo((BackupRequestState.Published, firstPoint.Value.BackupId)));
+        Assert.That((status.Request(second)?.State, status.Request(second)?.Point?.BackupId),
+            Is.EqualTo((BackupRequestState.Published, secondPoint.Value.BackupId)));
+    }
+
+    /// <summary>
+    /// #1483: the answers a status keeps — a request's Running entry is replaced by its final answer, which then stands (a failure reported after its point
+    /// was published changes nothing); the newest 8 requests are kept, the oldest dropped.
+    /// </summary>
+    [Test]
+    [VerifiesRule("BKP-16")]
+    public void Answers_TheFirstFinalOneStands_AndTheNewestEightAreKept()
+    {
+        var state = new BackupOpsState();
+        var id = Guid.NewGuid();
+        state.Answer(new BackupRequestOutcome(id, BackupRequestState.Running, null, null, DateTime.UtcNow));
+        state.Answer(new BackupRequestOutcome(id, BackupRequestState.Published, null, null, DateTime.UtcNow));
+        state.Answer(new BackupRequestOutcome(id, BackupRequestState.Failed, null, "after the publish", DateTime.UtcNow));
+        Assert.That((state.Requests.Length, state.Requests[0].State), Is.EqualTo((1, BackupRequestState.Published)));
+
+        var ids = new List<Guid> { id };
+        for (var i = 0; i < 9; i++)
+        {
+            ids.Add(Guid.NewGuid());
+            state.Answer(new BackupRequestOutcome(ids[^1], BackupRequestState.Deferred, null, "held", DateTime.UtcNow));
+        }
+
+        Assert.That(state.Requests.Select(r => r.Id), Is.EqualTo(ids.Skip(ids.Count - BackupStatus.KeptRequests)), "the newest 8, oldest first");
+    }
+
+    /// <summary>#1483: a request the engine refuses for good is answered at once, Refused with the reason, not left to the requester's timeout.</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ARefusedRequest_IsAnsweredAtOnce_WithTheRefusal()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = OpenOnClock(scope);
+        Spawn(dbe, 20);
+        dbe.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: the commit pipeline stopped"));
+        var id = WriteRequest(dbe);
+        dbe.BackupScheduler.TickForTest();   // the submit is refused before any job starts
+        var answer = dbe.Backup.Status.Requests.LastOrDefault();
+        Assert.That((answer?.Id, answer?.State), Is.EqualTo((id, BackupRequestState.Refused)));
+        Assert.That(answer.Error, Is.Not.Empty);
+        Assert.That(File.Exists(Path.Combine(dbe.MMF.BundleDirectory, "backup.request")), Is.False, "a refusal for good retires the request");
     }
 
     /// <summary>

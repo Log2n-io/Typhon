@@ -591,7 +591,7 @@ internal sealed class WalArchiver : ResourceNode, IWalArchiver
             }
 
             through = archive.End;
-            if (current.ParentId != Guid.Empty && current.Reason is TimelineReason.SchemaChange or TimelineReason.BulkLoad)
+            if (current.ParentId != Guid.Empty && current.Reason is TimelineReason.SchemaChange or TimelineReason.BulkLoad or TimelineReason.BuildChange)
             {
                 var parent = OpenTimeline(_engine.TimelineFor(current.OriginLsn));
                 if (parent == null)

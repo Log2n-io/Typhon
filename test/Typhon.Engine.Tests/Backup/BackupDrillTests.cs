@@ -122,6 +122,32 @@ class BackupDrillTests : BackupTestBase<BackupDrillTests>
 
         Assert.That((report.Outcome, report.FailedStage), Is.EqualTo((BackupDrillOutcome.Passed, BackupDrillStage.None)), report.Error);
         Assert.That(report.Recovery.RecordsReplayed, Is.GreaterThan(0), "the tail's records were replayed");
+
+        // #1485: what "proven" was proven with, in the report and in the store's record.
+        var testAssembly = typeof(BackupDrillTests).Assembly;
+        Assert.That(report.Assemblies.Select(a => (a.Name, a.Mvid)),
+            Is.EqualTo(new[] { (testAssembly.GetName().Name, testAssembly.ManifestModule.ModuleVersionId) }));
+        var record = DrillRecords.ReadAll(StoreFileSystem.Instance, _store).Single();
+        Assert.That(record.Assemblies?.Select(a => a.Name), Is.EqualTo(new[] { testAssembly.GetName().Name }));
+    }
+
+    /// <summary>
+    /// #1485: the in-process opener is exact. An application whose build registers a component the point's database does not hold (a newer build) is
+    /// refused, not migrated: the drill is an Error naming the component — it proves nothing about the point — and the store's record keeps the reason.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ThePublicOpener_OfABuildThatAddsAComponent_IsAnError_NamingIt()
+    {
+        Backup(out _);
+
+        var report = BackupOperations.Drill(_store, PointSelector.Latest, Options(opener: b =>
+            BackupOperations.OpenAndCloseRestored(b, o => o.PageCacheSize(DrillCache).Register<CompA>().Register<CompSmSingleVersion>().Register<CompB>())));
+
+        Assert.That((report.Outcome, report.FailedStage), Is.EqualTo((BackupDrillOutcome.Error, BackupDrillStage.Open)));
+        Assert.That(report.Error, Does.Contain(nameof(CompB)).And.Contain("this build adds it").And.Contain("assemblies that wrote it"));
+        var record = DrillRecords.ReadAll(StoreFileSystem.Instance, _store).Single();
+        Assert.That((record.Outcome, record.Error), Is.EqualTo((BackupDrillOutcome.Error, report.Error)), "the record keeps the reason");
     }
 
     [Test]

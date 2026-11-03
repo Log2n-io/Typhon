@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 
@@ -140,6 +141,11 @@ internal static class BackupDrillRunner
             run.Error(BackupDrillStage.Open, $"{unregistered.Message} Drill it in a process that registers the application's archetypes "
                                              + "(BackupDrillOptions.OpenAndClose).");
         }
+        else if (Find(outcome.SettleFailure, TyphonErrorCode.SchemaMismatch) is { } mismatch)
+        {
+            // #1485: the build the drill opened with is not the one that wrote the point — the opener's limit again: it proves nothing about the point.
+            run.Error(BackupDrillStage.Open, $"{mismatch.Message} Drill it with the assemblies that wrote it.");
+        }
         else if (outcome.SettleFailure != null)
         {
             run.Fail(BackupDrillStage.Open, $"the restored database did not open: {Describe(outcome.SettleFailure)}");
@@ -151,6 +157,7 @@ internal static class BackupDrillRunner
         else
         {
             run.Recovery = settle.Recovery;
+            run.Assemblies = settle.Assemblies ?? [];
             if (!imageClean && !settle.CrashRecoveryRan)
             {
                 run.Fail(BackupDrillStage.Open, "the restored image was unclean and its open ran no crash recovery: the WAL tail was never replayed");
@@ -239,6 +246,7 @@ internal static class BackupDrillRunner
                     UowsVoided = run.Recovery.UowsVoided,
                     Verdict = run.Verdict,
                     Findings = run.Findings,
+                    Assemblies = [.. run.Assemblies],
                     Host = Environment.MachineName,
                     ToolVersion = $"Typhon {typeof(BackupDrillRunner).Assembly.GetName().Version}",
                 });
@@ -253,17 +261,25 @@ internal static class BackupDrillRunner
         BackupLog.DrillEnded(log, run.Point.BackupId, run.Outcome, run.FailedStage, run.Problem ?? "none",
             (long)(run.RestoreTime + run.OpenTime + run.CheckTime).TotalMilliseconds);
         return new BackupDrillReport(run.Point, run.Outcome, run.FailedStage, run.Problem, run.RestoreTime, run.OpenTime, run.CheckTime, run.Recovery,
-            run.Verdict, run.Findings, run.SuspectPages, recordFile, keptBundle);
+            run.Verdict, run.Findings, run.SuspectPages, recordFile, keptBundle, run.Assemblies);
     }
 
     /// <summary>
     /// Opens a restored bundle through <see cref="DatabaseEngine.Open"/> with <paramref name="configure"/>'s registrations (none: the persisted schema
     /// alone), which runs <c>InitializeArchetypes</c>: the WAL tail replays there, the derived structures rebuild and the image is sealed. Then a
-    /// dispose: a clean close. A tail holding records of an archetype <paramref name="configure"/> does not register fails the open (7012, #1309).
+    /// dispose: a clean close. A tail holding records of an archetype <paramref name="configure"/> does not register fails the open (7012, #1309). The open
+    /// is exact (<see cref="SchemaMatch.Exact"/>, #1485): registrations or assemblies that are not the ones that wrote the point are refused
+    /// (<see cref="SchemaMismatchException"/>), never migrated.
     /// </summary>
     public static BackupSettleResult OpenAndCloseRestored(string bundle, Action<TyphonOptions> configure, ILogger logger, ulong pageCacheBytes)
     {
         ArgumentException.ThrowIfNullOrEmpty(bundle);
+        if (!File.Exists(Path.Combine(bundle, "data")))
+        {
+            // An exact open reproduces a database as written; refused here, before the open would create an empty one in its place.
+            throw new SchemaMismatchException("The database", [$"'{bundle}' holds no database: an exact open reproduces one as written, it creates none"]);
+        }
+
         var clock = Stopwatch.StartNew();
         using var factory = logger == null ? null : new OneLoggerFactory(logger);
         BackupSettleResult settled;
@@ -275,6 +291,9 @@ internal static class BackupDrillRunner
                    }
 
                    configure?.Invoke(o);
+
+                   // #1485: a restored point opens only with the build that wrote it — never migrated, never added to, the timeline never forked.
+                   o.ConfigureEngine(e => e.SchemaMatch = SchemaMatch.Exact);
                }, factory))
         {
             settled = SettleResultOf(engine, clock.Elapsed);
@@ -290,7 +309,7 @@ internal static class BackupDrillRunner
 
         // The scan's figures are WalRecovery's; the replay is RecoveryDriver's, run later in InitializeArchetypes.
         recovery.RecordsReplayed = engine.LastWalV2RecoveryResult.RecordsApplied;
-        return new BackupSettleResult(engine.LastOpenRanCrashRecovery, recovery, duration);
+        return new BackupSettleResult(engine.LastOpenRanCrashRecovery, recovery, duration, engine.SchemaAssemblies());
     }
 
     private static TyphonException Find(Exception e, TyphonErrorCode code)
@@ -376,6 +395,8 @@ internal static class BackupDrillRunner
         public int Findings { get; set; }
 
         public int SuspectPages { get; set; }
+
+        public IReadOnlyList<BackupSchemaAssembly> Assemblies { get; set; } = [];
 
         public DrillState Fail(BackupDrillStage stage, string problem) => End(BackupDrillOutcome.Failed, stage, problem);
 

@@ -90,7 +90,9 @@ public sealed class EngineLifecycle : IDisposable
         string[] schemaDllPaths = null,
         string[] registeredSchemaDirs = null,
         CancellationToken ct = default,
-        ulong pageCacheBytes = SessionPageCacheBytes)
+        ulong pageCacheBytes = SessionPageCacheBytes,
+        bool exactSchema = false,
+        bool consoleLog = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         schemaDllPaths ??= [];
@@ -115,7 +117,7 @@ public sealed class EngineLifecycle : IDisposable
         {
             try
             {
-                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs, pageCacheBytes);
+                return TryOpenOnce(fullPath, directory, databaseName, schemaDllPaths, registeredSchemaDirs, pageCacheBytes, exactSchema, consoleLog);
             }
             catch (WorkbenchException wb) when (wb.ErrorCode == "file_locked" && attempt < maxAttempts)
             {
@@ -130,7 +132,9 @@ public sealed class EngineLifecycle : IDisposable
         string databaseName,
         string[] schemaDllPaths,
         string[] registeredSchemaDirs,
-        ulong pageCacheBytes)
+        ulong pageCacheBytes,
+        bool exactSchema,
+        bool consoleLog)
     {
         ServiceProvider sp = null;
         WorkbenchAssemblyLoadContext alc = null;
@@ -143,8 +147,13 @@ public sealed class EngineLifecycle : IDisposable
                 // Default engine logs stay quiet (Warning+). The DatabaseEngine category is admitted at Information so
                 // the open-time latency breakdown ("Open: InitializeArchetypes …", "Open: WAL recovery …") surfaces on
                 // a normal open. A console provider routes it to Kestrel stdout, which `/wb-dev` captures to
-                // .claude/state/wb-dev.kestrel.log — the place to read a slow-open diagnosis.
-                b.AddConsole();
+                // .claude/state/wb-dev.kestrel.log — the place to read a slow-open diagnosis. Not under `typhon backup drill`, whose stdout is its
+                // report (--format json).
+                if (consoleLog)
+                {
+                    b.AddConsole();
+                }
+
                 b.AddFilter((category, level) =>
                     level >= LogLevel.Warning ||
                     (level >= LogLevel.Information && category != null && category.StartsWith("Typhon.Engine", StringComparison.Ordinal)));
@@ -174,7 +183,13 @@ public sealed class EngineLifecycle : IDisposable
                         opts.DatabaseCacheSize = pageCacheBytes;
                     }
                 })
-                .AddDatabaseEngine(ConfigureEngineOptions);
+                .AddDatabaseEngine(engineOpts =>
+                {
+                    ConfigureEngineOptions(engineOpts);
+
+                    // #1485: a drill's or a settle's open reproduces the database as written, with the build that wrote it — or refuses.
+                    engineOpts.SchemaMatch = exactSchema ? SchemaMatch.Exact : SchemaMatch.Migrate;
+                });
 
             // Open-time instrumentation (#diagnose-open): bracket the three synchronous open phases so a slow open is
             // fully attributed in the log. Engine construction includes the system-schema load + WAL recovery (the
@@ -192,17 +207,56 @@ public sealed class EngineLifecycle : IDisposable
             // (engine.GetRequiredAssemblies) across the search order { registered = user-pointed dirs (Phase 2), bundled = the Workbench's own
             // deployment dir, legacy-adjacent = next to the database file }. The per-DB copy is no longer authoritative — a shipped/current assembly
             // in the Workbench bin (or a user-registered dir) wins over a stale copy.
+            //
+            // #1485: every match is exact — name, version and public-key token. A file of the right name at another version is another build: it is reported
+            // (version_mismatch) and never loaded in place of the one the database names, which an ordinary open would record over it.
+            var required = engine.GetRequiredAssemblies();
             var missingAssemblies = new List<string>();
+            var mismatchedAssemblies = new List<SchemaAssemblyResolver.VersionMismatch>();
             string schemaStatus;
             string[] resolvedSchemaPaths;
             if (schemaDllPaths.Length > 0)
             {
-                resolvedSchemaPaths = schemaDllPaths;
-                schemaStatus = "user-specified";
+                var kept = new List<string>(schemaDllPaths.Length);
+                foreach (var path in schemaDllPaths)
+                {
+                    if (SchemaAssemblyResolver.CheckNamedFile(required, path) is { } mismatch)
+                    {
+                        mismatchedAssemblies.Add(mismatch);
+                    }
+                    else
+                    {
+                        kept.Add(path);
+                    }
+                }
+
+                resolvedSchemaPaths = kept.ToArray();
+                schemaStatus = kept.Count > 0 ? "user-specified" : "schemaless";
             }
             else
             {
-                resolvedSchemaPaths = ResolveManifestAssemblies(engine, directory, registeredSchemaDirs, missingAssemblies, out schemaStatus);
+                var resolution = SchemaAssemblyResolver.Resolve(required, SchemaAssemblyResolver.SearchOrder(directory, registeredSchemaDirs));
+                resolvedSchemaPaths = resolution.Paths;
+                schemaStatus = resolution.Status;
+                missingAssemblies.AddRange(resolution.Missing);
+                mismatchedAssemblies.AddRange(resolution.Mismatches);
+            }
+
+            if (exactSchema && (missingAssemblies.Count > 0 || mismatchedAssemblies.Count > 0))
+            {
+                // Refused before anything is loaded or registered: the drill or the settle ends with the reason.
+                var differences = new List<string>();
+                foreach (var name in missingAssemblies)
+                {
+                    differences.Add($"assembly {name}: not found (the database names it)");
+                }
+
+                foreach (var m in mismatchedAssemblies)
+                {
+                    differences.Add($"assembly {m.Name}: the database was written by {m.Expected}, {m.Path} is {m.Found}");
+                }
+
+                throw new SchemaMismatchException("The schema assemblies", differences);
             }
 
             SchemaCompatibility.State state = SchemaCompatibility.State.Ready;
@@ -221,6 +275,7 @@ public sealed class EngineLifecycle : IDisposable
                 state = result.State;
                 diagnostics = result.Diagnostics;
                 loaded = result.RegisteredCount;
+
 
                 // Discover + register archetype types (feature #514 §5.2). Each loaded schema assembly carries a generated `[ModuleInitializer]` barrier
                 // (`__TyphonRegistry_<Assembly>`); RunModuleConstructor fires it, and the CLR runs a module initializer exactly once, before any type in the
@@ -253,13 +308,31 @@ public sealed class EngineLifecycle : IDisposable
                     schemaDllTicks = System.Diagnostics.Stopwatch.GetTimestamp() - schemaStart;
                     initializeArchetypes = true;
                 }
+
+                // An exact open goes on with nothing it could not register or finalize: a component left out, or an archetype whose module failed, would be
+                // skipped and the open would then "pass" without it. Only a component the database never stored is no difference (#1485); an archetype
+                // that differs is the engine's to refuse (SCHEMA-14).
+                if (exactSchema && Array.Exists(diagnostics, d => d.Kind != SchemaCompatibility.NotInDatabaseKind))
+                {
+                    var refused = new List<string>();
+                    foreach (var d in diagnostics)
+                    {
+                        if (d.Kind != SchemaCompatibility.NotInDatabaseKind)
+                        {
+                            refused.Add($"{d.ComponentName}: {d.Kind} ({d.Detail})");
+                        }
+                    }
+
+                    throw new SchemaMismatchException("The schema assemblies", refused);
+                }
             }
 
             // #1417 WB-5: a session without schema archetypes completes its open too, so its engine can take an online backup (the engine refuses one
             // until InitializeArchetypes has run) — as DerivedStructureRegeneration's schemaless call does. Except on the crash path: there it is where the
             // WAL replays, and a process that does not register the application's archetypes cannot replay their records (7012, #1309), so the call
             // would fail the open. Such a session keeps the pre-replay image and cannot back up (OpenedOnCrashPathWithoutSchema says why).
-            var crashPathWithoutSchema = !initializeArchetypes && engine.CrashRecoveryAtOpen;
+            // An exact open (a drill's, a settle's) always completes: its replay failing on such a record is the answer it owes (#1485).
+            var crashPathWithoutSchema = !exactSchema && !initializeArchetypes && engine.CrashRecoveryAtOpen;
             if (!crashPathWithoutSchema)
             {
                 // Archetypes whose stored component set differs from the loaded assembly's were skipped, not migrated (D4): each is reported, whether the
@@ -269,6 +342,20 @@ public sealed class EngineLifecycle : IDisposable
                 initArchetypesTicks = System.Diagnostics.Stopwatch.GetTimestamp() - initStart;
                 state = initialized.State;
                 diagnostics = initialized.Diagnostics;
+            }
+
+            // Another build of a manifest assembly: named in the banner, never loaded in its place (#1485).
+            foreach (var m in mismatchedAssemblies)
+            {
+                diagnostics = [.. diagnostics, new SchemaCompatibility.Diagnostic(
+                    m.Name,
+                    "version_mismatch",
+                    $"Assembly '{m.Name}' at {m.Path} is {m.Found}, but this database was last written by {m.Expected}. It was not loaded: point the "
+                    + "Workbench at that build (Options → Schema).")];
+                if (state == SchemaCompatibility.State.Ready)
+                {
+                    state = SchemaCompatibility.State.Incompatible;
+                }
             }
 
             // Any manifest assembly we couldn't locate → surface it as a diagnostic and a non-Ready state so the UI banner names the missing assembly
@@ -345,182 +432,6 @@ public sealed class EngineLifecycle : IDisposable
             UseFUA = false
         };
         engineOpts.ArchetypeSetMigration = ArchetypeSetMigrationPolicy.Refuse;
-    }
-
-    /// <summary>
-    /// Resolves the database's persisted assembly manifest to on-disk DLL paths across the ADR-055 search order:
-    /// <paramref name="registeredDirs"/> (user-pointed, Phase 2) → the Workbench's own deployment dir ("bundled") →
-    /// <paramref name="directory"/> (the database file's own directory, "legacy-adjacent"). Each assembly is located
-    /// by simple name: first the fast path <c>{SimpleName}.dll</c>, then a metadata name-match over every <c>*.dll</c>
-    /// in the dir (so a versioned or <c>*.schema.dll</c>-named file still resolves by its real assembly name). First
-    /// hit wins. Names that resolve to no file are appended to <paramref name="missing"/>. The core engine assembly is
-    /// never in the manifest, so it is never sought here.
-    /// </summary>
-    /// <summary>
-    /// The <c>bin/{Configuration}/{tfm}/</c> directories directly under <paramref name="databaseParent"/>, newest first.
-    /// Empty when there is no <c>bin</c> — which is every non-development database, so this costs one failed
-    /// <see cref="Directory.Exists"/> in production.
-    /// </summary>
-    /// <remarks>
-    /// Bounded on purpose: exactly <c>bin/*/*</c>, never a recursive walk. A deep sweep of an arbitrary directory a
-    /// database happens to live in is both slow and a way to load an assembly the user never meant to expose. Ordered
-    /// by write time so a fresh <c>Debug</c> build outranks a stale <c>Release</c> one from last month.
-    /// </remarks>
-    internal static IEnumerable<string> EnumerateAdjacentBuildOutputs(string databaseParent)
-    {
-        if (string.IsNullOrEmpty(databaseParent))
-        {
-            yield break;
-        }
-
-        var bin = Path.Combine(databaseParent, "bin");
-        if (!Directory.Exists(bin))
-        {
-            yield break;
-        }
-
-        List<string> tfmDirs = [];
-        try
-        {
-            foreach (var configDir in Directory.EnumerateDirectories(bin))
-            {
-                tfmDirs.AddRange(Directory.EnumerateDirectories(configDir));
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // An unreadable bin/ is not an error — it just means this probe contributes nothing.
-            yield break;
-        }
-
-        tfmDirs.Sort(static (a, b) => Directory.GetLastWriteTimeUtc(b).CompareTo(Directory.GetLastWriteTimeUtc(a)));
-        foreach (var d in tfmDirs)
-        {
-            yield return d;
-        }
-    }
-
-    private static string[] ResolveManifestAssemblies(DatabaseEngine engine, string directory, string[] registeredDirs, List<string> missing, out string status)
-    {
-        var required = engine.GetRequiredAssemblies();
-        if (required.Count == 0)
-        {
-            status = "schemaless";
-            return [];
-        }
-
-        // ADR-055 search order. A user-registered dir (e.g. a recompiled-from-git schema) wins over the Workbench's
-        // own shipped/current binaries, which in turn win over a *.schema.dll copied next to the database by an older
-        // build. The per-DB copy is kept only as a transition fallback ("legacy-adjacent"); a future build can drop it.
-        var searchDirs = new List<(string Dir, string Tier)>((registeredDirs?.Length ?? 0) + 2);
-        if (registeredDirs != null)
-        {
-            foreach (var d in registeredDirs)
-            {
-                if (!string.IsNullOrWhiteSpace(d))
-                {
-                    searchDirs.Add((d, "registered"));
-                }
-            }
-        }
-        searchDirs.Add((AppContext.BaseDirectory, "bundled"));
-        searchDirs.Add((directory, "legacy-adjacent"));
-
-        // A database created by a .NET app sits in that app's working directory, and the app's own assembly — the one
-        // the database names as its schema — is one level down in bin/{Config}/{tfm}/. That is the ENTIRE golden path:
-        // `typhon new` → `dotnet run` → open in the Workbench. Without this probe the first thing a new user sees is a
-        // red "schema" banner about binaries they built five minutes ago, sitting fifteen metres away in the same tree.
-        //
-        // Deliberately narrow rather than a recursive sweep: fixed depth, only under the bundle's own parent, and the
-        // match is still by exact assembly name below — so a hit means "the assembly this database asked for, by name".
-        // Ranked last, so a registered directory or a bundled build always wins over whatever happens to be in bin/.
-        foreach (var probe in EnumerateAdjacentBuildOutputs(directory))
-        {
-            searchDirs.Add((probe, "app-build-output"));
-        }
-
-        var nameIndex = new Dictionary<string, string>[searchDirs.Count]; // metadata-name index, built lazily per dir
-
-        var paths = new List<string>(required.Count);
-        var usedLegacy = false;
-        var usedRegistered = false;
-        foreach (var an in required)
-        {
-            var name = an.Name;
-            if (string.IsNullOrEmpty(name))
-            {
-                continue;
-            }
-
-            string resolved = null;
-            var resolvedTier = "bundled";
-            for (var i = 0; i < searchDirs.Count; i++)
-            {
-                // Fast path: {SimpleName}.dll. The SWG sample schema resolves here (file == "Typhon.Samples.Swg.dll").
-                var direct = Path.Combine(searchDirs[i].Dir, name + ".dll");
-                if (File.Exists(direct))
-                {
-                    resolved = direct;
-                    resolvedTier = searchDirs[i].Tier;
-                    break;
-                }
-                // Slow path: match by assembly metadata name (handles versioned / renamed files).
-                nameIndex[i] ??= BuildAssemblyNameIndex(searchDirs[i].Dir);
-                if (nameIndex[i].TryGetValue(name, out var m))
-                {
-                    resolved = m;
-                    resolvedTier = searchDirs[i].Tier;
-                    break;
-                }
-            }
-
-            if (resolved == null)
-            {
-                missing.Add(name);
-                continue;
-            }
-            paths.Add(resolved);
-            usedLegacy |= resolvedTier == "legacy-adjacent";
-            usedRegistered |= resolvedTier == "registered";
-        }
-
-        // Provenance precedence (most-notable wins): "legacy-adjacent" the moment we fell back to a per-DB copy for
-        // anything (so the UI can flag a still-copied database); else "registered" if a user-pointed dir supplied any
-        // assembly; else "bundled" when everything resolved from the Workbench's own binaries.
-        status = paths.Count == 0 ? "schemaless"
-            : usedLegacy ? "legacy-adjacent"
-            : usedRegistered ? "registered"
-            : "bundled";
-        return paths.ToArray();
-    }
-
-    /// <summary>
-    /// Indexes every managed <c>*.dll</c> in <paramref name="directory"/> by its assembly simple name (metadata only —
-    /// no assembly is loaded). Returns an empty map for a missing/blank directory (a registered dir may not exist yet).
-    /// </summary>
-    private static Dictionary<string, string> BuildAssemblyNameIndex(string directory)
-    {
-        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrEmpty(directory) || !Directory.Exists(directory))
-        {
-            return map;
-        }
-        foreach (var dll in Directory.EnumerateFiles(directory, "*.dll", SearchOption.TopDirectoryOnly))
-        {
-            try
-            {
-                var name = System.Reflection.AssemblyName.GetAssemblyName(dll).Name;
-                if (name != null)
-                {
-                    map.TryAdd(name, dll);
-                }
-            }
-            catch
-            {
-                // Not a managed assembly (native DLL, corrupt, etc.) — skip it.
-            }
-        }
-        return map;
     }
 
     private static IOException FindIOException(Exception ex)

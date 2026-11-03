@@ -1,0 +1,30 @@
+<Project>
+
+    <!--
+      #1485: builds the drill schema fixture once per variant and copies each into $(TargetDir)drill-schema/<variant>/, after the importing test
+      project's build. One assembly name, four builds: v1 (1.0.0.0), v2 (2.0.0.0), v2b (2.0.0.0 again, another field) and v2c (2.0.0.0 again,
+      another archetype set). Each variant has output and intermediate directories of its own (DrillVariant).
+    -->
+    <Target Name="BuildDrillSchemaVariants" AfterTargets="Build">
+        <ItemGroup>
+            <DrillSchemaVariant Include="v1" Props="DrillVersion=1.0.0.0;DrillLayout=A" />
+            <DrillSchemaVariant Include="v2" Props="DrillVersion=2.0.0.0;DrillLayout=A" />
+            <DrillSchemaVariant Include="v2b" Props="DrillVersion=2.0.0.0;DrillLayout=B" />
+            <DrillSchemaVariant Include="v2c" Props="DrillVersion=2.0.0.0;DrillLayout=C" />
+        </ItemGroup>
+        <MSBuild Projects="$(MSBuildThisFileDirectory)Typhon.Backup.DrillSchemaFixture.csproj"
+                 Targets="Build"
+                 BuildInParallel="false"
+                 Properties="Configuration=$(Configuration);DrillVariant=%(DrillSchemaVariant.Identity);%(DrillSchemaVariant.Props)">
+            <Output TaskParameter="TargetOutputs" ItemName="_DrillSchemaBuilt" />
+        </MSBuild>
+        <ItemGroup>
+            <_DrillSchemaCopy Include="@(_DrillSchemaBuilt)"
+                              Variant="$([System.IO.Path]::GetFileName($([System.IO.Path]::GetDirectoryName('%(FullPath)'))).Replace('variant-', ''))" />
+        </ItemGroup>
+        <Copy SourceFiles="@(_DrillSchemaCopy)" DestinationFolder="$(TargetDir)drill-schema\%(_DrillSchemaCopy.Variant)\" SkipUnchangedFiles="true">
+            <Output TaskParameter="DestinationFiles" ItemName="FileWrites" />
+        </Copy>
+    </Target>
+
+</Project>

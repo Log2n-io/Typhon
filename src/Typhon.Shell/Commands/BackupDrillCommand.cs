@@ -8,10 +8,12 @@ using System.Threading;
 namespace Typhon.Shell.Commands;
 
 /// <summary>
-/// <c>typhon backup drill --store S --scratch D [--point X] [--keep-scratch]</c> — proves a point restores into a database (04 §6): restore into
-/// <c>{scratch}/{guid}</c>, open (recovery runs) and close, check deep, record the result in the store, delete the scratch. Exit 0 passed, 1 passed with
-/// warnings (leaks, suspect pages), 2 the drill could not run (scratch I/O, cancelled, an archetype this process cannot replay), 3 the point does not
-/// restore, open or check sound, 4 refused (a scratch inside the store, a point of another format revision), 64 usage.
+/// <c>typhon backup drill --store S --scratch D [--point X] [--schema dll|dir]… [--keep-scratch]</c> — proves a point restores into a database (04 §6):
+/// restore into <c>{scratch}/{guid}</c>, open (recovery runs) and close, check deep, record the result in the store, delete the scratch. The open loads the
+/// application's schema assemblies — <c>--schema</c>'s, else the ones the point's manifest names, found the way the Workbench finds them — and is exact
+/// (#1485): an assembly missing or of another build, or a schema that is not the point's, ends the drill as an error naming it. Exit 0 passed, 1 passed
+/// with warnings (leaks, suspect pages), 2 the drill could not run (scratch I/O, cancelled, an archetype this process cannot replay, another build), 3 the
+/// point does not restore, open or check sound, 4 refused (a scratch inside the store, a point of another format revision), 64 usage.
 /// </summary>
 // ReSharper disable once ClassNeverInstantiated.Global
 internal sealed class BackupDrillCommand : Command<BackupDrillCommand.Settings>
@@ -27,6 +29,11 @@ internal sealed class BackupDrillCommand : Command<BackupDrillCommand.Settings>
         [CommandOption("-p|--point")]
         [Description("latest (default) or a backup id.")]
         public string Point { get; set; }
+
+        [CommandOption("--schema")]
+        [Description("A schema assembly of the application, or a directory to search for them first (repeatable). Default: the ones the point's "
+                     + "manifest names, searched next to this tool. They must be the build that wrote the point, exactly.")]
+        public string[] Schema { get; set; }
 
         [CommandOption("--keep-scratch")]
         [Description("Leave the restored bundle in the scratch directory.")]
@@ -55,6 +62,17 @@ internal sealed class BackupDrillCommand : Command<BackupDrillCommand.Settings>
             return output.Error(BackupCli.ExitUsage, pointError);
         }
 
+        string[] schema;
+        try
+        {
+            // A wrong path is the command line's mistake, found before a whole image is restored, never a failed point.
+            schema = Typhon.Workbench.Backups.BackupSettle.SearchDirectories(settings.Schema);
+        }
+        catch (ArgumentException e)
+        {
+            return output.Error(BackupCli.ExitUsage, e.Message);
+        }
+
         BackupDrillReport report;
         try
         {
@@ -63,6 +81,7 @@ internal sealed class BackupDrillCommand : Command<BackupDrillCommand.Settings>
                 ScratchDirectory = settings.Scratch,
                 KeepScratch = settings.KeepScratch,
                 Cancellation = ct,
+                OpenAndClose = b => Typhon.Workbench.Backups.BackupSettle.InThisProcess(b, schema, consoleLog: false).Result,
             });
         }
         catch (Exception ex) when (BackupCli.ExitCodeFor(ex) >= 0 || output.AsJson)
@@ -82,7 +101,7 @@ internal sealed class BackupDrillCommand : Command<BackupDrillCommand.Settings>
                     report.Point, report.Outcome, report.FailedStage, report.Error, restoreMs = (long)report.RestoreTime.TotalMilliseconds,
                     openMs = (long)report.OpenTime.TotalMilliseconds, checkMs = (long)report.CheckTime.TotalMilliseconds,
                     recovery = new { r.SegmentsScanned, r.RecordsScanned, r.RecordsReplayed, r.UowsPromoted, r.UowsVoided },
-                    report.Verdict, report.Findings, report.SuspectPages, report.RecordFile, report.ScratchBundle,
+                    report.Verdict, report.Findings, report.SuspectPages, report.RecordFile, report.ScratchBundle, report.Assemblies,
                 },
             });
             return exit;
@@ -107,6 +126,14 @@ internal sealed class BackupDrillCommand : Command<BackupDrillCommand.Settings>
             default:
                 console.MarkupLine($"[yellow]The drill could not run[/] for {at} ({report.FailedStage}): {Markup.Escape(report.Error ?? "")}");
                 break;
+        }
+
+        foreach (var a in report.Assemblies ?? [])
+        {
+            // #1485: what the point was proven (or refused) with.
+            var token = a.PublicKeyToken == null ? "unsigned" : "token " + a.PublicKeyToken;
+            console.MarkupLine($"[grey]Ran with {Markup.Escape(a.Name)} {Markup.Escape(a.Version)} ({token}, build {a.Mvid:D}) from "
+                               + $"{Markup.Escape(a.Path ?? "?")}.[/]");
         }
 
         if (report.ScratchBundle != null)

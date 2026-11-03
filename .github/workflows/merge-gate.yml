@@ -125,6 +125,8 @@ jobs:
               - 'tools/Typhon.Workbench/**'
               # The suite's own directory was missing: a change confined to a Workbench TEST file ran nothing.
               - 'test/Typhon.Workbench.Tests/**'
+              # #1485: the drill schema builds the Workbench and Shell tests load (DrillSchemaBuilds.targets).
+              - 'test/Typhon.Backup.DrillSchemaFixture/**'
             # Suites that ran in no job at all before #942 — small, and on the free runner.
             aux:
               - 'src/Typhon.Engine/**'
@@ -156,6 +158,7 @@ jobs:
               - 'test/Typhon.Protocol.Tests/**'
               - 'test/Typhon.Shell.Tests/**'
               - 'test/Typhon.Shell.Tests.SchemaFixture/**'
+              - 'test/Typhon.Backup.DrillSchemaFixture/**'
               - 'test/Typhon.Samples.Swg.Tests/**'
               - 'demo/AntHill/**'
               - 'demo/AsteroidField/**'

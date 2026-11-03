@@ -117,7 +117,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
             _state.Phase = BackupRunPhase.Capture;
             if (requestId != Guid.Empty)
             {
-                _state.LastRequestId = requestId;
+                _state.Answer(new BackupRequestOutcome(requestId, BackupRequestState.Running, null, null, UtcNow()));
             }
 
             _jobStartedMono = MonoNow();
@@ -143,13 +143,14 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         }
 
         var mono = MonoNow();
+        var now = UtcNow();
         lock (_lock)
         {
-            RecordFailure(refusal, failureClass, UtcNow());
+            RecordFailure(refusal, failureClass, now);
             if (requestId != Guid.Empty)
             {
                 // Answered: create --wait sees its request refused instead of waiting for a job that never starts.
-                _state.LastRequestId = requestId;
+                _state.Answer(new BackupRequestOutcome(requestId, BackupRequestState.Refused, null, refusal.Message, now));
             }
 
             _state.Version++;
@@ -176,16 +177,26 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
         Publish();
     }
 
-    void IBackupJobObserver.PointEnded(BackupJobSource source, IBackupPointStore store, in BackupPointInfo point, BackupCapture capture, Exception failure)
+    void IBackupJobObserver.PointEnded(BackupJobSource source, Guid requestId, IBackupPointStore store, in BackupPointInfo point, BackupCapture capture,
+        Exception failure)
     {
         var now = UtcNow();
         var mono = MonoNow();
         var failureClass = failure == null ? FailureClass.None : Classify(failure);
+        var summary = failure == null ? BackupOperations.Summarize((store as FileSystemBackupStore)?.LastPublished) : null;
         lock (_lock)
         {
+            if (requestId != Guid.Empty)
+            {
+                // #1483: the outcome of THIS request's job, which create --wait and the Workbench report; another job's never touches it.
+                _state.Answer(failure == null
+                    ? new BackupRequestOutcome(requestId, BackupRequestState.Published, summary, null, now)
+                    : new BackupRequestOutcome(requestId, failureClass == FailureClass.Deferred ? BackupRequestState.Deferred : BackupRequestState.Failed,
+                        null, failure.Message, now));
+            }
+
             if (failure == null)
             {
-                var summary = BackupOperations.Summarize((store as FileSystemBackupStore)?.LastPublished);
                 _state.AttemptEnded = true;
                 _state.ConsecutiveFailures = 0;
                 _state.CaptureRefused = false;
@@ -628,7 +639,7 @@ internal sealed partial class BackupScheduler : ResourceNode, IBackupJobObserver
                 _state.ConsecutiveFailures, _state.LastFailure, _state.PointsTotal, _state.FailuresTotal, _state.CbwCopiesTotal, _state.CbwAbortsTotal,
                 _state.SuspectPagesTotal, facts.ChainDepth, facts.StoreBytes, facts.RestorablePoints, facts.FreeSuspects, facts.LastDrill,
                 facts.LastPassedDrill,
-                _state.RetentionBlocked, ArchiveStatus(_state.Archive), _state.LastRequestId, now);
+                _state.RetentionBlocked, ArchiveStatus(_state.Archive), Array.AsReadOnly(_state.Requests), now);
             PublishProbe?.Invoke();
             Volatile.Write(ref _status, status);
         }

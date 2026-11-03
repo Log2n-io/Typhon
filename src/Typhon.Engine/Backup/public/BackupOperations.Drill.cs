@@ -37,6 +37,8 @@ public static partial class BackupOperations
     /// <summary>
     /// Opens a restored bundle with the application's registrations and closes it cleanly, so its WAL tail replays whatever archetypes it holds: the
     /// in-process drill's opener. <c>OpenAndClose = b =&gt; BackupOperations.OpenAndCloseRestored(b, o =&gt; o.Register&lt;Position&gt;())</c>.
+    /// The open is exact (<see cref="SchemaMatch.Exact"/>, #1485): a build other than the one that wrote the point — another assembly version, a component
+    /// or archetype that differs, one the database does not hold — is refused with <see cref="SchemaMismatchException"/>, never migrated.
     /// </summary>
     /// <param name="bundle">The restored <c>{name}.typhon</c> bundle.</param>
     /// <param name="configure">The registrations (and any option) the application opens its database with; passed to <see cref="DatabaseEngine.Open"/>.</param>

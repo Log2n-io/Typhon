@@ -3717,10 +3717,14 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             from the files, never the index; a recorded drop (BacklogReleased, CorruptMidSegment, TornAtCrash) or a missing
             range below L refuses with its range (Gap) and the LSNs still restorable; L past the archive ⇒ BeyondArchive
   invariant a restore never crosses a fork: L ≤ a child's OriginLsn is restored on the parent (ancestry walk), L > it on the
-            child from a child point only; a fork (SchemaChange at registration, BulkLoad before BulkEnd, Restore at adoption)
-            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline; a fork is
-            folded into the previous one only at the same origin with no point stamped since it (a point between two schema
-            changes at one origin would otherwise share a timeline with the second one's records)
+            child from a child point only; a fork (SchemaChange at registration, BuildChange when another build of a schema
+            assembly opens it — SCHEMA-14, BulkLoad before BulkEnd, LogBreak when a crash open dropped segments past a
+            break, Restore at adoption) flips BK_TimelineId/Parent/OriginLsn/Reason
+            in one fsynced meta write before any record of the new timeline; every fork but a restore's first seals the active
+            segment (a served switch), so the parent's segments end at its origin and every LSN the parent wrote restores from it
+            (a commit racing the switch, between its service and the flip, lands past the origin, on the child); a fork is folded
+            into the last fork of the session while no point was stamped since it (no base lies between them, so no restore tells
+            them apart), and a point between two changes makes the second fork, even at the same origin
   invariant the engine's timelines are one immutable value, published with a release store and read with one acquire load: a
             point's timeline and parent, the archiver's filing, are of one fork, never a torn id; the meta keeps the ancestors a
             local segment may still belong to (BK_TimelineAncestry), so a restart files a held segment under its own timeline
@@ -3740,7 +3744,8 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
     is needed
   verified: RestoreToLsnOracleTests (T12: every frame end as a target, from either base, oracle state; forced crash recovery),
             FrameCutTests, ArchiveRestorePlannerTests (every refusal; a disagreeing base never mixed; never across a fork),
-            TimelineForkTests (two schema changes with a point between them fork twice at one origin), RestoreMarkerV2Tests,
+            TimelineForkTests (two schema changes with a point between them fork twice at one origin; a runtime schema change
+            restores to the LSN before it from the parent, by LSN and by time), RestoreMarkerV2Tests,
             RestoreCleanBaseTests (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) —
             [VerifiesRule("BKP-11")]. Source mutants seen red: fork flipped after FlushToDisk, a fork folded by origin alone, the
             ancestry not persisted
@@ -3882,11 +3887,16 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a step
             parked below it) touches nothing of the engine after the stop returned, nor does a refresh still parked on the store
   invariant a backup.request selects auto or full and nothing else: the engine writes to BackupOptions.StorePath alone
+  invariant a backup.request is answered with its own job's outcome, by id, in the status (`BackupStatus.Requests`, the last 8): Running when its
+            job starts, then Published with its point, Failed, or Deferred when the job ends; Refused at once when its submit is refused for good; a
+            job of another source (schedule, archive, API) answers no request, and a second request does not erase the first one's answer (#1483)
   scope: BackupScheduler.Tick, BackupScheduler.RefreshStoreFacts, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob,
-         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore
+         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore, BackupOpsState.Answer
   on_violation: a full disk or a dead share crashes or stalls the database; a bundle-directory writer redirects backups anywhere
   verified: BackupSchedulerSafetyTests (a store throwing IOException, UnauthorizedAccessException or a non-I/O exception at every operation; a
             request naming a path; an unreadable request; requests refused; a store read parked on a dead share while the tick keeps stepping the archiver
             and publishing, AStoreReadParkedOnADeadShare_NeverStallsTheTick, source mutant seen red: the refresh run inline; a close with a step parked
-            in the tick) — [VerifiesRule("BKP-16")];
+            in the tick) — [VerifiesRule("BKP-16")]; BackupSchedulerTests (#1483: a scheduled point published, or failing, while a request
+            waits answers no request; two requests keep their own answers) [VerifiesRule("BKP-16")], Shell CreateWait_ReportsItsOwnRequestsRefusal_…,
+            Workbench BackUpNow_ByRequest_ReportsItsOwnRefusal_…;
             [RuleMutant("BKP-16")]: a tick that rethrows

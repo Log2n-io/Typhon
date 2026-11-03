@@ -289,6 +289,12 @@ internal enum TimelineReason
 
     /// <summary>A crash open dropped segments past a break in the log: their LSNs are reused, and the archive may hold the ones it dropped.</summary>
     LogBreak,
+
+    /// <summary>
+    /// Another build of a schema assembly opened the database (#1485): its records are another build's, which only that build reproduces, so no restore
+    /// replays across the change. Last, so the values persisted before it keep their meaning.
+    /// </summary>
+    BuildChange,
 }
 
 /// <summary>Where a restored timeline came from.</summary>

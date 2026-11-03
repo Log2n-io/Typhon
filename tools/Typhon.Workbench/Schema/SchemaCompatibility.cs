@@ -216,6 +216,11 @@ public static class SchemaCompatibility
                 engine.RegisterComponentByType(type, schemaValidation: SchemaValidationMode.Enforce);
                 registered++;
             }
+            catch (SchemaMismatchException)
+            {
+                // #1485: an exact open (a drill's, a settle's) is refused whole, never reported and gone on with.
+                throw;
+            }
             catch (SchemaDowngradeException sd)
             {
                 diagnostics.Add(new Diagnostic(name, "schema_downgrade", sd.Message));

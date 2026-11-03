@@ -172,7 +172,7 @@ public sealed class BackupsJobEndpointTests
 
         Done(job);
         Assert.That(job.Create.RequestId, Is.Not.Null);
-        Assert.That(BackupOperations.ReadStatus(_bundle).Status.LastRequestId, Is.EqualTo(job.Create.RequestId), "the engine echoed this request");
+        Assert.That(BackupOperations.ReadStatus(_bundle).Status.Requests[^1].Id, Is.EqualTo(job.Create.RequestId), "the engine echoed this request");
         Assert.That(job.Create.Point.Offline, Is.False);
     }
 
@@ -212,6 +212,43 @@ public sealed class BackupsJobEndpointTests
 
         Assert.That(job.State, Is.EqualTo(BackupJobStates.Error));
         Assert.That(job.Error.Message, Does.Contain("deferred"));
+    }
+
+    /// <summary>
+    /// #1483: the request route reports its own request's outcome. Another job publishes a point while the request waits (the counters the route used to
+    /// read move), then the engine refuses the request for good: the job ends in error with the refusal, not with the other job's point.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public async Task BackUpNow_ByRequest_ReportsItsOwnRefusal_NotAPointAnotherJobPublishedMeanwhile()
+    {
+        await MakeBundleWithTwoPoints(_bundle, _store);
+        using var engine = DatabaseEngine.Open(_bundle, o => o.Backup(new BackupOptions
+        {
+            StorePath = _store, Interval = TimeSpan.Zero, Retention = null, ManualTickForTest = true,
+        }));
+        var scheduler = engine.BackupScheduler;
+        scheduler.TickForTest();
+
+        var started = await Start("create", new BackupCreateRequestDto(_store, _bundle, true));
+        Assert.That(started.Route, Is.EqualTo("request"));
+        var served = false;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var job = await Terminal(started.JobId, dto =>
+        {
+            if (served || dto.Phase != "requested")
+            {
+                return;
+            }
+
+            served = true;
+            Assert.That(engine.Backup.CreateAsync().Wait(TimeSpan.FromSeconds(30)), Is.True, "premise: another job published a point");
+            engine.LatchCommitPipelineFailure(0, new InvalidOperationException("staged: the commit pipeline stopped"));
+            scheduler.TickForTest();   // the request's submit is refused for good: answered in the status file
+        }, cts.Token);
+
+        Assert.That(job.State, Is.EqualTo(BackupJobStates.Error));
+        Assert.That(job.Error.Message, Does.Contain("refused"));
     }
 
     [Test]
