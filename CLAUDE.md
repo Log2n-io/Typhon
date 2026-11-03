@@ -385,7 +385,7 @@ When closing a GitHub issue: 1) Check ALL checkboxes in the issue body, 2) Updat
 
 - **Priority**: P0-Critical · P1-High · P2-Medium · P3-Low
 - **Estimate**: XS · S · M · L · XL
-- **Area**: Concurrency · Execution · Storage · Durability · MVCC · Schema · Spatial · Query · Runtime · Observability · Resources · Errors · Utilities · Workbench · Indexes
+- **Area**: Concurrency · Execution · Storage · Durability · MVCC · Schema · Spatial · Query · Runtime · Observability · Resources · Errors · Utilities · Workbench · Indexes · Subscriptions · Realms
 - **Product**: Engine · Workbench · CLI · CI · User adoption
 - **Bug status**: New · Confirmed · Fixing · Fixed · Verified · Duplicate · Won't fix · Can't reproduce
 - **Start date** / **Target date**: dates
