@@ -109,3 +109,38 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 button.watch { font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 3px; border: 1px solid var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
 button.watch:hover { background: rgba(240, 184, 74, .15); }
 h2 button.watch { margin-left: 8px; vertical-align: middle; }
+
+/* The accounts page (accounts.md § 2): a list on the left, the selected character on the right. */
+.admin { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(480px, 2fr); gap: 14px; padding: 16px 20px; align-items: start; }
+@media (max-width: 1000px) { .admin { grid-template-columns: 1fr; } }
+.admin .scroll { max-height: calc(100vh - 220px); overflow-y: auto; }
+.filters { display: flex; gap: 8px; margin-bottom: 8px; }
+.filters input { flex: 1; }
+input, select { font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; }
+input[type=number] { width: 110px; }
+input.count { width: 70px; }
+.accounts tr { cursor: pointer; }
+.accounts tr:hover td { background: rgba(255, 255, 255, .05); }
+.accounts tr.selected td { background: rgba(240, 184, 74, .12); }
+.accounts tr.none td { color: var(--muted); }
+.dot.off { background: var(--line); }
+.tag { font-size: 10px; padding: 0 5px; margin-left: 6px; border-radius: 6px; background: rgba(255, 255, 255, .08); color: var(--muted); }
+.forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.form { background: rgba(255, 255, 255, .03); border-radius: 6px; padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.form h3, .form p { flex-basis: 100%; margin: 0; }
+.form label, .stats-edit label { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); }
+.stats-edit { display: flex; flex-wrap: wrap; gap: 6px 10px; margin: 4px 0; }
+.stats-form { flex-basis: 100%; }
+button.act { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 3px; border: 1px solid var(--accent); background: rgba(240, 184, 74, .15); color: var(--accent); cursor: pointer; }
+button.act:hover { background: rgba(240, 184, 74, .3); }
+button:disabled { opacity: .5; cursor: default; }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.danger:hover { background: rgba(255, 122, 107, .15); }
+.items td.actions { white-space: nowrap; text-align: right; }
+.items tr.editor td { background: rgba(240, 184, 74, .06); }
+.applied { color: var(--good); }
+.refused { color: var(--bad); }
+.unlock form { display: flex; gap: 8px; }
+
+.fold { cursor: pointer; user-select: none; margin-top: 14px; }
+.fold:hover { color: var(--accent); }

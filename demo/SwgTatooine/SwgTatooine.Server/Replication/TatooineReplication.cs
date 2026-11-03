@@ -477,6 +477,45 @@ public struct SalvageItem
     public ulong Item;
 }
 
+/// <summary>
+/// "Refine these" (crafting-catalog.md § 11.1): at a crafting station, N units of a material, core or add-on at one Mk into one of the next, for each of
+/// <see cref="Count"/>, and a fee (<see cref="Refining"/>).
+/// </summary>
+public struct RefineItems
+{
+    /// <summary>What to refine: a material, a core or an add-on.</summary>
+    public ushort Template;
+
+    /// <summary>The Mk refined from, I to IV.</summary>
+    public byte Mk;
+
+    /// <summary>How many of the next Mk to make, each from N of this one; at most <see cref="Refining.MaxOutputs"/>.</summary>
+    public byte Count;
+}
+
+/// <summary>
+/// "Pack this into that" (crafting-catalog.md § 11.2): an item or a crate from the grid into an identical pristine item or crate, up to a crate's capacity —
+/// a pack, an add to a crate, or a merge of two. Anywhere, from the inventory.
+/// </summary>
+public struct PackItem
+{
+    /// <summary>The item or crate packed, its raw id: absorbed.</summary>
+    public ulong Item;
+
+    /// <summary>The item or crate packed into, its raw id: it becomes, or stays, the crate.</summary>
+    public ulong Into;
+}
+
+/// <summary>"Take these out": <see cref="Count"/> items unpacked from a crate in the grid, each into a free slot; one left in it at least.</summary>
+public struct UnpackItem
+{
+    /// <summary>The crate's raw id.</summary>
+    public ulong Item;
+
+    /// <summary>How many to take out, 1 to the crate's count less one: unpacking all of it leaves its last item as itself.</summary>
+    public byte Count;
+}
+
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
 public struct AbandonMission
 {
@@ -819,8 +858,10 @@ public static partial class TatooineReplication
     /// </remarks>
     public static string PlayerProfileName { get; set; } = HumanProfile;
 
-    /// <summary>The profile a camera riding an entity is served: <see cref="PlayerProfile"/>'s shape plus the buildings. See its declaration for why it is
-    /// a separate profile and not a flag on the player's.</summary>
+    /// <summary>
+    /// The profile a camera riding an entity is served: <see cref="PlayerProfile"/>'s shape plus the buildings. See its declaration for why it is a
+    /// separate profile and not a flag on the player's.
+    /// </summary>
     public const string SpectateProfile = "spectate";
 
     /// <summary>The session kind a small-view client names in <c>HELLO</c>.</summary>
@@ -1119,6 +1160,32 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a <see cref="RepairItem"/> of an item not worn down: a repair to max × 0.75 would lower its condition.</summary>
     public const byte RepairNotWorn = AckReasons.FirstApplicationReason + 54;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="BoardShuttle"/> whose fare (<see cref="TatooineData.ShuttleFare"/>) was not paid — a wallet short of it, none open
+    /// yet, or a transaction that did not commit. The passenger is taken out of the queue.
+    /// </summary>
+    public const byte ShuttleFareUnpaid = AckReasons.FirstApplicationReason + 55;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="RefineItems"/> of something that does not refine (a crafted item, a kit), at Mk V or no Mk, or of no count or more
+    /// than one action makes.
+    /// </summary>
+    public const byte RefineBad = AckReasons.FirstApplicationReason + 56;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="PackItem"/> of two items not both in the grid, not identical or not pristine, or past a crate's capacity
+    /// (<see cref="Crates"/>).
+    /// </summary>
+    public const byte PackBad = AckReasons.FirstApplicationReason + 57;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: an <see cref="UnpackItem"/> of something not a crate in the grid, of no count or all of it, or with no free slots for it.
+    /// </summary>
+    public const byte UnpackBad = AckReasons.FirstApplicationReason + 58;
+
+    /// <summary><c>ACKS</c> reason: an equip, a salvage or a craft input of a crate: it is unpacked first.</summary>
+    public const byte ItemCrated = AckReasons.FirstApplicationReason + 59;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1777,9 +1844,11 @@ public static partial class TatooineReplication
     /// <summary>Declares everything a client can see.</summary>
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
     /// <param name="automatic">Whether the engine detects changes itself instead of relying on the simulation's <c>Replicate</c> calls (experimental).</param>
-    public static void Declare(SubscriptionsRegistry subs, bool automatic = false)
+    /// <param name="rateScale">Every command's rate and burst multiplied by this: 1 outside tests (<see cref="SimConfig.CommandRateScale"/>).</param>
+    public static void Declare(SubscriptionsRegistry subs, bool automatic = false, int rateScale = 1)
     {
         ArgumentNullException.ThrowIfNull(subs);
+        ArgumentOutOfRangeException.ThrowIfLessThan(rateScale, 1);
 
         subs.Sessions.Kinds(GodKind, PlayerKind);
 
@@ -1992,16 +2061,16 @@ public static partial class TatooineReplication
         // The field is NAMED, like every other command's. It was the one that was not, and so it travelled as "Realm" — the C# member — where the rest of
         // this file sends "x", "z", "paused". Nothing had ever sent it, so nothing had ever noticed; the first client to try got a catalog lookup failure
         // at the point of sending. Named here rather than worked around in the client, because the client was right.
-        subs.Command<ViewRealm>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt, "realm"));
+        subs.Command<ViewRealm>(c => c.Rate(1 * rateScale, 2 * rateScale).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt, "realm"));
 
         // A GM announcement: one realm's subtree, told once. Spectators only, and at the SAME rate as the other god controls rather than twice it — an
         // announcement is one event fanned out to every session in a planet and in all of its buildings, which is the widest thing one message can ask for in
         // this demo, so it has no business being the most permissive of them.
-        subs.Command<GmAnnounce>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(a => a.Realm, Codec.VarUInt, "realm"));
+        subs.Command<GmAnnounce>(c => c.Rate(1 * rateScale, 2 * rateScale).Roles(SessionRole.Spectator).Field(a => a.Realm, Codec.VarUInt, "realm"));
 
         // Spectators only, and at ViewRealm's rate for ViewRealm's reason: an accepted ask changes the session's profile, and a profile change is a whole
         // RESET. It is a camera's control, not a player's — a possessed player already follows itself.
-        subs.Command<Spectate>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(s => s.NetId, Codec.VarUInt, "netId"));
+        subs.Command<Spectate>(c => c.Rate(1 * rateScale, 2 * rateScale).Roles(SessionRole.Spectator).Field(s => s.NetId, Codec.VarUInt, "netId"));
 
         // The movement and targeting intents (SWG-01). Players and bots only: a spectator has no entity to move, so the engine refuses the message rather
         // than the system dropping it after the wire has already been paid for.
@@ -2014,14 +2083,14 @@ public static partial class TatooineReplication
         // an error — and a heading in 16 bits is a quarter of a degree, which is finer than a mouse can aim.
         subs.Command<MoveTo>(c => c
             .Coalesce(CommandCoalesce.LatestPerSession)
-            .Rate(30, 60)
+            .Rate(30 * rateScale, 60 * rateScale)
             .Roles(SessionRole.Player)
             .Precheck(static (in m) => float.IsFinite(m.X) && float.IsFinite(m.Z))
             .Field(m => m.X, Codec.F32, "x")
             .Field(m => m.Z, Codec.F32, "z"));
         subs.Command<MoveDir>(c => c
             .Coalesce(CommandCoalesce.LatestPerSession)
-            .Rate(30, 60)
+            .Rate(30 * rateScale, 60 * rateScale)
             .Roles(SessionRole.Player)
             // Finiteness only. The speed class is deliberately NOT checked here: the engine's own contract for a pre-check is that it "rejects the impossible,
             // not the disallowed", and which classes this server grants is policy that lives with the entitlement in TrySpeedFor. Checking it here made the
@@ -2033,7 +2102,7 @@ public static partial class TatooineReplication
             .Field(m => m.Boost, Codec.U8, "boost")
             .Field(m => m.Throttle, Codec.U8, "throttle"));
         subs.Command<SetTarget>(c => c
-            .Rate(4, 8)
+            .Rate(4 * rateScale, 8 * rateScale)
             .Roles(SessionRole.Player)
             .Field(t => t.NetId, Codec.VarUInt, "netId"));
 
@@ -2047,14 +2116,14 @@ public static partial class TatooineReplication
         // refusal counter unreachable by any client.
         subs.Command<SetViewRadius>(c => c
             .Coalesce(CommandCoalesce.LatestPerSession)
-            .Rate(4, 8)
+            .Rate(4 * rateScale, 8 * rateScale)
             .Roles(SessionRole.Player)
             .Field(v => v.RadiusM, Codec.VarUInt, "radiusM"));
 
         // The god camera for a player. Each accepted ask is a profile change, so a whole RESET of the planet: ViewRealm's rate, once a second with a burst
         // of two, which a person toggling a button does not reach.
         subs.Command<Overview>(c => c
-            .Rate(1, 2)
+            .Rate(1 * rateScale, 2 * rateScale)
             .Roles(SessionRole.Player)
             .Field(v => v.On, Codec.U8, "on"));
 
@@ -2062,39 +2131,39 @@ public static partial class TatooineReplication
         // LatestPerSession would be wrong here — two asks naming two cities are two different intentions and the last one is not obviously the wanted one;
         // the rate limit refuses the second instead, which the client can show.
         subs.Command<BoardShuttle>(c => c
-            .Rate(1, 2)
+            .Rate(1 * rateScale, 2 * rateScale)
             .Roles(SessionRole.Player)
             .Field(v => v.DestCity, Codec.VarInt, "destCity"));
 
         // A toggle a person presses; two a second is more than a hand does, and a refused one is counted.
         subs.Command<SetMount>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(v => v.On, Codec.U8, "on"));
 
         // A toggle a person presses, and only the last one counts: latest per session, at the mount's rate.
         subs.Command<SetStance>(c => c
             .Coalesce(CommandCoalesce.LatestPerSession)
-            .Rate(4, 8)
+            .Rate(4 * rateScale, 8 * rateScale)
             .Roles(SessionRole.Player)
             .Field(v => v.Stance, Codec.U8, "stance"));
 
         // Missions (missions.md § 3). Queued, because each is a decision and two takes are two different offers; two a second with a burst of four, which a
         // person clicking down a list does not reach. Handled by the mission desk, not here: the race between two takers is settled in its arrival order.
         subs.Command<TakeMission>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(t => t.Offer, Codec.VarUInt, "offer")
             .Field(t => t.Serial, Codec.VarUInt, "serial"));
         subs.Command<AbandonMission>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(a => a.Mission, Codec.U64, "mission"));
 
         // The economy (economy-foundation.md). Queued, because each is a payment and two tips are two payments; two a second with a burst of four, which a
         // person typing /tip does not reach. Applied by the Ledger system, in arrival order.
         subs.Command<GiveCredits>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(g => g.Target, Codec.VarUInt, "target")
             .Field(g => g.Amount, Codec.VarUInt, "amount"));
@@ -2102,7 +2171,7 @@ public static partial class TatooineReplication
         // The bazaar (bazaar.md § 3.1). Queued, because each is a payment or a movement of items; the tip's rate. Applied by the Market system, in arrival
         // order within a kind: the race between two buyers of one listing is settled by that order.
         subs.Command<MarketList>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Template, Codec.VarUInt, "template")
             .Field(m => m.Mk, Codec.U8, "mk")
@@ -2110,27 +2179,27 @@ public static partial class TatooineReplication
             .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice")
             .Field(m => m.Item, Codec.U64, "item"));
         subs.Command<MarketCancel>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Listing, Codec.U64, "listing"));
         subs.Command<MarketBuy>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Listing, Codec.U64, "listing")
             .Field(m => m.UnitPrice, Codec.VarUInt, "unitPrice"));
         subs.Command<MarketCollect>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Listing, Codec.U64, "listing"));
         subs.Command<SellToVendor>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Template, Codec.VarUInt, "template")
             .Field(m => m.Mk, Codec.U8, "mk")
             .Field(m => m.Quantity, Codec.U8, "quantity")
             .Field(m => m.Item, Codec.U64, "item"));
         subs.Command<BuyStandard>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Template, Codec.VarUInt, "template")
             .Field(m => m.Price, Codec.VarUInt, "price")
@@ -2138,17 +2207,17 @@ public static partial class TatooineReplication
 
         // The workshop (crafting-build.md C1). Queued, each a move of an item; a few a second, which a person changing a set of armour does not reach.
         subs.Command<Equip>(c => c
-            .Rate(4, 8)
+            .Rate(4 * rateScale, 8 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Item, Codec.U64, "item"));
         subs.Command<Unequip>(c => c
-            .Rate(4, 8)
+            .Rate(4 * rateScale, 8 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Slot, Codec.U8, "slot"));
 
         // Crafting (crafting-build.md C2): a start, its points one by one, an add-on, the finish — eight points a second at most, a person clicking.
         subs.Command<CraftStart>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Schematic, Codec.VarUInt, "schematic")
             .Field(m => m.Mk0, Codec.U8, "mk0")
@@ -2164,30 +2233,46 @@ public static partial class TatooineReplication
             .Field(m => m.Part4, Codec.U64, "part4")
             .Field(m => m.Part5, Codec.U64, "part5"));
         subs.Command<CraftExperiment>(c => c
-            .Rate(8, 8)
+            .Rate(8 * rateScale, 8 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Line, Codec.U8, "line"));
         subs.Command<CraftEnhance>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Mk, Codec.U8, "mk"));
         subs.Command<CraftFinish>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Schematic, Codec.VarUInt, "schematic"));
         subs.Command<RepairItem>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Item, Codec.U64, "item"));
         subs.Command<SalvageItem>(c => c
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Player)
             .Field(m => m.Item, Codec.U64, "item"));
+        subs.Command<RefineItems>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Template, Codec.VarUInt, "template")
+            .Field(m => m.Mk, Codec.U8, "mk")
+            .Field(m => m.Count, Codec.U8, "count"));
+        subs.Command<PackItem>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item")
+            .Field(m => m.Into, Codec.U64, "into"));
+        subs.Command<UnpackItem>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item")
+            .Field(m => m.Count, Codec.U8, "count"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
         subs.Command<Say>(c => c
-            .Rate(1, 2)
+            .Rate(1 * rateScale, 2 * rateScale)
             .Roles(SessionRole.Player)
             .Field(s => s.Text, Codec.Str(Utf8Text256.Capacity), "text"));
 
@@ -2220,7 +2305,7 @@ public static partial class TatooineReplication
         // not narrow enough for anything but a demo.
         subs.Command<SetPaused>(c => c
             .Coalesce(CommandCoalesce.LatestPerSession)
-            .Rate(2, 4)
+            .Rate(2 * rateScale, 4 * rateScale)
             .Roles(SessionRole.Spectator)
             .Field(p => p.Paused, Codec.U8, "paused"));
 

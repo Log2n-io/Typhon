@@ -234,7 +234,16 @@ public static class ItemEndpoints
             var id = EntityId.FromRawValue(stacks[i].Id);
             if (id.ArchetypeId == ix.InstanceRouting && tx.TryOpen(id, out var e))
             {
-                Stats(json, in t, e.Read(ItemInstanceArch.Stats));
+                var stats = e.Read(ItemInstanceArch.Stats);
+                Stats(json, in t, in stats);
+
+                // What it packs with (crafting-catalog.md § 11.2): equal for identical pristine items; absent for one that does not pack.
+                if (s.Slot <= ItemLedger.Slots && Crates.Packable(s.Template, in stats))
+                {
+                    json.Append(",\"packKey\":\"");
+                    Crates.AppendKey(json, s.Template, s.Mk, in stats);
+                    json.Append('"');
+                }
             }
 
             json.Append('}');
@@ -378,6 +387,7 @@ public static class ItemEndpoints
         var minted = new Dictionary<int, long>();
         var destroyed = new Dictionary<int, long>();
         var missionTick = new Dictionary<long, long>();
+        var refines = new Dictionary<long, RefineTally>();
         var routing = dbe.ArchetypeIdOf<ListingArch>();
         var instanceRouting = ix.InstanceRouting;
         bool IsListing(long key) => key != 0 && EntityId.FromRawValue((ulong)key).ArchetypeId == routing;
@@ -406,6 +416,11 @@ public static class ItemEndpoints
                 if (!RowRules(result, missionTick, isListing, in r))
                 {
                     continue;
+                }
+
+                if (r.Kind == ItemMoveKind.Refine)
+                {
+                    TallyRefine(result, refines, in r);
                 }
 
                 var k = Key(r.Template, r.Mk);
@@ -488,9 +503,15 @@ public static class ItemEndpoints
                 result.Violation($"stack {id}: its owner {s.Owner} has no wallet");
             }
 
-            if (s.Count is < 1 or > ItemLedger.StackMax || (instance && s.Count != 1))
+            // An item with stats is one, or a crate of identical pristine ones in the grid (crafting-catalog.md § 11.2).
+            var most = !instance ? ItemLedger.StackMax : equipped ? 1 : Crates.Capacity;
+            if (s.Count < 1 || s.Count > most)
             {
-                result.Violation($"stack {id}: holds {s.Count}, outside 1..{(instance ? 1 : ItemLedger.StackMax)}");
+                result.Violation($"stack {id}: holds {s.Count}, outside 1..{most}");
+            }
+            else if (instance && s.Count > 1 && (!tx.TryOpen(found.Id, out var crate) || !Crates.Packable(s.Template, crate.Read(ItemInstanceArch.Stats))))
+            {
+                result.Violation($"stack {id}: a crate of {s.Count} whose item is not pristine");
             }
 
             if (instance != ItemCatalog.HasStats(s.Template))
@@ -616,6 +637,17 @@ public static class ItemEndpoints
             }
         }
 
+        // Each refine took N of one Mk for every one of the next it made, of the same template (crafting-catalog.md § 11.1).
+        foreach (var (refine, n) in refines)
+        {
+            var ratio = Refining.RatioOf(n.Template, n.Mk);
+            if (n.Made == 0 || ratio == 0 || n.Taken != ratio * n.Made)
+            {
+                result.Violation(
+                    $"refine {refine}: took {n.Taken} of template {n.Template} Mk {n.Mk} and made {n.Made} of Mk {n.Mk + 1} - the ratio is {ratio}");
+            }
+        }
+
         // A mission's cache comes with its reward: the credit ledger, in this same snapshot, pays that mission on the cache's tick (§ 3.4).
         if (missionTick.Count > 0)
         {
@@ -684,7 +716,8 @@ public static class ItemEndpoints
             ok = false;
         }
 
-        if (r.From == r.To)
+        // A pack or an unpack moves units between two stacks of one owner (crafting-catalog.md § 11.2); every other row moves them between two.
+        if (r.From == r.To && r.Kind is not (ItemMoveKind.Pack or ItemMoveKind.Unpack))
         {
             result.Violation($"seq {r.Seq}: both sides are {r.From}");
             ok = false;
@@ -715,6 +748,7 @@ public static class ItemEndpoints
             case ItemMoveKind.Standard:
             case ItemMoveKind.Grant:
             case ItemMoveKind.Make:
+            case ItemMoveKind.AdminGrant:
                 if (r.From != ItemLedger.World || r.To == ItemLedger.World)
                 {
                     result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from World to a character, not {r.From} to {r.To}");
@@ -740,6 +774,7 @@ public static class ItemEndpoints
             case ItemMoveKind.Craft:
             case ItemMoveKind.Decay:
             case ItemMoveKind.Repair:
+            case ItemMoveKind.AdminTake:
                 if (r.From == ItemLedger.World || isListing(r.From) || r.To != ItemLedger.World)
                 {
                     result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a character to World, not {r.From} to {r.To}");
@@ -758,6 +793,29 @@ public static class ItemEndpoints
                 }
 
                 break;
+            case ItemMoveKind.Pack:
+            case ItemMoveKind.Unpack:
+                // Between two stacks of one character, naming the crate: the one packed into, or the one unpacked from.
+                if (r.From != r.To || r.From == ItemLedger.World || isListing(r.From) || !ItemCatalog.HasStats(r.Template) || r.FromStack == r.ToStack
+                    || r.Ref != (r.Kind == ItemMoveKind.Pack ? r.ToStack : r.FromStack) || (r.Kind == ItemMoveKind.Unpack && r.Count != 1))
+                {
+                    result.Violation(
+                        $"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must move items with stats between two stacks of one character, naming its crate, "
+                        + $"not {r.From} to {r.To} for {r.Ref}");
+                }
+
+                break;
+            case ItemMoveKind.Refine:
+                // N units of Mk k destroyed, a character to World; one of Mk k+1 for each N minted, World to that character — every row naming the first.
+                if (isListing(r.From) || isListing(r.To) || (r.From == ItemLedger.World) == (r.To == ItemLedger.World) || r.Ref == 0 || r.Ref > r.Seq
+                    || t.Category is not (ItemCategory.Material or ItemCategory.Core or ItemCategory.Addon))
+                {
+                    result.Violation(
+                        $"seq {r.Seq}: a refine row must move a material, core or add-on between a character and World, naming the refine's first row, "
+                        + $"not {r.From} to {r.To} for {r.Ref}");
+                }
+
+                break;
             case ItemMoveKind.Salvage:
                 // The item destroyed, a character to World; the quality materials it gives back, World to that character — every row naming the item.
                 if (isListing(r.From) || isListing(r.To) || (r.From == ItemLedger.World) == (r.To == ItemLedger.World) || r.Ref == 0
@@ -772,8 +830,10 @@ public static class ItemEndpoints
                 break;
         }
 
-        // Only a mission cache MINTS Mk V — and a craft, from a Mk V core that came from one; units already held may be listed, bought, returned or sold.
-        if (r.Mk == 5 && r.From == ItemLedger.World && r.Kind is not (ItemMoveKind.Mission or ItemMoveKind.Make or ItemMoveKind.Salvage))
+        // Only a mission cache MINTS Mk V — and a craft, from a Mk V core that came from one, and an operator; units already held may be listed, bought,
+        // returned or sold.
+        if (r.Mk == 5 && r.From == ItemLedger.World
+            && r.Kind is not (ItemMoveKind.Mission or ItemMoveKind.Make or ItemMoveKind.Salvage or ItemMoveKind.AdminGrant or ItemMoveKind.Refine))
         {
             result.Violation($"seq {r.Seq}: Mk V in a {ItemMoveKind.NameOf(r.Kind)} row - only a mission cache holds Mk V");
         }
@@ -789,6 +849,50 @@ public static class ItemEndpoints
         }
 
         return ok;
+    }
+
+    /// <summary>One refine's rows, summed: whose, what it took of one Mk and made of the next.</summary>
+    private struct RefineTally
+    {
+        public long Owner;
+        public ushort Template;
+        public byte Mk;
+        public long Taken;
+        public long Made;
+    }
+
+    /// <summary>Adds a refine row to its refine's tally; one of another template, or not a step of one Mk, is a violation.</summary>
+    private static void TallyRefine(ItemAuditResult result, Dictionary<long, RefineTally> refines, in ItemLedgerEntry r)
+    {
+        var taken = r.To == ItemLedger.World;
+        var mk = (byte)(taken ? r.Mk : r.Mk - 1);
+        var owner = taken ? r.From : r.To;
+        if (!refines.TryGetValue(r.Ref, out var n))
+        {
+            // The first row of a refine is the one its rows name.
+            if (r.Ref != r.Seq)
+            {
+                result.Violation($"seq {r.Seq}: refine {r.Ref} has no row of its own at that seq before this one");
+            }
+
+            n = new RefineTally { Owner = owner, Template = r.Template, Mk = mk };
+        }
+        else if (n.Template != r.Template || n.Mk != mk || n.Owner != owner)
+        {
+            result.Violation(
+                $"seq {r.Seq}: refine {r.Ref} moves {owner}'s template {r.Template} Mk {r.Mk}, not one step of {n.Owner}'s {n.Template} from Mk {n.Mk}");
+        }
+
+        if (taken)
+        {
+            n.Taken += r.Count;
+        }
+        else
+        {
+            n.Made += r.Count;
+        }
+
+        refines[r.Ref] = n;
     }
 
     /// <summary>One side of a row against the stack it names.</summary>

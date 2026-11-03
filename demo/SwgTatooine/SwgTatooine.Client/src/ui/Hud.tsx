@@ -1,16 +1,42 @@
-import { Fragment } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
+import { loadOpen, saveOpen, type HudSection } from '../data/hud-sections';
 import { SpeedClass } from '../data/source';
 import { gaitLabel } from '../app/gait';
 import { realmLabel } from '../data/realm-view';
 import { dashboardUrl } from '../data/server-config';
-import { useStats } from '../state/stats-store';
+import { useStats, type FrameStats } from '../state/stats-store';
 import { useTerrain } from '../state/terrain-store';
 import { useUi } from '../state/ui-store';
 
 const fmt = (v: number, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '—');
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB/s`;
 
-/** Frame, clock, source and per-archetype counts, refreshed four times a second. */
+/**
+ * A section's title, folding it: the arrow, the name, and — closed — the one figure worth seeing without opening it. `extra` sits at its right,
+ * outside the button: the Server title's dashboard link, a link inside a button not being valid HTML.
+ */
+function Fold(props: {
+  readonly open: boolean;
+  readonly onToggle: () => void;
+  readonly title: string;
+  readonly summary: string;
+  readonly extra?: ReactNode;
+}) {
+  return (
+    <div className="hud-title hud-server-title">
+      <button type="button" className="hud-fold" aria-expanded={props.open} onClick={props.onToggle}>
+        {props.open ? '▾' : '▸'} {props.title}
+        {props.open || props.summary === '' ? null : <span className="hud-fold-summary">{props.summary}</span>}
+      </button>
+      {props.extra}
+    </div>
+  );
+}
+
+/**
+ * Frame, clock, source and per-archetype counts, refreshed four times a second. Three sections — Client, Server, This session — each folded by its
+ * title, all closed on a first visit and left as the player left them after that (`data/hud-sections`, Loïc, 2026-11-02).
+ */
 export function Hud() {
   const stats = useStats((s) => s.stats);
   // Whether this server told us the radius it honours; without it the row cannot claim to be the granted one.
@@ -25,109 +51,173 @@ export function Hud() {
     useUi((s) => s.dashboardPort),
     window.location,
   );
+  // The sections this browser left open: none on a first visit.
+  const [open, setOpen] = useState(() => loadOpen());
   if (stats === null) {
     return <div className="panel hud">Starting…</div>;
   }
 
+  const toggle = (section: HudSection) => {
+    const next = new Set(open);
+    if (!next.delete(section)) {
+      next.add(section);
+    }
+
+    saveOpen(next);
+    setOpen(next);
+  };
+
   const server = stats.source.server;
-  const repl = stats.replication;
   const session = stats.source.session;
   return (
     <div className="panel hud">
-      <div className="hud-title">Client</div>
-      <table>
-        <tbody>
+      <Fold
+        open={open.has('client')}
+        onToggle={() => {
+          toggle('client');
+        }}
+        title="Client"
+        summary={`${fmt(stats.fps, 0)} fps`}
+      />
+      {open.has('client') ? (
+        <ClientTable stats={stats} terrainCached={terrainCached} terrainLoadMs={terrainLoadMs} />
+      ) : null}
+      <Fold
+        open={open.has('server')}
+        onToggle={() => {
+          toggle('server');
+        }}
+        title={`Server (${stats.source.name})`}
+        summary={`tick ${fmt(server?.simMs ?? Number.NaN, 1)} ms`}
+        extra={
+          dashboard === null ? null : (
+            <a
+              className="hud-dashboard"
+              href={dashboard}
+              target="_blank"
+              rel="noreferrer"
+              title="The demo's dashboard: economy, missions, bots, server health"
+            >
+              Dashboard ↗
+            </a>
+          )
+        }
+      />
+      {open.has('server') ? <ServerTables stats={stats} radiusKnown={radiusKnown} /> : null}
+      {session === null ? null : (
+        <>
+          <Fold
+            open={open.has('session')}
+            onToggle={() => {
+              toggle('session');
+            }}
+            title="This session"
+            summary={session.rttMs > 0 ? `RTT ${fmt(session.rttMs, 0)} ms` : ''}
+          />
+          {open.has('session') ? <SessionTable stats={stats} /> : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+type Stats = FrameStats;
+
+function ClientTable(props: {
+  readonly stats: Stats;
+  readonly terrainCached: boolean;
+  readonly terrainLoadMs: number;
+}) {
+  const { stats, terrainCached, terrainLoadMs } = props;
+  return (
+    <table>
+      <tbody>
+        <tr>
+          <td>FPS</td>
+          <td>{fmt(stats.fps, 0)}</td>
+        </tr>
+        <tr>
+          <td>Frame JS (ours)</td>
+          <td>
+            {fmt(stats.frameJsMs, 2)} ms · p95 {fmt(stats.frameJsP95Ms, 2)}
+          </td>
+        </tr>
+        <tr>
+          <td>Babylon frame</td>
+          <td>{fmt(stats.frameTotalMs, 2)} ms</td>
+        </tr>
+        <tr>
+          <td>Terrain</td>
+          <td>
+            {stats.terrainTriangles.toLocaleString()} tris · {stats.terrainNodes} nodes @ {fmt(stats.terrainFinestM, 0)}{' '}
+            m{stats.terrainCapped ? ' ⚠ capped' : ''}
+          </td>
+        </tr>
+        <tr>
+          <td>Draw calls</td>
+          <td>{stats.drawCalls}</td>
+        </tr>
+        <tr>
+          <td>Apply / tick</td>
+          <td>{stats.source.applyMs < 0.1 ? '< 0.1' : fmt(stats.source.applyMs, 2)} ms</td>
+        </tr>
+        <tr>
+          <td>Render delay</td>
+          <td>{fmt(stats.renderDelayMs, 0)} ms</td>
+        </tr>
+        <tr>
+          <td>Tick (render / latest)</td>
+          <td>
+            {fmt(stats.renderTime, 1)} / {stats.latestTick}
+          </td>
+        </tr>
+        <tr>
+          <td>Altitude</td>
+          <td>{fmt(stats.altitude, 0)} m</td>
+        </tr>
+        {stats.feet === null ? null : (
           <tr>
-            <td>FPS</td>
-            <td>{fmt(stats.fps, 0)}</td>
-          </tr>
-          <tr>
-            <td>Frame JS (ours)</td>
-            <td>
-              {fmt(stats.frameJsMs, 2)} ms · p95 {fmt(stats.frameJsP95Ms, 2)}
+            {/* The gap between the bottom of the drawn body and the surface the collision rule says is under it.
+                0.00 means the feet are on the ground. Anything else is the body in the air, and the three figures
+                beside it say which of the four numbers involved is the one that disagrees. */}
+            <td>Feet</td>
+            <td style={{ color: Math.abs(stats.feet.gapM) > 0.05 ? '#ff6b6b' : undefined }}>
+              {`${fmt(stats.feet.gapM, 2)} m gap · body ${fmt(stats.feet.bottomY, 2)} · surface `}
+              {`${fmt(stats.feet.surfaceY, 2)} · terrain ${fmt(stats.feet.terrainY, 2)} · server ${fmt(stats.feet.serverY, 2)}`}
             </td>
           </tr>
-          <tr>
-            <td>Babylon frame</td>
-            <td>{fmt(stats.frameTotalMs, 2)} ms</td>
-          </tr>
-          <tr>
-            <td>Terrain</td>
-            <td>
-              {stats.terrainTriangles.toLocaleString()} tris · {stats.terrainNodes} nodes @{' '}
-              {fmt(stats.terrainFinestM, 0)} m{stats.terrainCapped ? ' ⚠ capped' : ''}
-            </td>
-          </tr>
-          <tr>
-            <td>Draw calls</td>
-            <td>{stats.drawCalls}</td>
-          </tr>
-          <tr>
-            <td>Apply / tick</td>
-            <td>{stats.source.applyMs < 0.1 ? '< 0.1' : fmt(stats.source.applyMs, 2)} ms</td>
-          </tr>
-          <tr>
-            <td>Render delay</td>
-            <td>{fmt(stats.renderDelayMs, 0)} ms</td>
-          </tr>
-          <tr>
-            <td>Tick (render / latest)</td>
-            <td>
-              {fmt(stats.renderTime, 1)} / {stats.latestTick}
-            </td>
-          </tr>
-          <tr>
-            <td>Altitude</td>
-            <td>{fmt(stats.altitude, 0)} m</td>
-          </tr>
-          {stats.feet === null ? null : (
-            <tr>
-              {/* The gap between the bottom of the drawn body and the surface the collision rule says is under it.
-                  0.00 means the feet are on the ground. Anything else is the body in the air, and the three figures
-                  beside it say which of the four numbers involved is the one that disagrees. */}
-              <td>Feet</td>
-              <td style={{ color: Math.abs(stats.feet.gapM) > 0.05 ? '#ff6b6b' : undefined }}>
-                {`${fmt(stats.feet.gapM, 2)} m gap · body ${fmt(stats.feet.bottomY, 2)} · surface `}
-                {`${fmt(stats.feet.surfaceY, 2)} · terrain ${fmt(stats.feet.terrainY, 2)} · server ${fmt(stats.feet.serverY, 2)}`}
-              </td>
-            </tr>
-          )}
-          <tr>
-            {/* What Shift gives (or the swoop, on the 1 key), the boost Shift+1..4 latched, and what the SERVER says that is
-                worth — the figure is replicated, so a dash here means the owner block has not arrived and the predictor is
-                in its no-prediction fallback, which is worth being able to see. */}
-            <td>Gait</td>
-            <td>{`${gaitLabel(stats.gait)}${stats.gait === SpeedClass.swoop ? ' (1)' : ''} ×${stats.boost} (⇧${stats.boost}) · ${fmt(stats.gaitMps, 1)} m/s`}</td>
-          </tr>
-          <tr>
-            {/* The terrain under the camera's target, and where it came from. The world no longer starts before the field
-                does, so there is no 'baking' state to report here any more — what is worth reporting instead is whether
-                this session paid the bake or read it back, because that is the difference between ~2 s and a fraction of
-                it, and it is the one number that says the local database is doing its job. */}
-            <td>Ground</td>
-            <td>
-              {`${fmt(stats.groundM, 1)} m `}
-              {terrainCached
-                ? `(cached, read in ${fmt(terrainLoadMs, 0)} ms)`
-                : `(baked in ${fmt(stats.terrainBakeMs, 0)} ms)`}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <div className="hud-title hud-server-title">
-        <span>Server ({stats.source.name})</span>
-        {dashboard === null ? null : (
-          <a
-            className="hud-dashboard"
-            href={dashboard}
-            target="_blank"
-            rel="noreferrer"
-            title="The demo's dashboard: economy, missions, bots, server health"
-          >
-            Dashboard ↗
-          </a>
         )}
-      </div>
+        <tr>
+          {/* What Shift gives (or the swoop, on the 1 key), the boost Shift+1..4 latched, and what the SERVER says that is
+              worth — the figure is replicated, so a dash here means the owner block has not arrived and the predictor is
+              in its no-prediction fallback, which is worth being able to see. */}
+          <td>Gait</td>
+          <td>{`${gaitLabel(stats.gait)}${stats.gait === SpeedClass.swoop ? ' (1)' : ''} ×${stats.boost} (⇧${stats.boost}) · ${fmt(stats.gaitMps, 1)} m/s`}</td>
+        </tr>
+        <tr>
+          {/* The terrain under the camera's target, and where it came from. The world no longer starts before the field
+              does, so there is no 'baking' state to report here any more — what is worth reporting instead is whether
+              this session paid the bake or read it back, because that is the difference between ~2 s and a fraction of
+              it, and it is the one number that says the local database is doing its job. */}
+          <td>Ground</td>
+          <td>
+            {`${fmt(stats.groundM, 1)} m `}
+            {terrainCached
+              ? `(cached, read in ${fmt(terrainLoadMs, 0)} ms)`
+              : `(baked in ${fmt(stats.terrainBakeMs, 0)} ms)`}
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  );
+}
+
+function ServerTables(props: { readonly stats: Stats; readonly radiusKnown: boolean }) {
+  const { stats, radiusKnown } = props;
+  const server = stats.source.server;
+  const repl = stats.replication;
+  return (
+    <>
       <table>
         <tbody>
           <tr>
@@ -243,49 +333,7 @@ export function Hud() {
           )}
         </tbody>
       </table>
-      {session === null ? null : (
-        <>
-          <div className="hud-title">This session</div>
-          <table>
-            <tbody>
-              <tr>
-                <td title="Round trip measured by the PING loop.">RTT</td>
-                <td>{session.rttMs > 0 ? `${fmt(session.rttMs, 0)} ms` : '—'}</td>
-              </tr>
-              <tr>
-                {/* Two different measurements of the same thing, deliberately side by side: the server's own figure for
-                    this session, and this client's estimate over arrival times. A gap between them is worth seeing. */}
-                <td title="What the server says it is sending THIS session, against what this client measures arriving. They should track.">
-                  Out (server / seen)
-                </td>
-                <td>
-                  {kb(session.outBytesPerSec)} / {kb(stats.source.wireBytesPerSec)}
-                </td>
-              </tr>
-              <tr>
-                <td title="Regions this client sent, held back as not worth sending, and had refused by the server.">
-                  Regions s/h/refused
-                </td>
-                <td>
-                  {session.regionsSent} / {session.regionsSuppressed} / {session.regionsRejected}
-                  {session.regionsRejected > 0 ? ' ⚠' : ''}
-                </td>
-              </tr>
-              {session.skippedFrames === 0 && session.droppedCommands === 0 ? null : (
-                <tr>
-                  {/* Counters, not rates — they only rise. A HUD that showed them per second would be lying. */}
-                  <td title="Frames the server chose not to send this session, and commands it refused (rate limiting included). Both are totals since the session opened.">
-                    Skipped / dropped
-                  </td>
-                  <td>
-                    {session.skippedFrames.toLocaleString()} / {session.droppedCommands.toLocaleString()}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </>
-      )}
+      {/* What this client holds of each archetype: replication's counts, so the server's section's. */}
       <table className="hud-layers">
         <thead>
           <tr>
@@ -336,6 +384,54 @@ export function Hud() {
           </tr>
         </tbody>
       </table>
-    </div>
+    </>
+  );
+}
+
+function SessionTable(props: { readonly stats: Stats }) {
+  const session = props.stats.source.session;
+  if (session === null) {
+    return null;
+  }
+
+  return (
+    <table>
+      <tbody>
+        <tr>
+          <td title="Round trip measured by the PING loop.">RTT</td>
+          <td>{session.rttMs > 0 ? `${fmt(session.rttMs, 0)} ms` : '—'}</td>
+        </tr>
+        <tr>
+          {/* Two different measurements of the same thing, deliberately side by side: the server's own figure for
+              this session, and this client's estimate over arrival times. A gap between them is worth seeing. */}
+          <td title="What the server says it is sending THIS session, against what this client measures arriving. They should track.">
+            Out (server / seen)
+          </td>
+          <td>
+            {kb(session.outBytesPerSec)} / {kb(props.stats.source.wireBytesPerSec)}
+          </td>
+        </tr>
+        <tr>
+          <td title="Regions this client sent, held back as not worth sending, and had refused by the server.">
+            Regions s/h/refused
+          </td>
+          <td>
+            {session.regionsSent} / {session.regionsSuppressed} / {session.regionsRejected}
+            {session.regionsRejected > 0 ? ' ⚠' : ''}
+          </td>
+        </tr>
+        {session.skippedFrames === 0 && session.droppedCommands === 0 ? null : (
+          <tr>
+            {/* Counters, not rates — they only rise. A HUD that showed them per second would be lying. */}
+            <td title="Frames the server chose not to send this session, and commands it refused (rate limiting included). Both are totals since the session opened.">
+              Skipped / dropped
+            </td>
+            <td>
+              {session.skippedFrames.toLocaleString()} / {session.droppedCommands.toLocaleString()}
+            </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
   );
 }

@@ -30,6 +30,17 @@ public sealed partial class SimBridge
     private long _unequips;
     private long _gearWrites;
     private long _workshopCommitsFailed;
+    private long _workshopAborted;
+    private bool _failNextWorkshop;
+
+    /// <summary>The checks' failure injection: the Workshop's next pass that writes is aborted, as if one of its writes had failed.</summary>
+    internal void FailNextWorkshopWriteForChecks() => Volatile.Write(ref _failNextWorkshop, true);
+
+    /// <summary>Workshop passes aborted: a command's write failed after its checks, so the whole pass was refused.</summary>
+    public long WorkshopAborted => Interlocked.Read(ref _workshopAborted);
+
+    /// <summary>Workshop passes whose transaction did not commit, aborts included.</summary>
+    public long WorkshopCommitsFailed => Interlocked.Read(ref _workshopCommitsFailed);
 
     /// <summary>Equips applied since start.</summary>
     public long Equips => Interlocked.Read(ref _equips);
@@ -90,9 +101,13 @@ public sealed partial class SimBridge
         var finishes = subs == null ? default : subs.Commands<CraftFinish>();
         var repairs = subs == null ? default : subs.Commands<RepairItem>();
         var salvages = subs == null ? default : subs.Commands<SalvageItem>();
-        var crafting = starts.Count + experiments.Count + enhances.Count + finishes.Count + repairs.Count + salvages.Count;
+        var refines = subs == null ? default : subs.Commands<RefineItems>();
+        var packs = subs == null ? default : subs.Commands<PackItem>();
+        var unpacks = subs == null ? default : subs.Commands<UnpackItem>();
+        var crafting = starts.Count + experiments.Count + enhances.Count + finishes.Count + repairs.Count + salvages.Count + refines.Count + packs.Count
+            + unpacks.Count;
         var flushDue = ctx.TickNumber % Math.Max(1, _config.TickRateHz) == 0;
-        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue))
+        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue) && !AdminPending)
         {
             return;
         }
@@ -124,6 +139,9 @@ public sealed partial class SimBridge
         _craftAbort = false;
         _repairsApplied.Clear();
         _salvagesApplied.Clear();
+        _refinesApplied.Clear();
+        _packsApplied.Clear();
+        _unpacksApplied.Clear();
         _gearScratch.Clear();
         _gearScratch.AddRange(_gearDue);
         _gearDue.Clear();
@@ -184,7 +202,26 @@ public sealed partial class SimBridge
                 {
                     SalvageFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
                 }
+
+                foreach (var command in refines)
+                {
+                    RefineFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                // Packs, then unpacks: a client that packs and unpacks in one tick sees them applied so.
+                foreach (var command in packs)
+                {
+                    PackFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in unpacks)
+                {
+                    UnpackFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
             }
+
+            // The operators' requests (SimBridge.Admin.cs), after the players': a worn item they rewrite or take is in the gear computed below.
+            AdminTick(tx, ctx.WorldTick);
 
             // The gear from what the transaction leaves worn, read through it before it commits; written to the bodies once it has.
             _gearComputed.Clear();
@@ -195,23 +232,44 @@ public sealed partial class SimBridge
             }
 
             var written = _equipsApplied.Count + _unequipsApplied.Count + _craftsApplied.Count + _repairsApplied.Count + _salvagesApplied.Count
-                + _wearCounts.Writes > 0;
+                + _refinesApplied.Count + _packsApplied.Count + _unpacksApplied.Count + _wearCounts.Writes + _adminApplied.Count > 0;
             if (written)
             {
                 FlushItemHead(tx);
             }
 
-            committed = !written || (!_craftAbort && tx.Commit());
+            // Committed even when nothing counted was written: a staged write the count does not see (the item head, spawned by a first load) would
+            // otherwise be rolled back while memory believes it (review, 2026-11-03). An abort — a command whose write failed after its checks — is
+            // counted apart from a commit that failed.
+            if (written && Volatile.Read(ref _failNextWorkshop))
+            {
+                Volatile.Write(ref _failNextWorkshop, false);
+                _craftAbort = true;
+            }
+
+            if (_craftAbort)
+            {
+                Interlocked.Increment(ref _workshopAborted);
+            }
+
+            committed = !_craftAbort && tx.Commit();
+        }
+
+        if (crafting > 0 || _adminEconomy)
+        {
+            EndEconomy(committed);
         }
 
         if (crafting > 0)
         {
-            EndEconomy(committed);
             EndCrafts(committed);
+            EndRefines(subs, committed);
+            EndCrates(subs, committed);
         }
 
         EndItems(committed);
         EndWear(tick0, committed);
+        EndAdmin(ctx, committed);
 
         if (committed)
         {
@@ -285,6 +343,12 @@ public sealed partial class SimBridge
         if (src == 0 || !items.Slots[src].Instance)
         {
             RefuseWorkshop(subs, in command, TatooineReplication.EquipNotYours);
+            return;
+        }
+
+        if (items.Slots[src].Count != 1)
+        {
+            RefuseWorkshop(subs, in command, TatooineReplication.ItemCrated);
             return;
         }
 

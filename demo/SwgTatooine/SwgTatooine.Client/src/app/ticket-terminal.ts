@@ -221,7 +221,11 @@ export function bazaarMenuItems(reserved: number): ContextMenuItem[] {
  */
 export function craftMenuItems(): ContextMenuItem[] {
   return [
-    { label: 'Craft, repair, salvage…', hint: 'The crafting panel (C, at a station)', action: { kind: 'craft' } },
+    {
+      label: 'Craft, repair, salvage, refine…',
+      hint: 'The crafting panel (C, at a station)',
+      action: { kind: 'craft' },
+    },
   ];
 }
 
@@ -290,12 +294,18 @@ function cornersOf(pose: Pose, descriptor: Descriptor): Float64Array | null {
  *
  * @param from The city whose port the terminal is in, which is not a destination; -1 for none known.
  * @param names Every city's name, by city index.
+ * @param fare What a ticket costs, credits; 0 when the server publishes none, and the hint then names no price.
  */
-export function ticketMenuItems(from: number, names: readonly string[]): ContextMenuItem[] {
+export function ticketMenuItems(from: number, names: readonly string[], fare = 0): ContextMenuItem[] {
   const items: ContextMenuItem[] = [];
+  const cr = `${fare.toLocaleString('en-US')} cr`;
   names.forEach((name, city) => {
     if (city !== from) {
-      items.push({ label: name, hint: `Queue for the next shuttle to ${name}`, action: { kind: 'board', city } });
+      items.push({
+        label: fare > 0 ? `${name} · ${cr}` : name,
+        hint: `Queue for the next shuttle to ${name}${fare > 0 ? ` — a ticket is ${cr}, kept until you fly` : ''}`,
+        action: { kind: 'board', city },
+      });
     }
   });
   return items;

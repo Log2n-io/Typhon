@@ -438,6 +438,7 @@ public static class EconomyEndpoints
             case TransferKind.Fare:
             case TransferKind.Bench:
             case TransferKind.Repair:
+            case TransferKind.Refine:
                 if (r.From == EconomyLedger.World || r.To != EconomyLedger.World || r.Ref == 0)
                 {
                     result.Violation($"seq {r.Seq}: a {TransferKind.NameOf(r.Kind)} must be paid by a wallet to World for a listing, not {r.From} to {r.To} for {r.Ref}");
@@ -448,6 +449,16 @@ public static class EconomyEndpoints
                 if (r.From != EconomyLedger.World || r.To == EconomyLedger.World || r.Ref == 0)
                 {
                     result.Violation($"seq {r.Seq}: a vendor payout must be paid by World into a wallet for item rows, not {r.From} to {r.To} for {r.Ref}");
+                }
+
+                break;
+            case TransferKind.AdminGrant:
+            case TransferKind.AdminTake:
+                if ((r.From == EconomyLedger.World) == (r.To == EconomyLedger.World)
+                    || (r.Kind == TransferKind.AdminGrant) != (r.From == EconomyLedger.World))
+                {
+                    result.Violation(
+                        $"seq {r.Seq}: an {TransferKind.NameOf(r.Kind)} must move between World and one wallet, World giving it, not {r.From} to {r.To}");
                 }
 
                 break;

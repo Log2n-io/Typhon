@@ -1,7 +1,7 @@
 import { isTyping } from '../camera/camera-input';
 
 /** Which panel a key press toggles, or `null` for one that is not a panel key — typed into a field, or with a modifier. */
-export function panelKey(e: KeyboardEvent): 'journal' | 'inventory' | 'bazaar' | 'craft' | null {
+export function panelKey(e: KeyboardEvent): 'journal' | 'inventory' | 'bazaar' | 'craft' | 'map' | null {
   if (e.repeat || e.isComposing || e.ctrlKey || e.altKey || e.metaKey || isTyping(e)) {
     return null;
   }
@@ -15,6 +15,8 @@ export function panelKey(e: KeyboardEvent): 'journal' | 'inventory' | 'bazaar' |
       return 'bazaar';
     case 'c':
       return 'craft';
+    case 'm':
+      return 'map';
     default:
       return null;
   }

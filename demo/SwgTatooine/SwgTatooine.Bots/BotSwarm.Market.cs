@@ -323,7 +323,7 @@ public sealed partial class BotSwarm
             {
                 // Gear of its band first (crafting-build.md § 6, Gear): the best-value listing above what it has, the vendor's standard issue failing it.
                 _standard ??= await Optional(async () => MarketJson.Standard(await GetAsync(_standardUri).ConfigureAwait(false))).ConfigureAwait(false);
-                if (MarketPlan.GearWanted(gear, _standard, band, _held) is { } piece
+                if (MarketPlan.GearWanted(gear, _standard, band, _held, CraftPlan.Blaster) is { } piece
                     && await Optional(async () => await Page($"item={piece.Item}").ConfigureAwait(false)).ConfigureAwait(false) is { } page)
                 {
                     if (piece.Item.StartsWith("armor_padded_", StringComparison.Ordinal))
@@ -576,7 +576,6 @@ public sealed partial class BotSwarm
             return prices;
         }
 
-        /// <summary>A GET with the bot's own token, as the browser's; a refusal throws, and the trade is planned again next visit.</summary>
         /// <summary>An optional read of a trade: its failure costs that part of the plan, not the visit's collect and vendoring.</summary>
         private static async Task<T> Optional<T>(Func<Task<T>> read) where T : class
         {
@@ -591,6 +590,7 @@ public sealed partial class BotSwarm
             }
         }
 
+        /// <summary>A GET with the bot's own token, as the browser's; a refusal throws, and the trade is planned again next visit.</summary>
         private async Task<string> GetAsync(Uri uri)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);

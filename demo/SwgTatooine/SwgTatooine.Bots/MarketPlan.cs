@@ -93,7 +93,7 @@ public static class MarketPlan
     {
         foreach (var g in gear)
         {
-            if (g.Worn || g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon) || g.WornDown)
+            if (g.Worn || g.Crate || g.Wears == 0 || g.Mk > Math.Max(1, band) || !Fits(g, weapon) || g.WornDown)
             {
                 continue;
             }
@@ -180,19 +180,19 @@ public static class MarketPlan
     }
 
     /// <summary>
-    /// Whether a worn item is to be replaced (crafting-build.md § 6, Gear): worn down with no repair left, or none it can make — no kit of its class held.
-    /// Its slot counts as empty: the board's piece or the vendor's is bought, and put on over it.
+    /// Whether a worn item is to be replaced (crafting-build.md § 6, Gear): <b>broken</b> — at 0 with a repair left — and no kit of its class held to
+    /// repair it. Its slot counts as empty: the board's piece or the vendor's is bought, and put on over it.
     /// </summary>
+    /// <remarks>
+    /// <b>Worn to the end, not swapped at 20 %</b> (Loïc, 2026-11-03: decay must finish its job). Replaced worn down, an item never used its repairs and never
+    /// wore out — 3 574 broken and 0 destroyed in a night — and it was sold at full value, the vendor paying for wear. A worn item with no repair left is not
+    /// spent either: it is worn until the wear destroys it, and its slot is then empty.
+    /// </remarks>
     public static bool Spent(GearItem g, IReadOnlyList<HeldStack> held)
     {
-        if (!g.Worn || !g.WornDown)
+        if (!g.Worn || !g.Broken || g.Repairs >= MaxRepairs)
         {
             return false;
-        }
-
-        if (g.Repairs >= MaxRepairs)
-        {
-            return true;
         }
 
         var kit = KitFor(g.Wears);
@@ -229,8 +229,9 @@ public static class MarketPlan
         foreach (var g in gear)
         {
             var value = prices.ValueOf(g.Item, g.Mk);
+            // A crate (crafting-catalog.md § 11.2) is never worn: it is surplus, listed or sold whole.
             if (g.Worn || g.Id == wear || g.Template is >= CraftPlan.FirstPart and <= CraftPlan.LastPart || value <= 0d
-                || Wanted(gear, g, band, weapon))
+                || (!g.Crate && Wanted(gear, g, band, weapon)))
             {
                 continue;
             }
@@ -248,12 +249,12 @@ public static class MarketPlan
 
             if (listed < MaxListed)
             {
-                plan.Add(new MarketCommand(MarketStep.List, g.Template, g.Mk, 1, Price(value, SurplusLow, SurplusHigh, ref rng), 0, g.Id));
+                plan.Add(new MarketCommand(MarketStep.List, g.Template, g.Mk, g.Count, Price(value, SurplusLow, SurplusHigh, ref rng), 0, g.Id));
                 listed++;
             }
-            else if (vendorRest && VendorPayout(1, value) > 0)
+            else if (vendorRest && VendorPayout(g.Count, value) > 0)
             {
-                plan.Add(new MarketCommand(MarketStep.Vendor, g.Template, g.Mk, 1, 0, 0, g.Id));
+                plan.Add(new MarketCommand(MarketStep.Vendor, g.Template, g.Mk, g.Count, 0, 0, g.Id));
             }
         }
 
@@ -287,8 +288,12 @@ public static class MarketPlan
     /// (102-107) it has nothing for, as the padded piece; else the first armour slot whose best is below its band, as the piece it wears. The asset to
     /// browse, the slot, and the best Mk it already has there (0 for none); null when its gear is of its band.
     /// </summary>
+    /// <remarks>
+    /// A crate covers nothing — it is never worn — and with a <paramref name="weapon"/> template, nor does a weapon of another kind: a sword in the grid of a
+    /// bot that fights with a pistol left its spent blaster unreplaced (review, 2026-11-03).
+    /// </remarks>
     public static (string Item, int Slot, int HaveMk)? GearWanted(IReadOnlyList<GearItem> gear, IReadOnlyList<StandardOffer> offers, int band,
-        IReadOnlyList<HeldStack> held = null)
+        IReadOnlyList<HeldStack> held = null, ushort weapon = 0)
     {
         (string, int, int)? below = null;
         for (var slot = 101; slot <= 107; slot++)
@@ -298,13 +303,13 @@ public static class MarketPlan
             string spent = null;
             foreach (var g in gear)
             {
-                if (g.Wears != slot)
+                if (g.Wears != slot || g.Crate || !Fits(g, weapon))
                 {
                     continue;
                 }
 
                 // Worn down and past repair (or held so): it counts as nothing — its replacement is wanted, the same piece.
-                if (g.WornDown && (held == null ? g.Repairs >= MaxRepairs : g.Worn ? Spent(g, held) : true))
+                if (g.WornDown && (held == null ? g.Broken : g.Worn ? Spent(g, held) : true))
                 {
                     spent ??= g.Item;
                     continue;
@@ -359,8 +364,9 @@ public static class MarketPlan
         foreach (var r in rows)
         {
             var value = prices.ValueOf(r.Item, r.Mk);
+            // A crate (crafting-catalog.md § 11.2) is not bought to wear: it would have to be unpacked, and a bot wants one piece.
             if (r.Mk <= haveMk || r.Mk > Math.Max(1, band) || value <= 0d || r.Unit > BuyOverValue * value || wallet - r.Total < StandardReserve
-                || Contains(own, r.Id) || r.WornDown)
+                || Contains(own, r.Id) || r.WornDown || r.Quantity > 1)
             {
                 continue;
             }
@@ -408,7 +414,7 @@ public static class MarketPlan
             var covered = false;
             foreach (var g in gear)
             {
-                covered |= g.Wears == o.Wears && (held == null || (g.Worn ? !Spent(g, held) : !g.WornDown));
+                covered |= g.Wears == o.Wears && !g.Crate && Fits(g, weapon) && (held == null || (g.Worn ? !Spent(g, held) : !g.WornDown));
             }
 
             // The weapon first — a bot fighting with its fist is worse off than one short of gloves — then the cheapest piece.

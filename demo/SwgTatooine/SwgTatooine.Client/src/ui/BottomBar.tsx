@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { panelKey } from '../app/panel-keys';
 import { useChat } from '../state/chat-store';
 import { useItems } from '../state/items-store';
+import { useMap } from '../state/map-store';
 import { useMarket } from '../state/market-store';
 import { useMissions } from '../state/mission-store';
 import { useSessionStore } from '../state/session-store';
@@ -16,8 +17,8 @@ import { useWallet } from '../state/wallet-store';
  *
  * <b>And their keys</b> (Loïc, 2026-10-26): <kbd>J</kbd> toggles the journal, <kbd>I</kbd> the inventory, <kbd>B</kbd> the
  * bazaar (bazaar.md § 6: browsing and cancelling work anywhere; the rest at a bazaar terminal), <kbd>C</kbd> the crafting panel
- * at a station only (the server refuses everything in it elsewhere) — not while typing, not with a modifier held, and not while
- * a context menu is open, whose keys are its own.
+ * at a station only (the server refuses everything in it elsewhere), <kbd>M</kbd> the planet map (Loïc, 2026-11-02) — not while
+ * typing, not with a modifier held, and not while a context menu is open, whose keys are its own.
  */
 export function BottomBar() {
   const playing = useSessionStore((s) => s.grant !== null);
@@ -33,6 +34,8 @@ export function BottomBar() {
   const bazaarOpen = useMarket((s) => s.open);
   const toggleBazaar = useMarket((s) => s.toggle);
   const reserved = useMarket((s) => s.mine?.reserved.length ?? 0);
+  const mapOpen = useMap((s) => s.open);
+  const toggleMap = useMap((s) => s.toggle);
 
   useEffect(() => {
     if (!shown) {
@@ -54,6 +57,8 @@ export function BottomBar() {
         useMissions.getState().toggleJournal();
       } else if (panel === 'bazaar') {
         useMarket.getState().toggle();
+      } else if (panel === 'map') {
+        useMap.getState().toggle();
       } else if (panel === 'craft') {
         const craft = useCraft.getState();
         if (craft.open || craft.atStation) {
@@ -111,6 +116,15 @@ export function BottomBar() {
           aria-pressed={bazaarOpen}
         >
           <span aria-hidden="true">⚖</span> Bazaar{reserved > 0 ? ` (${String(reserved)})` : ''}
+        </button>
+        <button
+          type="button"
+          className={mapOpen ? 'active' : ''}
+          onClick={toggleMap}
+          title="Planet map (M)"
+          aria-pressed={mapOpen}
+        >
+          <span aria-hidden="true">🗺</span> Map
         </button>
       </div>
     </>

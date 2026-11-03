@@ -51,6 +51,8 @@ function refusalText(reason: number, city: number): string {
       return 'You are no longer standing at the shuttleport. Walk back to it and ask again.';
     case 132:
       return `${cityName(city)} is not somewhere this port flies to.`;
+    case 183:
+      return `You cannot pay the fare to ${cityName(city)}. Earn some credits and ask again.`;
     default:
       return `The server refused the flight to ${cityName(city)} (reason ${reason}).`;
   }

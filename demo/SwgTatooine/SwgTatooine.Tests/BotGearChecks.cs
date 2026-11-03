@@ -218,17 +218,20 @@ internal sealed class BotGearChecks
     }
 
     /// <summary>
-    /// § 6, Gear: a worn item worn down with no repair left — or no kit to make one — is to be replaced: its slot is wanted as if empty, and a sound piece
-    /// is put on over it, even of the same Mk.
+    /// § 6, Gear, as of Loïc's 2026-11-03 rule (decay finishes its job): a worn item is replaced once it is <b>broken</b> with no kit to repair it — its
+    /// slot is wanted as if empty, and a sound piece is put on over it, even of the same Mk. Worn down but still working, or past its repairs, it is worn
+    /// on: to the repair, or to the wear that destroys it.
     /// </summary>
     [Test]
-    public void ABot_ReplacesWhatIsWornDownAndPastRepair()
+    public void ABot_ReplacesWhatIsBrokenAndBeyondItsKits_AndWearsTheRestToTheEnd()
     {
-        var spent = Worn(1, 101, 1, 100, 1000, repairs: 2);
+        var spent = Worn(1, 101, 1, 0, 1000, broken: true);
         var spare = new GearItem(9, ItemCatalog.Blaster, 4, 101, 0, "blaster_dl44", 1) { Condition = 1000, MaxCondition = 1000 };
         Assert.Multiple(() =>
         {
             Assert.That(MarketPlan.Spent(spent, []), Is.True);
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 100, 1000, repairs: 2), []), Is.False, "past its repairs, worn until the wear destroys it");
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 100, 1000), []), Is.False, "worn down, no kit: still worn, not swapped at 20 %");
             Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 0, 1000, broken: true), [Kits(MarketPlan.KitWeapon, 1)]), Is.False, "a repair left, a kit held");
             Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 0, 1000, broken: true), []), Is.True, "a repair left but no kit");
             Assert.That(MarketPlan.GearWanted([spent], null, 1, []), Is.EqualTo(("blaster_dl44", 101, 0)), "the same piece, any Mk of its band");
@@ -249,7 +252,7 @@ internal sealed class BotGearChecks
         var prices = MarketPrices.None.With("blaster_dl44", 1, 1_000d).With("blaster_dl44", 2, 2_000d);
         BrowseRow Row(ulong id, int condition, bool broken = false)
             => new(id, 1, "blaster_dl44", MarketCategory.Other, 1, 1, 900, 900, 99) { Condition = condition, MaxCondition = 1000, Broken = broken };
-        var spent = Worn(1, 101, 1, 100, 1000, repairs: 2);
+        var spent = Worn(1, 101, 1, 0, 1000, broken: true);
         var spare = new GearItem(2, ItemCatalog.Blaster, 3, 101, 0, "blaster_dl44", 1) { Condition = 50, MaxCondition = 1000 };
         var rng = 1u;
         Assert.Multiple(() =>

@@ -114,6 +114,39 @@ describe('the vendor, the bench and salvage (Loïc, 2026-11-02: a vendor buy sai
   });
 });
 
+describe("an operator (the dashboard's accounts page)", () => {
+  it('say the credits it gave or took, and the items it gave, not those it took', () => {
+    const batch = [
+      credits('admingrant', 5000, true, null, '0', 40),
+      credits('admintake', 120, false, null, '0', 41),
+      drop('admingrant', 'DL-44 Blaster', 3, 1, '0', 42),
+      drop('admintake', 'Hide', 1, 4, '0', 43, false),
+    ];
+    expect(noticeLines(batch)).toEqual([
+      'An operator gave you 5,000 cr',
+      'An operator took 120 cr',
+      'Given by an operator: DL-44 Blaster Mk III',
+    ]);
+  });
+});
+
+describe('a refine', () => {
+  it('says what it made and its fee, not the units it took', () => {
+    const batch = [
+      drop('refine', 'Ranged Core', 1, 6, '9', 40, false),
+      drop('refine', 'Ranged Core', 2, 2, '9', 40),
+      credits('refine', 154, false, null, '9', 40),
+    ];
+    expect(noticeLines(batch)).toEqual(['Refined: Ranged Core Mk II ×2 for 154 cr']);
+  });
+});
+
+describe('a shuttle ticket', () => {
+  it('says the fare it paid', () => {
+    expect(noticeLines([credits('fare', 150, false, null, '1', 40)])).toEqual(['Bought a shuttle ticket for 150 cr']);
+  });
+});
+
 describe('the announced notices', () => {
   afterEach(() => {
     useChat.getState().clear();

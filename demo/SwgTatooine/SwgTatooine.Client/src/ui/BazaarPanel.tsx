@@ -9,6 +9,7 @@ import {
   MAX_UNIT_PRICE,
   priceOf,
   standardMaterialPrice,
+  itemVendorPayout,
   vendorPayout,
   type BazaarTab,
   type MarketCategory,
@@ -475,7 +476,14 @@ function SellTab() {
   const price = stack === undefined ? undefined : priceOf(prices, stack.item, stack.mk);
   const total = sell.quantity * sell.unitPrice;
   const fee = fees(total).listFee;
-  const payout = price === undefined ? 0 : vendorPayout(sell.quantity, price.vendor);
+  const payout =
+    price === undefined
+      ? 0
+      : stack?.stats === undefined
+        ? vendorPayout(sell.quantity, price.vendor)
+        : itemVendorPayout(price.vendor, stack.stats, stack.count);
+  // An item with stats worth nothing is still taken — scrapped, its end a decay row — where units worth nothing are refused.
+  const scrap = stack?.stats !== undefined && price !== undefined && payout === 0;
   const full = mine !== null && mine.listed.length >= mine.caps.listings;
   return (
     <>
@@ -517,6 +525,7 @@ function SellTab() {
                 aria-label="Quantity"
                 min={1}
                 max={stack.count}
+                disabled={stack.stats !== undefined}
                 value={sell.quantity}
                 onChange={(e) => {
                   setQuantity(Number(e.target.value));
@@ -558,11 +567,25 @@ function SellTab() {
             </button>
             <button
               type="button"
-              disabled={here === 0 || pending || payout === 0}
-              title={here === 0 ? NOT_HERE : payout === 0 ? 'The vendor will not buy that' : 'The units are destroyed'}
+              disabled={here === 0 || pending || (payout === 0 && !scrap)}
+              title={
+                here === 0
+                  ? NOT_HERE
+                  : scrap
+                    ? 'Broken or worn out: the vendor takes it for nothing'
+                    : payout === 0
+                      ? 'The vendor will not buy that'
+                      : stack.stats === undefined
+                        ? 'The units are destroyed'
+                        : 'Paid by the condition it has left'
+              }
               onClick={vendor}
             >
-              {payout === 0 ? 'The vendor will not buy this' : `Sell to vendor for ${formatCredits(payout)}`}
+              {scrap
+                ? 'Scrap at the vendor (pays nothing)'
+                : payout === 0
+                  ? 'The vendor will not buy this'
+                  : `Sell to vendor for ${formatCredits(payout)}`}
             </button>
           </div>
         </>

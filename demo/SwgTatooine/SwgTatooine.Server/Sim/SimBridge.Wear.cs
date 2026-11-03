@@ -154,11 +154,13 @@ public sealed partial class SimBridge
     /// <summary>A creature's hit landed on a body: its damage, before mitigation, added to the armour's sum (§ 9.1).</summary>
     internal static bool CountHit(ref PlayerGear gear, int damage)
     {
+        var before = gear.ArmorWear;
         var points = Math.Min(ushort.MaxValue, gear.ArmorWear + Math.Max(0, damage));
         gear.ArmorWear = (ushort)points;
-        return CountUse(ref gear) || points >= WearFlushPoints;
+        return CountUse(ref gear) | (before < WearFlushPoints && points >= WearFlushPoints);
     }
 
+    // Due once, at the crossing (review, 2026-11-03): every use past it queued the body again until the next flush. A flush that fails queues it again.
     private static bool CountUse(ref PlayerGear gear)
     {
         if (gear.Uses < byte.MaxValue)
@@ -166,7 +168,7 @@ public sealed partial class SimBridge
             gear.Uses++;
         }
 
-        return gear.Uses >= WearFlushUses;
+        return gear.Uses == WearFlushUses;
     }
 
     /// <summary>
@@ -258,8 +260,10 @@ public sealed partial class SimBridge
                 continue;
             }
 
+            var end = stats;
             if (DestroyWorn(tx, character, k, ItemMoveKind.Decay, 0, worldTick))
             {
+                NoteGearEnd(GearEnd.WornOut, piece.Mk, in end);
                 _wearCounts.Decayed++;
                 switch (piece.Mk)
                 {
@@ -417,6 +421,13 @@ public sealed partial class SimBridge
         var item = EntityId.FromRawValue(command.Value.Item);
         var items = ItemsOf(owner);
         var (template, mk, worn) = HeldOrWorn(items, item);
+        var held = SlotOf(items, item);
+        if (held != 0 && items.Slots[held].Count != 1)
+        {
+            RefuseCraft(subs, in command, TatooineReplication.ItemCrated);
+            return;
+        }
+
         var kit = KitOf(template);
         if (template == 0 || kit == 0 || !TryStatsOf(tx, item, out var stats))
         {
@@ -604,6 +615,12 @@ public sealed partial class SimBridge
             return;
         }
 
+        if (items.Slots[s].Count != 1)
+        {
+            RefuseCraft(subs, in command, TatooineReplication.ItemCrated);
+            return;
+        }
+
         var (template, mk) = (items.Slots[s].Template, items.Slots[s].Mk);
         var back = SalvageOf(template, mk);
         if (!RoomForSalvage(items, back))
@@ -629,6 +646,7 @@ public sealed partial class SimBridge
             }
         }
 
+        NoteGearEnd(GearEnd.Salvaged, mk, in stats);
         _wearCounts.Salvages++;
         _craftBodies.Add(body);
         _salvagesApplied.Add(command);

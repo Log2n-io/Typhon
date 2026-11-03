@@ -158,7 +158,7 @@ public sealed partial class SimBridge
         _deskWalletsMoved.Clear();
     }
 
-    /// <summary>The <c>Ledger</c> system: the wallets asked for by a bind, then this tick's tips, in that order.</summary>
+    /// <summary>The <c>Ledger</c> system: the wallets asked for by a bind, then this tick's tips, then its shuttle fares, in that order.</summary>
     public void LedgerTick(TickContext ctx)
     {
         if (Halted(ctx.TickNumber))
@@ -177,8 +177,10 @@ public sealed partial class SimBridge
             GearDueOnBind(character, body);
         }
 
+        SettleTickets(tick);
         var tips = subs == null ? default : subs.Commands<GiveCredits>();
-        if (_economyLoaded && _walletsAsked.Count == 0 && tips.Count == 0)
+        var boards = subs == null ? default : subs.Commands<BoardShuttle>();
+        if (_economyLoaded && _walletsAsked.Count == 0 && tips.Count == 0 && boards.Count == 0 && !FaresDue)
         {
             _boundThisTick.Clear();
             return;
@@ -200,22 +202,32 @@ public sealed partial class SimBridge
 
         if (tips.Count > 0)
         {
-            TatooineReplication.FillCharacterBodies(_econBodies);
-            _econCharacterOf.Clear();
-            foreach (var (character, body) in _econBodies)
-            {
-                _econCharacterOf[body] = character;
-            }
-
+            FillEconCharacters();
             foreach (var command in tips)
             {
                 TipFromCommand(tx, tick0, subs, in command, worldTick);
             }
         }
 
+        foreach (var command in boards)
+        {
+            FareFromCommand(tx, tick0, subs, in command, worldTick);
+        }
+
+        if (FaresDue)
+        {
+            if (tips.Count == 0)
+            {
+                FillEconCharacters();
+            }
+
+            ChargeFaresDue(tx, tick0, worldTick);
+        }
+
         FlushItemHead(tx);
-        var committed = EndEconomy(tx.Commit());
+        var committed = !Volatile.Read(ref _failNextLedger) ? EndEconomy(tx.Commit()) : FailLedgerOnce();
         var packs = EndItems(committed);
+        EndFares(tick0, subs, committed);
         _boundThisTick.Clear();
         if (!committed)
         {
@@ -240,6 +252,28 @@ public sealed partial class SimBridge
         }
     }
 
+    /// <summary>Every body online to its character, for this tick's tips and fares.</summary>
+    private void FillEconCharacters()
+    {
+        TatooineReplication.FillCharacterBodies(_econBodies);
+        _econCharacterOf.Clear();
+        foreach (var (character, body) in _econBodies)
+        {
+            _econCharacterOf[body] = character;
+        }
+    }
+
+    private bool _failNextLedger;
+
+    /// <summary>The checks' failure injection: the Ledger's next transaction is not committed, as if the commit had failed.</summary>
+    internal void FailNextLedgerWriteForChecks() => Volatile.Write(ref _failNextLedger, true);
+
+    private bool FailLedgerOnce()
+    {
+        Volatile.Write(ref _failNextLedger, false);
+        return EndEconomy(false);
+    }
+
     /// <summary>Reads the wallets and the head on the first use after a start or a failed commit.</summary>
     private void EnsureEconomy(Transaction tx)
     {
@@ -257,6 +291,7 @@ public sealed partial class SimBridge
     /// <returns>Whether it committed.</returns>
     private bool EndEconomy(bool committed)
     {
+        SettleNotices(committed);
         if (_economyDirty)
         {
             if (committed)

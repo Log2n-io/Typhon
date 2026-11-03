@@ -950,10 +950,12 @@ public static class MarketEndpoints
             }
             else
             {
-                // One sale is one seller's units of one item, paid the floor on all of them, to that seller.
+                // One sale is one seller's units of one item, paid the floor on all of them, to that seller. An item with stats is paid by the condition
+                // it had left (Loïc, 2026-11-03), which its destroyed entity no longer says: from 1 credit to the floor of a new one.
                 var sale = vendorSales[creditSeq];
                 var payout = MarketValues.VendorPayout(sale.Template, sale.Mk, sale.Units);
-                if (!sale.One || credit.To != sale.Seller || credit.Amount != payout)
+                var paid = ItemCatalog.HasStats(sale.Template) ? credit.Amount >= 1 && credit.Amount <= payout : credit.Amount == payout;
+                if (!sale.One || credit.To != sale.Seller || !paid)
                 {
                     result.Violation("MA-5", $"vendor credit seq {creditSeq} paid {credit.Amount} to {credit.To}; its rows sold {sale.Units} of {sale.Template} Mk "
                         + $"{sale.Mk} from {sale.Seller}{(sale.One ? "" : " and other items or sellers")}, worth {payout}");

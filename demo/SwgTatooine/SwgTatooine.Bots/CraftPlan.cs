@@ -308,12 +308,23 @@ public static class CraftPlan
         var spare = new List<HeldPart>(parts);
         Needs(book, book.Of(target), held, spare, need, 0);
         var deficits = new SortedDictionary<ushort, int>();
+        // A slot is filled from one Mk (Units, Assemble): what is held counts by the Mk holding the most, not summed across Mks (review, 2026-11-03).
+        Span<int> byMk = stackalloc int[6];
         foreach (var (template, count) in need)
         {
-            var have = 0;
+            byMk.Clear();
             foreach (var h in held)
             {
-                have += h.Template == template ? h.Count : 0;
+                if (h.Template == template && h.Mk is >= 0 and <= 5)
+                {
+                    byMk[h.Mk] += h.Count;
+                }
+            }
+
+            var have = 0;
+            foreach (var n in byMk)
+            {
+                have = Math.Max(have, n);
             }
 
             if (count > have)
@@ -388,7 +399,7 @@ public static class CraftPlan
         var parts = new List<HeldPart>();
         foreach (var g in gear)
         {
-            if (!g.Worn && g.Template is >= FirstPart and <= LastPart)
+            if (!g.Worn && !g.Crate && g.Template is >= FirstPart and <= LastPart)
             {
                 parts.Add(new HeldPart(g.Id, g.Template, g.Grade));
             }

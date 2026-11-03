@@ -139,6 +139,7 @@ public sealed class DashboardFeed : BackgroundService
 
             Record("tx/s", Number(stats, "economy", "transfersPerSec", "10s"));
             Record("drops/min", Number(stats, "items", "dropsPerMin", "10s"));
+            Record("crafts/min", Number(stats, "craft", "finishedPerMin", "10s"));
             Record("sales/min", Number(stats, "market", "salesPerMin", "10s"));
             Record("faucets/min", Number(stats, "economy", "faucetsPerMin", "10s"));
             Record("sinks/min", Number(stats, "economy", "sinksPerMin", "10s"));

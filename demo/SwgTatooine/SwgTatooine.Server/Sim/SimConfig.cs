@@ -323,6 +323,14 @@ public sealed class SimConfig
     public bool Unpaced;
 
     /// <summary>
+    /// Every client command's rate and burst multiplied by this (2026-11-02). <b>Tests only, and deliberately no command-line flag:</b> the rates are the
+    /// server's abuse limit, counted in wall-clock seconds by the engine, so no tick rate shortens a check that sends many commands — the refusal checks
+    /// spent half a second per command waiting on them, and nearly half the suite's time was such waits. A check whose subject is the rate itself (the
+    /// bots trading at the commands' rate) keeps 1.
+    /// </summary>
+    public int CommandRateScale = 1;
+
+    /// <summary>
     /// Restore the pre-#927 packing bound: computed from <c>CellState.EntityCount</c>, the grid-wide sum over every archetype sharing the cell, rather than
     /// from this archetype's own population. The A/B arm, so the comparison is one binary and one switch rather than two builds.
     /// </summary>

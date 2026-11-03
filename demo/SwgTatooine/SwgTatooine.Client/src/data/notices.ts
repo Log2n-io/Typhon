@@ -49,10 +49,14 @@ const DROP_PREFIX: Readonly<Partial<Record<string, string>>> = {
   standard: 'Bought from the vendor',
   make: 'Crafted',
   salvage: 'Salvaged',
+  // What a refine made (crafting-catalog.md § 11.1), with its fee; the units it took are not said, as a craft's inputs are not.
+  refine: 'Refined',
+  // Given by an operator from the back office (the dashboard's accounts page); what one takes is not said, as no other loss of items is.
+  admingrant: 'Given by an operator',
 };
 
-/** The drop kinds whose line names the credits the same kind paid on the same tick: a vendor buy's price. */
-const PRICED_DROPS: ReadonlySet<string> = new Set(['standard']);
+/** The drop kinds whose line names the credits the same kind paid on the same tick: a vendor buy's price, a refine's fee. */
+const PRICED_DROPS: ReadonlySet<string> = new Set(['standard', 'refine']);
 
 /**
  * The chat lines of one batch of notices — every notice of one frame — oldest first.
@@ -117,6 +121,16 @@ function creditLine(
   const who = n.other ?? 'somebody';
   if (n.kind === 'tip') {
     return n.incoming ? `${who} tipped you ${formatCredits(n.amount)}` : `You tipped ${who} ${formatCredits(n.amount)}`;
+  }
+
+  if (n.kind === 'fare') {
+    return `Bought a shuttle ticket for ${formatCredits(n.amount)}`;
+  }
+
+  if (n.kind === 'admingrant' || n.kind === 'admintake') {
+    return n.incoming
+      ? `An operator gave you ${formatCredits(n.amount)}`
+      : `An operator took ${formatCredits(n.amount)}`;
   }
 
   // The tax a sale paid is the notice naming the same listing.

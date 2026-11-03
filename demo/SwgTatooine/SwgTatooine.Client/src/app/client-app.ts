@@ -61,6 +61,7 @@ import { useCraft } from '../state/craft-store';
 import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
+import { useMap } from '../state/map-store';
 import { useMissions } from '../state/mission-store';
 import { announceNotices, useWallet } from '../state/wallet-store';
 import { useSessionStore } from '../state/session-store';
@@ -221,6 +222,9 @@ const MOUNT_ANSWER_MS = 1500;
 
 /** How often the navigation pane rescans for the nearest facilities: five times a second is a walk of a metre or two. */
 const NAV_INTERVAL_MS = 200;
+
+/** How often the planet map's player marker moves while the map is open: ten times a second follows a run without a store write a frame. */
+const MAP_INTERVAL_MS = 100;
 const REGION_INTERVAL_MS = 200;
 const PICK_RADIUS_PX = 8;
 const FRAME_SAMPLES = 128;
@@ -1937,6 +1941,32 @@ export class ClientApp {
     }
   }
 
+  private mapAtMs = Number.NEGATIVE_INFINITY;
+
+  /**
+   * The planet map's player marker (`map-store`), only while the map is open: where the body stands — the predicted position, as the
+   * waypoint pane's — and the camera's yaw. None for a session with no avatar on the planet: a god camera, a room, a dungeon.
+   */
+  private updateMapPlayer(nowMs: number, yaw: number): void {
+    const map = useMap.getState();
+    if (!map.open || nowMs - this.mapAtMs < MAP_INTERVAL_MS) {
+      return;
+    }
+
+    this.mapAtMs = nowMs;
+    const source = this.source;
+    const onPlanet = source !== null && source.canPlay && source.selfNetId !== 0 && this.profile.kind === 'planet';
+    map.setPlayer(
+      onPlanet
+        ? {
+            x: this.predictor.active ? this.predictor.x : this.eyeX,
+            z: this.predictor.active ? this.predictor.z : this.eyeZ,
+            yaw,
+          }
+        : null,
+    );
+  }
+
   /** Turns the pane's arrows to the camera, every frame: up is straight ahead (see `relativeBearing`). */
   private paintNav(yaw: number): void {
     if (!this.navShown) {
@@ -3440,6 +3470,7 @@ export class ClientApp {
     this.updateCraft();
     this.updateNav(now);
     this.paintNav(cam.yaw);
+    this.updateMapPlayer(now, cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
     // The placements are held in planet coordinates, so they follow the origin the frame it snaps. One node, every frame:
     // cheaper than asking whether it moved.
@@ -4401,6 +4432,7 @@ export class ClientApp {
       items: ticketMenuItems(
         ui.shuttleport?.city ?? -1,
         CITIES.map((c) => c.name),
+        this.shuttleSchedule?.fare ?? 0,
       ),
     });
     return false;

@@ -28,6 +28,7 @@ import {
   parseBrowse,
   parseMine,
   parsePrices,
+  itemVendorPayout,
   vendorPayout,
   type MarketCommand,
   type MarketListing,
@@ -101,14 +102,26 @@ describe('the fees', () => {
     // A Hide Mk I is 1.7 cr: the vendor pays 0.34 cr a unit.
     expect(vendorPayout(20, 340)).toBe(6);
     expect(vendorPayout(2, 340)).toBe(0);
+    // An item with stats by the condition it has left (2026-11-03); broken, nothing; a part, which has no condition, whole.
+    expect(itemVendorPayout(181_200, { condition: 1_800_000, maxCondition: 3_600_000 })).toBe(90);
+    expect(itemVendorPayout(181_200, { condition: 0, maxCondition: 3_600_000, broken: true })).toBe(0);
+    expect(itemVendorPayout(181_200, { condition: 0, maxCondition: 0 })).toBe(181);
     expect(vendorPayout(1, 145_200)).toBe(145);
     expect(vendorPayout(5, 0)).toBe(0);
   });
 });
 
 describe('a refusal', () => {
-  it('reads every reason of § 3.1, 151-163 in order, the workshop 164-182, and NotInWorld reused', () => {
-    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 32 }, (_, i) => 151 + i)]);
+  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, and NotInWorld reused", () => {
+    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([
+      142,
+      ...Array.from({ length: 32 }, (_, i) => 151 + i),
+      184,
+      185,
+      186,
+      187,
+    ]);
+    expect(marketRefusal(184)).toContain('refine');
     expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
     expect(marketRefusal(MarketReason.StanceNoWeapon)).toContain('weapon');
     expect(marketRefusal(MarketReason.Sold)).toBe('Sold to someone else first');

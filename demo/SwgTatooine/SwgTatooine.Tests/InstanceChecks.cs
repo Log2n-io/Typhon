@@ -25,6 +25,7 @@ internal sealed class InstanceChecks : ServedChecks
     private TatooineSim Start(bool persist = false)
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.Persist = persist;
         var sim = new TatooineSim(config);
@@ -54,7 +55,7 @@ internal sealed class InstanceChecks : ServedChecks
 
     private static MissionTerminalRef Home(TatooineSim sim) => sim.Index.Bazaars[0];
 
-    private void Breathe() => Harness.Ticks(Worlds.ServedHz / 2 + 1);
+    private void Breathe() => Harness.Ticks(Worlds.FastCommandGapTicks);
 
     /// <summary>Credits the honest way: Mk IV armour cores, minted and sold to the vendor at a fifth of 5 950 each.</summary>
     private void Earn(TatooineSim sim, Trader t, int cores)
@@ -211,6 +212,9 @@ internal sealed class InstanceChecks : ServedChecks
         SessionHarness.Until(() => Market.Listings(sim).Values.Any(l => l.Seller == a.Key), "the listing");
         Harness.Ticks(2);
         var (listing, l) = Market.Listings(sim).Single(kv => kv.Value.Seller == a.Key);
+        // The board is a snapshot published every MarketPublishMs, not the ledger: two ticks after the listing it may not be on it yet. It passed while
+        // the commands' half-second gaps happened to straddle a publish (2026-11-02).
+        SessionHarness.Until(() => sim.Bridge.MarketBoard.Cities.SelectMany(c => c.Listings).Any(v => v.Id == listing), "the listing on the board");
         Assert.Multiple(() =>
         {
             Assert.That((l.Template, l.Mk, l.Quantity), Is.EqualTo((Gloves, (byte)1, 1)));
@@ -270,7 +274,8 @@ internal sealed class InstanceChecks : ServedChecks
         Expect(() => BuyStandard(a.Link, Gloves, 1), TatooineReplication.MarketSold, "another price");
         Expect(() => BuyStandard(a.Link, ItemCatalog.CoreArmor, 1), TatooineReplication.MarketBadListing, "not standard issue");
         Expect(() => BuyStandard(a.Link, Blaster, Equipment.StandardPrice(Blaster)), TatooineReplication.MarketNotEnough, "1 812 cr against 240");
-        Expect(() => Market.List(a.Link, Gloves, 1, 2, 500, id.RawValue), TatooineReplication.MarketBadListing, "two at a time");
+        // Two of one item: a quantity is the item's count — 1, or a crate's (crafting-catalog.md § 11.2) — so two of a single one are not held.
+        Expect(() => Market.List(a.Link, Gloves, 1, 2, 500, id.RawValue), TatooineReplication.MarketNoItems, "two of one item");
         Expect(() => Market.List(a.Link, Gloves, 1, 1, 500, 12345), TatooineReplication.MarketNoItems, "an id it does not hold");
         Expect(() => Market.List(a.Link, Gloves, 1, 1, 500), TatooineReplication.MarketNoItems, "no id");
         Expect(() => Market.Vendor(a.Link, Gloves, 1, 1, 12345), TatooineReplication.MarketNoItems, "the vendor, a wrong id");
@@ -287,6 +292,7 @@ internal sealed class InstanceChecks : ServedChecks
     public void ANewCharacter_GetsTheWelcomePack_ExactlyOnce()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.WelcomePack = true;
         using var sim = new TatooineSim(config);

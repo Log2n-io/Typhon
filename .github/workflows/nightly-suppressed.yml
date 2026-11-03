@@ -73,7 +73,9 @@ jobs:
           fi
 
       - name: Build (Release)
-        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+        run: |
+          dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+          dotnet build demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release
 
       # `Category=Nightly` is a ONE-term filter, and that is load-bearing: NUnit runs an [Explicit] test when it
       # reads the filter as naming it. The gate's 305-term class filter does not qualify, which is precisely why
@@ -98,6 +100,15 @@ jobs:
             --logger "trx;LogFileName=nightly.trx" \
             --results-directory ci-out \
             2>&1 | tee ci-out/nightly.log
+          # The SWG demo's own Nightly tier (its tuning measures): the same one-term filter, its own trx. The guard and the verdict below read every
+          # trx in ci-out.
+          dotnet test demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            -c Release --no-build \
+            --filter "Category=Nightly&Category!=Quarantine" \
+            --blame-hang --blame-hang-timeout 300s \
+            --logger "trx;LogFileName=nightly-swg.trx" \
+            --results-directory ci-out \
+            2>&1 | tee ci-out/nightly-swg.log
 
       # ── The load-bearing guard ────────────────────────────────────────────────────────────────────────────
       # A tier that selects ZERO tests and reports green is the exact defect this whole issue is about, one level

@@ -36,6 +36,15 @@ public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int 
 
     public bool Broken { get; init; }
 
+    /// <summary>How many it is: 1, or a crate's count (crafting-catalog.md § 11.2) — listed and sold whole, never worn nor crafted with.</summary>
+    public int Count { get; init; } = 1;
+
+    /// <summary>What it packs with (the server's <c>packKey</c>): equal for identical pristine items; null for one that does not pack.</summary>
+    public string PackKey { get; init; }
+
+    /// <summary>Whether it is a crate.</summary>
+    public bool Crate => Count > 1;
+
     /// <summary>Worn down (crafting-build.md § 6): broken, or under 20 % of its max — time to repair it or replace it.</summary>
     public bool WornDown => Broken || (MaxCondition > 0 && Condition * 5L < MaxCondition);
 }

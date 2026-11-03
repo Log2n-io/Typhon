@@ -129,8 +129,13 @@ export interface MarketState {
    * rather than after {@link MARKET_ANSWER_MS}.
    */
   readonly settle: (row: string) => void;
+  /** Who hears that the workshop's row was refused: the crafting store, which forgets the step it waited for. */
+  readonly onCraftRefused: (handler: (() => void) | null) => void;
   /** Takes off what is worn in an equip slot, 101-107. */
   readonly unequip: (slot: number) => void;
+  /** Packs an item or a crate into an identical one; takes items out of a crate (crafting-catalog.md § 11.2). Refusals show on the `'gear'` row. */
+  readonly pack: (item: string, into: string) => void;
+  readonly unpack: (item: string, count: number) => void;
   /** The server refused `command` with `reason`. */
   readonly refused: (reason: number, command: MarketCommand) => void;
   /**
@@ -172,11 +177,22 @@ export const useMarket = create<MarketState>((set, get) => {
     }
 
     set({ pending: [...get().pending, row], rowNotices: omit(get().rowNotices, row) });
+    // This send's own: a row settled early and sent again is not cleared by the first send's timer (review, 2026-11-03).
+    const seq = (sendSeqOf.get(row) ?? 0) + 1;
+    sendSeqOf.set(row, seq);
     setTimeout(() => {
-      clearPending(row);
+      if (sendSeqOf.get(row) === seq) {
+        clearPending(row);
+      }
     }, MARKET_ANSWER_MS);
     return true;
   };
+
+  /** Told when the workshop's row is refused — the crafting store's `forget`, set by it (the two stores import one way only). */
+  let refusedCraft: (() => void) | null = null;
+
+  /** The last send of each row, by sequence. */
+  const sendSeqOf = new Map<string, number>();
 
   const clearPending = (row: string): void => {
     if (get().pending.includes(row)) {
@@ -352,7 +368,9 @@ export const useMarket = create<MarketState>((set, get) => {
     setSellQuantity: (quantity) => {
       const stack = get().stacks.find((s) => s.id === get().sell.stack);
       const max = Math.min(MAX_LISTING_QTY, stack?.count ?? MAX_LISTING_QTY);
-      set({ sell: { ...get().sell, quantity: clampInt(quantity, 1, max) } });
+      // An item with stats, or a crate of them, goes whole.
+      const min = stack?.stats === undefined ? 1 : max;
+      set({ sell: { ...get().sell, quantity: clampInt(quantity, min, max) } });
     },
     setSellPrice: (unitPrice) => {
       set({ sell: { ...get().sell, unitPrice: clampInt(unitPrice, 1, MAX_UNIT_PRICE) } });
@@ -381,12 +399,12 @@ export const useMarket = create<MarketState>((set, get) => {
         return;
       }
 
-      // An item with stats is listed by its id, one at a time (crafting-build.md § 2.1).
+      // An item with stats is listed by its id, one at a time (crafting-build.md § 2.1) — a crate whole, its count the quantity.
       send({
         kind: 'list',
         template: stack.template,
         mk: stack.mk,
-        quantity: stack.stats === undefined ? sell.quantity : 1,
+        quantity: stack.stats === undefined ? sell.quantity : stack.count,
         unitPrice: sell.unitPrice,
         ...(stack.stats === undefined ? {} : { item: stack.id }),
       });
@@ -406,7 +424,7 @@ export const useMarket = create<MarketState>((set, get) => {
       send(
         stack.stats === undefined
           ? { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: sell.quantity }
-          : { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: 1, item: stack.id },
+          : { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: stack.count, item: stack.id },
       );
     },
     buyStandard: (template, price, quantity) => {
@@ -420,11 +438,20 @@ export const useMarket = create<MarketState>((set, get) => {
     settle: (row) => {
       clearPending(row);
     },
+    onCraftRefused: (handler) => {
+      refusedCraft = handler;
+    },
     equip: (itemId) => {
       send({ kind: 'equip', item: itemId });
     },
     unequip: (slot) => {
       send({ kind: 'unequip', slot });
+    },
+    pack: (item, into) => {
+      send({ kind: 'pack', item, into });
+    },
+    unpack: (item, count) => {
+      send({ kind: 'unpack', item, count });
     },
     refused: (reason, command) => {
       const row = commandRow(command);
@@ -444,6 +471,11 @@ export const useMarket = create<MarketState>((set, get) => {
       }
 
       const text = marketRefusal(reason, city);
+      // The workshop's step refused is not waited for: a later inventory read must not report it done (review, 2026-11-03).
+      if (row === 'craft') {
+        refusedCraft?.();
+      }
+
       set({
         pending: get().pending.filter((r) => r !== row),
         rowNotices: { ...get().rowNotices, [row]: text },

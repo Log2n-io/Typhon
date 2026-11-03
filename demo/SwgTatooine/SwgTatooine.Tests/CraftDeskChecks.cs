@@ -22,6 +22,7 @@ internal sealed class CraftDeskChecks : ServedChecks
     private TatooineSim Start(bool persist = false)
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.Persist = persist;
         var sim = new TatooineSim(config);
@@ -48,7 +49,7 @@ internal sealed class CraftDeskChecks : ServedChecks
         return new Crafter(link, body, character);
     }
 
-    private void Breathe() => Harness.Ticks(Worlds.ServedHz / 2 + 1);
+    private void Breathe() => Harness.Ticks(Worlds.FastCommandGapTicks);
 
     private static void StartCraft(FakeLink link, ushort schematic, byte[] mks, ulong[] parts)
     {
@@ -152,6 +153,27 @@ internal sealed class CraftDeskChecks : ServedChecks
             Assert.That(sim.Bridge.TryCraftOf(c.Key, out _), Is.False, "the craft outlived its finish");
             Assert.That(sim.Bridge.CraftFees, Is.Zero, "a part has no value, so no fee");
         });
+
+        // The dashboard's crafting card (Loïc, 2026-11-02): the grip counted under its template and listed as the latest craft, by its crafter, with its
+        // grade; nothing under way any more.
+        ItemCatalog.TryGet(Schematics.Grip, out var gripItem);
+        using (var doc = System.Text.Json.JsonDocument.Parse(sim.Bridge.DemoStatsJson()))
+        {
+            var craft = doc.RootElement.GetProperty("craft");
+            var latest = craft.GetProperty("recent")[0];
+            var name = CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, 0x9501), out _, out var profile) ? profile.Name.AsString : null;
+            Assert.Multiple(() =>
+            {
+                Assert.That(craft.GetProperty("finished").GetInt64(), Is.EqualTo(1));
+                Assert.That(craft.GetProperty("underWay").GetInt64(), Is.Zero);
+                Assert.That(craft.GetProperty("made").GetProperty(gripItem.Asset)[0].GetInt64(), Is.EqualTo(1), "one grip, no Mk");
+                Assert.That(latest.GetProperty("item").GetString(), Is.EqualTo(gripItem.Asset));
+                Assert.That(latest.GetProperty("crafter").GetString(), Is.EqualTo(name));
+                Assert.That(latest.GetProperty("stats").GetProperty("grade").GetInt32(), Is.EqualTo((int)Math.Round(expected[0])));
+                Assert.That(latest.GetProperty("at").GetInt64(), Is.GreaterThan(0));
+            });
+        }
+
         AuditsOk(sim, "after the grip");
     }
 
@@ -353,5 +375,163 @@ internal sealed class CraftDeskChecks : ServedChecks
         Harness.Ticks(2);
         Assert.That(Items.Stacks(second, again.Character).Count(s => s.Stack.Template == Schematics.KnucklePlate), Is.EqualTo(1));
         AuditsOk(second, "after the reopen and the finish");
+    }
+
+    private static void Refine(FakeLink link, ushort template, byte mk, int count)
+        => link.SendCommand(
+            nameof(RefineItems),
+            new RecordValues { ["template"] = FieldValue.Of(template), ["mk"] = FieldValue.Of(mk), ["count"] = FieldValue.Of(count) });
+
+    /// <summary>
+    /// Refine (crafting-catalog.md § 11.1): seven Mk I cores at a station, two refined — six destroyed and two Mk II made, <c>refine</c> rows all naming the
+    /// first, and the fee, 5 % of the two Mk II's value, a <c>refine</c> credit row naming it too; one Mk I left. The audits clean, the ratio among them.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void Cores_RefineThreeToOne_ForTheFee_AsRefineRows()
+    {
+        using var sim = Start();
+        var c = LogIn(sim, 0x9601, 1);
+        Stage(sim, c, ItemCatalog.CoreRanged, 1, 7);
+        Harness.Ticks(1);
+        var rows = Items.Rows(sim).Count;
+        var credits = Ledgers.Rows(sim).Count;
+        var balance = Ledgers.Balance(sim, c.Character);
+
+        Refine(c.Link, ItemCatalog.CoreRanged, 1, 2);
+        SessionHarness.Until(() => sim.Bridge.Refines == 1, "the refine applied");
+        Breathe();
+
+        var made = Items.Rows(sim).Skip(rows).ToList();
+        var paid = Ledgers.Rows(sim).Skip(credits).ToList();
+        var fee = Refining.FeeOf(ItemCatalog.CoreRanged, 1, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(fee, Is.EqualTo(154), "5 % of two Mk II cores");
+            Assert.That(Market.Units(sim, c.Character, ItemCatalog.CoreRanged, 1), Is.EqualTo(1));
+            Assert.That(Market.Units(sim, c.Character, ItemCatalog.CoreRanged, 2), Is.EqualTo(2));
+            Assert.That(made.Select(r => (r.Kind, r.Mk, r.From == c.Key, r.To == c.Key)).Distinct(), Is.EquivalentTo(new[]
+            {
+                (ItemMoveKind.Refine, (byte)1, true, false), (ItemMoveKind.Refine, (byte)2, false, true),
+            }));
+            Assert.That(made.Where(r => r.Mk == 1).Sum(r => r.Count), Is.EqualTo(6));
+            Assert.That(made.Select(r => r.Ref).Distinct(), Is.EqualTo(new[] { made[0].Seq }), "every row names the first");
+            Assert.That(paid.Select(r => (r.Kind, r.From, r.To, r.Amount, r.Ref)), Is.EqualTo(new[]
+            {
+                (TransferKind.Refine, c.Key, EconomyLedger.World, fee, made[0].Seq),
+            }));
+            Assert.That(Ledgers.Balance(sim, c.Character), Is.EqualTo(balance - fee));
+            Assert.That(sim.Bridge.RefinedInto(2), Is.EqualTo(2));
+        });
+        AuditsOk(sim, "after the refine");
+    }
+
+    /// <summary>
+    /// Materials refine by their own ratio (12 Mk I units to one Mk II, § 11.1), and the last step makes Mk V, which only a mission cache mints otherwise:
+    /// seven Mk IV add-ons into one Mk V, for 555 cr. The audits clean.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void Materials_RefineByTheirRatio_AndTheLastStepMakesMkV()
+    {
+        using var sim = Start();
+        var c = LogIn(sim, 0x9602, 1);
+        Stage(sim, c, ItemCatalog.Metal, 1, 30);
+        Stage(sim, c, ItemCatalog.AddonWeapon, 4, 7);
+        Harness.Ticks(1);
+        var balance = Ledgers.Balance(sim, c.Character);
+
+        Refine(c.Link, ItemCatalog.Metal, 1, 2);
+        Refine(c.Link, ItemCatalog.AddonWeapon, 4, 1);
+        SessionHarness.Until(() => sim.Bridge.Refines == 2, "both refines applied");
+        Breathe();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Market.Units(sim, c.Character, ItemCatalog.Metal, 1), Is.EqualTo(6));
+            Assert.That(Market.Units(sim, c.Character, ItemCatalog.Metal, 2), Is.EqualTo(2));
+            Assert.That(Market.Units(sim, c.Character, ItemCatalog.AddonWeapon, 4), Is.Zero);
+            Assert.That(Market.Units(sim, c.Character, ItemCatalog.AddonWeapon, 5), Is.EqualTo(1));
+            Assert.That(
+                Ledgers.Balance(sim, c.Character), Is.EqualTo(balance - 556),
+                "the add-on's 555 cr, and the 1 cr a refine pays at least: two Mk II metal units are worth under one");
+        });
+        AuditsOk(sim, "after the refines");
+    }
+
+    /// <summary>
+    /// What does not refine is refused with its reason and writes nothing: a kit, Mk V, no count, more than a crate's worth of cores, inputs not
+    /// held, and a refine away from a station.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void ARefineOfWhatDoesNotRefine_IsRefusedAndWritesNothing()
+    {
+        using var sim = Start();
+        var c = LogIn(sim, 0x9603, 1);
+        Stage(sim, c, ItemCatalog.CoreMelee, 1, 2);
+        Stage(sim, c, ItemCatalog.CoreMelee, 5, 7);
+        Harness.Ticks(1);
+        var rows = Items.Rows(sim).Count;
+        var credits = Ledgers.Rows(sim).Count;
+
+        Refine(c.Link, ItemCatalog.KitWeaponRepair, 0, 1);
+        Breathe();
+        Refine(c.Link, ItemCatalog.CoreMelee, 5, 1);
+        Breathe();
+        Refine(c.Link, ItemCatalog.CoreMelee, 1, 0);
+        Breathe();
+        Refine(c.Link, ItemCatalog.CoreMelee, 1, Refining.MaxItemsPerAction + 1);
+        Breathe();
+        Refine(c.Link, ItemCatalog.CoreMelee, 1, 1);
+        Breathe();
+        Worlds.Park(sim, c.Link.Session, sim.Index.Stations[0].X + 60f, sim.Index.Stations[0].Z);
+        Harness.Ticks(2);
+        Refine(c.Link, ItemCatalog.CoreMelee, 5, 1);
+        Breathe();
+        Harness.Ticks(3);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Count(c.Link, TatooineReplication.RefineBad), Is.EqualTo(4), "a kit, Mk V, no count, past a crate");
+            Assert.That(Count(c.Link, TatooineReplication.CraftBadInputs), Is.EqualTo(1), "two Mk I cores for one Mk II");
+            Assert.That(Count(c.Link, TatooineReplication.CraftNotAtStation), Is.EqualTo(1));
+            Assert.That(Items.Rows(sim), Has.Count.EqualTo(rows), "a refusal writes no item row");
+            Assert.That(Ledgers.Rows(sim), Has.Count.EqualTo(credits), "nor a credit row");
+            Assert.That(sim.Bridge.Refines, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A Workshop pass that does not commit tells nothing of what it would have done (review, 2026-11-03): the refine is refused, no notice of it is heard,
+    /// the units are where they were; the next refine goes through and is told.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AWorkshopPassThatFails_IsRefused_AndToldNothing()
+    {
+        using var sim = Start();
+        var c = LogIn(sim, 0x9604, 1);
+        Stage(sim, c, ItemCatalog.CoreRanged, 1, 6);
+        Harness.Ticks(1);
+
+        sim.Bridge.FailNextWorkshopWriteForChecks();
+        Refine(c.Link, ItemCatalog.CoreRanged, 1, 1);
+        SessionHarness.Until(() => Count(c.Link, TatooineReplication.CraftFailed) == 1, "the refine refused with its pass");
+        Harness.Ticks(3);
+        var told = Notices.Heard(c.Link).Count(n => n.Kind == "refine");
+        var units = Market.Units(sim, c.Character, ItemCatalog.CoreRanged, 1);
+
+        Refine(c.Link, ItemCatalog.CoreRanged, 1, 1);
+        SessionHarness.Until(() => sim.Bridge.Refines == 1, "the second refine");
+        Harness.Ticks(3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(told, Is.Zero, "a refine that never committed was told");
+            Assert.That(units, Is.EqualTo(6));
+            Assert.That(sim.Bridge.WorkshopAborted, Is.EqualTo(1));
+            Assert.That(Notices.Heard(c.Link).Count(n => n.Kind == "refine"), Is.GreaterThan(0), "the refine that committed is told");
+        });
+        AuditsOk(sim, "after the refines");
     }
 }

@@ -28,6 +28,8 @@ export interface InventoryItem {
   readonly count: number;
   /** An item with stats (crafting-build.md § 2.1): its lines by category, its condition. Absent for units. */
   readonly stats?: ItemStats;
+  /** What it packs with into a crate (crafting-catalog.md § 11.2): equal for identical pristine items; absent for one that does not pack. */
+  readonly packKey?: string;
 }
 
 /** What `/swg/inventory` says of an item with stats: a weapon's or an armour piece's lines, and its wear. */
@@ -130,8 +132,9 @@ export function parseInventory(answer: unknown): InventorySnapshot | null {
     open: a.open === true,
     slots: a.slots,
     items: a.items.filter(isItem).map((i) => {
-      const { stats, ...rest } = i;
-      const item = { ...rest, template: typeof i.template === 'number' ? i.template : 0 };
+      const { stats, packKey, ...rest } = i;
+      const base = { ...rest, template: typeof i.template === 'number' ? i.template : 0 };
+      const item = typeof packKey === 'string' ? { ...base, packKey } : base;
       return isStats(stats) ? { ...item, stats } : item;
     }),
     lost: a.lost.filter(isLost),

@@ -2457,8 +2457,10 @@ public sealed partial class BotSwarm : IAsyncDisposable
         // Read like a browser's: GET /swg/missions with the bot's own token whenever the body's owner field `journal` moves.
         private static readonly HttpClient JournalHttp = new() { Timeout = TimeSpan.FromSeconds(10) };
 
-        /// <summary>How long a first failed owner read waits before it is asked again, from when it ended: three seconds at the usual 4 Hz, doubled per
-        /// failure in a row (<see cref="OwnerFieldPoll"/>).</summary>
+        /// <summary>
+        /// How long a first failed owner read waits before it is asked again, from when it ended: three seconds at the usual 4 Hz, doubled per failure in
+        /// a row (<see cref="OwnerFieldPoll"/>).
+        /// </summary>
         private const long OwnerReadRetryTicks = 12;
         private readonly Uri _missionsUri;
         private readonly string _token;

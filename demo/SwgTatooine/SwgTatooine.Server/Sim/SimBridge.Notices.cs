@@ -14,6 +14,11 @@ namespace SwgTatooine.Server;
 /// the other side's name read once per character a tick.
 /// </para>
 /// <para>
+/// <b>Only rows that committed are told</b> (review, 2026-11-03): a writer's notices are kept when its transaction commits and dropped when it does not, at
+/// <see cref="SettleNotices"/> — every writer ends through <c>EndItems</c> or <c>EndEconomy</c>, which call it. A failed refine was told "Refined" and
+/// refused at once.
+/// </para>
+/// <para>
 /// <b>Only to a character with a session.</b> The world, a listing and a character nobody plays have no session; their side is dropped at the telling.
 /// A notice is news: one queued while its player is between sessions is not kept for later.
 /// </para>
@@ -24,13 +29,16 @@ public sealed partial class SimBridge
     private readonly Dictionary<EntityId, uint> _noticeSessions = [];
     private readonly Dictionary<long, Utf8Text256> _noticeNames = [];
     private readonly object _noticesLock = new();
+
+    // How many of _notices belong to transactions that committed: those past it are the transaction under way's.
+    private int _noticesCommitted;
     private ushort? _characterArchetype;
 
     /// <summary>Queues the notice of one ledger row to each of its sides that is not the world.</summary>
     private void QueueNotice(byte ledger, long from, long to, long world, string kind, long amount, int count, ushort template, byte mk, long reference)
     {
-        // A measured run, and a check that serves nothing, has nobody to tell.
-        if (!TatooineReplication.Declared)
+        // A measured run, and a check that serves nothing, has nobody to tell; a move between two stacks of one owner (a pack) is no news.
+        if (!TatooineReplication.Declared || from == to)
         {
             return;
         }
@@ -60,6 +68,20 @@ public sealed partial class SimBridge
                 notice.Incoming = 1;
                 _notices.Add((to, from, notice));
             }
+        }
+    }
+
+    /// <summary>A writer's transaction ended: its notices are kept for the telling when it committed, dropped when it did not.</summary>
+    private void SettleNotices(bool committed)
+    {
+        lock (_noticesLock)
+        {
+            if (!committed && _notices.Count > _noticesCommitted)
+            {
+                _notices.RemoveRange(_noticesCommitted, _notices.Count - _noticesCommitted);
+            }
+
+            _noticesCommitted = _notices.Count;
         }
     }
 
@@ -123,6 +145,7 @@ public sealed partial class SimBridge
             }
 
             _notices.Clear();
+            _noticesCommitted = 0;
         }
     }
 

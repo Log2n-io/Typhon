@@ -570,6 +570,9 @@ public static class TatooineHost
         app.MapProgress(runtime.Engine);
         app.MapFacilities();
 
+        // The back office (accounts.md § 2), for the dashboard's accounts page: only with SWG_ADMIN_KEY set, and every call must carry it.
+        app.MapAdmin(runtime.Engine, Environment.GetEnvironmentVariable(AdminEndpoints.KeyVariable));
+
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
         // 08-hosting.md § 7's stats page, now that the engine can answer it (#ENG-07). The same numbers the STATS block sends to game clients, plus the
@@ -642,7 +645,8 @@ public static class TatooineHost
                 ? string.Empty
                 : FormattableString.Invariant(
                     $",\"shuttle\":{{\"intervalTicks\":{boarding.IntervalTicks},\"windowTicks\":{boarding.WindowTicks},")
-                  + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)}}}");
+                  + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)},")
+                  + FormattableString.Invariant($"\"fare\":{TatooineData.ShuttleFare}}}");
             // The demo's dashboard, on this host: the client links to it. Absent when there is none.
             var dashboard = DashboardPort > 0 ? FormattableString.Invariant($",\"dashboardPort\":{DashboardPort}") : string.Empty;
             return Results.Text(

@@ -320,8 +320,17 @@ public sealed partial class SimBridge
                 // schedule and fades out on touchdown, so a boarding hashed somewhere into the window would hold that client's screen black for up to the
                 // whole of it. The scripted crowd keeps the trickle — it is #910's workload. "A session's" is any body a session possesses, stated as
                 // "not the crowd's" rather than as one controller kind, so no kind a possession may carry later can become a branch on bot-ness.
-                var key = cluster.GetEntityId(idx).EntityKey;
+                // A session's passenger flies on a paid ticket only (SimBridge.Fares.cs): queued this tick, its fare is charged by this tick's Ledger,
+                // which runs after this phase, so it waits here for the next one; one queued unpaid is handed to that Ledger to charge.
+                var id = cluster.GetEntityId(idx);
+                var key = id.EntityKey;
                 var session = controls[idx].Kind != ControllerKind.Scripted;
+                if (session && !HoldsTicket(id))
+                {
+                    FareDue(id);
+                    continue;
+                }
+
                 var board = session || (_config.ShuttleBurst
                     ? phase < k
                     : Hash01(Salt(tick, key, 0x5A17EE21u)) * (window - phase) < k);
@@ -370,6 +379,10 @@ public sealed partial class SimBridge
                 state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, key, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
                 TatooineReplication.Replicate(in cluster, idx);
                 boardings++;
+                if (session)
+                {
+                    FlewOnTicket(id);
+                }
 
                 // The port probe reads planet 0's ports: only arrivals there count (review #4).
                 if (planet == 0 && !interPlanet)

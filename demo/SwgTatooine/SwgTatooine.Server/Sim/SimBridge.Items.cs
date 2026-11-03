@@ -301,6 +301,8 @@ public sealed partial class SimBridge
     /// <returns>Whether it committed.</returns>
     private bool EndItems(bool committed)
     {
+        EndGearEnds(committed);
+        SettleNotices(committed);
         if (_itemsDirty)
         {
             if (committed)

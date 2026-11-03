@@ -170,10 +170,13 @@ public sealed class BotTelemetryChecks
             var g = recorder.Goals;
             Assert.Multiple(() =>
             {
-                Assert.That(g[0], Is.EqualTo((Goal.Choosing, Goal.Hunting, GoalWhy.Spawned, GoalWhy.CreatureNoticed)), "the hunt's start");
-                Assert.That(g[1], Is.EqualTo((Goal.Hunting, Goal.Visiting, GoalWhy.HuntTimeout, GoalWhy.ErrandStarted)), "the hunt given up, the errand chosen");
+                Assert.That(g[0], Is.EqualTo((Activity.Choosing, Activity.Hunting, GoalWhy.Spawned, GoalWhy.CreatureNoticed)), "the hunt's start");
+                Assert.That(
+                    g[1],
+                    Is.EqualTo((Activity.Hunting, Activity.Visiting, GoalWhy.HuntTimeout, GoalWhy.ErrandStarted)),
+                    "the hunt given up, the errand chosen");
                 Assert.That(g.Count, Is.GreaterThanOrEqualTo(3), "the errand's end was not observed");
-                Assert.That(g[2].From, Is.EqualTo(Goal.Visiting));
+                Assert.That(g[2].From, Is.EqualTo(Activity.Visiting));
                 Assert.That(g[2].Exit, Is.EqualTo(GoalWhy.VisitDone), "the choice after the errand does not say the visit was done");
                 Assert.That(g.All(t => t.Enter != GoalWhy.None), Is.True, "a transition began with no reason");
                 Assert.That(recorder.Legs, Does.Contain(LegWhy.Planned), "the errand's walk was not observed");
@@ -185,6 +188,25 @@ public sealed class BotTelemetryChecks
         }
 
         Assert.Fail("no seed under 400 chose the errand after the hunt");
+    }
+
+    /// <summary>
+    /// A visit is shown by what it visits (Loïc, 2026-11-03: crafting was nowhere on the dashboard): a crafting station's is Crafting, a bazaar's
+    /// Trading, a mission terminal's Visiting; any other goal is its own activity.
+    /// </summary>
+    [Test]
+    public void AVisit_IsShownByWhatItVisits()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(BotBrain.ActivityOf(Goal.Visiting, Routing.CraftingStationKind), Is.EqualTo(Activity.Crafting));
+            Assert.That(BotBrain.ActivityOf(Goal.Visiting, Routing.BazaarKind), Is.EqualTo(Activity.Trading));
+            Assert.That(BotBrain.ActivityOf(Goal.Visiting, Routing.MissionTerminalKind), Is.EqualTo(Activity.Visiting));
+            foreach (var goal in Enum.GetValues<Goal>().Where(g => g != Goal.Visiting))
+            {
+                Assert.That(BotBrain.ActivityOf(goal, Routing.CraftingStationKind).ToString(), Is.EqualTo(goal.ToString()), $"{goal} is its own activity");
+            }
+        });
     }
 
     /// <summary>BT-4: the report the bots write is read by the dashboard's model, every field where it was written.</summary>
@@ -201,7 +223,7 @@ public sealed class BotTelemetryChecks
             Assert.That(report.Hz, Is.EqualTo(4d));
             Assert.That(report.Tick, Is.EqualTo(1_000));
             Assert.That(report.Fleet.Bots, Is.EqualTo(1));
-            Assert.That(report.Fleet.Goals.Keys, Is.EquivalentTo(Enum.GetNames<Goal>()));
+            Assert.That(report.Fleet.Goals.Keys, Is.EquivalentTo(Enum.GetNames<Activity>()), "every activity, crafting and trading included");
             Assert.That(report.Fleet.Why["CreatureNoticed"], Is.EqualTo(1));
             Assert.That(report.Fleet.Totals["hunts"], Is.EqualTo(3));
             Assert.That(report.Fleet.Totals["goalChanges"], Is.GreaterThanOrEqualTo(1));
@@ -209,7 +231,7 @@ public sealed class BotTelemetryChecks
             Assert.That(report.Fleet.GoalChangesPerBotMin, Is.Not.Null);
 
             Assert.That(bot.Index, Is.EqualTo(40));
-            Assert.That(bot.Goal, Is.EqualTo(nameof(Goal.Hunting)));
+            Assert.That(bot.Goal, Is.EqualTo(nameof(Activity.Hunting)));
             Assert.That(bot.Cl, Is.EqualTo(3));
             Assert.That(bot.X, Is.EqualTo(12.5).Within(0.05));
             Assert.That(bot.Z, Is.EqualTo(-40.0).Within(0.05));
@@ -221,7 +243,7 @@ public sealed class BotTelemetryChecks
             Assert.That(bot.Events.Any(e => e.Kind == "intent" && e.Intent == nameof(IntentKind.Attack)), Is.True, "the attack was not recorded");
             Assert.That(bot.Events.Select(e => e.Seq), Is.Unique.And.Ordered);
             Assert.That(bot.Trail, Is.Not.Empty);
-            Assert.That(bot.Trail[0].Goal, Is.EqualTo(nameof(Goal.Hunting)));
+            Assert.That(bot.Trail[0].Goal, Is.EqualTo(nameof(Activity.Hunting)));
             Assert.That(bot.Intents[nameof(IntentKind.Attack)], Is.GreaterThan(0));
         });
 
@@ -392,7 +414,7 @@ public sealed class BotTelemetryChecks
         fleet.Begin();
         var stats = new long[Enum.GetValues<FleetStat>().Length];
         stats[(int)FleetStat.Hunts] = 3;
-        fleet.Add(0, brain.Goal, brain.Counters, stats);
+        fleet.Add(0, brain.Activity, brain.Counters, stats);
         fleet.End(DateTime.UtcNow);
 
         cursors = new (long, long)[1];
@@ -428,10 +450,11 @@ public sealed class BotTelemetryChecks
     /// <summary>An observer that keeps what it is told.</summary>
     private sealed class Recorder : IBrainTrace
     {
-        public readonly List<(Goal From, Goal To, GoalWhy Exit, GoalWhy Enter)> Goals = [];
+        public readonly List<(Activity From, Activity To, GoalWhy Exit, GoalWhy Enter)> Goals = [];
         public readonly List<LegWhy> Legs = [];
 
-        public void OnGoal(long tick, Goal from, Goal to, GoalWhy exit, GoalWhy enter, uint subject, float metres) => Goals.Add((from, to, exit, enter));
+        public void OnGoal(long tick, Activity from, Activity to, GoalWhy exit, GoalWhy enter, uint subject, float metres)
+            => Goals.Add((from, to, exit, enter));
 
         public void OnLeg(long tick, LegWhy what, int points, float metres) => Legs.Add(what);
     }

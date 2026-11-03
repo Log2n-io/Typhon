@@ -13,7 +13,7 @@ export const CRAFT_DONE_MS = 4000;
  * as the craft or the item read again on the next `items` revision, so that read is where it is done.
  */
 export interface CraftSent {
-  readonly kind: 'craftStart' | 'craftPoint' | 'craftEnhance' | 'craftFinish' | 'repair' | 'salvage';
+  readonly kind: 'craftStart' | 'craftPoint' | 'craftEnhance' | 'craftFinish' | 'repair' | 'salvage' | 'refine';
   readonly seq: number;
   /** The item repaired or salvaged; `''` for a craft step. */
   readonly item: string;
@@ -21,6 +21,9 @@ export interface CraftSent {
   readonly repairs: number;
   /** What the done line names: the schematic, the line a point went to, the item. */
   readonly label: string;
+  /** A refine's output, `template:mk`, and how many of it were held when it was sent; absent for the rest. */
+  readonly output?: string;
+  readonly units?: number;
 }
 
 /** What the panel says of the last step: done, or no answer. */
@@ -64,7 +67,16 @@ export function craftDoneText(
       return items.some((i) => i.id === sent.item)
         ? null
         : `Salvaged: ${sent.label} — its materials are in your inventory`;
+    case 'refine':
+      return unitsOfKey(items, sent.output ?? '') > (sent.units ?? 0) ? `Refined: ${sent.label}` : null;
   }
+}
+
+/** Units held of `template:mk`, the grid's stacks only. */
+function unitsOfKey(items: readonly InventoryItem[], key: string): number {
+  return items
+    .filter((i) => i.stats === undefined && i.slot <= 100 && `${String(i.template)}:${String(i.mk)}` === key)
+    .reduce((n, i) => n + i.count, 0);
 }
 
 /**
@@ -110,6 +122,10 @@ export interface CraftStore {
   /** Repair, or salvage, an item at the station (crafting-build.md C3). */
   readonly repair: (item: string) => void;
   readonly salvage: (item: string) => void;
+  /** Refine `count` of the next Mk from N units each of `template` at `mk` (crafting-catalog.md § 11.1). */
+  readonly refine: (template: number, mk: number, count: number, label: string) => void;
+  /** The server refused the step in flight: it is not waited for any more. */
+  readonly forget: () => void;
   /** A new session: nothing of the last character's craft or picks survives. */
   readonly reset: () => void;
 }
@@ -171,6 +187,10 @@ export const useCraft = create<CraftStore>((set, get) => {
     }, MARKET_ANSWER_MS);
   };
 
+  useMarket.getState().onCraftRefused(() => {
+    get().forget();
+  });
+
   const schematicName = (id: number): string => get().book?.schematics.find((x) => x.id === id)?.name ?? 'the craft';
 
   return {
@@ -222,6 +242,17 @@ export const useCraft = create<CraftStore>((set, get) => {
     },
     refresh: async () => {
       const generation = ++refreshGeneration;
+      // A repair, a salvage or a refine shows in the inventory, read already: settled now, whatever the craft read below does.
+      const early = get().sent;
+      if (early !== null && (early.kind === 'repair' || early.kind === 'salvage' || early.kind === 'refine')) {
+        const text = craftDoneText(early, null, null, items());
+        if (text !== null) {
+          set({ sent: null });
+          useMarket.getState().settle('craft');
+          say(text, true);
+        }
+      }
+
       if (get().book === null) {
         const book = parseSchematics(await fetchJson('swg/schematics'));
         if (book !== null) {
@@ -285,6 +316,17 @@ export const useCraft = create<CraftStore>((set, get) => {
     salvage: (item) => {
       const held = items().find((i) => i.id === item);
       issue({ kind: 'salvage', item }, { kind: 'salvage', item, repairs: 0, label: held?.name ?? 'the item' });
+    },
+    refine: (template, mk, count, label) => {
+      const output = `${String(template)}:${String(mk + 1)}`;
+      issue(
+        { kind: 'refine', template, mk, count },
+        { kind: 'refine', item: '', repairs: 0, label, output, units: unitsOfKey(items(), output) },
+      );
+    },
+    forget: () => {
+      sendSeq++;
+      set({ sent: null });
     },
     reset: () => {
       refreshGeneration++;

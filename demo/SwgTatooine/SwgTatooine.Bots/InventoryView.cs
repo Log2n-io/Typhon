@@ -65,6 +65,8 @@ public sealed record InventoryView(int Stacks, int LastLost)
                     MaxCondition = stats.TryGetProperty("maxCondition", out var m) ? m.GetInt32() : 1,
                     Repairs = stats.TryGetProperty("repairs", out var r) ? r.GetInt32() : 0,
                     Broken = stats.TryGetProperty("broken", out var b) && b.ValueKind == JsonValueKind.True,
+                    Count = s.TryGetProperty("count", out var n) ? n.GetInt32() : 1,
+                    PackKey = s.TryGetProperty("packKey", out var p) ? p.GetString() : null,
                 });
                 continue;
             }

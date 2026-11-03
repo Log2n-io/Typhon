@@ -11,6 +11,7 @@ import {
   slotGrid,
   type InventoryItem,
 } from '../data/items';
+import { cratesOf, packSteps } from '../data/crates';
 import { formatCredits } from '../data/wallet';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
@@ -124,6 +125,70 @@ export function InventoryWindow() {
         )}
       </div>
       {cells.every((c) => c === null) ? <div className="hint">No items yet.</div> : null}
+      <Crates items={inventory?.items ?? NO_ITEMS} />
+    </div>
+  );
+}
+
+const NO_ITEMS: readonly InventoryItem[] = [];
+
+/**
+ * Crates (crafting-catalog.md § 11.2): identical unused items packed into one slot, ten at most — a pack a click, the smallest into the fullest; a crate
+ * unpacked one item, or all of it, into free slots. A crate is listed and sold whole, and unpacked before it is worn.
+ */
+function Crates({ items }: { readonly items: readonly InventoryItem[] }) {
+  const pending = useMarket((s) => s.pending.includes('gear'));
+  const steps = packSteps(items);
+  const crates = cratesOf(items);
+  if (steps.length === 0 && crates.length === 0) {
+    return null;
+  }
+
+  const label = (name: string, mk: number): string => `${name}${mk > 0 ? ` Mk ${mkNumeral(mk)}` : ''}`;
+  return (
+    <div className="inventory-crates" aria-label="Crates">
+      <div className="hud-title">Crates</div>
+      {steps.map((s) => (
+        <div key={s.into} className="row">
+          <span>
+            {label(s.name, s.mk)} · {String(s.held)} identical
+          </span>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              useMarket.getState().pack(s.item, s.into);
+            }}
+          >
+            Pack ({String(s.total)} in a crate)
+          </button>
+        </div>
+      ))}
+      {crates.map((c) => (
+        <div key={c.id} className="row">
+          <span>
+            Crate: {label(c.name, c.mk)} ×{String(c.count)}
+          </span>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              useMarket.getState().unpack(c.id, 1);
+            }}
+          >
+            Unpack 1
+          </button>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              useMarket.getState().unpack(c.id, c.count - 1);
+            }}
+          >
+            Unpack all
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

@@ -8,7 +8,8 @@ using Microsoft.Extensions.Logging;
 using SwgTatooine.Dashboard;
 using SwgTatooine.Dashboard.Components;
 
-// The demo's dashboard: one page over what the game server publishes. Read-only, so it may bind the LAN (see the .csproj).
+// The demo's dashboard: one page over what the game server publishes, read-only; and the accounts page, which writes through the server's back office
+// and asks for the operators' key before it shows anything (see the .csproj).
 //   --port 5090            what the game server announces in /typhon/demo.json (its --dashboard-port)
 //   --bind 0.0.0.0         every interface by default: a person on the LAN opens it from the game client's link
 //   --server http://127.0.0.1:5080   the game server to read
@@ -41,6 +42,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardFeed>());
 // What the bot swarm reports when run with --dashboard (bot-telemetry.md): received here, never asked of the game server, which knows nothing of bots.
 builder.Services.AddSingleton<BotBoard>();
 builder.Services.AddSingleton(new WatchLink(clientUrl, serverUri.Port));
+
+// The accounts page (accounts.md § 2): the game server's back office, with the operators' key from the environment, and one unlock per browser session.
+builder.Services.AddSingleton(new AdminLink(serverUri, Environment.GetEnvironmentVariable(AdminLink.KeyVariable)));
+builder.Services.AddScoped<AdminSession>();
 
 var app = builder.Build();
 app.MapStaticAssets();

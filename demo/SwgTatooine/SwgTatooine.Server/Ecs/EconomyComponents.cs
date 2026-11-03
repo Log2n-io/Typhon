@@ -37,7 +37,10 @@ public static class TransferKind
     /// </summary>
     public const byte Standard = 8;
 
-    /// <summary>A shuttle ticket (crafting-catalog.md § 15.4, C5): the passenger pays World <see cref="TatooineData.ShuttleFare"/>. <see cref="LedgerEntry.Ref"/> is the shuttleport's raw id.</summary>
+    /// <summary>
+    /// A shuttle ticket (crafting-catalog.md § 15.4): a session's passenger pays World <see cref="TatooineData.ShuttleFare"/> when its boarding is accepted
+    /// (<c>SimBridge.Fares.cs</c>). <see cref="LedgerEntry.Ref"/> is the departure city plus one.
+    /// </summary>
     public const byte Fare = 9;
 
     /// <summary>The bench fee (crafting-catalog.md § 15.4): 3 % of a crafted item's value, the crafter to World. <see cref="LedgerEntry.Ref"/> is the craft's raw id.</summary>
@@ -46,8 +49,22 @@ public static class TransferKind
     /// <summary>A repair's fee (crafting-build.md C3): the owner → World. <see cref="LedgerEntry.Ref"/> is the repaired item's raw id.</summary>
     public const byte Repair = 11;
 
+    /// <summary>
+    /// Credits an operator gave a character from the back office (the dashboard's accounts page): World → the wallet. <see cref="LedgerEntry.Ref"/> is 0.
+    /// </summary>
+    public const byte AdminGrant = 12;
+
+    /// <summary>Credits an operator took from a character from the back office: the wallet → World. <see cref="LedgerEntry.Ref"/> is 0.</summary>
+    public const byte AdminTake = 13;
+
+    /// <summary>
+    /// The refine fee (crafting-catalog.md § 11.1, § 15.4): 5 % of the refined output's value, the refiner to World. <see cref="LedgerEntry.Ref"/> is the
+    /// seq of the refine's first item row.
+    /// </summary>
+    public const byte Refine = 14;
+
     /// <summary>The first kind past the last one: what a per-kind counter is sized by.</summary>
-    public const byte Count = 12;
+    public const byte Count = 15;
 
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
@@ -63,6 +80,9 @@ public static class TransferKind
         Fare => "fare",
         Bench => "bench",
         Repair => "repair",
+        AdminGrant => "admingrant",
+        AdminTake => "admintake",
+        Refine => "refine",
         _ => "unknown",
     };
 }

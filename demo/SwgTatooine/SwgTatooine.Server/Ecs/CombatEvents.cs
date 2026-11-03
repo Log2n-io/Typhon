@@ -166,6 +166,11 @@ internal struct ProgressRefresh
 
     /// <summary>Its character's progress, as the desk committed it.</summary>
     public CharacterProgress Progress;
+
+    /// <summary>
+    /// 1 when an operator set it (SimBridge.Admin.cs): the body takes its level exactly, down as well as up; 0 for a grant, which only raises.
+    /// </summary>
+    public byte Exact;
 }
 
 /// <summary>What a <see cref="KillEvent"/> killed.</summary>

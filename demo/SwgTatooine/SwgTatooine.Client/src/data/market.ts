@@ -222,6 +222,25 @@ export function vendorPayout(count: number, vendorMilli: number): number {
   return Math.floor((Math.max(0, count) * Math.max(0, vendorMilli)) / 1000);
 }
 
+/**
+ * What the vendor pays for one item with stats (Loïc, 2026-11-03): its payout by the condition it has left, ⌊payout × condition / max⌋ — the server's
+ * `VendorFromCommand`. 0 means it is scrapped: taken for nothing, broken or worn too far to be worth a credit. An item without a condition (a part) is paid
+ * whole.
+ */
+export function itemVendorPayout(
+  vendorMilli: number,
+  stats: { readonly condition: number; readonly maxCondition: number; readonly broken?: boolean },
+  count = 1,
+): number {
+  // A crate (crafting-catalog.md § 11.2) is sold whole: its count's payout, its items all pristine.
+  const full = vendorPayout(count, vendorMilli);
+  if (stats.maxCondition <= 0) {
+    return full;
+  }
+
+  return stats.broken === true ? 0 : Math.floor((full * Math.max(0, stats.condition)) / stats.maxCondition);
+}
+
 /** The fee preview the Sell tab shows: "fee 9 cr now · tax 72 cr at sale · you get 819". */
 export function feeLine(total: number): string {
   const f = fees(total);
@@ -311,6 +330,10 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   180: 'It has had its two repairs',
   181: 'Only a crafted item in your inventory can be salvaged',
   182: 'Not worn down enough to repair: it would lower its condition',
+  184: 'That does not refine, or not that many at once',
+  185: 'Those cannot be packed together: identical, unused, ten to a crate',
+  186: 'Nothing to unpack, or no room for it',
+  187: 'Unpack it first',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -392,7 +415,13 @@ export type MarketCommand =
   /** Repair an item at a station with a kit of its class (crafting-build.md C3). */
   | { readonly kind: 'repair'; readonly item: string }
   /** Salvage a crafted item at a station for a quarter of its quality materials. */
-  | { readonly kind: 'salvage'; readonly item: string };
+  | { readonly kind: 'salvage'; readonly item: string }
+  /** Refine at a station (crafting-catalog.md § 11.1): N units of `template` at `mk` into one of the next, `count` times. */
+  | { readonly kind: 'refine'; readonly template: number; readonly mk: number; readonly count: number }
+  /** Pack an item or a crate into an identical one (crafting-catalog.md § 11.2), anywhere. */
+  | { readonly kind: 'pack'; readonly item: string; readonly into: string }
+  /** Take `count` items out of a crate, each into a free slot. */
+  | { readonly kind: 'unpack'; readonly item: string; readonly count: number };
 
 /** The command's name in the server's catalog, and its fields as the codec names them. `null` for a malformed one. */
 export function marketWire(
@@ -460,6 +489,12 @@ export function marketWire(
       return { name: 'RepairItem', values: { item: itemOf(command.item) } };
     case 'salvage':
       return { name: 'SalvageItem', values: { item: itemOf(command.item) } };
+    case 'refine':
+      return { name: 'RefineItems', values: { template: command.template, mk: command.mk, count: command.count } };
+    case 'pack':
+      return { name: 'PackItem', values: { item: itemOf(command.item), into: itemOf(command.into) } };
+    case 'unpack':
+      return { name: 'UnpackItem', values: { item: itemOf(command.item), count: command.count } };
   }
 }
 
@@ -476,6 +511,8 @@ export function commandRow(command: MarketCommand): string {
       return 'issue';
     case 'equip':
     case 'unequip':
+    case 'pack':
+    case 'unpack':
       return 'gear';
     case 'craftStart':
     case 'craftPoint':
@@ -483,6 +520,7 @@ export function commandRow(command: MarketCommand): string {
     case 'craftFinish':
     case 'repair':
     case 'salvage':
+    case 'refine':
       // One row for the workshop: its refusals show on the panel, and a command in flight holds the next — a double click spends one point.
       return 'craft';
     case 'collect':

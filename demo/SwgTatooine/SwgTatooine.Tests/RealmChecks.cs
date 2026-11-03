@@ -36,6 +36,18 @@ internal static class Worlds
     /// </remarks>
     public const int ServedHz = 50;
 
+    /// <summary>
+    /// The command rate scale (<see cref="SimConfig.CommandRateScale"/>) of a check that only needs its commands through: 2 a second becomes 50, one a
+    /// tick at <see cref="ServedHz"/>, burst 100. The rates are counted in wall-clock seconds, so at 1 a check waited half a second after each command —
+    /// nearly half the suite's time (2026-11-02). A check whose subject is the rate (the bots trading at it) keeps 1.
+    /// </summary>
+    public const int FastCommands = 25;
+
+    /// <summary>
+    /// Ticks after a command at <see cref="FastCommands"/>: one for the command's tick, one for its effect or its refusal to be read, one spare.
+    /// </summary>
+    public const int FastCommandGapTicks = 3;
+
     /// <summary>A small world paced at <see cref="ServedHz"/>, for a fixture that serves it to fake clients.</summary>
     /// <param name="dir">Its database directory.</param>
     /// <returns>The configuration, which the caller may adjust further.</returns>

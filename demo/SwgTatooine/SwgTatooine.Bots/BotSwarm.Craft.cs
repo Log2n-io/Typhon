@@ -29,12 +29,15 @@ public sealed partial class BotSwarm
     /// <summary>The workshop's refusals, <c>CraftNotAtStation</c> … <c>RepairNotWorn</c>: the first application reason + 41 … + 54.</summary>
     public const byte CraftFirstReason = AckReasons.FirstApplicationReason + 41;
 
-    public const int CraftReasons = 14;
+    public const int CraftReasons = 19;
 
     /// <summary>The refusals' names, by offset from <see cref="CraftFirstReason"/>.</summary>
     public static readonly string[] CraftReasonNames =
         ["notAtStation", "busy", "none", "badInputs", "noPoints", "noRoom", "notEnough", "failed", "noAddon", "repairBadItem", "repairNoKit", "repairSpent",
-            "salvageBadItem", "repairNotWorn"];
+            "salvageBadItem", "repairNotWorn", "(shuttle)", "refineBad", "packBad", "unpackBad", "itemCrated"];
+
+    /// <summary>The offset of the shuttle's fare refusal (+55), inside the workshop's range but not the workshop's: never counted here.</summary>
+    private const int ShuttleOffset = 14;
 
     /// <summary>A craft's commands, in order: the start, a point per line listed, the add-on when it has one, the finish.</summary>
     public static List<CraftCommand> Encode(CraftJob job)
@@ -88,6 +91,8 @@ public sealed partial class BotSwarm
             t.Finished += Volatile.Read(ref bot.CraftsFinishSent);
             t.InputsBought += Volatile.Read(ref bot.CraftInputsBought);
             t.Repairs += Volatile.Read(ref bot.RepairsSent);
+            t.Refines += Volatile.Read(ref bot.RefinesSent);
+            t.Packs += Volatile.Read(ref bot.PacksSent);
             t.GearBought += Volatile.Read(ref bot.GearBought);
             t.ItemsListed += Volatile.Read(ref bot.ItemsListed);
             for (var i = 0; i < CraftReasons; i++)
@@ -114,6 +119,12 @@ public sealed partial class BotSwarm
 
         /// <summary>Repairs sent (§ 6, Repair): any trading bot's, not only the crafters'.</summary>
         public long RepairsSent;
+
+        /// <summary>Refines sent (crafting-catalog.md § 11.1): any trader's, at a station.</summary>
+        public long RefinesSent;
+
+        /// <summary>Packs sent (crafting-catalog.md § 11.2): identical spare gear put into crates.</summary>
+        public long PacksSent;
         public readonly long[] CraftRefused = new long[CraftReasons];
 
         private CraftBook _book;
@@ -168,10 +179,12 @@ public sealed partial class BotSwarm
                 _repairsDue = MarketPlan.RepairsDue(gear, held);
             }
 
+            CraftJob job = null;
             if (Crafts)
             {
                 var parts = CraftPlan.PartsOf(gear);
-                _craftJob = CraftPlan.Next(_book, _craftTargets, _craftTurn, held, parts);
+                job = CraftPlan.Next(_book, _craftTargets, _craftTurn, held, parts);
+                _craftJob = job;
 
                 // Only an input it can buy — one the vendor sells; Hide and Bone it hunts — and not again soon after a visit that bought none.
                 var wanted = false;
@@ -185,7 +198,27 @@ public sealed partial class BotSwarm
 
                 _inputWanted = wanted;
             }
+
+            // The craft planned just now, not the field, which a station visit may have taken meanwhile; and what it will wear as the wear rule says it,
+            // its weapon and its stacks included — or it packs the piece it was about to put on (review, 2026-11-03).
+            if (_trades)
+            {
+                var band = MarketPlan.Band(_brain.CombatLevel);
+                _refinesDue = RefinePlan.Due(held, band, job != null ? CraftPlan.Uses(_book, job) : null);
+                _packsDue = CratePlan.Packs(gear, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster, held));
+            }
         }
+
+        // Nothing due: one list each, never written (a station visit swaps them in).
+        private static readonly List<ulong> NoRepairs = [];
+        private static readonly List<(ushort Template, int Mk, int Count)> NoRefines = [];
+        private static readonly List<(ulong Item, ulong Into)> NoPacks = [];
+
+        /// <summary>The packs its last inventory read says are due (<see cref="CratePlan"/>), sent at its next station with the refines.</summary>
+        private volatile List<(ulong Item, ulong Into)> _packsDue = [];
+
+        /// <summary>The refines its last inventory read says are due (<see cref="RefinePlan"/>), sent at its next station.</summary>
+        private volatile List<(ushort Template, int Mk, int Count)> _refinesDue = [];
 
         /// <summary>Its next target lacks an input the vendor sells and it can make nothing: an errand to the bazaar to buy it (§ 6, Inputs).</summary>
         private volatile bool _inputWanted;
@@ -222,22 +255,41 @@ public sealed partial class BotSwarm
                 return;
             }
 
-            var job = Crafts ? _craftJob : null;
-            _craftJob = null;
-            var repairs = _repairsDue;
-            _repairsDue = [];
-            _ = CraftAsync(job, repairs, _brain.VisitSerial);
+            // Each taken whole and replaced in one step: an inventory read landing between a read and a clear would be lost, or sent twice.
+            var job = Crafts ? Interlocked.Exchange(ref _craftJob, null) : null;
+            var repairs = Interlocked.Exchange(ref _repairsDue, NoRepairs);
+            var refines = Interlocked.Exchange(ref _refinesDue, NoRefines);
+            var packs = Interlocked.Exchange(ref _packsDue, NoPacks);
+            _ = CraftAsync(job, repairs, refines, packs, _brain.VisitSerial);
         }
 
-        private async Task CraftAsync(CraftJob job, List<ulong> repairs, long visit)
+        private async Task CraftAsync(CraftJob job, List<ulong> repairs, List<(ushort Template, int Mk, int Count)> refines,
+            List<(ulong Item, ulong Into)> packs, long visit)
         {
             try
             {
-                // Repairs first (crafting-build.md § 6, Repair), each a command of its own; then the craft.
+                // Repairs first (crafting-build.md § 6, Repair), each a command of its own; then the refines; then the craft.
                 var plan = new List<CraftCommand>();
                 foreach (var item in repairs)
                 {
                     plan.Add(new CraftCommand(RepairCommand, new RecordValues { ["item"] = FieldValue.OfUInt64(item) }));
+                }
+
+                foreach (var (template, mk, count) in refines)
+                {
+                    plan.Add(new CraftCommand(
+                        RefinePlan.Command,
+                        new RecordValues
+                        {
+                            ["template"] = FieldValue.Of((double)template), ["mk"] = FieldValue.Of((double)mk), ["count"] = FieldValue.Of((double)count),
+                        }));
+                }
+
+                foreach (var (item, into) in packs)
+                {
+                    plan.Add(new CraftCommand(
+                        CratePlan.Command,
+                        new RecordValues { ["item"] = FieldValue.OfUInt64(item), ["into"] = FieldValue.OfUInt64(into) }));
                 }
 
                 if (!Crafts)
@@ -319,6 +371,12 @@ public sealed partial class BotSwarm
                 case RepairCommand:
                     Interlocked.Increment(ref RepairsSent);
                     break;
+                case RefinePlan.Command:
+                    Interlocked.Increment(ref RefinesSent);
+                    break;
+                case CratePlan.Command:
+                    Interlocked.Increment(ref PacksSent);
+                    break;
                 default:
                     Interlocked.Increment(ref CraftsFinishSent);
                     break;
@@ -335,7 +393,7 @@ public sealed partial class BotSwarm
             for (var i = 0; i < acks.Count; i++)
             {
                 var offset = acks[i].Reason - CraftFirstReason;
-                if (offset is >= 0 and < CraftReasons)
+                if (offset is >= 0 and < CraftReasons && offset != ShuttleOffset)
                 {
                     Interlocked.Increment(ref CraftRefused[offset]);
                 }
@@ -374,6 +432,8 @@ public struct CraftTotals
     public long Finished;
     public long InputsBought;
     public long Repairs;
+    public long Refines;
+    public long Packs;
 
     /// <summary>Every trading bot's, not only the crafters': gear of its band bought off the board, items with stats listed.</summary>
     public long GearBought;

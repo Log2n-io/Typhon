@@ -602,6 +602,26 @@ button.active {
   gap: 8px;
 }
 
+/* A section's title folds it (Hud.tsx): a button drawn as the title, with the closed section's one figure after it. */
+.hud-fold {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.hud-fold:hover,
+.hud-fold:focus-visible {
+  text-decoration: underline;
+}
+
+.hud-fold-summary {
+  margin-left: 8px;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+}
+
 .hud-dashboard {
   color: var(--accent);
   font-size: 11px;
@@ -835,6 +855,85 @@ button.active {
   font-variant-numeric: tabular-nums;
   line-height: 1;
   text-shadow: 0 0 2px #000;
+}
+
+/* Crates (InventoryWindow.tsx): a pack or an unpack per line, under the grid. */
+.inventory-crates {
+  margin-top: 8px;
+}
+
+.inventory-crates .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* The planet map (PlanetMap.tsx): centred, over every other window — the tooltip portal alone above it. */
+.planet-map {
+  z-index: 950;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 6px 8px 8px;
+}
+
+.planet-map-head,
+.planet-map-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.planet-map-head {
+  margin-bottom: 6px;
+}
+
+.planet-map-title {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.planet-map-tools {
+  display: flex;
+  gap: 4px;
+}
+
+.planet-map-tools button {
+  min-width: 28px;
+}
+
+.planet-map-canvas {
+  display: block;
+  border-radius: 4px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.planet-map-canvas:active {
+  cursor: grabbing;
+}
+
+.planet-map-foot {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.planet-map-scale {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.planet-map-scale-bar {
+  display: inline-block;
+  height: 4px;
+  border: 1px solid var(--muted);
+  border-top: none;
 }
 
 /* In a portal on the body, placed by ItemTip: the inventory scrolls, which clips anything positioned inside it. */

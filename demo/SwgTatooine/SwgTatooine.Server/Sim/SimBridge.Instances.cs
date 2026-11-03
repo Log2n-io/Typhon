@@ -71,17 +71,19 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// <see cref="ItemTransfer"/> for a template with stats: one instance, whole. From a character it is <paramref name="item"/>, which must sit in its grid
-    /// (an equipped item is unequipped first); from a listing it is the one in its escrow. To World it is destroyed; to a listing it goes into escrow; to a
-    /// character, into its lowest free slot. Validated whole before the first write.
+    /// <see cref="ItemTransfer"/> for a template with stats: one instance, whole — an item, or a crate of <paramref name="count"/> (<see cref="Crates"/>),
+    /// which
+    /// must be its count. From a character it is <paramref name="item"/>, which must sit in its grid (an equipped item is unequipped first); from a listing it
+    /// is the one in its escrow. To World it is destroyed; to a listing it goes into escrow; to a character, into its lowest free slot. Validated whole before
+    /// the first write.
     /// </summary>
-    /// <returns>1 when moved; 0, having written nothing, when refused.</returns>
+    /// <returns><paramref name="count"/> when moved; 0, having written nothing, when refused.</returns>
     private int InstanceTransfer(Transaction tx, long from, long to, ushort template, byte mk, int count, byte kind, long reference, long worldTick,
         EntityId item)
     {
         var fromListing = IsListing(from);
         var toListing = IsListing(to);
-        if (count != 1 || from == ItemLedger.World || (fromListing && toListing) || (fromListing && to == ItemLedger.World))
+        if (count is < 1 or > Crates.Capacity || from == ItemLedger.World || (fromListing && toListing) || (fromListing && to == ItemLedger.World))
         {
             Interlocked.Increment(ref _itemsRefused);
             return 0;
@@ -93,7 +95,7 @@ public sealed partial class SimBridge
         {
             var listingKey = fromListing ? from : to;
             if (!_book.TryGetValue(listingKey, out entry) || entry.L.Template != template || entry.L.Mk != mk
-                || entry.L.Quantity != (fromListing ? 1 : 0))
+                || entry.L.Quantity != (fromListing ? count : 0))
             {
                 Interlocked.Increment(ref _itemsRefused);
                 return 0;
@@ -113,7 +115,8 @@ public sealed partial class SimBridge
             src = SlotOf(giver, item);
         }
 
-        if (!IsInstance(item) || (!fromListing && src == 0) || (giver != null && (giver.Slots[src].Template != template || giver.Slots[src].Mk != mk)))
+        if (!IsInstance(item) || (!fromListing && src == 0)
+            || (giver != null && (giver.Slots[src].Template != template || giver.Slots[src].Mk != mk || giver.Slots[src].Count != count)))
         {
             Interlocked.Increment(ref _itemsRefused);
             return 0;
@@ -139,7 +142,7 @@ public sealed partial class SimBridge
         if (giver != null)
         {
             giver.Slots[src] = default;
-            _pendingHeld[k]--;
+            _pendingHeld[k] -= count;
             _pendingStacks--;
         }
         else
@@ -150,11 +153,11 @@ public sealed partial class SimBridge
         if (to == ItemLedger.World)
         {
             tx.Destroy(item);
-            AppendItemRow(tx, from, to, key, 0, 0, 0, 1, template, mk, kind, reference, worldTick);
-            _itemHead.Destroyed++;
-            _pendingDestroyed[k]++;
+            AppendItemRow(tx, from, to, key, 0, 0, 0, count, template, mk, kind, reference, worldTick);
+            _itemHead.Destroyed += count;
+            _pendingDestroyed[k] += count;
             _itemHeadDirty = true;
-            return 1;
+            return count;
         }
 
         var e = tx.OpenMut(item);
@@ -167,42 +170,49 @@ public sealed partial class SimBridge
         if (toListing)
         {
             _escrowItemOf[to] = item;
-            entry.L.Quantity = 1;
-            AppendItemRow(tx, from, to, key, to, 0, 1, 1, template, mk, kind, reference, worldTick);
+            entry.L.Quantity = count;
+            AppendItemRow(tx, from, to, key, to, 0, count, count, template, mk, kind, reference, worldTick);
         }
         else
         {
-            taker.Slots[dst] = new ItemSlot { Stack = item, Template = template, Mk = mk, Count = 1, Instance = true };
-            _pendingHeld[k]++;
+            taker.Slots[dst] = new ItemSlot { Stack = item, Template = template, Mk = mk, Count = count, Instance = true };
+            _pendingHeld[k] += count;
             _pendingStacks++;
             if (fromListing)
             {
                 entry.L.Quantity = 0;
             }
 
-            AppendItemRow(tx, from, to, fromListing ? from : key, key, 0, 1, 1, template, mk, kind, reference, worldTick);
+            AppendItemRow(tx, from, to, fromListing ? from : key, key, 0, count, count, template, mk, kind, reference, worldTick);
         }
 
         if (entry != null)
         {
             entry.L.LastSeq = _itemHead.LastSeq;
             entry.L.Rows++;
-            _bookEscrow += fromListing ? -1 : 1;
+            _bookEscrow += fromListing ? -count : count;
             tx.OpenMut(entry.Id).Set(ListingArch.Entry, entry.L);
             MarkCityDirty(in entry.L);
         }
 
         _itemHeadDirty = true;
-        return 1;
+        return count;
     }
 
-    /// <summary>Whether <paramref name="owner"/>'s grid holds the instance <paramref name="item"/>, of that template and Mk.</summary>
-    private bool HoldsInstance(long owner, EntityId item, ushort template, byte mk)
+    /// <summary>
+    /// Whether <paramref name="owner"/>'s grid holds the instance <paramref name="item"/>, of that template and Mk, <paramref name="count"/> of it — 1 for
+    /// an item, a crate's count for a crate.
+    /// </summary>
+    private bool HoldsInstance(long owner, EntityId item, ushort template, byte mk, int count)
     {
         var items = ItemsOf(owner);
         var s = SlotOf(items, item);
-        return s != 0 && items.Slots[s].Instance && items.Slots[s].Template == template && items.Slots[s].Mk == mk;
+        return s != 0 && items.Slots[s].Instance && items.Slots[s].Template == template && items.Slots[s].Mk == mk && items.Slots[s].Count == count;
     }
+
+    /// <summary>Whether a listing's goods fit a grid: units by the room for them, an item with stats — or a crate — by one free slot.</summary>
+    private static bool FitsListing(OwnerItems items, in Listing l)
+        => ItemCatalog.HasStats(l.Template) ? FreeSlot(items) != 0 : RoomFor(items, l.Template, l.Mk) >= l.Quantity;
 
     /// <summary>
     /// Destroys what a character wears in equip slot <c>First + k</c>, to World with one row — an item worn out (crafting-catalog.md § 9.2). The grid is

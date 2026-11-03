@@ -1070,8 +1070,10 @@ public struct PlayerState
     /// <summary>Which city this player calls home. Travel legs start and end at cities far more often than at random points.</summary>
     [Field] public int HomeCity;
 
-    /// <summary>The city whose shuttleport this player is walking to or queued at (#910) — or, while <see cref="PlayerActivity.LeavingRoom"/>, the
-    /// waypoint of the room's route it is walking to.</summary>
+    /// <summary>
+    /// The city whose shuttleport this player is walking to or queued at (#910) — or, while <see cref="PlayerActivity.LeavingRoom"/>, the waypoint of the
+    /// room's route it is walking to.
+    /// </summary>
     [Field] public int ShuttleFrom;
 
     /// <summary>The city the shuttle takes this player to — or, while walking to, through or out of a door, the realm of the ROOM that door belongs to

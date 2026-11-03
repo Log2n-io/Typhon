@@ -66,7 +66,7 @@ public static class BotReportWriter
     }
 
     // The names once, not per report.
-    private static readonly string[] GoalNames = Enum.GetNames<Goal>();
+    private static readonly string[] GoalNames = Enum.GetNames<Activity>();
     private static readonly string[] StatNames = Camel(Enum.GetNames<FleetStat>());
     private static readonly string[] WhyNames = Enum.GetNames<GoalWhy>();
     private static readonly string[] LegNames = Enum.GetNames<LegWhy>();

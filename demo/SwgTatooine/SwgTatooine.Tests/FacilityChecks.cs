@@ -131,8 +131,8 @@ public sealed class FacilityChecks
     }
 
     /// <summary>
-    /// A crafting station stands beside every gate's bazaar (Loïc, 2026-11-02): within its own reach of the bazaar's stand point, so what is bought there
-    /// is crafted without a step, and clear of the bazaar's footprint.
+    /// A crafting station stands beside every gate's bazaar (Loïc, 2026-11-02): a few steps from it, and clear of its approach (see
+    /// <see cref="WorldBuilder.GateStationX"/>).
     /// </summary>
     [Test]
     public void ACraftingStation_StandsBesideEveryGatesBazaar()
@@ -150,7 +150,7 @@ public sealed class FacilityChecks
                 }
             }
 
-            Assert.That(nearest, Is.InRange(StructureFootprint.HalfExtentM(StructureKind.Bazaar) + 1.38f, TatooineData.StationReachM - 1.2f),
+            Assert.That(nearest, Is.InRange(WorldBuilder.GateStationX - WorldBuilder.GateFacilityX - 0.01f, 10f),
                 $"region {region}: the nearest station is {nearest:F1} m from the gate's bazaar");
         }
     }

@@ -618,7 +618,8 @@ if (brain)
 
         Console.WriteLine(
             $"crafting: {c.Crafters} crafter(s); {c.Started} start(s), {c.Resumed} craft(s) found under way, {c.Points} point(s), {c.Enhanced} add-on(s), "
-            + $"{c.Finished} finish(es) sent; {c.Repairs} repair(s) sent; {c.InputsBought} input buy(s) chosen; "
+            + $"{c.Finished} finish(es) sent; {c.Repairs} repair(s) sent; {c.Refines} refine(s) sent; {c.Packs} pack(s) sent; "
+            + $"{c.InputsBought} input buy(s) chosen; "
             + $"{c.GearBought} gear buy(s) chosen off the board, "
             + $"{c.ItemsListed} item(s) listed"
             + (craftRefused.Count == 0 ? string.Empty : $"; refused: {string.Join(", ", craftRefused)}"));

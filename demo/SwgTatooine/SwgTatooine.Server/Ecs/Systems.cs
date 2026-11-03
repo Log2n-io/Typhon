@@ -579,6 +579,9 @@ internal sealed class LedgerSystem : CallbackSystem
         .Writes<LedgerEntry>()
         .Writes<LedgerHead>()
 
+        // The shuttle's tickets (SimBridge.Fares.cs): issued here, read by Shuttle's workers — the declared order, not a side effect of PlayerState.
+        .WritesResource("ShuttleTickets")
+
         // The welcome pack (crafting-build.md O-1), minted with the wallet it comes with, in its transaction.
         .Writes<ItemStack>()
         .Writes<ItemInstance>()
@@ -709,7 +712,10 @@ internal sealed class WorkshopSystem : CallbackSystem
         // The body's gear, its items revision; its level, for the gate.
         .Writes<PlayerGear>()
         .Writes<PlayerState>()
-        .Reads<PlayerLook>();
+        .Reads<PlayerLook>()
+
+        // An operator's level and XP (SimBridge.Admin.cs), through its side transaction; the body is brought to them by Progression, in the Report phase.
+        .SideWrites<CharacterProgress>();
 
     protected override void Execute(TickContext ctx) => _bridge.WorkshopTick(ctx);
 }
@@ -754,6 +760,7 @@ internal sealed class ShuttleSystem : QuerySystem
         .Writes<PlayerPlacement>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
+        .ReadsResource("ShuttleTickets")
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.ShuttleTick(ctx);
@@ -833,8 +840,10 @@ internal sealed class DungeonSystem : CallbackSystem
     protected override void Execute(TickContext ctx) => _bridge.DungeonTick(ctx);
 }
 
-/// <summary>Per-tick shuttle bookkeeping and, with <c>--probe</c>, the arrival-cell query probe. It declares the player positions its queries read, like
-/// any system; a CallbackSystem that declares component access still runs (measured: it did here, every tick).</summary>
+/// <summary>
+/// Per-tick shuttle bookkeeping and, with <c>--probe</c>, the arrival-cell query probe. It declares the player positions its queries read, like any
+/// system; a CallbackSystem that declares component access still runs (measured: it did here, every tick).
+/// </summary>
 internal sealed class ShuttleProbeSystem : CallbackSystem
 {
     private readonly SimBridge _bridge;

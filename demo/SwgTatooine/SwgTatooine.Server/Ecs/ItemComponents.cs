@@ -60,6 +60,34 @@ public static class ItemMoveKind
     /// <summary>A cancelled or expired listing collected: the listing → its seller. <see cref="ItemLedgerEntry.Ref"/> is the listing's raw id.</summary>
     public const byte Return = 16;
 
+    /// <summary>
+    /// Items an operator gave a character from the back office: World → the character, minted, at any Mk. <see cref="ItemLedgerEntry.Ref"/> is 0.
+    /// </summary>
+    public const byte AdminGrant = 17;
+
+    /// <summary>
+    /// Items an operator took from a character from the back office: the character → World, destroyed. <see cref="ItemLedgerEntry.Ref"/> is 0.
+    /// </summary>
+    public const byte AdminTake = 18;
+
+    /// <summary>
+    /// A refine (crafting-catalog.md § 11.1): N units of Mk <i>k</i>, the refiner → World, destroyed; and one of Mk <i>k</i>+1 for each N, World → the
+    /// refiner, of the same template. <see cref="ItemLedgerEntry.Ref"/> is the seq of the refine's first row, on every row of it.
+    /// </summary>
+    public const byte Refine = 19;
+
+    /// <summary>
+    /// A pack (crafting-catalog.md § 11.2): an item, or a crate, into an identical crate or item of the same owner — one row from the absorbed stack to the
+    /// crate, both sides the owner; the absorbed entity is destroyed. <see cref="ItemLedgerEntry.Ref"/> is the crate's raw id.
+    /// </summary>
+    public const byte Pack = 20;
+
+    /// <summary>
+    /// An unpack: one item out of a crate into a new instance in a free slot of the same owner, a row each. <see cref="ItemLedgerEntry.Ref"/> is the
+    /// crate's raw id.
+    /// </summary>
+    public const byte Unpack = 21;
+
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
     {
@@ -77,6 +105,11 @@ public static class ItemMoveKind
         Repair => "repair",
         Salvage => "salvage",
         Return => "return",
+        AdminGrant => "admingrant",
+        AdminTake => "admintake",
+        Refine => "refine",
+        Pack => "pack",
+        Unpack => "unpack",
         _ => "unknown",
     };
 }

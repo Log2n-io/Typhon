@@ -28,6 +28,7 @@ internal sealed class MarketDeskChecks : ServedChecks
     private TatooineSim Start(bool persist = false)
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.Persist = persist;
         var sim = new TatooineSim(config);
@@ -143,7 +144,7 @@ internal sealed class MarketDeskChecks : ServedChecks
     }
 
     /// <summary>A rate bucket's worth of patience: two commands a second, a burst of four.</summary>
-    private void Breathe() => Harness.Ticks(Worlds.ServedHz / 2 + 1);
+    private void Breathe() => Harness.Ticks(Worlds.FastCommandGapTicks);
 
     private static void AuditsOk(TatooineSim sim, string when)
     {

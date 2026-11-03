@@ -24,6 +24,7 @@ internal sealed class DecayChecks : ServedChecks
     private TatooineSim Start()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.WelcomePack = true;
         var sim = new TatooineSim(config);
@@ -81,7 +82,7 @@ internal sealed class DecayChecks : ServedChecks
 
     private static int Count(FakeLink link, byte reason) => Ledgers.Refusals(link).Count(r => r == reason);
 
-    private void Breathe() => Harness.Ticks(Worlds.ServedHz / 2 + 1);
+    private void Breathe() => Harness.Ticks(Worlds.FastCommandGapTicks);
 
     private static void AuditsOk(TatooineSim sim, string when)
     {
@@ -336,6 +337,57 @@ internal sealed class DecayChecks : ServedChecks
         b.Link.SendCommand(nameof(SalvageItem), new RecordValues { ["item"] = FieldValue.OfUInt64(standard.RawValue) });
         SessionHarness.Until(() => Count(b.Link, TatooineReplication.SalvageBadItem) > refused, "standard issue refused");
         AuditsOk(sim, "after the salvage");
+    }
+
+    /// <summary>
+    /// The vendor pays an item with stats by the condition it has left (Loïc, 2026-11-03): a blaster at half its condition sells for half its payout, a
+    /// <c>vendor</c> row with its credit row; a broken one is taken for nothing — scrapped, a <c>decay</c> row and no credit row — and both ends are counted
+    /// (<see cref="GearEnd"/>); the audits clean.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheVendor_PaysForTheConditionLeft_AndScrapsWhatIsBroken()
+    {
+        using var sim = Start();
+        var b = LogIn(sim, 0xDE51);
+        var bazaar = sim.Index.Bazaars[0];
+        Worlds.Park(sim, b.Link.Session, bazaar.X + 2.5f, bazaar.Z);
+        Harness.Ticks(2);
+
+        Equipment.TryStandard(Blaster, out var issue);
+        var halfStats = Standard(Blaster, issue.MaxCondition / 2);
+        var brokenStats = Standard(Blaster, 0, repairs: 1);
+        brokenStats.Flags |= ItemFlags.Broken;
+        var before = Items.Stacks(sim, b.Character).Select(x => x.Id).ToHashSet();
+        sim.Bridge.StageInstance(b.Key, Blaster, 1, in halfStats);
+        sim.Bridge.StageInstance(b.Key, Blaster, 1, in brokenStats);
+        SessionHarness.Until(() => Items.Stacks(sim, b.Character).Count(x => !before.Contains(x.Id)) == 2, "the two staged blasters");
+        var staged = Items.Stacks(sim, b.Character).Where(x => !before.Contains(x.Id)).Select(x => x.Id).ToList();
+        var half = staged.Single(id => StatsOf(sim, id).Condition > 0);
+        var broken = staged.Single(id => id != half);
+
+        var balance = Ledgers.Balance(sim, b.Character);
+        var credits = Ledgers.Rows(sim).Count;
+        Market.Vendor(b.Link, Blaster, 1, 1, half.RawValue);
+        SessionHarness.Until(() => Items.Stacks(sim, b.Character).All(x => x.Id != half), "the worn blaster sold");
+        Breathe();
+        var paid = Ledgers.Balance(sim, b.Character) - balance;
+        Market.Vendor(b.Link, Blaster, 1, 1, broken.RawValue);
+        SessionHarness.Until(() => Items.Stacks(sim, b.Character).All(x => x.Id != broken), "the broken blaster taken");
+        Breathe();
+
+        var full = MarketValues.VendorPayout(Blaster, 1, 1);
+        var scrapRow = Items.Rows(sim).Last();
+        Assert.Multiple(() =>
+        {
+            Assert.That(paid, Is.EqualTo(full * halfStats.Condition / halfStats.MaxCondition), "half its condition, half its payout");
+            Assert.That(Ledgers.Balance(sim, b.Character) - balance, Is.EqualTo(paid), "the broken one pays nothing");
+            Assert.That(Ledgers.Rows(sim), Has.Count.EqualTo(credits + 1), "one credit row: the sale's, none for the scrap");
+            Assert.That((scrapRow.Kind, scrapRow.From, scrapRow.To, scrapRow.Count), Is.EqualTo((ItemMoveKind.Decay, b.Key, ItemLedger.World, 1)));
+            Assert.That(sim.Bridge.GearEnds(GearEnd.Sold), Is.EqualTo(1));
+            Assert.That(sim.Bridge.GearEnds(GearEnd.Scrapped), Is.EqualTo(1));
+        });
+        AuditsOk(sim, "after the sale and the scrap");
     }
 }
 

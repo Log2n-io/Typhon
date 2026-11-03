@@ -108,6 +108,7 @@ public sealed partial class SimBridge
             _craftsLoaded = false;
         }
 
+        EndMade(committed);
         _craftCounts = default;
     }
 
@@ -277,7 +278,7 @@ public sealed partial class SimBridge
 
                     var id = EntityId.FromRawValue(parts[nextPart++]);
                     var src = SlotOf(items, id);
-                    if (src == 0 || !items.Slots[src].Instance || !used.Add(id.RawValue))
+                    if (src == 0 || !items.Slots[src].Instance || items.Slots[src].Count != 1 || !used.Add(id.RawValue))
                     {
                         return false;
                     }
@@ -512,8 +513,9 @@ public sealed partial class SimBridge
 
         // Validated: the result, the fee, the craft gone — one commit.
         var reference = (long)craft.Id.RawValue;
+        var result = s.MakesInstance ? ResultOf(s, in state) : default;
         var made = s.MakesInstance
-            ? !MintInstance(tx, crafter, state.Output, state.Mk, ResultOf(s, in state), ItemMoveKind.Make, reference, worldTick).IsNull
+            ? !MintInstance(tx, crafter, state.Output, state.Mk, in result, ItemMoveKind.Make, reference, worldTick).IsNull
             : ItemTransfer(tx, ItemLedger.World, crafter, state.Output, state.Mk, 1, ItemMoveKind.Make, reference, worldTick) == 1;
         if (!made || (fee > 0 && !Transfer(tx, crafter, EconomyLedger.World, fee, TransferKind.Bench, reference, worldTick)))
         {
@@ -526,6 +528,7 @@ public sealed partial class SimBridge
         _crafts.Remove(crafter);
         _craftCounts.Finished++;
         _craftCounts.Fees += fee;
+        NoteMade(crafter, state.Output, state.Mk, in result, s.MakesInstance, worldTick);
         _craftBodies.Add(body);
         if (fee > 0)
         {

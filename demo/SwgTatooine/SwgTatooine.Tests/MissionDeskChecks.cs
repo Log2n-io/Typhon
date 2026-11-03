@@ -146,6 +146,57 @@ internal sealed class MissionDeskChecks : ServedChecks
         return best;
     }
 
+    /// <summary>
+    /// Every lair, by where it stands — an offer's anchor is its lair's position — with its spawner and health, read in one tick. For a check over many
+    /// offers: <see cref="LairAt"/> and <see cref="LairOf"/> each wait a tick, and the offer check made two such calls per offer — 20 s of a served world's
+    /// ticks for what one pass reads (2026-11-02).
+    /// </summary>
+    private static Dictionary<(ushort Realm, float X, float Z), (EntityId Id, Lair Spawner, int Health)> Lairs(TatooineSim sim)
+    {
+        var lairs = new Dictionary<(ushort, float, float), (EntityId, Lair, int)>();
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                var vitals = cluster.GetReadOnlySpan(CreatureLair.Vitals);
+                var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    lairs[(cluster.Realm.Value, places[slot].X, places[slot].Z)] = (cluster.GetEntityId(slot), spawners[slot], vitals[slot].Health);
+                }
+            }
+        });
+
+        return lairs;
+    }
+
+    /// <summary>Every live offer, by its terminal, read in one tick.</summary>
+    private static Dictionary<EntityId, List<MissionOfferInfo>> OffersByTerminal(TatooineSim sim)
+    {
+        var offers = new Dictionary<EntityId, List<MissionOfferInfo>>();
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
+            {
+                var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var info = infos[System.Numerics.BitOperations.TrailingZeroCount(bits)];
+                    if (!offers.TryGetValue(info.Terminal, out var list))
+                    {
+                        offers[info.Terminal] = list = [];
+                    }
+
+                    list.Add(info);
+                }
+            }
+        });
+
+        return offers;
+    }
+
     /// <summary>The lair standing exactly at a point on a planet — an offer's anchor is its lair's position — or <c>EntityId.Null</c>.</summary>
     private static EntityId LairAt(TatooineSim sim, ushort realm, float x, float z)
     {
@@ -452,19 +503,27 @@ internal sealed class MissionDeskChecks : ServedChecks
         Harness.Ticks(3);
         var named = new HashSet<EntityId>();
         var offers = 0;
+        // Read once each: the offers and the lairs are written by the desk's pass, twice a second, and the checks below hold at any one tick.
+        var byTerminal = OffersByTerminal(sim);
+        var lairs = Lairs(sim);
         Assert.Multiple(() =>
         {
             foreach (var terminal in sim.Index.Terminals)
             {
-                var listed = Offers(sim, terminal);
+                var listed = byTerminal.TryGetValue(terminal.Id, out var l) ? l : [];
                 Assert.That(listed, Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), $"terminal at {terminal.X:F0},{terminal.Z:F0}");
-                foreach (var (_, info) in listed)
+                foreach (var info in listed)
                 {
                     offers++;
-                    var lair = LairAt(sim, terminal.Realm, info.AnchorX, info.AnchorZ);
-                    Assert.That(lair.IsNull, Is.False, $"offer {info.Serial} names no lair");
+                    var found = lairs.TryGetValue((terminal.Realm, info.AnchorX, info.AnchorZ), out var at);
+                    Assert.That(found, Is.True, $"offer {info.Serial} names no lair");
+                    if (!found)
+                    {
+                        continue;
+                    }
+
+                    var (lair, spawner, health) = at;
                     Assert.That(named.Add(lair), Is.True, $"offer {info.Serial} names a lair another offer names");
-                    var (spawner, health) = LairOf(sim, lair);
                     Assert.That(health, Is.GreaterThan(0), "an offer names a broken lair");
                     Assert.That(spawner.Mission.IsNull, Is.True, "an offer names a reserved lair");
                     Assert.That(spawner.Site, Is.Not.Zero, "an offer names a lair of no site");

@@ -11,7 +11,7 @@ import { canUseAt, ticketTerminalOf } from '../src/app/ticket-terminal';
 import type { Descriptor } from '../src/assets/descriptor';
 
 /** The server's defaults: a landing every 120 s for 30 s, at 50 Hz, seven ports. */
-const SCHEDULE: ShuttleSchedule = { intervalTicks: 6000, windowTicks: 1500, ports: 7, boardM: 30 };
+const SCHEDULE: ShuttleSchedule = { intervalTicks: 6000, windowTicks: 1500, ports: 7, boardM: 30, fare: 150 };
 const HZ = 50;
 
 describe('shuttleMoment', () => {

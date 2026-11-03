@@ -140,14 +140,14 @@ function readShuttle(value: unknown): ShuttleSchedule | null {
     return null;
   }
 
-  const { intervalTicks, windowTicks, ports, boardM } = value as Record<string, unknown>;
+  const { intervalTicks, windowTicks, ports, boardM, fare } = value as Record<string, unknown>;
   return isFinitePositive(intervalTicks) &&
     intervalTicks > 0 &&
     isFinitePositive(windowTicks) &&
     isFinitePositive(ports) &&
     ports > 0 &&
     isFinitePositive(boardM)
-    ? { intervalTicks, windowTicks, ports, boardM }
+    ? { intervalTicks, windowTicks, ports, boardM, fare: isFinitePositive(fare) ? fare : 0 }
     : null;
 }
 

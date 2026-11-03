@@ -38,6 +38,9 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        AdminEndpoints.Desk = request => _bridge != null
+            ? _bridge.Admin(request)
+            : System.Threading.Tasks.Task.FromResult(new AdminOutcome(false, "the simulation is not started"));
         // Before the runtime starts: the facilities never move, and a spatial archetype is read off the tick only while nothing ticks.
         FacilityEndpoints.Json = FacilityEndpoints.Build(Dbe);
         TatooineHost.DashboardPort = _config.DashboardPort;
@@ -255,7 +258,7 @@ public sealed partial class TatooineSim
 
         // States the obligation rather than leaving it to the first login to discover. See ThrowIfAvatarsNotConfigured.
         TatooineReplication.ThrowIfAvatarsNotConfigured();
-        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
+        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic, _config.CommandRateScale);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
         // What a BoardShuttle ask is validated against. Handed over rather than reached for: the ports live in the world index, which the bridge owns.

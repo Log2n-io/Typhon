@@ -1128,6 +1128,9 @@ export class TyphonSource implements DataSource {
       'CraftFinish',
       'RepairItem',
       'SalvageItem',
+      'RefineItems',
+      'PackItem',
+      'UnpackItem',
     ]) {
       const command = plan.commandByName(name);
       if (command !== null) {

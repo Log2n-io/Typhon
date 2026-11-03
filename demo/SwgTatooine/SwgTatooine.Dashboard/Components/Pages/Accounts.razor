@@ -1,0 +1,586 @@
+@page "/accounts"
+@using System.Net.Http
+@inject AdminLink Admin
+@inject AdminSession Session
+@inject IJSRuntime JS
+
+<PageTitle>Tatooine accounts</PageTitle>
+
+<header class="top">
+    <h1>Accounts</h1>
+    <span class="muted">the back office: every account and its character, its level, credits and inventory</span>
+    <nav class="links"><a href="">← Dashboard</a></nav>
+</header>
+
+@if (!Admin.Configured)
+{
+    <main class="grid">
+        <section class="card wide">
+            <h2>The back office is off</h2>
+            <p>Set <code>@AdminLink.KeyVariable</code> (16 characters or more) in the environment of the game server and of this dashboard, the same on both,
+                and restart them.</p>
+        </section>
+    </main>
+}
+else if (!Session.Unlocked)
+{
+    <main class="grid">
+        <section class="card unlock">
+            <h2>Operator key</h2>
+            <form @onsubmit="Unlock">
+                <input type="password" @bind="_typed" placeholder="SWG_ADMIN_KEY" autofocus />
+                <button type="submit" class="act">Open</button>
+            </form>
+            @if (_unlockFailed)
+            {
+                <p class="refused">not the key</p>
+            }
+        </section>
+    </main>
+}
+else
+{
+    <main class="admin">
+        <section class="card list">
+            <h2>Accounts <span class="muted small">@_listNote</span></h2>
+            <div class="filters">
+                <input type="search" placeholder="filter by account or character name" @bind="_q" @bind:event="oninput" @bind:after="LoadList" />
+                <select @bind="_who" @bind:after="LoadList">
+                    <option value="all">everyone</option>
+                    <option value="people">people</option>
+                    <option value="bots">bots</option>
+                </select>
+            </div>
+            @if (_listError != null)
+            {
+                <p class="refused">@_listError</p>
+            }
+            <div class="scroll">
+                <table class="accounts">
+                    <thead><tr><th></th><th>account</th><th>character</th><th class="num">CL</th><th class="num">credits</th></tr></thead>
+                    <tbody>
+                    @foreach (var a in _accounts)
+                    {
+                        var id = (string)a["character"];
+                        <tr class="@(id != null && id == _selected ? "selected" : "") @(id == null ? "none" : "")" @onclick="() => Select(id)">
+                            <td><span class="dot @((bool?)a["online"] == true ? "up" : "off")" title="@((bool?)a["online"] == true ? "in the world" : "offline")"></span></td>
+                            <td>@((string)a["name"])@if ((bool?)a["bot"] == true) { <span class="tag">bot</span> }</td>
+                            <td>@((string)a["characterName"] ?? "—")</td>
+                            <td class="num">@((int?)a["level"])</td>
+                            <td class="num">@Credits(a["credits"])</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card detail">
+            @if (_detail == null)
+            {
+                <p class="muted">@(_detailError ?? "select a character")</p>
+            }
+            else
+            {
+                var d = _detail;
+                <h2>
+                    @((string)d["name"])
+                    <span class="muted small">
+                        account @((string)d["accountName"]) · @(((bool?)d["bot"] == true) ? "bot" : "person") ·
+                        @(((bool?)d["online"] == true) ? "in the world" : "offline") · realm @((int?)d["realm"]) at @((double?)d["x"]), @((double?)d["z"])
+                    </span>
+                    <button class="watch" @onclick="Reload">refresh</button>
+                </h2>
+
+                @if (_message != null)
+                {
+                    <p class="@(_ok ? "applied" : "refused")">@_message</p>
+                }
+
+                <h3 class="fold" @onclick='() => Toggle("progress")'>
+                    @Arrow("progress") Level and credits
+                    <span class="muted small">CL @((int?)d["level"]) · @F((long?)d["xp"]) XP · @Credits(d["credits"])</span>
+                </h3>
+                @if (IsOpen("progress"))
+                {
+                <div class="forms">
+                    <div class="form">
+                        <h3>Level</h3>
+                        <p class="muted small">CL @((int?)d["level"]) · @F((long?)d["xp"]) XP (this level from @F((long?)d["levelXp"]), the next at @F((long?)d["nextXp"]))
+                            · kills @F((long?)d["killXp"]) · missions @F((long?)d["missionXp"])</p>
+                        <label>CL <input type="number" min="1" max="@((int?)d["maxLevel"])" @bind="_level" /></label>
+                        <button class="act" disabled="@_busy" @onclick="SetLevel">set CL</button>
+                        <label>XP <input type="number" min="0" @bind="_xp" /></label>
+                        <button class="act" disabled="@_busy" @onclick="SetXp">set XP</button>
+                    </div>
+                    <div class="form">
+                        <h3>Credits</h3>
+                        <p class="muted small">@Credits(d["credits"]) held</p>
+                        <label>amount <input type="number" min="1" @bind="_amount" /></label>
+                        <button class="act" disabled="@_busy" @onclick="() => MoveCredits(1)">give</button>
+                        <button class="act" disabled="@_busy" @onclick="() => MoveCredits(-1)">take</button>
+                    </div>
+                </div>
+                }
+
+                <h3 class="fold" @onclick='() => Toggle("inventory")'>
+                    @Arrow("inventory") Inventory <span class="muted small">@Items.Count item(s), @((int?)d["inventory"]?["slots"]) slots</span>
+                </h3>
+                @if (IsOpen("inventory"))
+                {
+                <table class="items">
+                    <thead><tr><th>slot</th><th>item</th><th class="num">Mk</th><th class="num">count</th><th>stats</th><th></th></tr></thead>
+                    <tbody>
+                    @foreach (var it in Items)
+                    {
+                        var id = (string)it["id"];
+                        var slot = (int?)it["slot"] ?? 0;
+                        var stats = it["stats"];
+                        <tr>
+                            <td>@SlotName(slot)</td>
+                            <td>@((string)it["name"])</td>
+                            <td class="num">@((int?)it["mk"])</td>
+                            <td class="num">@((int?)it["count"])</td>
+                            <td class="small">@StatsText(stats)</td>
+                            <td class="actions">
+                                @if (stats != null)
+                                {
+                                    <button class="watch" @onclick="() => EditStats(it)">stats</button>
+                                    <button class="watch danger" disabled="@_busy" @onclick="() => Remove(id, 1)">
+                                        @((int?)it["count"] > 1 ? $"remove the crate of {(int?)it["count"]}" : "remove")
+                                    </button>
+                                }
+                                else
+                                {
+                                    <input type="number" class="count" min="1" max="@((int?)it["count"])" value="@RemoveCount(id, it)"
+                                           @onchange="e => _removeCounts[id] = int.TryParse((string)e.Value, out var n) ? n : 1" />
+                                    <button class="watch danger" disabled="@_busy" @onclick="() => Remove(id, RemoveCount(id, it))">remove</button>
+                                }
+                            </td>
+                        </tr>
+                        @if (_editing == id)
+                        {
+                            <tr class="editor">
+                                <td colspan="6">
+                                    @StatsEditor(_edit, LinesOf((string)it["category"]))
+                                    <button class="act" disabled="@_busy" @onclick="() => SaveStats(id)">save stats</button>
+                                    <button class="watch" @onclick="() => _editing = null">cancel</button>
+                                </td>
+                            </tr>
+                        }
+                    }
+                    </tbody>
+                </table>
+                }
+
+                <h3 class="fold" @onclick='() => Toggle("add")'>@Arrow("add") Add an item</h3>
+                @if (IsOpen("add"))
+                {
+                <div class="form add">
+                    <label>
+                        category
+                        <select @bind="_category" @bind:after="CategoryChanged">
+                            @foreach (var c in Categories)
+                            {
+                                <option value="@c">@c</option>
+                            }
+                        </select>
+                    </label>
+                    <label>
+                        item
+                        <select @bind="_template" @bind:after="TemplateChanged">
+                            @foreach (var t in TemplatesOf(_category))
+                            {
+                                <option value="@((int)t["id"])">@((string)t["name"])</option>
+                            }
+                        </select>
+                    </label>
+                    @if ((bool?)Template?["hasMk"] == true)
+                    {
+                        <label>
+                            Mk
+                            <select @bind="_mk" @bind:after="Defaults">
+                                @for (var mk = 1; mk <= 5; mk++)
+                                {
+                                    <option value="@mk">@mk</option>
+                                }
+                            </select>
+                        </label>
+                    }
+                    <label>count <input type="number" class="count" min="1" max="@MaxCount" @bind="_count" /></label>
+                    @if ((bool?)Template?["instance"] == true)
+                    {
+                        <div class="stats-form">@StatsEditor(_add, Lines(Template))</div>
+                    }
+                    <button class="act" disabled="@_busy" @onclick="AddItem">add</button>
+                </div>
+                }
+            }
+        </section>
+    </main>
+}
+
+@code {
+    // The stat lines an item with stats carries, as the form edits them: Stat0..Stat3, condition, its maximum, the life factor.
+    private sealed class StatsForm
+    {
+        public int[] Lines = new int[4];
+        public int Condition;
+        public int MaxCondition = 1;
+        public int LifeMilli = 1000;
+
+        // From the catalogue's defaults, which name the lines stat0..stat3 (the inventory names them by meaning: see EditStats).
+        public static StatsForm From(JsonNode s)
+        {
+            var f = new StatsForm();
+            if (s == null)
+            {
+                return f;
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                f.Lines[i] = (int?)s[$"stat{i}"] ?? 0;
+            }
+
+            f.Condition = (int?)s["condition"] ?? 0;
+            f.MaxCondition = (int?)s["maxCondition"] ?? 1;
+            f.LifeMilli = (int?)s["lifeMilli"] ?? 1000;
+            return f;
+        }
+
+        public JsonObject ToJson() => new()
+        {
+            ["stat0"] = Lines[0],
+            ["stat1"] = Lines[1],
+            ["stat2"] = Lines[2],
+            ["stat3"] = Lines[3],
+            ["condition"] = Condition,
+            ["maxCondition"] = MaxCondition,
+            ["lifeMilli"] = LifeMilli,
+        };
+    }
+
+    private string _typed;
+    private bool _unlockFailed;
+
+    private string _q = "";
+    private string _who = "all";
+    private string _listNote = "";
+    private string _listError;
+    private List<JsonNode> _accounts = [];
+
+    private string _selected;
+    private JsonNode _detail;
+    private string _detailError;
+    private string _message;
+    private bool _ok;
+    private bool _busy;
+
+    private int _level;
+    private int _xp;
+    private long _amount = 1000;
+    private readonly Dictionary<string, int> _removeCounts = [];
+    private string _editing;
+    private StatsForm _edit = new();
+
+    private JsonNode _catalog;
+    private string _category = "weapon";
+    private int _template;
+    private int _mk = 1;
+    private int _count = 1;
+    private StatsForm _add = new();
+
+    // The detail's sections open, by name: none by default; kept in this browser's localStorage (wwwroot/accounts.js), so they stay as left.
+    private readonly HashSet<string> _open = [];
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        var saved = await JS.InvokeAsync<string>("swgAccounts.load");
+        if (!string.IsNullOrEmpty(saved))
+        {
+            _open.UnionWith(saved.Split(',', StringSplitOptions.RemoveEmptyEntries));
+            StateHasChanged();
+        }
+    }
+
+    private bool IsOpen(string section) => _open.Contains(section);
+
+    private static readonly MarkupString Open = new("&#9662;");
+    private static readonly MarkupString Closed = new("&#9656;");
+
+    private MarkupString Arrow(string section) => IsOpen(section) ? Open : Closed;
+
+    private async Task Toggle(string section)
+    {
+        if (!_open.Remove(section))
+        {
+            _open.Add(section);
+        }
+
+        await JS.InvokeVoidAsync("swgAccounts.save", string.Join(',', _open));
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Session.Unlocked)
+        {
+            await Opened();
+        }
+    }
+
+    private async Task Unlock()
+    {
+        _unlockFailed = !Admin.Matches(_typed);
+        _typed = null;
+        if (!_unlockFailed)
+        {
+            Session.Unlocked = true;
+            await Opened();
+        }
+    }
+
+    private async Task Opened()
+    {
+        await LoadList();
+        try
+        {
+            _catalog = await Admin.Catalog();
+            CategoryChanged();
+        }
+        catch (Exception e) when (e is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            _listError = e.Message;
+        }
+    }
+
+    // The latest list asked for: one typed character a request, and an older answer landing after a newer one is dropped (review, 2026-11-03).
+    private int _listAsked;
+
+    private async Task LoadList()
+    {
+        var asked = ++_listAsked;
+        try
+        {
+            var page = await Admin.Accounts(_q, _who, 500);
+            if (asked != _listAsked)
+            {
+                return;
+            }
+
+            _accounts = page?["accounts"]?.AsArray().Where(a => a != null).ToList() ?? [];
+            _listNote = $"{(int?)page?["matched"]} of {(int?)page?["total"]}{((int?)page?["matched"] > _accounts.Count ? $", the first {_accounts.Count} shown" : "")}";
+            _listError = null;
+        }
+        catch (Exception e) when (e is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            if (asked == _listAsked)
+            {
+                _listError = e.Message;
+            }
+        }
+    }
+
+    private async Task Select(string id)
+    {
+        if (id == null)
+        {
+            _selected = null;
+            _detail = null;
+            _detailError = "this account has no character yet: it is made on its first login";
+            return;
+        }
+
+        _selected = id;
+        _message = null;
+        _editing = null;
+        await Reload();
+    }
+
+    private async Task Reload()
+    {
+        if (_selected == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _detail = await Admin.Character(_selected);
+            _detailError = null;
+            _level = (int?)_detail?["level"] ?? 1;
+            _xp = (int?)_detail?["xp"] ?? 0;
+        }
+        catch (Exception e) when (e is HttpRequestException or InvalidOperationException or TaskCanceledException)
+        {
+            _detail = null;
+            _detailError = e.Message;
+        }
+    }
+
+    private List<JsonNode> Items => _detail?["inventory"]?["items"]?.AsArray().Where(i => i != null).ToList() ?? [];
+
+    private async Task Write(string what, JsonObject body)
+    {
+        if (_busy || _selected == null)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            (_ok, _message) = await Admin.Post(_selected, what, body);
+            await Reload();
+            await LoadList();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private Task SetLevel() => Write("progress", new JsonObject { ["level"] = _level });
+
+    private Task SetXp() => Write("progress", new JsonObject { ["xp"] = _xp });
+
+    private Task MoveCredits(int sign) => Write("credits", new JsonObject { ["delta"] = sign * Math.Abs(_amount) });
+
+    private Task Remove(string id, int count) => Write("items/remove", new JsonObject { ["item"] = id, ["count"] = count });
+
+    private int RemoveCount(string id, JsonNode item) => _removeCounts.TryGetValue(id, out var n) ? n : (int?)item["count"] ?? 1;
+
+    private void EditStats(JsonNode item)
+    {
+        _editing = (string)item["id"];
+        var s = item["stats"];
+        var lines = LinesOf((string)item["category"]);
+        _edit = new StatsForm
+        {
+            Condition = (int?)s?["condition"] ?? 0,
+            MaxCondition = (int?)s?["maxCondition"] ?? 1,
+            LifeMilli = (int?)s?["lifeMilli"] ?? 1000,
+        };
+        for (var i = 0; i < lines.Count; i++)
+        {
+            _edit.Lines[i] = (int?)s?[lines[i]] ?? 0;
+        }
+    }
+
+    private async Task SaveStats(string id)
+    {
+        await Write("items/stats", new JsonObject { ["item"] = id, ["stats"] = _edit.ToJson() });
+        if (_ok)
+        {
+            _editing = null;
+        }
+    }
+
+    private Task AddItem()
+    {
+        var body = new JsonObject { ["template"] = _template, ["mk"] = (bool?)Template?["hasMk"] == true ? _mk : 0, ["count"] = _count };
+        if ((bool?)Template?["instance"] == true)
+        {
+            body["stats"] = _add.ToJson();
+        }
+
+        return Write("items", body);
+    }
+
+    // ── The catalogue ───────────────────────────────────────────────────────────────────────────────────────────────
+
+    private IEnumerable<JsonNode> Templates => _catalog?["templates"]?.AsArray().Where(t => t != null) ?? [];
+
+    private IEnumerable<string> Categories => Templates.Select(t => (string)t["category"]).Distinct();
+
+    private IEnumerable<JsonNode> TemplatesOf(string category) => Templates.Where(t => (string)t["category"] == category);
+
+    private JsonNode Template => Templates.FirstOrDefault(t => (int)t["id"] == _template);
+
+    private int MaxCount => (bool?)Template?["instance"] == true ? (int?)_catalog?["slots"] ?? 40 : ((int?)_catalog?["slots"] ?? 40) * ((int?)_catalog?["stackMax"] ?? 99);
+
+    private void CategoryChanged()
+    {
+        _template = (int?)TemplatesOf(_category).FirstOrDefault()?["id"] ?? 0;
+        TemplateChanged();
+    }
+
+    private void TemplateChanged()
+    {
+        _mk = (bool?)Template?["hasMk"] == true ? Math.Clamp(_mk, 1, 5) : 0;
+        _count = 1;
+        Defaults();
+    }
+
+    // The add form's stats: the server's defaults for the template at this Mk, which the operator may change before adding.
+    private void Defaults() => _add = StatsForm.From(Template?["defaults"]?[_mk.ToString(CultureInfo.InvariantCulture)]);
+
+    private static List<string> Lines(JsonNode template) => template?["lines"]?.AsArray().Select(l => (string)l).ToList() ?? [];
+
+    private List<string> LinesOf(string category) => Lines(TemplatesOf(category).FirstOrDefault());
+
+    // ── Rendering ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private RenderFragment StatsEditor(StatsForm f, List<string> lines) => __builder =>
+    {
+        <div class="stats-edit">
+            @for (var i = 0; i < lines.Count; i++)
+            {
+                var line = i;
+                <label>@lines[line] <input type="number" min="0" value="@f.Lines[line]"
+                                           @onchange="e => f.Lines[line] = int.TryParse((string)e.Value, out var n) ? n : 0" /></label>
+            }
+            <label>condition <input type="number" min="0" @bind="f.Condition" /></label>
+            <label>max condition <input type="number" min="1" @bind="f.MaxCondition" /></label>
+            <label>life ‰ <input type="number" min="1" @bind="f.LifeMilli" /></label>
+        </div>
+    };
+
+    private static string SlotName(int slot) => slot switch
+    {
+        101 => "worn: weapon",
+        102 => "worn: head",
+        103 => "worn: torso",
+        104 => "worn: arms",
+        105 => "worn: legs",
+        106 => "worn: hands",
+        107 => "worn: feet",
+        _ => slot.ToString(CultureInfo.InvariantCulture),
+    };
+
+    private static string StatsText(JsonNode s)
+    {
+        if (s == null)
+        {
+            return "";
+        }
+
+        var parts = new List<string>();
+        foreach (var (name, value) in s.AsObject())
+        {
+            if (name is "wears" or "crafter" or "lifeMilli" or "repairs" or "broken" or "condition" or "maxCondition")
+            {
+                continue;
+            }
+
+            parts.Add($"{name} {value}");
+        }
+
+        parts.Add($"condition {s["condition"]}/{s["maxCondition"]}");
+        if ((bool?)s["broken"] == true)
+        {
+            parts.Add("BROKEN");
+        }
+
+        return string.Join(" · ", parts);
+    }
+
+    private static string Credits(JsonNode n) => n == null ? "—" : ((long)n).ToString("N0", CultureInfo.InvariantCulture) + " cr";
+
+    private static string F(long? v) => (v ?? 0).ToString("N0", CultureInfo.InvariantCulture);
+}

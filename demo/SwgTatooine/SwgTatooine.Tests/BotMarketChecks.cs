@@ -632,8 +632,15 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     /// <remarks>
     /// Live, before this tuning (2026-10-27): ~4 800 units lost a minute with the market against ~5 400 without — 11 % fewer — two thirds of the bots
     /// questing at any time, at a trigger of 24 stacks and a floor of 18.
+    /// <para>
+    /// <b>Nightly, not the gate</b> (2026-11-02): a tuning measure, not a correctness check, and 93 s of the suite's 11 min — 8 quests of 3 bots' plans sent
+    /// at the commands' rate, which the engine counts in wall-clock seconds, so no tick rate shortens it. The desk's correctness under the bots' plans is
+    /// the gate's <see cref="BotsWithFullInventories_ListVendorAndBuy_AgainstTheRealDesk_AndTheAuditsStayOk"/>.
+    /// </para>
     /// </remarks>
     [Test]
+    [Explicit("A tuning measure (BZ-16), 93 s at the commands' wall-clock rate; the gate runs the desk's correctness check")]
+    [Category("Nightly")]
     [CancelAfter(300_000)]
     public void TheMarket_CutsTheDropsLostToAFullInventory()
     {

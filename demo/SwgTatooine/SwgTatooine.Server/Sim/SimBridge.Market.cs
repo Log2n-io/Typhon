@@ -1047,16 +1047,11 @@ public sealed partial class SimBridge
             return;
         }
 
-        // An item with stats is listed one at a time, by its id, from the grid: an equipped one is unequipped first.
+        // An item with stats is listed one at a time, by its id, from the grid — a crate whole, its count the quantity (crafting-catalog.md § 11.2): an
+        // equipped one is unequipped first.
         var item = EntityId.FromRawValue(v.Item);
         var stats = ItemCatalog.HasStats(v.Template);
-        if (stats && v.Quantity != 1)
-        {
-            RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
-            return;
-        }
-
-        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
+        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk, v.Quantity) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketNoItems);
             return;
@@ -1190,7 +1185,7 @@ public sealed partial class SimBridge
 
         // A purchase handed over at once is never reserved, so the cap is only asked of one that will be.
         var deliversHere = terminal.Realm == entry.L.Realm && terminal.Region == entry.L.City
-            && RoomFor(ItemsOf(buyer), entry.L.Template, entry.L.Mk) >= entry.L.Quantity;
+            && FitsListing(ItemsOf(buyer), in entry.L);
         if (!deliversHere && ReservedCount(buyer) >= MaxReserved)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketReservedCap);
@@ -1263,7 +1258,7 @@ public sealed partial class SimBridge
                 return;
             }
 
-            if (RoomFor(items, one.L.Template, one.L.Mk) < one.L.Quantity)
+            if (!FitsListing(items, in one.L))
             {
                 RefuseMarket(subs, in command, TatooineReplication.MarketNoRoom);
                 return;
@@ -1304,7 +1299,7 @@ public sealed partial class SimBridge
         var delivered = 0;
         foreach (var entry in _marketScratch)
         {
-            if (RoomFor(items, entry.L.Template, entry.L.Mk) < entry.L.Quantity)
+            if (!FitsListing(items, in entry.L))
             {
                 continue;
             }
@@ -1357,13 +1352,40 @@ public sealed partial class SimBridge
 
         var item = EntityId.FromRawValue(v.Item);
         var stats = ItemCatalog.HasStats(v.Template);
-        if (stats ? v.Quantity != 1 || !HoldsInstance(seller, item, v.Template, v.Mk) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
+        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk, v.Quantity) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketNoItems);
             return;
         }
 
+        // An item with stats is paid by the condition it has left (Loïc, 2026-11-03): one sold worn pays for what it still has, and one broken, or worn
+        // so far that it pays nothing, is taken for nothing — scrapped, its end a decay row, not a sale. Selling worn gear at its full value made the end
+        // of an item's life a faucet, and items were sold long before their repairs were used.
         var payout = MarketValues.VendorPayout(v.Template, v.Mk, v.Quantity);
+        var worn = default(ItemInstance);
+        var scrap = false;
+        if (stats && TryStatsOf(tx, item, out worn) && worn.MaxCondition > 0)
+        {
+            payout = (worn.Flags & ItemFlags.Broken) != 0 ? 0 : payout * Math.Max(0, worn.Condition) / worn.MaxCondition;
+            scrap = payout <= 0;
+        }
+
+        if (scrap)
+        {
+            _marketWritten = true;
+            if (ItemTransfer(tx, seller, ItemLedger.World, v.Template, v.Mk, 1, ItemMoveKind.Decay, 0, worldTick, item) != 1)
+            {
+                _marketAbort = true;
+                RefuseMarket(subs, in command, TatooineReplication.MarketFailed);
+                return;
+            }
+
+            NoteGearEnd(GearEnd.Scrapped, v.Mk, in worn);
+            _marketItemsMoved.Add(seller);
+            _vendorsApplied.Add(command);
+            return;
+        }
+
         if (payout <= 0)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketWorthless);
@@ -1381,6 +1403,12 @@ public sealed partial class SimBridge
             _marketAbort = true;
             RefuseMarket(subs, in command, TatooineReplication.MarketFailed);
             return;
+        }
+
+        // A crate is that many items sold.
+        for (var n = 0; stats && n < v.Quantity; n++)
+        {
+            NoteGearEnd(GearEnd.Sold, v.Mk, in worn);
         }
 
         _marketCounts.VendorPaid += payout;
@@ -1571,7 +1599,7 @@ public sealed partial class SimBridge
         _marketItemsMoved.Add(entry.L.Seller);
         _marketItemsMoved.Add(collector);
         var here = deliverHere ?? (AtListingCity(tick0, collector, in entry.L)
-            && RoomFor(ItemsOf(collector), entry.L.Template, entry.L.Mk) >= entry.L.Quantity);
+            && FitsListing(ItemsOf(collector), in entry.L));
         return !here || Deliver(tx, entry, worldTick);
     }
 

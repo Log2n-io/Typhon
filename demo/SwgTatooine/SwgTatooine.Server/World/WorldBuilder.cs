@@ -269,12 +269,15 @@ public static class WorldBuilder
     public const float GateFacilityZ = GateOutsideZ + 2.3f;
 
     /// <summary>
-    /// The crafting station beside the gate's bazaar (Loïc, 2026-11-02), west of it on the same line: 4.5 m centre to centre, the two footprints
-    /// (1.4 + 0.8 m) and the planner's street (<see cref="StructureFootprint.MarginM"/>) with 0.3 m to spare — 1.7 m between the published station's side
-    /// (1.38 m half-width) and the bazaar's footprint. The bazaar's stand point is 4.6 m from the station's centre, inside its 6 m reach
-    /// (<see cref="TatooineData.StationReachM"/>), so what is bought at the bazaar is crafted without a step.
+    /// The crafting station beside the gate's bazaar (Loïc, 2026-11-02), west of it on the same line, 8 m centre to centre: a few steps from the bazaar's
+    /// stand point, and clear of its west approach.
     /// </summary>
-    public const float GateStationX = GateFacilityX + 4.5f;
+    /// <remarks>
+    /// <b>Not nearer, measured.</b> At 4.5 m — the bazaar's stand point inside the station's 6 m reach, crafting without a step — the station stood on the
+    /// way a body comes round the town hall's approach to the bazaar: a possessed body's <c>MoveTo</c> is steered straight, without the crowd's route, and
+    /// it slid along the station's north side and round the bazaar until the bot gave up (BotMarketLiveChecks' one-bot case, 2026-11-02).
+    /// </remarks>
+    public const float GateStationX = GateFacilityX + 8f;
 
     /// <summary>
     /// The bazaar and the mission terminal at a shuttleport's gate, a crafting station beside the bazaar, and the corridor between them kept clear of
@@ -478,8 +481,10 @@ public static class WorldBuilder
     /// <summary>A city's building <paramref name="i"/> has an interior: every one but the shuttleport (0) and the mission terminals (multiples of 9).</summary>
     public static bool IsEnterable(int i) => i != 0 && i % 9 != 0;
 
-    /// <summary>Enterable buildings on one planet — the same on every planet, which share the map. Counted from the map, so realms are registered before
-    /// the world is built.</summary>
+    /// <summary>
+    /// Enterable buildings on one planet — the same on every planet, which share the map. Counted from the map, so realms are registered before the world
+    /// is built.
+    /// </summary>
     public static int CountEnterable(TatooineMap map)
     {
         var n = 0;

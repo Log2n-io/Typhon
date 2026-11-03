@@ -15,6 +15,7 @@ import { MissionTerminal } from './MissionTerminal';
 import { Toolbar } from './Toolbar';
 import { ShuttlePrompt } from './ShuttlePrompt';
 import { ContextMenu } from './ContextMenu';
+import { PlanetMap } from './PlanetMap';
 import { needsAccount, Viewport } from './Viewport';
 import { useSessionStore } from '../state/session-store';
 
@@ -67,6 +68,8 @@ export function App() {
       <InventoryWindow />
       <BazaarPanel />
       <CraftPanel />
+      {/* Last of the windows, so over every other one (Loïc, 2026-11-02). */}
+      <PlanetMap />
       <Kicked />
     </div>
   );

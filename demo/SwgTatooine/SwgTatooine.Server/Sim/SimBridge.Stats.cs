@@ -123,7 +123,11 @@ public sealed partial class SimBridge
     private const int SeriesMarketFees = 18;
     private const int SeriesFaucets = 19;
     private const int SeriesSinks = 20;
-    private const int SeriesCount = 21;
+    private const int SeriesCraftsStarted = 21;
+    private const int SeriesCraftsFinished = 22;
+    private const int SeriesFares = 23;
+    private const int SeriesTicketFlights = 24;
+    private const int SeriesCount = 25;
 
     /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
     private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
@@ -163,6 +167,10 @@ public sealed partial class SimBridge
         values[SeriesItemDrops] = ItemDrops;
         values[SeriesItemUnits] = ItemUnits;
         values[SeriesItemsLost] = ItemsLost;
+        values[SeriesCraftsStarted] = CraftsStarted;
+        values[SeriesCraftsFinished] = CraftsFinished;
+        values[SeriesFares] = FaresPaid;
+        values[SeriesTicketFlights] = TicketFlights;
         SampleMarket(values);
         _rates.Sample(System.Diagnostics.Stopwatch.GetElapsedTime(_statsStarted).TotalSeconds, values);
 
@@ -256,6 +264,16 @@ public sealed partial class SimBridge
         Rate(j, "walletsOpenedPerMin", r10[SeriesGrants], r60[SeriesGrants], 60d).Append(',');
         Rate(j, "tipsRefusedPerMin", r10[SeriesTipsRefused], r60[SeriesTipsRefused], 60d);
         AppendCreditsByKind(j, r10, r60);
+
+        // The shuttle fare (SimBridge.Fares.cs): what a ticket costs, how many were bought and flown, and how often — whether anybody travels.
+        j.Append("},\"travel\":{");
+        Num(j, "fare", TatooineData.ShuttleFare).Append(',');
+        Num(j, "faresPaid", FaresPaid).Append(',');
+        Num(j, "faresRefused", FaresRefused).Append(',');
+        Num(j, "ticketFlights", TicketFlights).Append(',');
+        Num(j, "ticketsHeld", TicketsHeld).Append(',');
+        Rate(j, "faresPerMin", r10[SeriesFares], r60[SeriesFares], 60d).Append(',');
+        Rate(j, "flightsPerMin", r10[SeriesTicketFlights], r60[SeriesTicketFlights], 60d);
         j.Append("},\"missions\":{");
         Num(j, "held", MissionsHeld).Append(',');
         Num(j, "offers", MissionOffersStanding).Append(',');
@@ -342,6 +360,21 @@ public sealed partial class SimBridge
         Num(j, "repairs", Repairs).Append(',');
         Num(j, "repairFees", RepairFees).Append(',');
         Num(j, "salvages", Salvages);
+        AppendGearEndsJson(j);
+        j.Append('}');
+
+        // Crafting (crafting-build.md § 8, C2): the steps counted, their rates, what was made by template and Mk, the latest crafts and who made them.
+        j.Append(",\"craft\":{");
+        Num(j, "started", CraftsStarted).Append(',');
+        Num(j, "finished", CraftsFinished).Append(',');
+        Num(j, "underWay", CraftsUnderWay).Append(',');
+        Num(j, "points", CraftPoints).Append(',');
+        Num(j, "enhanced", CraftsEnhanced).Append(',');
+        Num(j, "fees", CraftFees).Append(',');
+        Rate(j, "startedPerMin", r10[SeriesCraftsStarted], r60[SeriesCraftsStarted], 60d).Append(',');
+        Rate(j, "finishedPerMin", r10[SeriesCraftsFinished], r60[SeriesCraftsFinished], 60d).Append(',');
+        AppendRefineJson(j);
+        AppendMadeJson(j);
         j.Append('}');
         return j.Append('}').ToString();
 

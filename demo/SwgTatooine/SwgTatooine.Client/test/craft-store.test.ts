@@ -4,6 +4,7 @@ import { craftDoneText, useCraft, type CraftSent } from '../src/state/craft-stor
 import { useMarket, type MarketActions } from '../src/state/market-store';
 import type { CraftUnderWay } from '../src/data/craft';
 import type { InventoryItem } from '../src/data/items';
+import { fitsPart } from '../src/ui/CraftPanel';
 
 /**
  * The crafting panel's state (crafting-build.md C2): a read that fails keeps the craft shown, an older answer never overwrites a newer one, a command in
@@ -174,5 +175,43 @@ describe('a workshop step', () => {
     useMarket.getState().refused(171, { kind: 'craftFinish', schematic: 69 });
     vi.advanceTimersByTime(MARKET_ANSWER_MS);
     expect(useCraft.getState().done?.ok).not.toBe(false);
+  });
+});
+
+describe('the workshop row (review, 2026-11-03)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    useCraft.getState().reset();
+    useMarket.getState().reset();
+    useMarket.getState().setActions(null);
+  });
+
+  it("is held by its own send only: an early settle's old timer does not free the next send", () => {
+    vi.useFakeTimers();
+    harness();
+    const equip: MarketCommand = { kind: 'equip', item: '5' };
+    expect(useMarket.getState().sendCommand(equip)).toBe(true);
+    useMarket.getState().settle('gear');
+    vi.advanceTimersByTime(3_000);
+    expect(useMarket.getState().sendCommand(equip)).toBe(true);
+    vi.advanceTimersByTime(MARKET_ANSWER_MS - 2_000);
+    expect(useMarket.getState().pending).toContain('gear');
+    vi.advanceTimersByTime(3_000);
+    expect(useMarket.getState().pending).not.toContain('gear');
+  });
+
+  it('forgets the step it waited for when the server refuses it', () => {
+    harness();
+    useCraft.getState().refine(12, 1, 2, '2 × Core Mk II');
+    expect(useCraft.getState().sent?.kind).toBe('refine');
+    useMarket.getState().refused(184, { kind: 'refine', template: 12, mk: 1, count: 2 });
+    expect(useCraft.getState().sent).toBeNull();
+  });
+
+  it('takes no crate for a part slot: it is unpacked first', () => {
+    const part = { id: '1', slot: 1, item: 'p', name: 'Grip', category: 'part', template: 29, mk: 0, count: 1 };
+    expect(fitsPart(29, part)).toBe(true);
+    expect(fitsPart(0, part)).toBe(true);
+    expect(fitsPart(29, { ...part, count: 3 })).toBe(false);
   });
 });

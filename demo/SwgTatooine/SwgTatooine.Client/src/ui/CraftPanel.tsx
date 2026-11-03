@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 
 import { ceiling, lineValue, SCALE, type CraftInput, type Schematic, type SchematicBook } from '../data/craft';
 import { ITEM_ICON_PX, itemInitials, MAX_REPAIRS, mkNumeral, repairKitOf, type InventoryItem } from '../data/items';
+import { priceOf } from '../data/market';
+import { refineFee, refineOptions, type RefineOption } from '../data/refine';
 import { useCraft } from '../state/craft-store';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
@@ -53,6 +55,7 @@ export function CraftPanel() {
         <UnderWay book={book} />
       )}
       <Upkeep />
+      <Refine />
     </div>
   );
 }
@@ -113,15 +116,22 @@ function ItemIcon({ asset, name }: { readonly asset: string; readonly name: stri
  * How many times a schematic can be crafted from what is held: per material or core slot, the most whole counts one Mk's units cover; per part slot,
  * the parts that fit, by the slot's count; the fewest of all. A slot's needs are counted on their own, so two slots of one material may overcount.
  */
+/**
+ * Whether an item fills a part slot of `template` (0: any segment): the part itself, loose — a crate of them is unpacked first (crafting-catalog.md
+ * § 11.2), as the server refuses it.
+ */
+export function fitsPart(template: number, i: InventoryItem): boolean {
+  return (
+    i.count === 1 &&
+    (template === 0 ? i.template === PADDED_SEGMENT || i.template === COMPOSITE_SEGMENT : i.template === template)
+  );
+}
+
 export function craftableCount(s: Schematic, items: readonly InventoryItem[]): number {
   let n = Number.MAX_SAFE_INTEGER;
   for (const slot of s.slots) {
     if (slot.kind === 'part') {
-      const fit = items.filter((i) =>
-        slot.template === 0
-          ? i.template === PADDED_SEGMENT || i.template === COMPOSITE_SEGMENT
-          : i.template === slot.template,
-      ).length;
+      const fit = items.filter((i) => fitsPart(slot.template, i)).length;
       n = Math.min(n, Math.floor(fit / slot.count));
       continue;
     }
@@ -218,11 +228,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
     for (const slot of s.slots) {
       if (slot.kind === 'part') {
         const fits = items
-          .filter((i) =>
-            slot.template === 0
-              ? i.template === PADDED_SEGMENT || i.template === COMPOSITE_SEGMENT
-              : i.template === slot.template,
-          )
+          .filter((i) => fitsPart(slot.template, i))
           .sort((a, b) => (b.stats?.grade ?? 0) - (a.stats?.grade ?? 0));
         for (let n = 0; n < slot.count; n++) {
           pickedParts.push(fits[n]?.id ?? '0');
@@ -270,11 +276,7 @@ function Pick({ book }: { readonly book: SchematicBook }) {
             {s.slots.map((slot, k) => {
               if (slot.kind === 'part') {
                 const first = at[k];
-                const fits = items.filter((i) =>
-                  slot.template === 0
-                    ? i.template === PADDED_SEGMENT || i.template === COMPOSITE_SEGMENT
-                    : i.template === slot.template,
-                );
+                const fits = items.filter((i) => fitsPart(slot.template, i));
                 return (
                   <div key={k} className="craft-slot">
                     <ItemIcon asset={slot.item} name={slot.template === 0 ? 'Segment' : slot.item} />
@@ -400,9 +402,12 @@ function Upkeep() {
   const busy = useBusy();
   // Salvage destroys the item: a first click asks, a second on the same item does it.
   const [confirming, setConfirming] = useState<string | null>(null);
-  // What wears (repair), and what a crafter made in the grid — parts included (salvage).
+  // What wears (repair), and what a crafter made in the grid — parts included (salvage); a crate is neither, unpacked first.
   const wearing = items.filter(
-    (i) => i.stats !== undefined && (repairKitOf(i) !== undefined || (i.stats.crafter !== '0' && i.slot <= 100)),
+    (i) =>
+      i.stats !== undefined &&
+      i.count === 1 &&
+      (repairKitOf(i) !== undefined || (i.stats.crafter !== '0' && i.slot <= 100)),
   );
   if (wearing.length === 0) {
     return null;
@@ -468,6 +473,68 @@ function Upkeep() {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Refine (crafting-catalog.md § 11.1), at the station: every material, core and add-on held N times or more — N of its Mk into one of the next, for 5 %
+ * of the output's value. One, or as many as one action makes.
+ */
+function Refine() {
+  const items = useItems((s) => s.snapshot?.items ?? NO_ITEMS);
+  const prices = useMarket((s) => s.prices);
+  const refine = useCraft((s) => s.refine);
+  const busy = useBusy();
+  const options = refineOptions(items);
+  if (options.length === 0) {
+    return null;
+  }
+
+  const fee = (o: RefineOption, n: number): string => {
+    const next = priceOf(prices, o.item, o.mk + 1);
+    return next === undefined ? 'a fee' : `${refineFee(next.value, n).toLocaleString('en-US')} cr`;
+  };
+  const send = (o: RefineOption, n: number): void => {
+    refine(o.template, o.mk, n, `${String(n)} × ${o.name} Mk ${mkNumeral(o.mk + 1)}`);
+  };
+  return (
+    <div className="craft-upkeep" aria-label="Refine">
+      <div className="hud-title">Refine</div>
+      {options.map((o) => (
+        <div
+          key={`${String(o.template)}:${String(o.mk)}`}
+          className="craft-slot"
+          data-testid={`refine-${String(o.template)}-${String(o.mk)}`}
+        >
+          <ItemIcon asset={o.item} name={o.name} />
+          <span>
+            {o.name} · {String(o.ratio)} × Mk {mkNumeral(o.mk)} → 1 × Mk {mkNumeral(o.mk + 1)} · {String(o.held)} held
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            title={`${String(o.ratio)} Mk ${mkNumeral(o.mk)} for one Mk ${mkNumeral(o.mk + 1)}, ${fee(o, 1)}`}
+            onClick={() => {
+              send(o, 1);
+            }}
+          >
+            Refine 1
+          </button>
+          {o.most > 1 ? (
+            <button
+              type="button"
+              disabled={busy}
+              title={`${String(o.ratio * o.most)} Mk ${mkNumeral(o.mk)} for ${String(o.most)} Mk ${mkNumeral(o.mk + 1)}, ${fee(o, o.most)}`}
+              onClick={() => {
+                send(o, o.most);
+              }}
+            >
+              Refine {String(o.most)}
+            </button>
+          ) : null}
+        </div>
+      ))}
     </div>
   );
 }
