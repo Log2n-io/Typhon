@@ -3,17 +3,20 @@
 # This file maps all variations of author names to a canonical form.
 # Format: Canonical Name <canonical@email> Commit Name <commit@email>
 #
-# All commits will display as "nockawa <loic.baumann@outlook.com>"
+# All commits will display as "nockawa <48723305+nockawa@users.noreply.github.com>"
 
 # Map "Loïc Baumann" variations to "nockawa"
-nockawa <loic.baumann@outlook.com> Loïc Baumann <loic.baumann@outlook.com>
-nockawa <loic.baumann@outlook.com> Loic Baumann <loic.baumann@outlook.com>
+nockawa <48723305+nockawa@users.noreply.github.com> Loïc Baumann <loic.baumann@outlook.com>
+nockawa <48723305+nockawa@users.noreply.github.com> Loic Baumann <loic.baumann@outlook.com>
 
-# Map the unity3d.com email to the canonical outlook.com email
-nockawa <loic.baumann@outlook.com> Loïc Baumann <loic.baumann@unity3d.com>
+# Map the unity3d.com email to the canonical noreply email
+nockawa <48723305+nockawa@users.noreply.github.com> Loïc Baumann <loic.baumann@unity3d.com>
 
-# Map GitHub noreply email to canonical email
-nockawa <loic.baumann@outlook.com> nockawa <nockawa@users.noreply.github.com>
+# Map the legacy GitHub noreply email (no numeric id) to the canonical one
+nockawa <48723305+nockawa@users.noreply.github.com> nockawa <nockawa@users.noreply.github.com>
+
+# Map commits authored as "nockawa" with the outlook.com email
+nockawa <48723305+nockawa@users.noreply.github.com> nockawa <loic.baumann@outlook.com>
 
 # Canonical identity (this line ensures "nockawa" commits stay as-is)
-nockawa <loic.baumann@outlook.com>
+nockawa <48723305+nockawa@users.noreply.github.com>
