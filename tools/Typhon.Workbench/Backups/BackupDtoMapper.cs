@@ -87,7 +87,8 @@ internal static class BackupDtoMapper
             s.StoreBytes, s.RestorablePoints, Map(s.LastDrill), Map(s.LastPassedDrill), s.RetentionBlocked.ToString(),
             new BackupArchiveStatusDto(a.State.ToString(), Id(a.TimelineId), a.ArchivedThroughLsn, a.LagBytes, a.BacklogBytes, a.LagSeconds, a.GapsTotal,
                 a.LastGapFromLsn, a.LastGapToLsn, Instant(a.LastArchivedSealUtc), a.ConsecutiveFailures, a.LastError),
-            Id(s.LastRequestId), Instant(s.UpdatedUtc));
+            (s.Requests ?? []).Select(r => new BackupRequestOutcomeDto(Id(r.Id), r.State.ToString(), Map(r.Point), r.Error, Instant(r.Utc))).ToList(),
+            Instant(s.UpdatedUtc));
     }
 
     public static BackupArchiveDto Map(BackupArchiveListing l)
@@ -158,7 +159,8 @@ internal static class BackupDtoMapper
 
     public static BackupDrillReportDto Map(BackupDrillReport r, bool needsSchema) =>
         new(Map(r.Point), r.Outcome.ToString(), r.FailedStage.ToString(), r.Error, r.RestoreTime.TotalMilliseconds, r.OpenTime.TotalMilliseconds,
-            r.CheckTime.TotalMilliseconds, Map(r.Recovery), r.Verdict.ToString(), r.Findings, r.SuspectPages, r.RecordFile, needsSchema);
+            r.CheckTime.TotalMilliseconds, Map(r.Recovery), r.Verdict.ToString(), r.Findings, r.SuspectPages, r.RecordFile, needsSchema,
+            (r.Assemblies ?? []).Select(a => $"{a.Name} {a.Version} ({(a.PublicKeyToken == null ? "unsigned" : "token " + a.PublicKeyToken)})").ToList());
 
     public static BackupRestoreResultDto Map(BackupRestoreResult r, BackupSettleDto settle) =>
         new(Map(r.Point), r.Target, r.DisplacedBundle, r.ChainDepth, r.PagesWritten, r.ZeroPages, r.TailSegments, r.BytesRead, r.BytesWritten,

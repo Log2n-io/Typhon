@@ -9,8 +9,8 @@ namespace Typhon.Workbench.Backups;
 /// <c>typhon</c>'s, which hosts the Workbench under <c>typhon ui</c>): every engine the Backups view opens on a restored image runs in a process of its own,
 /// so it never shares the Workbench's process-global archetype registry with a live session.
 /// <list type="bullet">
-/// <item><c>--backup-drill --store S --point latest|N --scratch D [--schema dll]…</c> runs <see cref="BackupOperations.Drill"/>.</item>
-/// <item><c>--backup-settle --bundle B [--schema dll]…</c> opens and closes a restored bundle (<see cref="BackupSettle"/>).</item>
+/// <item><c>--backup-drill --store S --point latest|N --scratch D [--schema dll|dir]…</c> runs <see cref="BackupOperations.Drill"/>.</item>
+/// <item><c>--backup-settle --bundle B [--schema dll|dir]…</c> opens and closes a restored bundle (<see cref="BackupSettle"/>).</item>
 /// </list>
 /// Both report on stdout as JSON lines, each prefixed with <see cref="LinePrefix"/> so an engine log written to the console is never taken for one.
 /// </summary>
@@ -18,9 +18,10 @@ namespace Typhon.Workbench.Backups;
 /// <para>Lines: <c>{"event":"progress","stage":…,"done":…,"total":…}</c> (drill), then exactly one of <c>{"event":"report","report":{…}}</c> (drill,
 /// exit 0), <c>{"event":"settle","settle":{…}}</c> (settle, exit 0) or <c>{"event":"error","category":…,"message":…,"needsSchema":…}</c> (exit 2); a
 /// usage error exits 64.</para>
-/// <para>With <c>--schema</c> a restored point is settled through the Workbench's own open with those assemblies, so a point whose WAL tail holds the
-/// application's records replays; without, through the persisted schema alone, which reports such a point as needing its schema (7012), not as
-/// damaged.</para>
+/// <para>A restored point is settled through the Workbench's own open, exact (#1485): with <c>--schema</c>'s assemblies (a directory is searched first),
+/// else the ones its manifest names, found the way a session finds them — so a point whose WAL tail holds the application's records replays. An assembly
+/// that is missing or another build is refused with the reason; a database whose manifest names none settles with the persisted schema alone, which
+/// reports a point whose tail holds the application's records as needing its schema (7012), not as damaged.</para>
 /// <para><c>--watch-stdin</c>: the child exits (<see cref="ExitOrphaned"/>) when its stdin reaches its end. The parent keeps the pipe open for the child's
 /// whole life, so a Workbench that dies, however it dies, takes its child with it — a drill never goes on restoring a whole image for nobody.</para>
 /// </remarks>
@@ -93,9 +94,9 @@ public static class BackupDrillChild
 
     private static int Drill(TextWriter output, string store, string point, string scratch, string[] schemaPaths)
     {
-        if (string.IsNullOrWhiteSpace(store) || string.IsNullOrWhiteSpace(scratch) || !TryParsePoint(point, out var selector))
+        if (string.IsNullOrWhiteSpace(store) || string.IsNullOrWhiteSpace(scratch) || !TryParsePoint(point, out var selector) || !ValidSchema(schemaPaths))
         {
-            Write(output, new Line("error", null, 0, 0, null, "failed", "Usage: --backup-drill --store S --point latest|N --scratch D [--schema dll]…"));
+            Write(output, new Line("error", null, 0, 0, null, "failed", "Usage: --backup-drill --store S --point latest|N --scratch D [--schema dll|dir]…"));
             return ExitUsage;
         }
 
@@ -130,11 +131,25 @@ public static class BackupDrillChild
         }
     }
 
+    /// <summary>Whether every <c>--schema</c> entry is a file or a directory (checked before anything is restored).</summary>
+    private static bool ValidSchema(string[] schemaPaths)
+    {
+        try
+        {
+            BackupSettle.SearchDirectories(schemaPaths);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     private static int Settle(TextWriter output, string bundle, string[] schemaPaths)
     {
-        if (string.IsNullOrWhiteSpace(bundle))
+        if (string.IsNullOrWhiteSpace(bundle) || !ValidSchema(schemaPaths))
         {
-            Write(output, new Line("error", null, 0, 0, null, "failed", "Usage: --backup-settle --bundle B [--schema dll]…"));
+            Write(output, new Line("error", null, 0, 0, null, "failed", "Usage: --backup-settle --bundle B [--schema dll|dir]…"));
             return ExitUsage;
         }
 

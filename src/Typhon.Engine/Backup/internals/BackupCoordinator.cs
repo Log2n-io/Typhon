@@ -39,7 +39,7 @@ internal interface IBackupJobObserver
     void PhaseChanged(BackupRunPhase phase);
 
     /// <summary>The capture and its verify ended: <paramref name="failure"/> null when the point is published and verified.</summary>
-    void PointEnded(BackupJobSource source, IBackupPointStore store, in BackupPointInfo point, BackupCapture capture, Exception failure);
+    void PointEnded(BackupJobSource source, Guid requestId, IBackupPointStore store, in BackupPointInfo point, BackupCapture capture, Exception failure);
 
     /// <summary>Whether <see cref="AfterPoint"/> has work (a retention policy): the job then stays one job until it ends.</summary>
     bool HasWorkAfterPoint { get; }
@@ -245,7 +245,7 @@ internal sealed partial class BackupCoordinator : ResourceNode
                 BeforePostVerify?.Invoke(point);
                 VerifyPublished(request.Store as FileSystemBackupStore, point);
                 published = true;
-                observer?.PointEnded(request.Source, request.Store, point, capture, null);
+                observer?.PointEnded(request.Source, request.RequestId, request.Store, point, capture, null);
 
                 // The caller's task completes now; with no work after the point, the next job may start as soon as it sees it.
                 EndJobUnless(observer is { HasWorkAfterPoint: true } && request.Store is FileSystemBackupStore);
@@ -254,7 +254,7 @@ internal sealed partial class BackupCoordinator : ResourceNode
             catch (Exception e)
             {
                 published = false;
-                observer?.PointEnded(request.Source, request.Store, point, capture, e);
+                observer?.PointEnded(request.Source, request.RequestId, request.Store, point, capture, e);
                 EndJobUnless(false);
                 request.Completion.SetException(e);
             }

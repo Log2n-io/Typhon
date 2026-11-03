@@ -323,6 +323,48 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
                 measured, a SingleVersion holder read every column as zero, with no error
   verified: ArchetypeSchemaValidationTests.FieldMigrationWithAnUnopenedHolder_IsRefused [VerifiesRule] [RuleMutant]
 
+### SCHEMA-14: An exact-schema open opens only with the build that wrote the database, and writes nothing of a difference `[silent]`
+  invariant with `SchemaMatch.Exact` (every drill, every restore's settle, #1485): each registered component the catalog holds equals its `ComponentR1`
+            row — name, revision, storage mode, size — and every `FieldR1`, by field id, in all it records (name, type, element type, array length,
+            offset, size, static and realm-key flags, index flags), and is declared by the assembly whose identity (simple name, version, public-key
+            token) its `AssemblyR1` row names
+  invariant the archetypes are judged by the open's own passes (SCHEMA-10, SCHEMA-11, #1394), classified as an inspector classifies
+            (`ArchetypeSetMigrationPolicy.Refuse`): every archetype of the engine's load context the open would migrate, rewrite or refuse — a set
+            change, a revision bump, stale stored names, a per-archetype refusal, and one skipped for a component the build declares and the database
+            never stored — is a difference, and so is each archetype it keeps that the catalog lacks, holds under another name, or that another
+            assembly than the manifest's declares
+  invariant what neither side holds is not compared: a component the loaded assembly declares and the database never stored is not registered (the
+            Workbench's SchemaCompatibility); a stored archetype the build declares the same way but cannot wire is skipped, and a replay that needs it
+            fails (7012). The manifest's assemblies must all be supplied (the resolver refuses a missing one; a file named for the drill is the build it
+            means)
+  never an exact open migrates, forks the timeline, creates the database, or adds a component, an engine catalog (a realm), a grid setting or an
+        archetype: a difference is refused (`SchemaMismatchException`, 3003) before the fork, the migration or a catalog write, naming what differs
+        (the component and field, the archetype and the change, or the assembly and both versions); a refused open never closes clean an image it did
+        not recover, so the right build still replays the WAL
+  invariant an ordinary open keeps the manifest naming the build that writes the database, once the open completed (a refused open leaves it and the
+            timeline as found): the `AssemblyR1` row of an assembly whose version or token the loaded build changed takes the loaded one's, a catalog
+            row whose type another assembly now declares names that assembly's row, and a manifest row no catalog row names any more is retired — all
+            durably, after a `BuildChange` fork (BKP-11), so a point's image names the build that wrote it and no restore replays one build's records
+            under another's manifest
+  enforce a schema assembly found by name at another version or token is never loaded in place of the one the manifest names (the Workbench's resolver,
+          which `typhon backup drill` and the drill and settle children share): it is reported, and an exact open refuses it
+  scope: DatabaseEngine.ThrowIfComponentNotExact, DatabaseEngine.CompareFields, DatabaseEngine.ThrowIfArchetypesNotExact,
+         DatabaseEngine.AssemblyMismatch, DatabaseEngine.ApplyPendingDeclaringAssemblies, DatabaseEngine.RecordDeclaringAssembly,
+         DatabaseEngine.RecordAssemblyIdentity, DatabaseEngine.RetireUnreferencedAssemblies, BackupDrillRunner.OpenAndCloseRestored
+  on_violation: a drill "proves" a point with a build that migrated it on the way, or a restore settles another build's schema over the point, and both
+                report success; an inspector that resolves by name alone loads another build and records it in the manifest, so the version check then
+                refuses the build that wrote the database
+  rationale: a restore is crash recovery with the real code (BKP-05), so the code must be the code that wrote the point. Version numbers are not proof —
+             dev builds stay at 1.0.0.0, unsigned assemblies have no token — so the stored schema is compared too; the version is compared as well because a
+             build can change behaviour (a migration function, a computed index) without changing a layout. The archetypes reuse the open's own
+             classification so that an exact open and an ordinary one never disagree on what a set change is
+  verified: ExactSchemaOpenTests [VerifiesRule("SCHEMA-14")] (a layout change, a component and an archetype the database does not hold, an archetype at
+            another revision, an assembly at another version and the build-change fork of the ordinary open that records it, a refused ordinary open
+            that writes nothing of it, an exact open of no database; nothing written, nothing forked; a refusal on a crashed image leaves its WAL to
+            replay), BackupDrillTests (the in-process opener refuses a build that adds a component), DrillWithSchemaAssembliesTests (real builds:
+            older, newer, same version with another field, same version with another archetype set, missing, a named file of another build; the
+            settle; a session never loads another build), BackupDrillSchemaCommandTests. Source mutants seen red: a name-only resolver match, the
+            exact component check skipped, the refused archetype changes ignored
 ---
 
 ## Module: MEMB — The archetype membership channel

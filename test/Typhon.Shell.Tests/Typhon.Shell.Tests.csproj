@@ -31,7 +31,13 @@
         <ProjectReference Include="..\Typhon.Shell.Tests.SchemaFixture\Typhon.Shell.Tests.SchemaFixture.csproj"
                           ReferenceOutputAssembly="false"
                           Private="false" />
+        <!-- #1485: restored and built with the tests, never referenced; DrillSchemaBuilds.targets builds its variants into drill-schema/. -->
+        <ProjectReference Include="..\Typhon.Backup.DrillSchemaFixture\Typhon.Backup.DrillSchemaFixture.csproj"
+                          ReferenceOutputAssembly="false"
+                          Private="false" />
     </ItemGroup>
+
+    <Import Project="..\Typhon.Backup.DrillSchemaFixture\DrillSchemaBuilds.targets" />
 
     <Target Name="CopyForeignSchemaFixture" AfterTargets="Build">
         <ItemGroup>

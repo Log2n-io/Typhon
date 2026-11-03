@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <!--
+      #1485: the schema assembly of a backup drill's wrong-build tests, built once per variant by the test project that uses it (DrillSchemaBuilds.targets):
+      one assembly name, several versions and layouts — the builds an operator could hand a drill. DrillVersion sets its identity, DrillLayout=B adds a field
+      to its component without bumping the version (the build whose version number lies). Not referenced by any test host: each variant is loaded as a
+      foreign schema assembly, the way the Workbench and `typhon backup drill` load an application's.
+    -->
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>default</LangVersion>
+        <IsPackable>false</IsPackable>
+        <IsTestProject>false</IsTestProject>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <DrillVersion Condition="'$(DrillVersion)' == ''">1.0.0.0</DrillVersion>
+        <AssemblyVersion>$(DrillVersion)</AssemblyVersion>
+        <FileVersion>$(DrillVersion)</FileVersion>
+        <Version>$(DrillVersion)</Version>
+        <DefineConstants Condition="'$(DrillLayout)' == 'B'">$(DefineConstants);DRILL_LAYOUT_B</DefineConstants>
+        <DefineConstants Condition="'$(DrillLayout)' == 'C'">$(DefineConstants);DRILL_LAYOUT_C</DefineConstants>
+        <!-- The version is the variant's, not the repository's tag. -->
+        <MinVerSkip>true</MinVerSkip>
+    </PropertyGroup>
+
+    <!-- A variant builds beside the others, never over them. -->
+    <PropertyGroup Condition="'$(DrillVariant)' != ''">
+        <OutputPath>bin\$(Configuration)\variant-$(DrillVariant)\</OutputPath>
+        <IntermediateOutputPath>obj\$(Configuration)\variant-$(DrillVariant)\</IntermediateOutputPath>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- A variant's properties are its own: the engine it compiles against is the host's, built once (and never copied beside a variant). -->
+        <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" Private="false"
+                          GlobalPropertiesToRemove="DrillVariant;DrillVersion;DrillLayout" />
+        <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" Private="false"
+                          GlobalPropertiesToRemove="DrillVariant;DrillVersion;DrillLayout" />
+        <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj"
+                          ReferenceOutputAssembly="false"
+                          OutputItemType="Analyzer"
+                          GlobalPropertiesToRemove="DrillVariant;DrillVersion;DrillLayout" />
+    </ItemGroup>
+
+</Project>

@@ -25,6 +25,12 @@
         <ProjectReference Include="..\..\tools\Typhon.Workbench\Typhon.Workbench.csproj" />
         <!-- Source-generated component schema providers (feature #514, phase 4). Consumer split = ArchetypeAccessorGenerator only (no TraceEvent post-init leak). -->
         <ProjectReference Include="..\..\src\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+        <!-- #1485: restored and built with the tests, never referenced; DrillSchemaBuilds.targets builds its variants into drill-schema/. -->
+        <ProjectReference Include="..\Typhon.Backup.DrillSchemaFixture\Typhon.Backup.DrillSchemaFixture.csproj"
+                          ReferenceOutputAssembly="false"
+                          Private="false" />
     </ItemGroup>
+
+    <Import Project="..\Typhon.Backup.DrillSchemaFixture\DrillSchemaBuilds.targets" />
 
 </Project>

@@ -137,7 +137,8 @@ public partial class DatabaseEngine
             return null;
         }
 
-        var refusePolicy = _options.ArchetypeSetMigration == ArchetypeSetMigrationPolicy.Refuse;
+        // An exact open (#1485) classifies as an inspector does: every archetype it would migrate or rewrite is skipped and listed, and it refuses them all.
+        var refusePolicy = _options.ArchetypeSetMigration == ArchetypeSetMigrationPolicy.Refuse || ExactSchema;
         var kept = new Dictionary<ushort, (string[], ArchetypeSetMigrationPlan)>();
         List<ushort> refused = null;
         foreach (var (archetypeId, slotToTable) in resolved)

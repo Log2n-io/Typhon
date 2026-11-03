@@ -91,9 +91,15 @@ For a store whose database runs elsewhere, or only offline: `typhon backup statu
 A backup that was never restored is a hope. A **drill** restores a point into a scratch directory, opens the database (its WAL tail
 replays), checks it deep, records the verdict in the store, and deletes the scratch. Health and retention read those records.
 
-Opening a point replays its WAL tail, and replaying the application's records needs the application's components registered. So:
+Opening a point replays its WAL tail, and replaying the application's records runs the application's code: a drill opens with the
+application's schema assemblies — **the exact build that wrote the point**. Its open is exact: an assembly at another version or public-key token,
+a component whose layout differs (even under the same version number), a component or archetype the point does not hold — each ends the drill
+as **Error** (exit 2) naming what differs, never as Passed and never migrated. Keep the binaries of every build that wrote a point you keep.
 
-- **From the application** (the general case): drill in-process with the application's registrations.
+- **From the `typhon` tool** (the general case): `typhon backup drill --store /backups/world --scratch /scratch/typhon-drill --schema /opt/world/bin`.
+  `--schema` names the application's schema assemblies, or a directory holding them (repeatable); without it, the tool looks for the assemblies the
+  point's manifest names beside itself. The report names the assemblies it ran with: what "proven" was proven with.
+- **From the application**: drill in-process with the application's registrations, the same exact open.
 
   ```csharp
   var report = BackupOperations.Drill("/backups/world", PointSelector.Latest, new BackupDrillOptions
@@ -104,13 +110,9 @@ Opening a point replays its WAL tail, and replaying the application's records ne
   // report.Outcome: Passed, PassedWithWarnings, Failed (the point is not trustworthy), Error (the drill could not run)
   ```
 
-  Run it daily, from an admin command or a small tool built with the application.
-- **From the `typhon` tool**: `typhon backup drill --store /backups/world --scratch /scratch/typhon-drill` drills a point without the
-  application's assemblies. That works for a point with nothing to replay (an offline point of a cleanly closed database). For a point whose
-  tail holds the application's records it ends in **Error** (exit 2), naming the component it could not replay: that says nothing about the
-  point, only that the tool cannot open it.
+  An application that was upgraded since the point drills it as an **Error**: the point needs the build that wrote it.
 
-Drill exit codes: 0 passed, 1 passed with warnings, 3 failed, 2 could not run.
+Run it daily. Drill exit codes: 0 passed, 1 passed with warnings, 3 failed, 2 could not run (another build, a missing assembly, scratch I/O).
 
 ## 4. 🌍 Mirror it off-site
 
@@ -138,7 +140,9 @@ typhon backup restore --store /backups/world --to /data/                       #
 typhon backup restore --store /backups/world --time 2026-10-21T14:03:00Z --to /data/   # with Archive: an instant
 ```
 
-Start the application: the open runs ordinary crash recovery. Then `typhon check /data/world.typhon`. The engine's next point is full, on a
+The restore prints the schema assemblies the restored database names. Start **that build** of the application first: the open runs ordinary
+crash recovery with the code that wrote the point. Another build may migrate the restored database on its way open — an older one possibly
+dropping what it does not know. Upgrade afterwards, as any upgrade. Then `typhon check /data/world.typhon`. The engine's next point is full, on a
 new timeline.
 
 ### A bad deploy or a mass delete at time T
@@ -149,7 +153,8 @@ new timeline.
    (`--dry-run` first shows the point, the archived segments and the LSN it would end at).
 3. Inspect the restored bundle in the Workbench, then swap it in (`--replace`) or extract what you need.
 
-A restore never crosses a schema change or a bulk load: each starts a new timeline, and an LSN before it restores from the parent timeline.
+A restore never crosses a schema change, a new build of the application or a bulk load: each starts a new timeline, and an LSN before it restores
+from the parent timeline.
 
 ### `typhon check` reports data loss
 

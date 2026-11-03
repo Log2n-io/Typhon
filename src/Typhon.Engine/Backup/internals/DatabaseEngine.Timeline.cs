@@ -113,6 +113,7 @@ public partial class DatabaseEngine
 
     private TimelineHistory _timelines = TimelineHistory.Of(default(TimelineEntry));
     private long _lastForkOrigin = -1;
+    private TimelineReason _lastForkReason;
     private long _pointStamps;
     private long _pointStampsAtLastFork = -1;
 
@@ -228,31 +229,46 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
-    /// Forks the timeline before a write the WAL cannot replay (Q4, WA-13): with archiving configured, a meta flip naming the current timeline as parent
-    /// and, as origin, the LSN before the active segment's first — after a served segment switch when <paramref name="switchSegment"/>, so the parent's
-    /// segments end exactly there. Idempotent while nothing could tell the two forks apart: the same origin and no point stamped since the last fork (a
-    /// registration changing several components forks once). A point between them, whose capture's switch skips an empty segment, keeps the origin the
-    /// same, yet a restore past the second change must not replay its records onto that point (D3). Archiving off: nothing to protect, no flip.
+    /// Forks the timeline before a write the WAL cannot replay (Q4, WA-13): with archiving configured, a served segment switch, then a meta flip naming
+    /// the current timeline as parent and, as origin, the LSN before the active segment's first. The switch makes the parent's segments end exactly at the
+    /// origin, so every LSN the parent wrote restores from it (#1484: without it, the LSNs between the active segment's start and the fork were on neither
+    /// timeline). An empty active segment is not switched (the open's forks, on a fresh segment). A commit racing the switch — between its service and the
+    /// flip — lands past the origin, on the child, where no base is that early: the one window the fork does not cover, a few records under traffic.
+    /// Folded into the last fork of this session while no point was stamped since it: no base lies between the two, so no restore could tell them apart
+    /// (a registration changing several components forks once, commits between them or not). A point between them makes the second change fork, even at
+    /// the same origin, or a restore past it would replay its records onto that point (D3). Archiving off: nothing to protect, no flip.
     /// </summary>
-    internal void ForkTimeline(TimelineReason reason, bool switchSegment)
+    internal void ForkTimeline(TimelineReason reason)
     {
         if (ArchiveConfiguration == null || WalManager?.SegmentManager == null)
         {
             return;
         }
 
-        if (switchSegment)
+        // Folded before the switch: a second change of the same fork rotates no segment. A log break is never folded: the archiver reads a fork's
+        // reason, and a parent whose archive may hold the dropped segments must not be taken for a schema or build change's (WalArchiver).
+        lock (_timelineLock)
         {
-            // Outside the lock: the writer serves the switch on its next pass, and a stalled writer must not hold up a point's stamp behind the fork.
-            var ticket = WalManager.RequestSegmentSwitch();
-            var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(30));
-            var waiter = new AdaptiveWaiter();
-            while (WalManager.SwitchesServed < ticket)
+            if (CanFold(reason))
             {
-                if (!waiter.Wait(ref ctx))
-                {
-                    throw new InvalidOperationException($"The WAL writer did not serve the segment switch of a timeline fork ({reason}) within 30 s.");
-                }
+                return;
+            }
+        }
+
+        // Outside the lock: the writer serves the switch on its next pass, and a stalled writer must not hold up a point's stamp behind the fork.
+        var ticket = WalManager.RequestSegmentSwitch();
+        var ctx = WaitContext.FromTimeout(TimeSpan.FromSeconds(30));
+        var waiter = new AdaptiveWaiter();
+        while (WalManager.SwitchesServed < ticket)
+        {
+            if (!WalManager.IsRunning && WalManager.SwitchesServed < ticket)
+            {
+                throw new InvalidOperationException($"The WAL writer stopped before it served the segment switch of a timeline fork ({reason}).");
+            }
+
+            if (!waiter.Wait(ref ctx))
+            {
+                throw new InvalidOperationException($"The WAL writer did not serve the segment switch of a timeline fork ({reason}) within 30 s.");
             }
         }
 
@@ -260,15 +276,16 @@ public partial class DatabaseEngine
         lock (_timelineLock)
         {
             var origin = WalManager.SegmentManager.ArchiveSnapshot(0, 0).ActiveFirstLsn - 1;
-            if (origin == _lastForkOrigin && _pointStamps == _pointStampsAtLastFork)
+            if (CanFold(reason))
             {
-                return;
+                return;   // another fork of the same change took the flip while this one switched
             }
 
             var parent = _timelines.Current.TimelineId;
             child = Guid.NewGuid();
             AdoptTimeline(child, parent, origin, reason, keepLineage: true);
             _lastForkOrigin = origin;
+            _lastForkReason = reason;
             _pointStampsAtLastFork = _pointStamps;
             LogTimelineForked(parent, child, origin, reason);
         }
@@ -276,6 +293,13 @@ public partial class DatabaseEngine
         // Outside the lock: the probe stands for whatever runs between the flip and the change's first write (a point's capture, in a test).
         AfterTimelineForkProbe?.Invoke(child);
     }
+
+    /// <summary>
+    /// Whether a fork for <paramref name="reason"/> folds into the session's last one (under <see cref="_timelineLock"/>): one was taken, no point was
+    /// stamped since, and neither is a log break — the one reason the archiver must see as it is.
+    /// </summary>
+    private bool CanFold(TimelineReason reason) =>
+        _lastForkOrigin >= 0 && _pointStamps == _pointStampsAtLastFork && reason != TimelineReason.LogBreak && _lastForkReason != TimelineReason.LogBreak;
 
     /// <summary>
     /// <paramref name="history"/> without the ancestors no local segment can belong to any more: a timeline owns the LSNs past its origin up to the next

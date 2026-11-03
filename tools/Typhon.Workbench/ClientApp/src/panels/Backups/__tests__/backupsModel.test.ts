@@ -208,7 +208,7 @@ describe('health', () => {
       lastDrill: null,
       lastPassedDrill: null,
       retentionBlocked: 'None',
-      lastRequestId: null,
+      requests: [],
       updatedUtc: null,
       archive: {
         state: 'Off',

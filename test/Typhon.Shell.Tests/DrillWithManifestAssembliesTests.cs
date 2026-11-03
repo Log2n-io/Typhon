@@ -10,17 +10,18 @@ using Typhon.Workbench.Fixtures;
 namespace Typhon.Shell.Tests;
 
 /// <summary>
-/// T13 (AC-D2, plan 1416 §8.1): <c>typhon backup drill</c> in a child process — the CLI as cron runs it, with no schema option and nothing that registers
-/// the application's components or archetypes — drills a point of a database holding every persisted shape: Versioned, SingleVersion and Transient
-/// components, component collections, unique and multi-value indexes, spatial clusters, a polymorphic archetype tree (the SWG dev fixture).
+/// T13 (AC-D2, plan 1416 §8.1; #1485): <c>typhon backup drill</c> in a child process — the CLI as cron runs it, with no schema option — drills a point
+/// of a database holding every persisted shape: Versioned, SingleVersion and Transient components, component collections, unique and multi-value
+/// indexes, spatial clusters, a polymorphic archetype tree (the SWG dev fixture). With no <c>--schema</c>, the CLI loads the assemblies the point's
+/// manifest names from its default search order — here <c>Typhon.Workbench.Fixtures</c>, shipped beside it — at their exact identity, and opens
+/// exactly.
 /// </summary>
 /// <remarks>
-/// The point is a clean one (an offline backup of a closed database): its open replays nothing. A point whose WAL tail holds records of the application's
-/// archetypes cannot be settled by such a process (#1309: the replay refuses archetypes it does not register) — the drill reports that as an
-/// <see cref="BackupDrillOutcome.Error"/> (engine <c>BackupDrillTests</c>), and a host drills it in-process with its own opener.
+/// The point is a clean one (an offline backup of a closed database). Points whose tail holds the application's records, and builds that are not the
+/// point's, are <c>BackupDrillSchemaCommandTests</c>' and the Workbench's <c>DrillWithSchemaAssembliesTests</c>'.
 /// </remarks>
 [TestFixture]
-public sealed class DrillWithoutApplicationAssembliesTests
+public sealed class DrillWithManifestAssembliesTests
 {
     private static readonly TimeSpan ChildBudget = TimeSpan.FromSeconds(60);
     private string _root;
@@ -42,7 +43,7 @@ public sealed class DrillWithoutApplicationAssembliesTests
 
     [Test]
     [CancelAfter(90_000)]
-    public void TheCli_DrillsAPointOfEveryShape_WithoutTheApplicationsAssemblies()
+    public void TheCli_DrillsAPointOfEveryShape_WithTheAssembliesItsManifestNames()
     {
         var fixture = FixtureDatabase.CreateOrReuse(Path.Combine(_root, "db"), force: true, Small, databaseName: "drilled");
         var store = Path.Combine(_root, "store");

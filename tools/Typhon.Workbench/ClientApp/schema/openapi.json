@@ -5887,7 +5887,8 @@
           "findings",
           "suspectPages",
           "recordFile",
-          "needsSchema"
+          "needsSchema",
+          "assemblies"
         ],
         "type": "object",
         "properties": {
@@ -5969,6 +5970,15 @@
           },
           "needsSchema": {
             "type": "boolean"
+          },
+          "assemblies": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -6070,7 +6080,7 @@
           "lastPassedDrill",
           "retentionBlocked",
           "archive",
-          "lastRequestId",
+          "requests",
           "updatedUtc"
         ],
         "type": "object",
@@ -6228,11 +6238,14 @@
           "archive": {
             "$ref": "#/components/schemas/BackupArchiveStatusDto"
           },
-          "lastRequestId": {
+          "requests": {
             "type": [
               "null",
-              "string"
-            ]
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BackupRequestOutcomeDto"
+            }
           },
           "updatedUtc": {
             "type": [
@@ -6984,6 +6997,46 @@
               "string"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "BackupRequestOutcomeDto": {
+        "required": [
+          "id",
+          "state",
+          "point",
+          "error",
+          "utc"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "state": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "point": {
+            "$ref": "#/components/schemas/BackupPointDto"
+          },
+          "error": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "utc": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "date-time"
           }
         }
       },

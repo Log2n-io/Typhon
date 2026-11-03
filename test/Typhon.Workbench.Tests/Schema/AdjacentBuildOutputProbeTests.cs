@@ -2,7 +2,7 @@ using NUnit.Framework;
 using System;
 using System.IO;
 using System.Linq;
-using Typhon.Workbench.Sessions;
+using Typhon.Workbench.Schema;
 
 namespace Typhon.Workbench.Tests.Schema;
 
@@ -35,7 +35,7 @@ public class AdjacentBuildOutputProbeTests
     public void NoBinDirectory_ProbesNothing()
     {
         // The production case: a database that does not live beside a build tree. One failed Directory.Exists.
-        Assert.That(EngineLifecycle.EnumerateAdjacentBuildOutputs(_tempDir), Is.Empty);
+        Assert.That(SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(_tempDir), Is.Empty);
     }
 
     [Test]
@@ -44,7 +44,7 @@ public class AdjacentBuildOutputProbeTests
         var tfm = Path.Combine(_tempDir, "bin", "Debug", "net10.0");
         Directory.CreateDirectory(tfm);
 
-        Assert.That(EngineLifecycle.EnumerateAdjacentBuildOutputs(_tempDir), Is.EqualTo(new[] { tfm }));
+        Assert.That(SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(_tempDir), Is.EqualTo(new[] { tfm }));
     }
 
     [Test]
@@ -58,7 +58,7 @@ public class AdjacentBuildOutputProbeTests
         Directory.SetLastWriteTimeUtc(release, DateTime.UtcNow.AddDays(-30));
         Directory.SetLastWriteTimeUtc(debug, DateTime.UtcNow);
 
-        Assert.That(EngineLifecycle.EnumerateAdjacentBuildOutputs(_tempDir).First(), Is.EqualTo(debug));
+        Assert.That(SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(_tempDir).First(), Is.EqualTo(debug));
     }
 
     [Test]
@@ -69,7 +69,7 @@ public class AdjacentBuildOutputProbeTests
         var tfm = Path.Combine(_tempDir, "bin", "Debug", "net10.0");
         Directory.CreateDirectory(Path.Combine(tfm, "runtimes", "win-x64", "lib"));
 
-        var probed = EngineLifecycle.EnumerateAdjacentBuildOutputs(_tempDir).ToArray();
+        var probed = SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(_tempDir).ToArray();
 
         Assert.That(probed, Is.EqualTo(new[] { tfm }));
         Assert.That(probed.Any(p => p.Contains("runtimes", StringComparison.Ordinal)), Is.False);
@@ -78,8 +78,8 @@ public class AdjacentBuildOutputProbeTests
     [Test]
     public void MissingOrEmptyParent_IsNotAnError()
     {
-        Assert.That(EngineLifecycle.EnumerateAdjacentBuildOutputs(null), Is.Empty);
-        Assert.That(EngineLifecycle.EnumerateAdjacentBuildOutputs(""), Is.Empty);
-        Assert.That(EngineLifecycle.EnumerateAdjacentBuildOutputs(Path.Combine(_tempDir, "gone")), Is.Empty);
+        Assert.That(SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(null), Is.Empty);
+        Assert.That(SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(""), Is.Empty);
+        Assert.That(SchemaAssemblyResolver.EnumerateAdjacentBuildOutputs(Path.Combine(_tempDir, "gone")), Is.Empty);
     }
 }
