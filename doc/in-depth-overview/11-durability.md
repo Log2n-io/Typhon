@@ -297,7 +297,7 @@ This is the defining safety property: a torn primary page is never silently serv
 
 ## 7. Recovery
 
-Recovery runs only after an unclean close (the `CleanShutdown` flag was absent at open), before any transaction is accepted, as **two cooperating passes**:
+Recovery runs after an unclean close (the `CleanShutdown` flag was absent at open) or on a forced open (`DatabaseEngineOptions.ForceCrashRecoveryAtOpen` / restore marker), before any transaction is accepted, as **two cooperating passes**:
 
 ### 7.1 Segment scan — `WalRecovery`
 

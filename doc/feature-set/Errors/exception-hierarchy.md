@@ -62,6 +62,7 @@ catch (TyphonException ex)
 | `BulkSessionAlreadyActiveException`, `BulkSessionClosedException`, `BulkLoadCheckpointTimeoutException` | `DurabilityException` | `false` | `ActiveBulkSessionId` / `BulkSessionId` / `BulkSessionId`, `Timeout` |
 | `ResourceExhaustedException` | `TyphonException` | `true` | see [Resource Exhaustion Handling](./resource-exhaustion-handling.md) |
 | `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException` | `TyphonException` | `false` | `Diff`, `Failures`, `PersistedRevision`/`RuntimeRevision` |
+| `ArchetypeSchemaException` | `TyphonException` | `false` | archetype `Name`, `ArchetypeSchemaErrorKind` |
 | `UniqueConstraintViolationException` | `TyphonException` | `false` | — |
 | `ForeignKeyViolationException` | `TyphonException` | `ParentDying` | `Child`, `Parent`, `ParentDying` |
 | `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (opt-in; `Typhon:Checks:DeclaredAccess`) |
