@@ -23,8 +23,8 @@ Here it is end-to-end. We'll walk through it piece by piece below.
 ```csharp
 using System;                   // Console
 using System.Numerics;          // Vector2, for the spatial-grid config
-using Typhon.Engine;            // DatabaseEngine, EntityId, Point2F, AABB2F, transactions, queries
-using Typhon.Schema.Definition; // [Component], [Archetype], Comp<T>
+using Typhon.Engine;            // DatabaseEngine, EntityId, Archetype<T>, Comp<T>, transactions, queries
+using Typhon.Schema.Definition; // [Component], [Archetype], [Index], StorageMode, Point2F, AABB2F
 using ShardGuide;               // the component + archetype types declared at the bottom
 
 // ── 3. Open the engine (once, at startup) ──────────────────────────────

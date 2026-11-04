@@ -67,7 +67,7 @@ using var view = tx.Query<PlayerArch>()
 - String-typed fields (`String64`) have no key-type mapping for predicates — referencing one throws `NotSupportedException` at the first terminal call; use `.Where(lambda)` for string-field filtering instead.
 - OR expressions normalize to DNF capped at **16 branches**; exceeding it throws `InvalidOperationException` — restructure as multiple queries or fewer ANDed OR-pairs (each ANDed OR-pair multiplies the branch count).
 - `ToView()` on a `WhereField` query is the only path that yields an incrementally-maintained `EcsView` (ring-buffer delta refresh, O(1) typical cost per change); `Where` (opaque) forces full-rescan pull mode instead.
-- `ExecuteOrdered()` requires `OrderByField`/`OrderByFieldDescending` on an indexed field and does not support multi-branch (OR) predicates.
+- `ExecuteOrdered()` requires `OrderByField`/`OrderByFieldDescending` on an indexed field. Multi-branch (OR) predicates are evaluated only by `ToView()`: `Execute`, `Count`, `Any`, `ExecuteOrdered` and `foreach` throw `InvalidOperationException` on one rather than return a partial result.
 - Multiple `WhereField` calls targeting the **same component** cross-product as AND-of-OR — chaining ANDed OR-pairs grows DNF branches multiplicatively against the 16-branch cap. A second call targeting a **different** component throws `InvalidOperationException` — use `.Where<T>(lambda)` for the second component, which evaluates per entity and composes correctly across components.
 - Entities spawned (but not yet committed) in the same transaction have no index entry yet; `Execute`/`Count`/`Any` still see them via a deferred-compiled fallback predicate so read-your-own-writes holds, even though the targeted scan itself can't find them.
 

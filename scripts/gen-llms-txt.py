@@ -27,6 +27,7 @@ Design: claude/design/Misc/llms-txt-generation.md  (#492)
 Usage:
     python3 scripts/gen-llms-txt.py            # generate + validate (writes doc/_site)
     python3 scripts/gen-llms-txt.py --check    # validate only, write nothing (exit 1 on any defect)
+    python3 scripts/gen-llms-txt.py --verify-publish _publish   # CI: check the assembled Pages tree (host-root llms files + links)
 """
 import json
 import os
@@ -543,15 +544,29 @@ def _audit_residual(md, where, residual):
 
 # Artifacts this run generates into doc/_site — valid targets even before written.
 GENERATED = {"llms.txt", "llms-full.txt"}
+# What the docs workflow publishes at the HOST ROOT (build-docs.yml, "Assemble" step); every
+# other page lives under /latest/. A host-root URL to anything else is a 404 on the live site.
+HOST_ROOT_FILES = {"llms.txt", "llms-full.txt", "robots.txt", "index.html"}
+# Every doc-site URL, markdown link or bare (the hand-authored preamble uses bare URLs).
+DOC_URL = re.compile(r"""https://doc\.typhondb\.io/((?:latest/)?)([^\s)\]>`'"]*)""")
+
+
+def _doc_urls(text):
+    """Yield (under_latest, relative_path) for every doc-site URL in `text`."""
+    for m in DOC_URL.finditer(text):
+        rel = m.group(2).split("#")[0].rstrip(".,;:")
+        yield bool(m.group(1)), rel
 
 
 def _validate_index_links(llms, residual):
-    """Every link in llms.txt must point at a file that exists in doc/_site."""
-    for m in re.finditer(r'\]\((https://doc\.typhondb\.io/(?:latest/)?)([^)\s]+)\)', llms):
-        rel = m.group(2).split("#")[0]
-        if rel in GENERATED:
+    """Every link in llms.txt must point at a file that exists in doc/_site (or at the host root)."""
+    for latest, rel in _doc_urls(llms):
+        if not latest:
+            if rel and rel not in HOST_ROOT_FILES:
+                residual.append(("host-root-404:" + rel, "llms.txt"))
             continue
-        # llms.txt is host-root; llms-full.txt + pages live under /latest/.
+        if rel in GENERATED or not rel:
+            continue
         local = os.path.join(SITE_DIR, rel.replace("/", os.sep))
         if os.path.exists(local):
             continue
@@ -560,6 +575,28 @@ def _validate_index_links(llms, residual):
         if rel.endswith(".html.md") and os.path.exists(local[:-len(".md")]):
             continue
         residual.append(("index-link-404:" + rel, "llms.txt"))
+
+
+def verify_publish(pub):
+    """Check the assembled Pages tree: the host-root llms files exist and every doc-site URL in the
+    root llms.txt resolves to a file in it. Run by build-docs.yml after the Assemble step."""
+    missing = [f for f in ("llms.txt", "llms-full.txt") if not os.path.isfile(os.path.join(pub, f))]
+    bad = []
+    if not missing:
+        llms = open(os.path.join(pub, "llms.txt"), encoding="utf-8").read()
+        for latest, rel in _doc_urls(llms):
+            target = os.path.join(pub, "latest", rel) if latest else os.path.join(pub, rel)
+            if rel and not os.path.isfile(target.replace("/", os.sep)):
+                bad.append(("latest/" if latest else "") + rel)
+    for f in missing:
+        print("FAIL — {} missing from the host root of {}".format(f, pub), file=sys.stderr)
+    for u in sorted(set(bad)):
+        print("FAIL — llms.txt links https://doc.typhondb.io/{} but the published tree has no such file".format(u),
+              file=sys.stderr)
+    if missing or bad:
+        return 1
+    print("Published llms files: host-root llms.txt + llms-full.txt present, every link resolves.")
+    return 0
 
 
 def report(errors, residual):
@@ -581,6 +618,8 @@ def report(errors, residual):
 
 
 def main():
+    if "--verify-publish" in sys.argv[1:]:
+        return verify_publish(sys.argv[sys.argv.index("--verify-publish") + 1])
     write = "--check" not in sys.argv[1:]
     if not os.path.exists(os.path.join(SITE_DIR, "manifest.json")):
         print("error: doc/_site/manifest.json not found — run scripts/build-docs.sh first",

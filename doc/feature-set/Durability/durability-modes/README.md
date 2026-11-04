@@ -68,7 +68,7 @@ tx2.Commit();                  // blocks ~15-85µs — durable on the data file'
 - Disposing a `Deferred` UoW does **not** flush — unflushed transactions stay volatile until something else
   flushes the WAL (explicit `Flush()`/`FlushAsync()`, the GroupCommit timer, or commit-buffer back-pressure —
   which fires only when the active buffer is completely full and a claim no longer fits, forcing a swap + drain).
-  Disposing a `GroupCommit` or `Immediate` UoW does flush.
+  Disposing a `GroupCommit` or `Immediate` UoW does flush, when at least one of its transactions committed.
 - `Immediate` raises `CommitDurabilityUncertainException` rather than rolling back if the post-append fsync
   wait doesn't confirm in time — the transaction is already committed and visible; this is "durability
   unconfirmed," never a rollback signal. See the [Commit Pipeline](../commit-pipeline.md) feature.

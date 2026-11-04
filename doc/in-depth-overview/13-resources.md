@@ -397,4 +397,4 @@ Root
 - [02-storage](02-storage.md) — `PageCache` as a resource with `Capacity` + `Throughput` (`CacheHits`/`CacheMisses`), `Memory` for managed-page bytes
 - [08-transactions](08-transactions.md) — `TransactionPool` (`Capacity`, `Throughput` for commits/rollbacks) and the `UowRegistry` slot pool exposed via the resource graph
 - [11-durability](11-durability.md) — WAL ring buffer (`Capacity`), WAL segment manager (`DiskIO`), checkpoint (`Duration`) all surface here
-- [12-observability](12-observability.md) — `TyphonEvent.Emit*` typed events, OTel exporters built on top of `ResourceMetricsExporter`, `TraceIdEnricher` for trace correlation
+- [12-observability](12-observability.md) — `TyphonEvent.Emit*` typed events, OTel exporters built on top of `ResourceMetricsExporter`

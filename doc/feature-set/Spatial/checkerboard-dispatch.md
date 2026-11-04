@@ -28,15 +28,17 @@ clusters can run in parallel safely, and a system that only touches face-adjacen
 half-written neighbor. A flat world has `cellZ = 0` throughout, so its Red/Black split is exactly the
 familiar 2D checkerboard. `checkerboard: true` turns this into two sequential dispatch phases inside the
 same DAG node — your callback runs twice per tick (once per phase), with `ctx.Entities` scoped to that
-phase's clusters only. Downstream systems see one node and wait for both phases; nothing else in the DAG
-needs to know dispatch happened twice.
+phase's clusters only. After the Red phase's chunks all complete, the scheduler's cleanup hook signals a
+re-dispatch, the same node runs again scoped to Black, and only then do successors fire. Downstream systems
+see one node and wait for both phases; nothing else in the DAG needs to know dispatch happened twice.
 
 <a href="assets/spatial-checkerboard-3d.svg"><img src="assets/spatial-checkerboard-3d.svg" width="1200" alt="A 2x2x2 block of grid cells two-colored by (x + y + z) % 2, with one cell's six face neighbors highlighted in the opposite color and its diagonal neighbors shown sharing its own color"></a>
 
 ## 💻 Usage
 
 ```csharp
-schedule.QuerySystem("Pheromone_Diffuse", ctx =>
+var game = schedule.PublicTrack.DeclareDag("Game");
+game.QuerySystem("Pheromone_Diffuse", ctx =>
 {
     // Safe to read/write neighboring cells' data — no other worker is touching an adjacent cell
     // during this phase.
@@ -51,6 +53,9 @@ schedule.QuerySystem("Pheromone_Diffuse", ctx =>
     tier: SimTier.Near,
     parallel: true,
     checkerboard: true);
+
+// Equivalent class-based form (SystemBuilder):
+// protected override void Configure(SystemBuilder b) => b.Name("Pheromone_Diffuse").Tier(SimTier.Near).Parallel().Checkerboard();
 ```
 
 | Option | Default | Effect |
@@ -61,7 +66,8 @@ schedule.QuerySystem("Pheromone_Diffuse", ctx =>
 
 - Requires `parallel: true` — registering `checkerboard: true` without it throws
   `InvalidOperationException` at schedule build time, not at first tick.
-- Incompatible with `ChunkedParallel` — both throw if combined.
+- Incompatible with `ChunkedParallel` and with a change filter — both combinations throw at schedule build
+  time (a change filter's entity list has no Red/Black half, so both phases would process every dirty entity).
 - Composes with `tier:`/`CellAmortize` — coloring is computed over whichever cluster set the tier filter
   (and dormancy) already produced; sleeping clusters are excluded before the split, same as any other
   tier-filtered system.
@@ -83,7 +89,7 @@ schedule.QuerySystem("Pheromone_Diffuse", ctx =>
 
 - Source: [src/Typhon.Engine/Runtime/public/Dag.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/Dag.cs) (`QuerySystem` `checkerboard:` parameter), [SystemBuilder.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SystemBuilder.cs) (`Checkerboard()`), [TyphonRuntime.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TyphonRuntime.cs) (`SplitCheckerboardClusters`, two-phase prepare/re-dispatch)
 - Related catalog entry: [Tiered Simulation Dispatch](./tiered-simulation-dispatch.md) (the tier filter checkerboard composes with)
-- Sibling: [Checkerboard (Red/Black) Dispatch](../Runtime/spatial-tiers-adaptive-dispatch/checkerboard-dispatch.md) — same feature cataloged from the Runtime/dispatch angle rather than the spatial-grid angle
+- Runtime side: [Spatial Tiers & Adaptive Dispatch](../Runtime/spatial-tiers-adaptive-dispatch/README.md) (how tiers, amortization, checkerboard and dormancy compose in system dispatch)
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/04-tick-integration.md § Checkerboard Parallel Dispatch -->
 <!-- ADR: claude/adr/046-spatial-tiers-architecture.md (Decision 6 — one DAG node, two internal phases) -->

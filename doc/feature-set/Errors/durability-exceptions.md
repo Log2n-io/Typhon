@@ -15,7 +15,7 @@ WAL and commit failures are not interchangeable: a disk write that fails outrigh
 
 ## ⚙️ How it works (in brief)
 
-All seven types inherit `DurabilityException : TyphonException`, so `catch (DurabilityException)` is the subsystem-wide umbrella. `WalWriteException` wraps a fatal WAL writer I/O failure (ADR-020's dedicated writer thread) — not transient; the engine stops accepting durable commits and needs a restart. `WalClaimTooLargeException` and `WalSegmentException` are buffer-sizing and segment-file errors, also not transient — they're configuration problems, not contention. `CommitDurabilityUncertainException` is the **AP-02** point-of-no-return signal: by the time it's thrown, Append and Publish already succeeded and the transaction is committed and visible — only the durability *confirmation* (the post-publish FUA wait) didn't land in time. The three `BulkLoadSession` exceptions cover its own exclusivity gate, post-close calls, and the `CompleteBulkLoad` checkpoint barrier ([BulkLoad Write Path](../Durability/bulk-load.md) covers the session mechanics; this entry covers only its exceptions).
+All the types below inherit `DurabilityException : TyphonException` (as does the `BackupException` family, see the [catalog](./exception-hierarchy.md)), so `catch (DurabilityException)` is the subsystem-wide umbrella. `WalWriteException` wraps a fatal WAL writer I/O failure (ADR-020's dedicated writer thread) — not transient; the engine stops accepting durable commits and needs a restart. `WalClaimTooLargeException` and `WalSegmentException` are buffer-sizing and segment-file errors, also not transient — they're configuration problems, not contention. `CommitDurabilityUncertainException` is the **AP-02** point-of-no-return signal: by the time it's thrown, Append and Publish already succeeded and the transaction is committed and visible — only the durability *confirmation* (the post-publish FUA wait) didn't land in time. `CommitPublishIncompleteException` is its harsher sibling: the records were appended to the WAL but the in-memory publish failed part-way — the transaction is committed (never rolled back), the engine stops committing, and the next open replays it from the log; reopen, never re-run it. The three `BulkLoadSession` exceptions cover its own exclusivity gate, post-close calls, and the `CompleteBulkLoad` checkpoint barrier ([BulkLoad Write Path](../Durability/bulk-load.md) covers the session mechanics; this entry covers only its exceptions).
 
 ## 💻 Usage
 
@@ -31,7 +31,7 @@ try
 catch (CommitDurabilityUncertainException ex)
 {
     // Committed and visible — APPEND + PUBLISH already ran. Do NOT retry the transaction.
-    // Poll ex.HighLsn against DurabilityLog.DurableLsn to learn when it becomes durable.
+    // Poll ex.HighLsn against dbe.DurableLsn to learn when it becomes durable.
     LogDurabilityUncertain(ex.HighLsn);
 }
 catch (WalWriteException)
@@ -58,6 +58,7 @@ catch (BulkLoadCheckpointTimeoutException ex)
 | `WalClaimTooLargeException` | `WalClaimTooLarge` (7002) | `false` | `RequestedBytes`, `BufferCapacity` |
 | `WalSegmentException` | `WalSegmentError` (7004) | `false` | `SegmentPath` |
 | `CommitDurabilityUncertainException` | `CommitDurabilityUncertain` (7008) | `false` | `HighLsn` |
+| `CommitPublishIncompleteException` | `CommitPublishIncomplete` (7009) | `false` | `HighLsn` (0 when nothing was appended), `Durable`; inner exception = the original failure |
 | `BulkSessionAlreadyActiveException` | `BulkSessionAlreadyActive` (7005) | `false` | `ActiveBulkSessionId` |
 | `BulkSessionClosedException` | `BulkSessionClosed` (7006) | `false` | `BulkSessionId` |
 | `BulkLoadCheckpointTimeoutException` | `BulkLoadCheckpointTimeout` (7007) | `false` | `BulkSessionId`, `Timeout` |
@@ -68,7 +69,7 @@ catch (BulkLoadCheckpointTimeoutException ex)
 - `CommitDurabilityUncertainException` means **"committed, durability unconfirmed,"** never a rollback — `IsTransient` is `false` specifically to stop callers from auto-retrying a transaction that already happened.
 - `WalClaimTooLargeException` / `WalSegmentException` are not transient: a larger buffer or a fixed segment path is needed before the same operation can succeed.
 - The three `BulkLoadSession` exceptions are scoped to that session's own state machine — `BulkSessionAlreadyActiveException` from a second `BeginBulkLoad`, `BulkSessionClosedException` from any call after `CompleteBulkLoad`/`Dispose`, `BulkLoadCheckpointTimeoutException` only from `CompleteBulkLoad` (the session stays open afterward — retry or dispose).
-- All seven inherit `DurabilityException`, so `catch (DurabilityException)` catches the whole family uniformly for logging/alerting, while specific catches still get typed properties (`HighLsn`, `SegmentPath`, etc.).
+- All of them inherit `DurabilityException`, so `catch (DurabilityException)` catches the whole family uniformly for logging/alerting, while specific catches still get typed properties (`HighLsn`, `SegmentPath`, etc.).
 - None of these are part of the `TyphonTimeoutException` family, even though `BulkLoadCheckpointTimeoutException` is deadline-driven — it stays under `DurabilityException` because the BulkLoad session, unlike a lock wait, remains alive and resumable after the timeout.
 
 ## 🧪 Tests

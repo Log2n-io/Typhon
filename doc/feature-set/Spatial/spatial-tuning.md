@@ -145,7 +145,7 @@ All twenty-one settings, in constructor order (`WorldMin` and `WorldMax` share a
 
 ## 🔍 Diagnosing a misconfigured world
 
-Read `GetSpatialTelemetry(archetypeId)` or `GetSpatialTelemetryTotal()` from the tick loop after the fence. Per-tick members reset at every fence, so a background scrape samples one arbitrary tick. Ten counters reach OpenTelemetry as `typhon.ecs.spatial.*`, but four of the ones that matter most here — `RelocationsThrottled`, `RepairUnitsRefused`, `RepairQueueDepth` and `MeasuredNsPerEntity` — are API-only. See [Reading Spatial Telemetry](./spatial-telemetry.md) for the full counter set.
+Read `GetSpatialTelemetry(archetypeId)` or `GetSpatialTelemetryTotal()` from the tick loop after the fence. Per-tick members reset at every fence, so a background scrape samples one arbitrary tick. Thirty counters reach OpenTelemetry as `typhon.ecs.spatial.*`, but four of the ones that matter most here — `RelocationsThrottled`, `RepairUnitsRefused`, `RepairQueueDepth` and `MeasuredNsPerEntity` — are API-only. See [Reading Spatial Telemetry](./spatial-telemetry.md) for the full counter set.
 
 **Migration storm.** `MigrationCount` is a large fraction of the population every tick. Check `HysteresisAbsorbedCount` first: near zero means the margin is too narrow, so raise `MigrationHysteresisRatio`. If absorption is healthy the world is genuinely crossing cells and the fix is a larger cell. A high migration rate is not by itself a fault — coherent swarms measured 7 090 migrations per tick at 32 000 entities and were the *best*-partitioned case in the whole matrix, at 63.0 % tightness.
 
@@ -195,7 +195,7 @@ Whatever the shape, the acceptance test is the same: run at the real population,
 ## ⚠️ Guarantees & limits
 
 - **Set once, immutable after** — `ConfigureSpatialGrid` throws `InvalidOperationException` if called twice or after `InitializeArchetypes`. There is no runtime knob and no per-archetype override, so a tuning cycle is rebuild-and-rerun.
-- **Only cell identity is persisted** — the bootstrap record stores world bounds, cell size and `MigrationHysteresisRatio`, because those decide which cell a position maps to. The nine re-clustering knobs are deliberately absent, so a tool-only opener such as the Workbench or `typhon check` runs them at their defaults. An application calling `ConfigureSpatialGrid` always wins; a tuned value is never silently replaced by a stored one.
+- **Only cell identity is persisted** — the bootstrap record stores world bounds, cell size and `MigrationHysteresisRatio`, because those decide which cell a position maps to. The seventeen re-clustering and placement knobs are deliberately absent, so a tool-only opener such as the Workbench or `typhon check` runs them at their defaults. An application calling `ConfigureSpatialGrid` always wins; a tuned value is never silently replaced by a stored one.
 - **`ReclusterBudgetMs = 0` is overloaded** — it disables repair *and* disables relocation throttling, so every detected relocation then runs unbudgeted. It is not "switch the feature off".
 - **The budget admits whole units, never a fraction of one** — a Morton sort cannot be halved, and a partly re-sorted cell is worse than an untouched one because the cost is paid and the benefit is not. A unit the remaining budget cannot finish is not begun.
 - **Throttled relocations are dropped, not deferred** — the tick's migration array is fixed when the plan closes, so a deferred tail would re-execute against slots its entities have already left. Refused *repairs* are remembered, in the persistent per-cell queue.
@@ -203,7 +203,7 @@ Whatever the shape, the acceptance test is the same: run at the real population,
 - **Three settings are validated at construction** — `ClusterRepairExtentRatio` must be below 1.2; `ClusterRepairCriticalExtentRatio` must be `0` or strictly inside `(ClusterRepairExtentRatio, 1.2)`; `CellSize` must be positive and the derived cell count must fit a 32-bit key. Each throws with its reason at config time rather than at the first fence.
 - **A position outside the world is clamped, not rejected** — an out-of-world position folds into the nearest edge cell, so an escaping entity silently piles into the boundary cell. NaN and infinite coordinates throw.
 - **Cells are never destroyed** — occupied-cell count and resident bytes only grow. A world that sweeps a large region and leaves keeps every cell it ever touched until the cell state is reset.
-- **Promotion is observable only indirectly** — nothing reports how many cells are promoted or how dense the densest cell is, so the boundary has to be reasoned about from `ActiveClusterCount` over occupied cells rather than watched.
+- **Promotion is observable only through the profiler** — the per-realm telemetry record (kind 67, see [Reading Spatial Telemetry](./spatial-telemetry.md)) carries the promoted-cell count, but no public counter does, and nothing reports how dense the densest cell is, so the boundary has to be reasoned about from `ActiveClusterCount` over occupied cells.
 - **The safe ranges in the table are guidance, not measurement** — only the cell-size occupancy basin and `ReclusterBudgetMs` have measured curves behind them. The drift and repair ratios are marked provisional in the source, and matching cell size to query radius is unmeasured.
 
 ## 🧪 Tests

@@ -51,8 +51,9 @@ TyphonProfiler.Stop();
 
 | Signal | Effect |
 |---|---|
-| `Typhon.Telemetry.Enabled` / `Profiler.Enabled` = `false` | Bootstrap is a no-op; zero runtime cost |
-| `Profiler.Enabled` = `true`, but neither `Trace` nor `Live` channel configured | One-shot warning to `Console.Error`; profiling not started |
+| `Typhon:Profiler:Enabled` = `false` | Bootstrap is a no-op; zero runtime cost |
+| `Profiler.Enabled` = `true`, neither `Trace` nor `Live` configured | The capture is written to the database bundle's `profilings/` directory (its retention policy is applied first) |
+| `Trace` = `none` and no `Live`, or no database bundle to write into | One-shot warning to `Console.Error`; profiling not started |
 | Engine storage disposed (normal shutdown) | Primary teardown — trace finalized deterministically |
 | `AppDomain.ProcessExit` / terminating unhandled exception | Backup teardown for hosts that never dispose |
 | `TyphonProfiler.Stop()` called explicitly | Early, host-initiated teardown (idempotent) |
@@ -62,8 +63,8 @@ TyphonProfiler.Stop();
   the entire integration surface.
 - `TyphonProfiler.Start`/`Stop` are idempotent: a double-start is a no-op, a double-stop is a no-op — safe
   under restart-after-crash or a redundant safety-net firing.
-- Bootstrap failures (port already in use, unwritable trace path, or profiling enabled with no output channel
-  configured) are caught and logged to `Console.Error`; the host keeps running without profiling rather than crashing.
+- Bootstrap failures (port already in use, unwritable trace path) and an inert configuration (no output channel
+  left after the bundle default) are caught and reported on `Console.Error`; the host keeps running without profiling rather than crashing.
 - The telemetry configuration is frozen at assembly load — before `Main`'s first statement runs. `Environment.SetEnvironmentVariable`
   calls inside `Main` have no effect; set `TYPHON__PROFILER__*` in the OS environment or a launch profile instead.
 - The process-exit safety net does **not** catch `TerminateProcess`/`taskkill /F`/`SIGKILL`,

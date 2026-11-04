@@ -61,8 +61,8 @@ foreach (var seg in engine.EnumerateStorageSegments())
 
 ## ⚠️ Guarantees & limits
 
-- **Crash path only.** Runs solely when recovery detects WAL files at open; a clean reopen leaves chains
-  untouched for the regular revision garbage collector to trim lazily.
+- **Crash path only.** Runs whenever crash recovery runs: after an unclean close, or on an open that forces it
+  (`typhon repair`, or a restore whose marker asks for it); any other clean reopen leaves chains untouched for the regular revision garbage collector to trim lazily.
 - **Exactly one committed survivor per chain** — the highest-TSN element with no in-flight isolation marker.
   Elements from transactions that never durably committed are discarded along with their content, never kept
   "just in case."

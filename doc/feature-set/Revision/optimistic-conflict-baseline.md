@@ -22,13 +22,16 @@ between read and commit — that staleness has to be caught, not silently produc
 ## ⚙️ How it works (in brief)
 
 Every chain append (`AddCompRev`) records two coordinates: the new revision just written (`Cur`) and the revision
-it superseded (`Prev`), each as a `(chunk id, revision index)` pair. At commit, this `Cur` baseline is compared
-against the chain's authoritative state — a monotonic per-entity commit counter, immune to index reshuffling —
-to decide whether a conflict occurred. If a `ConcurrencyConflictHandler` is registered and a conflict fires, the
-baseline pair resolves the four data views (`ReadData`, `CommittedData`, `CommittingData`, `ToCommitData`) handed
-to the handler. Because compaction can shift indices between read and commit, the cached index is re-validated
-against its (unique) content-chunk id — `FindRevisionIndexByChunkId` — and repaired before it's trusted; without
-a handler, conflicts fall back to plain index-order comparison.
+it superseded (`Prev`), each as a `(chunk id, revision index)` pair. At commit, with a `ConcurrencyConflictHandler`
+registered, a conflict is a revision another transaction committed past this writer's snapshot: published with a
+commit stamp above its TSN, or still flagged by a committer already past its commit point (resolved through that
+committer's commit card). Chain position is no version order, so detection weighs revisions by stamp, never by
+index. When a conflict fires, the baseline pair resolves the four data views (`ReadData`, `CommittedData`,
+`CommittingData`, `ToCommitData`) handed to the handler. Because compaction can shift indices between read and
+commit, the cached index is re-validated against its (unique) content-chunk id — `FindRevisionIndexByChunkId` —
+and repaired before it's trusted. Without a handler, a conflict (the chain's per-entity commit counter moved since
+the read) is only counted: the writer's entry takes its stamp at its own commit point, after the commit it lost to,
+so it is the newest revision wherever it sits in the chain.
 
 ## 💻 Usage
 
@@ -69,8 +72,8 @@ t1.Commit(ConflictHandler);   // result: A == 120, not 90 (ours) or 130 (theirs)
 
 - Without a handler, conflict resolution is "last writer wins" — the committing transaction's value always
   replaces the prior one; no exception is raised.
-- With a handler, conflict detection uses a monotonic per-entity commit counter, not revision indices — it cannot
-  be fooled by background compaction reordering the chain between your read and your commit.
+- With a handler, conflict detection compares commit stamps against your snapshot, not revision indices — it
+  cannot be fooled by chain order or by compaction rewriting the chain between your read and your commit.
 - Stale cached positions caused by concurrent compaction are transparently repaired before use; if an entry is
   ever truly unrecoverable (a hard invariant violation, not expected in practice) commit throws rather than
   resolving against wrong data.

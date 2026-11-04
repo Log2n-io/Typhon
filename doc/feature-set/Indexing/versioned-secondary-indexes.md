@@ -66,7 +66,7 @@ using (var tx = dbe.CreateQuickTransaction())
 }
 
 // Move Aria to guild 9 — one traversal removes her element from key 7 and inserts it under key 9.
-// Any other member of guild 7 is untouched. No extra calls: it happens as part of Write + Commit.
+// Any other member of guild 7 is untouched. No extra calls: it happens as part of Set + Commit.
 using (var tx = dbe.CreateQuickTransaction())
 {
     var entity = tx.OpenMut(aria);
@@ -95,7 +95,7 @@ using var g9 = tx2.EnumerateIndex<GuildMember, long>(guildIndex, 9, 9); // Aria
   snapshot is still found at its old key, one spawned after it is not; the transaction's own destroys are gone and
   its own spawns are in, its own value writes unseen. The index itself holds the current entity sets; the entities a
   commit newer than the snapshot changed are read at the snapshot beside it (#1247). With nothing newer than the
-  snapshot this costs three loads per archetype on top of the O(K) walk.
+  snapshot and no spawn or destroy of its own, this costs two loads per archetype on top of the O(K) walk.
 - **No past membership beyond the snapshot.** There is no "who held this value at TSN T" query for an arbitrary T,
   and no append-only version-history tail behind the index — it would need pruning of its own and would charge every
   `AllowMultiple` mutation on a `Versioned` component for a capability no caller can reach.

@@ -57,11 +57,18 @@ catch (TyphonException ex)
 | `DatabaseLockedException` | `StorageException` | `false` | `OwnerPid`, `OwnerMachine`, `StartedAt` |
 | `TransactionExceedsPageCacheException` | `StorageException` | `false` | `HeldPages`, `CachePages`, `MarkedPages`, `PinnedPages` |
 | `DurabilityException` | `TyphonException` | `false` | — |
-| `WalWriteException`, `WalSegmentException`, `WalClaimTooLargeException` | `DurabilityException` | `false` | `SegmentPath` / `RequestedBytes`, `BufferCapacity` |
+| `WalWriteException`, `WalSegmentException`, `WalClaimTooLargeException` | `DurabilityException` | `false` | — / `SegmentPath` / `RequestedBytes`, `BufferCapacity` |
 | `CommitDurabilityUncertainException` | `DurabilityException` | `false` | `HighLsn` |
+| `CommitPublishIncompleteException` | `DurabilityException` | `false` | `HighLsn`, `Durable` (committed in the WAL but not fully published; the engine stops committing — reopen, do not re-run) |
 | `BulkSessionAlreadyActiveException`, `BulkSessionClosedException`, `BulkLoadCheckpointTimeoutException` | `DurabilityException` | `false` | `ActiveBulkSessionId` / `BulkSessionId` / `BulkSessionId`, `Timeout` |
-| `ResourceExhaustedException` | `TyphonException` | `true` | see [Resource Exhaustion Handling](./resource-exhaustion-handling.md) |
-| `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException` | `TyphonException` | `false` | `Diff`, `Failures`, `PersistedRevision`/`RuntimeRevision` |
+| `BackupException` | `DurabilityException` | `false` | — (base of every backup, restore and verify failure) |
+| `BackupStoreLockedException`, `BackupStoreMismatchException`, `BackupPackCorruptException`, `BackupChainBrokenException`, `BackupFormatUnsupportedException`, `RestoreRefusedException`, `BackupAbortedException`, `BackupPlanChangedException`, `RestoreTargetUnreachableException`, `BackupArchiveDivergedException` | `BackupException` | `false`, except `BackupStoreLockedException` (`true`) and `BackupAbortedException` (`true` for a CBW stall, gate timeout or WAL flush timeout) | e.g. `HolderPid`/`HolderMachine` (store locked), `PointId`/`MissingId`/`RestorableAlternatives` (chain broken), `Reason` (restore refused / aborted / target unreachable) |
+| `ResourceExhaustedException` | `TyphonException` | `true` | `ResourcePath`, `ResourceType`, `CurrentUsage`, `Limit` — see [Resource Exhaustion Handling](./resource-exhaustion-handling.md) |
+| `TransactionSequenceExhaustedException` | `ResourceExhaustedException` | `false` | TSN space (48 bits) exhausted — migrate to a fresh database |
+| `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException` | `TyphonException` | `false` | `Diff` / `ComponentName`, `Failures` / `ComponentName`, `PersistedRevision`, `RuntimeRevision` |
+| `SchemaMismatchException` | `TyphonException` | `false` | `Differences` (an exact-schema open — backup drill / restore settle — found a different build) |
+| `ArchetypeSchemaException` | `InvalidOperationException` (**not** a `TyphonException`) | — | `ArchetypeName`, `Kind` (`ArchetypeSchemaErrorKind`) |
+| `DatabaseIntegrityException` | `Exception` (**not** a `TyphonException`) | — | `Report` (`IntegrityReport`; verify-on-open refused the file) |
 | `UniqueConstraintViolationException` | `TyphonException` | `false` | — |
 | `ForeignKeyViolationException` | `TyphonException` | `ParentDying` | `Child`, `Parent`, `ParentDying` |
 | `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (opt-in; `Typhon:Checks:DeclaredAccess`) |
@@ -69,7 +76,7 @@ catch (TyphonException ex)
 ## ⚠️ Guarantees & limits
 
 - Three catch granularities by construction: `catch (TyphonException)` (any engine error), `catch (TyphonTimeoutException)` / `catch (StorageException)` / `catch (DurabilityException)` (subsystem-wide), or a specific leaf type.
-- `IsTransient` defaults to `false`; only `TyphonTimeoutException` (and its subclasses) and `ResourceExhaustedException` override it to `true`. See [IsTransient Retry Hint](./transience-hint.md) for the full retry philosophy.
+- `IsTransient` defaults to `false`; `TyphonTimeoutException` (and its subclasses), `ResourceExhaustedException` (except `TransactionSequenceExhaustedException`) and `BackupStoreLockedException` override it to `true`, while `ForeignKeyViolationException` and `BackupAbortedException` compute it from their state. See [IsTransient Retry Hint](./transience-hint.md) for the full retry philosophy.
 - No `Context` dictionary on the base class — every subclass exposes its diagnostic data as typed, strongly-named properties, not a string-keyed bag.
 - `ErrorCode` groups every exception into a stable, gap-numbered subsystem range — see [Error Code Classification](./error-codes.md).
 - Not `[Serializable]` — pre-1.0, no cross-process/cross-AppDomain exception marshaling is supported.

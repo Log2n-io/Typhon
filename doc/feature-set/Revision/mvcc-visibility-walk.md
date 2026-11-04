@@ -5,7 +5,7 @@ description: 'The visibility walk scans a Versioned component''s whole revision 
 ---
 
 # Chain Walk Correctness Under Compaction
-> The visibility walk scans a `Versioned` component's whole revision chain rather than stopping at the first too-new entry — because background revision GC can reorder entries physically without changing their TSNs.
+> The visibility walk scans a `Versioned` component's whole revision chain rather than stopping at the first too-new entry — because a chain's physical order is not its commit-stamp order.
 
 **Status:** ✅ Implemented · **Visibility:** Internal · **Category:** [Revision](./README.md)
 
@@ -13,19 +13,21 @@ description: 'The visibility walk scans a Versioned component''s whole revision 
 
 [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md) promises that a read resolves the latest revision
 committed at-or-before the reader's TSN. The naive way to implement that — walk the chain in physical order,
-stop at the first entry whose TSN exceeds the reader's snapshot — is wrong on Typhon's revision chain: cleanup
-compaction can relocate a later-committed revision into an earlier physical slot than an older one, so the
-chain's physical order and its commit-TSN order can diverge. A walk that breaks early can therefore skip the
+stop at the first entry whose TSN exceeds the reader's snapshot — is wrong on Typhon's revision chain: an entry is appended when its writer stages it, but it takes its
+commit stamp only at its writer's commit point, so two writers of one entity can publish in either order (a
+last-writer-wins commit publishes its entry where it sits), and cleanup compaction rewrites the chain — the
+chain's physical order and its commit-stamp order can diverge. A walk that breaks early can therefore skip the
 revision a reader was actually entitled to see, returning a stale or wrong value with no error.
 
 ## ⚙️ How it works (in brief)
 
 `RevisionChainReader.WalkChain` always processes every live entry in the chain — never breaking on the first
-`TSN > transactionTSN` it meets — and keeps the highest-TSN entry that is both committed (`!IsolationFlag`) and
-at-or-before the reader's TSN, voided entries skipped along the way. An entry's `IsolationFlag` stays set until
-its writing transaction calls `Commit`, which is what makes an uncommitted entry invisible to every reader,
-including the writer's own later reads through this same path (read-your-own-writes is served separately, from
-a per-transaction cache, not from the chain). One fast path exists: a single-entry, already-committed chain — the
+too-new entry it meets — and keeps the entry with the highest commit stamp at-or-below the reader's snapshot
+TSN, voided entries skipped along the way. An entry is staged with its writer's TSN and the `IsolationFlag` set;
+the writer's publish replaces both with its commit stamp. A still-flagged entry is resolved through its owner's
+commit card: visible only if the owner is committing with a stamp at-or-below the snapshot, otherwise it is an
+uncommitted write, invisible to every reader — including the writer's own later reads through this same path
+(read-your-own-writes is served separately, from a per-transaction cache, not from the chain). One fast path exists: a single-entry, already-committed chain — the
 common steady state for an entity not under concurrent write contention — resolves directly off the chain header
 without constructing the full walk or taking the chain's read lock at all.
 
@@ -40,9 +42,9 @@ causes a read to regress to an older or wrong revision.
 ## ⚠️ Guarantees & limits
 
 - **No break-on-first-too-new** — the walk always covers the full chain; a later-slotted revision with a lower
-  TSN than an earlier-slotted one (a relocation artifact of cleanup) is never mistaken for "we've gone too far".
-- **Latest-by-TSN wins among visible candidates** — ties cannot occur (TSNs are unique per commit), so resolution
-  is always deterministic.
+  commit stamp than an earlier-slotted one is never mistaken for "we've gone too far".
+- **Highest commit stamp wins among visible candidates** — ties cannot occur (stamps are unique per commit), so
+  resolution is always deterministic.
 - **Read cost scales with chain length** — a hot component with many outstanding revisions (e.g. a long-lived
   reader holding old ones alive) makes every read on it walk further; this is exactly what the revision garbage
   collector bounds by reclaiming entries no live snapshot can still need.

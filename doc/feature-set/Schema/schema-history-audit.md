@@ -15,7 +15,7 @@ Schema changes in production are easy to apply and hard to reconstruct after the
 
 ## ⚙️ How it works (in brief)
 
-Every time a component's schema changes on reopen — a compatible evolution (fields added/removed/widened) or a breaking migration — Typhon appends one entry to a built-in `SchemaHistoryR1` audit trail before the new schema becomes active. Each entry captures what changed (field counts by kind), how many entities were touched, and how long it took. Entries are never updated or deleted, and a component that reopens identical to its persisted schema produces no entry. The trail is itself an ordinary system component, so it survives reopen and is queried like any other audit data.
+Every time a component's schema changes on reopen — a compatible evolution (fields added/removed/widened), a breaking migration, or a rename — or an archetype's component set migrates, Typhon appends one entry to a built-in `SchemaHistoryR1` audit trail before the new schema becomes active. Each entry captures what changed (field counts by kind), how many entities were touched, and how long it took. Entries are never updated or deleted, and a component that reopens identical to its persisted schema produces no entry. The trail is itself an ordinary system component, so it survives reopen and is queried like any other audit data.
 
 ## 💻 Usage
 
@@ -49,12 +49,15 @@ tsh> schema-history
 | `Compatible` | Auto-resolved evolution — fields added/removed, lossless type widenings |
 | `Migration` | A registered migration function ran for a breaking type change |
 | `SystemUpgrade` | Reserved for future internal system-schema revisions — not currently emitted |
+| `Rename` | A component or archetype was renamed (`PreviousName`); the row's `PreviousName` holds the former name, `ComponentName` the new one |
+
+Each row's `Target` (`SchemaObjectKind.Component` / `Archetype`) says what changed: an archetype component-set migration is recorded too, with `FieldsAdded`/`FieldsRemoved` counting components.
 
 ## ⚠️ Guarantees & limits
 
 - Append-only: entries are never modified or deleted by Typhon; `GetSchemaHistory()` returns the full trail in chronological (insertion) order.
 - One entry per component per reopen where a real schema difference is detected — identical reopens (no field/type/index changes) write nothing.
-- `EntitiesMigrated`/`ElapsedMilliseconds` are populated only for `Migration` entries; `Compatible` entries report zero/the field-count deltas.
+- `EntitiesMigrated`/`ElapsedMilliseconds` are populated whenever entities were actually migrated (a compatible stride change included); a change that moved no data reports zero.
 - The history append happens immediately after the schema change is persisted, in the same registration call — but as a separate write, not one atomic unit with it.
 - The trail itself has no built-in retention/pruning — it grows for the life of the database. Plan for this if a database undergoes very frequent schema churn.
 

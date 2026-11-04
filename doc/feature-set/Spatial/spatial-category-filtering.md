@@ -48,7 +48,7 @@ var box = new AABB2F { MinX = 0, MinY = 0, MaxX = 50, MaxY = 50 };
 
 foreach (var hit in dbe.ClusterSpatialQuery<UnitArch>().AABB(box, categoryMask: (uint)Faction.Enemy))
 {
-    // hit.EntityId — this archetype's mask shares at least one bit with Faction.Enemy
+    // hit.Entity — this archetype's mask shares at least one bit with Faction.Enemy
 }
 ```
 

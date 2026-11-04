@@ -1,11 +1,11 @@
 ---
 uid: feature-runtime-system-types-compound-system
 title: 'CompoundSystem'
-description: 'Group related sub-systems'' registration under one Configure call — one node from the outside, parallel inside.'
+description: 'Group related sub-systems'' registration under one Configure call — expanded into ordinary DAG systems, parallel where access allows.'
 ---
 
 # CompoundSystem
-> Group related sub-systems' registration under one `Configure` call — one node from the outside, parallel inside.
+> Group related sub-systems' registration under one `Configure` call — expanded into ordinary DAG systems, parallel where access allows.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Runtime](../README.md)
 
@@ -14,8 +14,8 @@ description: 'Group related sub-systems'' registration under one Configure call 
 Related systems (a pathing system, a behavior-tree system, a steering system that together form "AI") are
 logically one unit, but registering them individually scatters their wiring across the schedule and forces
 every dependent to know about each member by name. `CompoundSystem` lets a group declare its members in one
-place and be depended on as a single name from outside, while still allowing the members to run in parallel
-with each other when their declared access doesn't conflict.
+place, while still allowing the members to run in parallel with each other when their declared access
+doesn't conflict. It is a registration convenience: dependents still target a member's own name.
 
 ## ⚙️ How it works (in brief)
 
@@ -45,7 +45,7 @@ public class AiGroup : CompoundSystem
 var aiGroup = new AiGroup();
 dag.Add(aiGroup);
 
-dag.CallbackSystem("Cleanup", ctx => ctx.FlushDestroys(), after: "Steering");
+dag.CallbackSystem("Cleanup", ctx => DestroyExpired(ctx), after: "Steering");
 ```
 
 ## ⚠️ Guarantees & limits

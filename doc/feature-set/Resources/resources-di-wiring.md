@@ -21,6 +21,7 @@ Every managed Typhon service (storage, durability, allocation, synchronization, 
 
 ```csharp
 var services = new ServiceCollection();
+services.AddLogging();                                       // storage + engine factories require ILogger<T>
 
 services
     .AddResourceRegistry(opt => opt.Name = "MyHost")        // IResourceRegistry singleton
@@ -49,7 +50,7 @@ var engine = sp.GetRequiredService<DatabaseEngine>();
 - All extensions are additive `IServiceCollection` calls returning `this`, so they chain fluently and compose with any other DI setup in the host.
 - Each extension resolves `IResourceRegistry` (and its other dependencies) lazily inside its factory delegate — nothing is constructed at `Add…` time, only at `BuildServiceProvider`/resolve time. Forgetting `AddResourceRegistry` (or a required dependency like the epoch manager or shared timer) surfaces as a standard DI resolution failure, not a silent gap in the resource tree.
 - Resource-graph attachment is not optional or toggleable per service: any service built through these extensions always registers under its subsystem node. There is no "construct without registering" escape hatch via DI — use the service's constructor directly if a tree-less instance is needed (e.g. tests that pass an explicit `IResourceRegistry` mock).
-- `AddOptions<T>().Validate(...)` hooks exist on these extensions but are currently placeholders (`// TODO Add validation logic`) — invalid option values are not yet rejected at registration time.
+- Options validation is real for storage and engine options: when a `configure` delegate is passed, `AddManagedPagedMMF` / `AddPagedMemoryMappedFile` and `AddDatabaseEngine` register an `IValidateOptions<T>`, so an invalid value throws `OptionsValidationException` at first resolve (see [Options Validation](../Hosting/engine-options-configuration/options-validation.md)). `ResourceRegistryOptions` and `MemoryAllocatorOptions` carry only a diagnostic `Name` and have no validator.
 - Options validation/binding follows standard `Microsoft.Extensions.Options` semantics (`IOptions<T>` resolved once per factory invocation); nothing Typhon-specific changes that contract.
 
 ## 🔗 Related

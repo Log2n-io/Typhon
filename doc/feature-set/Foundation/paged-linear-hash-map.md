@@ -11,7 +11,7 @@ description: 'O(1) exact-match key/value index, persisted in fixed-size chunks, 
 
 ## 🎯 What it solves
 
-Some indexes only ever need exact-match lookup — no range scans, no ordering — and for those, walking a B+Tree's `O(log n)` node chain on every lookup spends cycles a flat hash table wouldn't. `PagedHashMap<TKey, TValue, TStore>` is that flat alternative: an `O(1)` average-case lookup/insert/delete structure that lives in the same page-backed storage as everything else in the engine, grows incrementally (no stop-the-world resize), and survives a crash without ever touching the WAL. Its first consumer is spatial Layer-1 occupancy: "is this grid cell occupied, and by what" — a pure exact-match question at high update rate.
+Some indexes only ever need exact-match lookup — no range scans, no ordering — and for those, walking a B+Tree's `O(log n)` node chain on every lookup spends cycles a flat hash table wouldn't. `PagedHashMap<TKey, TValue, TStore>` is that flat alternative: an `O(1)` average-case lookup/insert/delete structure that lives in the same page-backed storage as everything else in the engine, grows incrementally (no stop-the-world resize), and survives a crash without ever touching the WAL. Its production form is the raw-value sibling `RawValuePagedHashMap<TKey, TStore>` (same linear-hashing core, values sized at runtime and copied as raw bytes), which backs every archetype's EntityMap — entity id → entity record, a pure exact-match question at high update rate.
 
 ## ⚙️ How it works (in brief)
 
@@ -19,14 +19,14 @@ Entries are grouped into fixed-size bucket chunks addressed by `hash(key) mod bu
 
 ## 💻 Usage
 
-`PagedHashMap<TKey, TValue, TStore>` is `internal` — engine plumbing consumed by other subsystems (currently `SpatialIndexState.OccupancyMap`), not called from application code. A consumer creates one over a dedicated `ChunkBasedSegment` and drives it through a `ChunkAccessor`:
+`PagedHashMap<TKey, TValue, TStore>` is `internal` — engine plumbing, not called from application code; the typed generic form is exercised by tests, while the engine's EntityMaps use `RawValuePagedHashMap`. A consumer creates one over a dedicated `ChunkBasedSegment` and drives it through a `ChunkAccessor`:
 
 ```csharp
 // One hash map owns its segment exclusively (chunk 0 is reserved for its meta).
 using var guard = EpochGuard.Enter(epochManager);
 var segment = new ChunkBasedSegment<PersistentStore>(epochManager, new PersistentStore(mmf), stride: 256);
 var occupancyMap = PagedHashMap<long, int, PersistentStore>.Create(
-    segment, initialBuckets: 64, allowMultiple: false, changeSet);
+    segment, initialBuckets: 64, changeSet: changeSet);
 
 // Insert / lookup / remove, all under a ChunkAccessor scope.
 var accessor = segment.CreateChunkAccessor(changeSet);
@@ -54,7 +54,7 @@ var reopened = PagedHashMap<long, int, PersistentStore>.Open(segment);
 | Option | Default | Effect |
 |---|---|---|
 | `initialBuckets` (`Create`) | 64 | Initial bucket count; must be a power of 2. Higher avoids early splits for known-large maps. |
-| `allowMultiple` | `false` | `true` stores multiple values per key via an internal variable-sized buffer; changes `Insert`/`Remove` semantics and disables `Upsert`. |
+| `bufferSegment` (`Create`/`Open`) | `null` | A second segment, of its own, for value buffers: passing it makes the map multi-value (several values per key in a variable-sized buffer); changes `Insert`/`Remove` semantics and disables `Upsert`. |
 
 ## ⚠️ Guarantees & limits
 

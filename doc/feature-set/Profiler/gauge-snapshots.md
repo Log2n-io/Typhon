@@ -39,7 +39,6 @@ nothing to call from application code; enabling the feature is a config toggle:
 // typhon.telemetry.json next to your executable:
 // {
 //   "Typhon": {
-//     "Telemetry": { "Enabled": true },
 //     "Profiler": { "Enabled": true, "Gauges": { "Enabled": true } }
 //   }
 // }

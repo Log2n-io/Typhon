@@ -78,7 +78,8 @@ trade.Commit();               // blocks ~15-85µs — WAL FUA complete before re
   interval is a maximum delay, not a guarantee.
 - Disposing a `Deferred` UoW does **not** flush — unflushed work stays volatile until something else flushes
   the WAL (explicit `Flush()`/`FlushAsync()`, the GroupCommit timer, or back-pressure). `GroupCommit` and
-  `Immediate` UoWs flush on dispose.
+  `Immediate` UoWs flush on dispose when at least one of their transactions committed (an empty or rolled-back
+  UoW does not wait on the WAL).
 - `Immediate` can throw `CommitDurabilityUncertainException` if the FUA confirmation doesn't arrive in time —
   the transaction is already committed and MVCC-visible; this means "durability unconfirmed," never a rollback.
 - Two orthogonal knobs extend this axis without changing UoW mode: [Per-Transaction Durability

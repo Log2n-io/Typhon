@@ -36,7 +36,6 @@ engine creates is traced automatically:
 // typhon.telemetry.json next to your executable
 {
   "Typhon": {
-    "Telemetry": { "Enabled": true },
     "Profiler": {
       "Enabled": true,
       "MemoryAllocations": { "Enabled": true }

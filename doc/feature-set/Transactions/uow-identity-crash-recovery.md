@@ -55,6 +55,9 @@ catch (ResourceExhaustedException ex)
   returned successfully; the crash-safety contract belongs to the UoW, not to any one transaction inside it.
 - **No replay needed to hide voided work** — a voided UoW's revisions disappear via the ID check alone; nothing is
   rewritten, scanned, or undone row by row.
+- **The ID does not outlive recovery** — when recovery collapses a revision chain to its committed head it clears
+  that head's `UowId` (to `0`, "always committed"); the registry is volatile and an old ID means nothing after the crash.
+  Snapshot visibility itself is decided by commit stamps; the UoW ID only decides whether a UoW's work survived.
 - **Slot recycling waits on the oldest active reader** — a UoW ID returns to the free pool only once no live
   transaction's snapshot can still observe its revisions; a long-lived read transaction can stall new-UoW
   admission under sustained load.

@@ -22,17 +22,19 @@ This doc covers both layers. The query builder ([`EcsQuery<TArchetype>`](https:/
 
 ## 1. Overview — the two pipelines
 
-There are two distinct query paths and one shared planner.
+There are two distinct query paths and one shared planner, plus two streaming ways to consume a match set.
 
 | Path | Trigger | Lifetime | Output |
 |---|---|---|---|
 | **One-shot `Execute()`** | `tx.Query<T>()....Execute()` | Runs once, allocates a `HashSet<EntityId>`, returns | Snapshot at `tx.TSN` |
 | **View (`.ToView()`)** | `tx.Query<T>()....ToView()` | Registers with `ViewRegistry`, lives until `Dispose()` | Maintained `HashMap<long>` + per-tick `ViewDelta` |
+| **`foreach` over a query** | `foreach (var e in tx.Query<T>()...)` | Streams: each archetype's entity map read in fills (64 keys, growing to 4 096), or a `WhereField` query's clusters, as the loop consumes them | Memory and pages held do not grow with the result |
+| **Snapshot walk** | `foreach (var batch in tx.Walk<TArch>())` | `ArchetypeWalk<TArch>` over a `SnapshotWalker`: every entity of exactly `TArch` visible at the snapshot, up to 64 per batch, a bounded page window and no epoch pin between batches | Storage order (entity-map order on a spatial archetype) |
 
 Both go through the same machinery:
 
 1. **`ExpressionParser`** — `Expression<Func<T, bool>>` lambdas are normalized to Disjunctive Normal Form (OR of ANDs), one `FieldPredicate[]` per OR branch.
-2. **`QueryResolverHelper.ResolveEvaluators`** — `FieldPredicate` (string field name + op + boxed value) becomes `FieldEvaluator` (16 B: field index, key type, op, byte branch index, 8-byte widened threshold). String64 predicates are **rejected here** ([`QueryResolverHelper.cs:93`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/QueryResolverHelper.cs)) — `KeyType.String64` exists for the index/statistics layer only; no scalar comparator for it.
+2. **`QueryResolverHelper.ResolveEvaluators`** — `FieldPredicate` (string field name + op + boxed value) becomes `FieldEvaluator` (16 B: field index, key type, op, byte branch index, 8-byte widened threshold). String64 predicates are **rejected here** ([`QueryResolverHelper.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/QueryResolverHelper.cs)) — `KeyType.String64` exists for the index/statistics layer only; no scalar comparator for it.
 3. **`PlanBuilder`** — picks the most selective indexed field as the primary scan (via `AdvancedSelectivityEstimator`), narrows its key range, orders the rest of the evaluators by ascending estimated cardinality (most selective first → short-circuit), builds an `ExecutionPlan`.
 4. **`EcsQuery`** — executes the plan per archetype (`ScanAllArchetypes` for unordered, `ExecuteOrderedClustered` for ordered): a range scan of the archetype's B+Tree or a zone-map-pruned pass over its clusters (§3), evaluating the remaining predicates inline, and streams the matching entities into a sink — a `HashSet<EntityId>` for a one-shot query, the view's `HashMap<long>` for a view refresh; an ordered query returns a `List<EntityId>`.
 
@@ -62,7 +64,7 @@ Constructed via `tx.Query<TArchetype>()` (polymorphic — includes descendant ar
 
 `Where<T>(Func<T, bool>)` takes a compiled delegate — opaque to the planner, evaluated post-scan via `tx.Open(id).TryRead<T>(...)`. It chains as AND.
 
-`WhereField<T>(Expression<Func<T, bool>>)` is the **planner-visible** form. The lambda gets parsed by `ExpressionParser`, broken into DNF, indexed-field-resolved, and folded into the execution plan. Multiple `WhereField` calls on the **same component** cross-product as **AND of ORs** (DNF normalization at `EcsQuery.cs:299-321`); a second call on a **different** component throws `InvalidOperationException` — use `.Where<T>(lambda)` for the second component. Required for incremental views.
+`WhereField<T>(Expression<Func<T, bool>>)` is the **planner-visible** form. The lambda gets parsed by `ExpressionParser`, broken into DNF, indexed-field-resolved, and folded into the execution plan. Multiple `WhereField` calls on the **same component** cross-product as **AND of ORs** (DNF normalization at `EcsQuery.cs`); a second call on a **different** component throws `InvalidOperationException` — use `.Where<T>(lambda)` for the second component. Required for incremental views.
 
 ### Spatial predicates
 
@@ -117,7 +119,7 @@ FK-join query. Created from `EcsQuery.NavigateField<TSource, TTarget>(fkSelector
 2. Apply DNF rewrite (distribute `&&` over `||`).
 3. Collect leaves into `FieldPredicate[][]` — outer = OR branches, inner = AND predicates per branch.
 
-**Branch cap:** `MaxDnfBranches = 16` ([`ExpressionParser.cs:23`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ExpressionParser.cs)). DNF normalization can blow up exponentially — `(A||B) && (C||D) && (E||F)` produces 2×2×2 = 8 branches; five ANDed pairs would explode past 16. Hit the cap → `InvalidOperationException` with a message telling you to split the query or reduce ANDed OR pairs. The cap aligns with the OR-mode view's 16-bit branch bitmap (see [§5](#5-view-system)).
+**Branch cap:** `MaxDnfBranches = 16` ([`ExpressionParser.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ExpressionParser.cs)). DNF normalization can blow up exponentially — `(A||B) && (C||D) && (E||F)` produces 2×2×2 = 8 branches; five ANDed pairs would explode past 16. Hit the cap → `InvalidOperationException` with a message telling you to split the query or reduce ANDed OR pairs. The cap aligns with the OR-mode view's 16-bit branch bitmap (see [§5](#5-view-system)).
 
 ### `PlanBuilder`
 
@@ -156,7 +158,7 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 | Unordered, otherwise | `ExecuteTargeted` → `ScanPerArchetypeBTree` — **Path B**: zone-map-prune each cluster and evaluate every predicate against the SoA column; for `Versioned` clusters whose update watermark is above the reader's snapshot, evaluation uses a per-transaction snapshot column instead (`FillSnapshotColumn`, VIS-12) |
 | Ordered, and every archetype in the mask carries per-archetype indexes on the where-component (`HasClusterIndexes`, non-null `IndexSlots`) | `ExecuteOrderedClustered` — K-way merge over the OrderBy field's per-archetype B+Trees |
 | Ordered, and any archetype in the mask lacks them | `ExecuteOrderedViaSortFallback` — scan, then sort |
-| `Count()` | `ExecuteTargeted().Count` — the same scan, then its size |
+| `Count()` with field predicates | `ExecuteTargeted().Count` — the same scan, then its size (a broad `Count()` with no predicate counts the entity maps instead) |
 
 All of them scan real data and return correct results (`src/Typhon.Engine/Ecs/public/EcsQuery.cs`). In particular, a query is never empty and `Count` is never 0 *merely because of plan shape*.
 
@@ -202,7 +204,7 @@ The B+Tree iteration lives in `EcsQuery`. For an `AllowMultiple = true` index, t
 
 ### View full scan — `EcsQuery.ExecuteFullScanAcrossArchetypes`
 
-The full-scan entry point for view refreshes is `EcsQuery.ExecuteFullScanAcrossArchetypes`. `EcsView` holds an `EcsViewFieldReader` (an abstract typed wrapper for per-entity secondary predicate checks) and calls: `_query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds)` (`Ecs/public/EcsView.cs:852`). `EcsViewFieldReader<T>` is the typed subclass used by the delta-check path for field evaluation via `TryOpen` + `TryRead<T>`.
+The full-scan entry point for view refreshes is `EcsQuery.ExecuteFullScanAcrossArchetypes`. `EcsView` holds an `EcsViewFieldReader` (an abstract typed wrapper for per-entity secondary predicate checks) and calls: `_query.ExecuteFullScanAcrossArchetypes(CachedPlan, CachedPlan.OrderedEvaluators, _componentTable, _entityIds)` (`Ecs/public/EcsView.cs`). `EcsViewFieldReader<T>` is the typed subclass used by the delta-check path for field evaluation via `TryOpen` + `TryRead<T>`.
 
 ### What's not there (audit clarifications)
 
@@ -240,7 +242,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 }
 ```
 
-The XML doc comment on `ViewBase` (line 10) references `View<T>`, `View<T1,T2>` and `OrView<T>` — **no such types exist**. Don't propagate the names. The single concrete derived type is `EcsView<TArchetype>`.
+The single concrete derived type is `EcsView<TArchetype>`.
 
 `_entityIds` is the maintained working set. `_deltas` accumulates per-tick `DeltaKind` (Added / Removed / Modified) per PK; `ClearDelta()` drops the map. Idempotent compaction is done inline in `CompactDelta`: Added+Removed cancels, Modified+Removed promotes to Removed, Removed+Added becomes Modified.
 
@@ -387,7 +389,7 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 
 `EcsQuery` handles this in two places:
 
-- **Targeted scan** (`WhereField` path): after the index-driven scan, `ExecuteTargeted` calls `CollectPendingSpawnsWithFieldFilter(result)` ([`EcsQuery.cs:1983`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)). For each entry in `tx.PendingSpawns`: skip if in `PendingDestroys`, skip if not in archetype mask, then evaluate the **compiled predicate** (`_pendingSpawnFieldFilter`) via `tx.Open(id).TryRead<T>(out value) && predicate(value)`. The compiled `Func<T,bool>` is deferred — it's only `.Compile()`d on first invocation (Expression.Compile costs ~100+ µs) and cached in a closure.
+- **Targeted scan** (`WhereField` path): after the index-driven scan, `ExecuteTargeted` calls `CollectPendingSpawnsWithFieldFilter(result)` ([`EcsQuery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EcsQuery.cs)). For each entry in `tx.PendingSpawns`: skip if in `PendingDestroys`, skip if not in archetype mask, then evaluate the **compiled predicate** (`_pendingSpawnFieldFilter`) via `tx.Open(id).TryRead<T>(out value) && predicate(value)`. The compiled `Func<T,bool>` is deferred — it's only `.Compile()`d on first invocation (Expression.Compile costs ~100+ µs) and cached in a closure.
 - **Broad scan** (opaque `Where<T>(Func<T,bool>)`): pending spawns are reached by `CollectMatching`, which enumerates archetype `EntityMap`s — but `tx.Open(id)` resolves to the pending-spawn data, so opaque `Where` filters work transparently for pending entities.
 
 `PendingDestroys` is checked first in both paths — an entity that was spawned and then destroyed in the same transaction is invisible to its own queries.
@@ -408,4 +410,4 @@ declared projections and answered from geometry, so the view machinery in [§5](
 - [03-indexing](03-indexing.md) — B+Tree iterators (`EnumerateRange`, `EnumerateRangeMultiple`) that the executor streams from
 - [06-ecs](06-ecs.md) — where `EcsQuery` and `EcsView` live, `EntityRef` enumeration, archetype masks, `Transaction.Open` / `TryRead`
 - [07-spatial](07-spatial.md) — how `WhereInAABB` / `WhereNearby` / `WhereRay` translate to R-Tree queries
-- [12-observability](12-observability.md) — `BeginQueryPlan` / `BeginQueryExecuteIndexScan` / `BeginQueryExecuteIterate` / `BeginQueryExecuteFilter` / `BeginQueryExecutePagination` typed event kinds; `QueryDefinitionDescribe` for caller attribution
+- [12-observability](12-observability.md) — the `Query*` trace event kinds (`QueryParse`, `QueryPlan`, `QueryEstimate`, `QueryExecuteIndexScan` / `QueryExecuteIterate` / `QueryExecuteFilter` / `QueryExecutePagination`, …); `QueryDefinitionDescribe` for caller attribution

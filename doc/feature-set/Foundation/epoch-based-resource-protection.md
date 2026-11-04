@@ -15,7 +15,7 @@ Every transaction reads and writes pages in Typhon's page cache while other thre
 
 ## ⚙️ How it works (in brief)
 
-A transaction "enters" an epoch scope when it starts and "exits" when it ends; entering pins the engine's current global epoch counter to that thread. Every page the transaction touches gets stamped with that epoch value. The page cache computes the lowest epoch still pinned by any active thread and treats it as a watermark: pages stamped at or above the watermark are still possibly in use and are skipped during eviction; everything below it is fair game. Because protection is granted to the whole scope rather than per page, there is nothing to release page-by-page and nothing to leak — but a long-running transaction holds back eviction for *every* page touched since it started, not just its own.
+A transaction "enters" an epoch scope when it starts and "exits" when it ends; entering pins the engine's current global epoch counter to that thread. Every page the transaction touches gets stamped with that epoch value. The page cache computes the lowest epoch still pinned by any active thread and treats it as a watermark: pages stamped at or above the watermark are still possibly in use and are skipped during eviction; everything below it is fair game. Because protection is granted to the whole scope rather than per page, there is nothing to release page-by-page and nothing to leak — but a long-running transaction holds back eviction for *every* page touched since its last epoch refresh, not just its own.
 
 ## 💻 Usage
 
@@ -41,7 +41,7 @@ int liveThreads = epochs.ActiveSlotCount;
 
 | Property | Meaning |
 |----------|---------|
-| `GlobalEpoch` | Current epoch counter, advances on every outermost scope exit. |
+| `GlobalEpoch` | Current epoch counter, advances on every outermost scope exit and every in-scope refresh. |
 | `MinActiveEpoch` | Lowest epoch any active thread is pinned at — the eviction watermark. |
 | `ActiveSlotCount` | Number of threads currently registered with the engine. |
 | `IsCurrentThreadInScope` | Whether the calling thread is currently inside a scope. |
@@ -51,6 +51,7 @@ int liveThreads = epochs.ActiveSlotCount;
 - **Constant cost regardless of pages touched** — one scope enter and one scope exit per transaction; a transaction touching 1 page or 10,000 pages pays the same protection overhead.
 - **No leaks possible** — there is no per-page handle to forget to release; scope exit is the only release point.
 - **Protection is by time window, not by identity** — a page is protected if its epoch overlaps *any* active scope, even one that never touched that page. Keep transactions/unit-of-work scopes short; a long-running one delays eviction of pages it never accessed.
+- **Long transactions refresh their pin** — a transaction moves its pinned epoch forward periodically (every 128 entity opens, spawns, index lookups, …; see [Epoch-Based Page Protection & Dirty-Page Tracking](../Storage/epoch-dirty-tracking.md)), so it holds back only what it touched since its last refresh. Broad query scans don't rely on the epoch at all: they pin each page by slot reference through a small sliding window and release it as they move on.
 - **Wait-free fast path** — entering/exiting a scope is a few nanoseconds (thread-local read/write plus one atomic increment), no contention with other threads in the common case.
 - Page reclamation under heavy, sustained concurrency can lag further behind than a ref-counted scheme would, trading some extra cache pressure for the lock-free guarantee.
 

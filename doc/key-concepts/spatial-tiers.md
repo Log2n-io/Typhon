@@ -27,5 +27,5 @@ All three compose, engine-managed — a system can be tier-filtered, amortized, 
 
 ## Learn & use
 
-- **Feature detail:** [Spatial tiers & adaptive dispatch](xref:feature-runtime-spatial-tiers-adaptive-dispatch-index) — [tier-filtered & amortized](xref:feature-runtime-spatial-tiers-adaptive-dispatch-tier-filtered-amortized-dispatch) · [cluster dormancy](xref:feature-runtime-spatial-tiers-adaptive-dispatch-cluster-dormancy) · [checkerboard dispatch](xref:feature-runtime-spatial-tiers-adaptive-dispatch-checkerboard-dispatch)
+- **Feature detail:** [Spatial tiers & adaptive dispatch](xref:feature-runtime-spatial-tiers-adaptive-dispatch-index) — [tier-filtered & amortized](xref:feature-runtime-spatial-tiers-adaptive-dispatch-tier-filtered-amortized-dispatch) · [cluster dormancy](xref:feature-spatial-cluster-dormancy) · [checkerboard dispatch](xref:feature-spatial-checkerboard-dispatch)
 - **Narrative:** [Guide ch.5 — systems](xref:guide-systems)

@@ -60,15 +60,16 @@ services
 
 var serviceProvider = services.BuildServiceProvider();
 var engine = serviceProvider.GetRequiredService<DatabaseEngine>();
+engine.InitializeArchetypes();   // power-user path: the caller wires archetypes (AddTyphon does this for you)
 ```
 
 | Extension | Registers | Options type |
 |---|---|---|
 | `AddResourceRegistry` | `IResourceRegistry` | `ResourceRegistryOptions` |
-| `AddMemoryAllocator` | `IMemoryAllocator` | `MemoryAllocatorOptions` |
+| `AddMemoryAllocator` | `IMemoryAllocator` (internal type) | `MemoryAllocatorOptions` |
 | `AddEpochManager` | `EpochManager` | — |
-| `AddHighResolutionSharedTimer` | `HighResolutionSharedTimerService` | — |
-| `AddDeadlineWatchdog` | `DeadlineWatchdog` | — |
+| `AddHighResolutionSharedTimer` | `HighResolutionSharedTimerService` (internal type) | — |
+| `AddDeadlineWatchdog` | `DeadlineWatchdog` (internal type) | — |
 | `AddManagedPagedMMF` | `ManagedPagedMMF` | `ManagedPagedMMFOptions` |
 | `AddPagedMemoryMappedFile` | `PagedMMF` | `PagedMMFOptions` |
 | `AddDatabaseEngine` | `DatabaseEngine` | `DatabaseEngineOptions` |
@@ -78,9 +79,15 @@ var engine = serviceProvider.GetRequiredService<DatabaseEngine>();
 - Call order is irrelevant — the dependency graph is enforced at resolution time, not registration
   time. Omit a required `Add*` and `GetRequiredService<DatabaseEngine>()` throws at the first
   missing dependency, not at startup.
-- Options validation is real and fails fast at DI resolution time: `OptionsValidators` delegates to the
-  options type's own `Validate(bool silent, out string message)`, so a bad option value throws when the
-  engine is first resolved rather than surfacing later as corrupt behaviour.
+- Options validation is real and fails fast at DI resolution time: when a `configure` delegate is passed,
+  `AddManagedPagedMMF`/`AddPagedMemoryMappedFile` register a validator that delegates to
+  `PagedMMFOptions.Validate(bool silent, out string message)`, and `AddDatabaseEngine` one that range-checks
+  the engine knobs, so a bad option value throws when the engine is first resolved rather than surfacing
+  later as corrupt behaviour. See [Options Validation](../engine-options-configuration/options-validation.md).
+- This chain is the power-user path: the caller owns component registration and must call
+  `DatabaseEngine.InitializeArchetypes()` on the resolved engine before using it. `AddTyphon(o => …)`
+  composes the same chain in one call and does that (plus `Register<T>`, spatial-grid config and `Seed`
+  steps) at first resolve.
 - `EnsureFileDeleted<TO>(provider)` is a test/tooling convenience that opens a scope, resolves
   `IOptions<TO>`, and deletes the **entire `.typhon` bundle directory** (data file, lock, and WAL) —
   not just the data file, and not part of normal application startup. The database must be closed first.

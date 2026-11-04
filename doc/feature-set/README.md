@@ -54,7 +54,7 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Transient Store (heap-backed) | Pinned heap blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code — tune via TransientOptions. | ✅ Implemented | 🔵 Core | [→](Storage/pluggable-storage-backend/transient-store.md) |
+| Transient Store (native-memory) | Pinned native-memory blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code — tune via TransientOptions. | ✅ Implemented | 🔵 Core | [→](Storage/pluggable-storage-backend/transient-store.md) |
 | Database File Locking & Lifecycle | Two-layer protection against concurrent multi-process opens — OS FileShare.Read plus an advisory .lock sidecar with stale/live/cross-machine PID detection — plus create/open/delete lifecycle handling. | ✅ Implemented | 🔵 Core | [→](Storage/file-locking-lifecycle.md) |
 | Page Cache & Clock-Sweep Eviction | 8 KiB pages, 4-state lifecycle, clock-sweep eviction with sequential-allocation optimization, async I/O, and backpressure handling. | ✅ Implemented | 🟣 Advanced | [→](Storage/page-cache.md) |
 | Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing | Hardware CRC32C page checksums, seqlock-protected checkpoint snapshots, and A/B slot pairing for structural pages that can't be rebuilt. | ✅ Implemented | 🟣 Advanced | [→](Storage/page-integrity.md) |
@@ -151,6 +151,8 @@ Every Public feature, one line each — the application-facing surface, complete
 | Spatially-Coherent Entity Clustering | Every entity in a cluster shares one grid cell, so spatial bookkeeping is per-cluster, not per-entity. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-coherent-clustering.md) |
 | Tiered Simulation Dispatch | One simulation tier per spatial cell, four dispatch frequencies, zero per-entity distance checks. | ✅ Implemented | 🟣 Advanced | [→](Spatial/tiered-simulation-dispatch.md) |
 | Checkerboard Dispatch | Opt-in two-phase Red/Black cluster partitioning for systems that write across cell boundaries, dispatched as one DAG node with two internal phases. | ✅ Implemented | 🟣 Advanced | [→](Spatial/checkerboard-dispatch.md) |
+| Trigger Volumes (Enter / Leave / Stay) | Region entities diffed against the spatial tree(s) each cycle to emit Enter/Leave/Stay events at a configurable per-region frequency. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-trigger-volumes.md) |
+| Cluster Dormancy (Sleep / Wake) | Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched. | ✅ Implemented | 🟣 Advanced | [→](Spatial/cluster-dormancy.md) |
 
 > Note: Static / Dynamic Separation is a sub-feature of the (Internal) Per-Cell Cluster Index Internals — see the [Internal](#internal--engine-internals-for-contributors) section below for the tree itself.
 
@@ -225,8 +227,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | &nbsp;&nbsp;↳ QuerySystem | Reactive per-entity system that auto-skips when nothing relevant changed, with optional automatic multi-core chunking. | ✅ Implemented | 🔵 Core | [→](Runtime/system-types/query-system.md) |
 | &nbsp;&nbsp;↳ ChunkedCallbackSystem | Fan a CallbackSystem's body out across N workers for SIMD sweeps, reductions, and other non-entity chunkable work. | ✅ Implemented | 🟣 Advanced | [→](Runtime/system-types/chunked-callback-system.md) |
 | &nbsp;&nbsp;↳ PipelineSystem | Reactive multi-stage gather/process/scatter system for bulk entity processing — full execution model pending Patate. | Implemented (chunk-dispatch only) | 🟣 Advanced | [→](Runtime/system-types/pipeline-system.md) |
-| &nbsp;&nbsp;↳ CompoundSystem | Group related sub-systems' registration under one Configure call — one node from the outside, parallel inside. | ✅ Implemented | 🟣 Advanced | [→](Runtime/system-types/compound-system.md) |
-| Declarative System Scheduling (Track → DAG → Phase, Auto-DAG) | Systems declare per-component read/write access and a DAG-local phase; the scheduler auto-derives execution edges and rejects unsafe write/write or stale-read conflicts at Build(). | ✅ Implemented | 🔵 Core | [→](Runtime/declarative-system-scheduling.md) |
+| &nbsp;&nbsp;↳ CompoundSystem | Group related sub-systems' registration under one Configure call — each member stays its own DAG node; dependents name members, not the group. | ✅ Implemented | 🟣 Advanced | [→](Runtime/system-types/compound-system.md) |
 | Parallel Entity Processing (QuerySystem.Parallel) | Automatic multi-core chunking with a reusable PointInTimeAccessor (no per-chunk Transaction for non-Versioned writes) across four dispatch paths selected by Versioned-write × change-filter. | ✅ Implemented | 🟣 Advanced | [→](Runtime/parallel-entity-processing.md) |
 | Reactive Dispatch: Change Filters & Run Conditions | changeFilter limits a system's entity set to dirty ∪ Added by piggybacking on the View's ring buffer; shouldRun gives a zero-cost proactive skip predicate evaluated before any input work. | ✅ Implemented | 🟣 Advanced | [→](Runtime/reactive-dispatch-change-filters.md) |
 | Typed Event Queues | Multi-producer per-worker-segment queues for inter-system signalling within a tick; any number of parallel chunk workers may push concurrently via `ctx.Writer(queue)`, enabling reactive cascade chains that early-out cheaply when dormant. | ✅ Implemented | 🟣 Advanced | [→](Runtime/typed-event-queues.md) |
@@ -235,17 +236,12 @@ Every Public feature, one line each — the application-facing surface, complete
 | Telemetry & Runtime Inspection | Always-on, zero-allocation ring buffer of per-tick/per-system telemetry inspectable from game code; a pluggable IRuntimeInspector hook for remote tooling is designed but not implemented. | 🚧 Partial | 🟣 Advanced | [→](Runtime/telemetry-runtime-inspection.md) |
 | Spatial Tiers & Adaptive Dispatch | Per-cluster simulation tiers let systems process near entities every tick and far entities at reduced/amortized/dormant rates, scoping dispatch automatically to the matching clusters. | ✅ Implemented | 🟣 Advanced | [→](Runtime/spatial-tiers-adaptive-dispatch/README.md) |
 | &nbsp;&nbsp;↳ Tier-Filtered & Amortized Dispatch | Scope a system to clusters in matching tier cells, and optionally process just 1/N of them per tick. | ✅ Implemented | 🟣 Advanced | [→](Runtime/spatial-tiers-adaptive-dispatch/tier-filtered-amortized-dispatch.md) |
-| &nbsp;&nbsp;↳ Cluster Dormancy (Sleep/Wake) | Clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to. | ✅ Implemented | 🟣 Advanced | [→](Runtime/spatial-tiers-adaptive-dispatch/cluster-dormancy.md) |
-| &nbsp;&nbsp;↳ Checkerboard (Red/Black) Dispatch | Two-phase Red/Black parallel dispatch so neighbor-touching systems never race across a cell boundary. | ✅ Implemented | 🟣 Advanced | [→](Runtime/spatial-tiers-adaptive-dispatch/checkerboard-dispatch.md) |
 | Data-Driven Timers / Scheduled Entities | Documented pattern for modeling respawns/expiries as entities with a time-of-expiry component and a CallbackSystem poll; no built-in timer/scheduling infrastructure exists yet. | 📋 Planned | 🟣 Advanced | [→](Runtime/data-driven-timers.md) |
-| Declarative Scheduling — Auto-DAG (RFC 07) | Directory-form restructuring of Declarative System Scheduling (above) into two sub-pages; it duplicates content covered earlier in this table — see the flagging note below. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/README.md) |
+| Declarative System Scheduling (Track → DAG → Phase, Auto-DAG) | Systems declare per-component read/write access and a DAG-local phase; the scheduler auto-derives execution edges and rejects unsafe write/write or stale-read conflicts at Build(). | ✅ Implemented | 🔵 Core | [→](Runtime/declarative-scheduling/README.md) |
 | &nbsp;&nbsp;↳ Track → DAG → Phase Partitioning | Tracks order coarse execution stages, DAGs group independent dependency graphs, phases order systems within one DAG. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/track-dag-phase-partitioning.md) |
 | &nbsp;&nbsp;↳ Access Declarations & Build-Time Conflict Detection | Reads/Writes/ReadsFresh/ReadsSnapshot declare what a system touches; Build() derives safe ordering and rejects unsafe overlaps. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/access-conflict-detection.md) |
-| Tick Lifecycle & Transaction Management | Restructures content already covered above by Side-Transactions and the tick loop's Parallel Tick Fence into its own directory — see the flagging note below. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/README.md) |
-| &nbsp;&nbsp;↳ Side-Transactions (Immediate Durability) | A transaction you open and commit from inside a tick system that becomes durable on its own, independent of whether the tick's main UoW ever flushes. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/side-transactions.md) |
-| &nbsp;&nbsp;↳ Parallel Tick Fence (WriteTickFence) | Spreads the post-tick WriteTickFence step across the worker pool instead of running it serially on one thread. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/parallel-tick-fence.md) |
+| Tick Lifecycle & Transaction Management | What happens inside one tick: the runtime-owned UoW, one auto-committed Transaction per system, spawn/destroy visibility across systems, and the single WAL flush at tick end. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/README.md) |
 
-> Flagging note: the last two entries (Declarative Scheduling — Auto-DAG, Tick Lifecycle & Transaction Management) are directory-form restructurings that duplicate content already covered earlier in this table (Declarative System Scheduling; Side-Transactions + Parallel Tick Fence). They are real doc pages under `Runtime/`, listed here for completeness; they likely need consolidating with — or retiring in favor of — the entries they duplicate rather than living on as permanent duplicates.
 
 ### Resources
 
@@ -309,7 +305,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | &nbsp;&nbsp;↳ Singleton/Scoped/Transient Lifetime Variants | Every Add* with a lifetime choice ships as Add.../AddScoped.../AddTransient... twins sharing one factory delegate. | ✅ Implemented | 🔵 Core | [→](Hosting/di-bootstrap-chain/lifetime-variants.md) |
 | Engine Options Configuration Surface | IOptions\<T\>-based configuration for engine services, set via configure delegates on each Add*() DI call. | ✅ Implemented | 🔵 Core | [→](Hosting/engine-options-configuration/README.md) |
 | &nbsp;&nbsp;↳ Options Validation | Engine and storage options are range-checked at DI resolution by two IValidateOptions\<T\> implementations, so a bad knob throws OptionsValidationException at startup rather than surfacing mid-open. | ✅ Implemented | 🟣 Advanced | [→](Hosting/engine-options-configuration/options-validation.md) |
-| Database Seeding | TyphonOptions.Seed(revision, tx => …) registers revision-stepped, crash-safe seed steps applied automatically at engine open — a fresh database runs them all, an existing one catches up on new ones. | ✅ Implemented | 🟢 Start Here | [→](Hosting/database-seeding.md) |
+| Database Seeding | TyphonOptions.Seed(revision, tx => …) registers revision-stepped seed steps, each applied once, automatically at engine open — a fresh database runs them all, an existing one catches up on new ones. | ✅ Implemented | 🟢 Start Here | [→](Hosting/database-seeding.md) |
 | Clean-Slate Database File Deletion | EnsureFileDeleted\<TO\>(IServiceProvider) resolves IOptions\<TO\> in a fresh scope and deletes the backing database file it points at. | ✅ Implemented | 🔵 Core | [→](Hosting/ensure-file-deleted.md) |
 | Profiler Launch Override Hook | AddTyphonProfiler(Func\<ProfilerLaunchConfig,ProfilerLaunchConfig\>) lets a host adjust the profiler launch config in code without giving up zero-code defaults. | ✅ Implemented | 🟣 Advanced | [→](Hosting/profiler-launch-override-hook.md) |
 
@@ -348,7 +344,7 @@ Every Internal feature, one line each — engine machinery with no direct applic
 | &nbsp;&nbsp;↳ Persistent Store (page-cache-backed) | The default backend — every durable component's segments run through the page cache at zero abstraction cost. | ✅ Implemented | [→](Storage/pluggable-storage-backend/persistent-store.md) |
 | String Table Storage | UTF-8 string storage spread across linked fixed-size chunks, for strings too long to hold inline. | ✅ Implemented | [→](Storage/string-table.md) |
 
-> Note: Transient Store (heap-backed), the other child of Pluggable Storage Backend, is Public — see the [Public](#public--what-you-can-use) section above.
+> Note: Transient Store (native-memory), the other child of Pluggable Storage Backend, is Public — see the [Public](#public--what-you-can-use) section above.
 
 ### Durability
 
@@ -395,9 +391,7 @@ Every Internal feature, one line each — engine machinery with no direct applic
 | Feature | Summary | Status | Link |
 |---|---|---|---|
 | Per-Cell Cluster Index Internals | Node layout, fanout and lock protocol of the R-Tree a cell half holds once its density crosses the promotion threshold. Most cells stay far below it and scan a linear list of cluster bounds instead. | ✅ Implemented | [→](Spatial/spatial-rtree-index/README.md) |
-| Trigger Volumes (Enter / Leave / Stay) | Region entities diffed against the spatial tree(s) each cycle to emit Enter/Leave/Stay events at a configurable per-region frequency. | ✅ Implemented | [→](Spatial/spatial-trigger-volumes.md) |
 | Cluster Spatial Queries | Per-cell broadphase + per-entity narrowphase AABB/Radius queries. | 🚧 Partial | [→](Spatial/cluster-spatial-queries.md) |
-| Cluster Dormancy (Sleep / Wake) | Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched. | ✅ Implemented | [→](Spatial/cluster-dormancy.md) |
 
 > Note: Static / Dynamic Separation, the only child of Per-Cell Cluster Index Internals, is Public — see the [Public](#public--what-you-can-use) section above.
 

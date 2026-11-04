@@ -1,11 +1,11 @@
 ---
 uid: feature-indexing-batched-index-maintenance
 title: 'Batched Index Maintenance for Bulk Commits'
-description: 'Commit-path rework that batches secondary-index updates per commit; the accessor-reuse half has shipped, the sorted-apply half has not.'
+description: 'Commit-path rework that batches secondary-index updates per commit; the batch-mode flushing half has shipped, the sorted-apply half has not.'
 ---
 
 # Batched Index Maintenance for Bulk Commits
-> Commit-path rework that batches secondary-index updates per commit; the accessor-reuse half has shipped, the sorted-apply half has not.
+> Commit-path rework that batches secondary-index updates per commit; the batch-mode flushing half has shipped, the sorted-apply half has not.
 
 **Status:** 🚧 Partial · **Visibility:** Internal · **Category:** [Indexing](./README.md)
 
@@ -21,11 +21,11 @@ measured at ~196 ms in index maintenance alone under the original fully-naive sc
 ## ⚙️ How it works (in brief)
 
 The fix is a two-phase commit-path rework, entirely internal — no new public API either way. **Phase A (shipped):**
-`Transaction.Commit()` now hoists one long-lived `ChunkAccessor` per index per component type out of the per-entity
-loop — instead of thousands of short-lived ones — and runs the whole component type's mutation loop with warm
-accessor `CommitChanges` suppressed (`ChunkBasedSegment.EnterBatchMode`/`ExitBatchMode`), flushing dirty pages
-only every 1,024 entities rather than after every single one. This is unconditional for every commit touching a
-`Versioned` component with at least one indexed field — there is no size threshold or opt-in. **Phase B (not yet
+`Transaction.Commit()` runs each component type's mutation loop with warm accessor `CommitChanges` suppressed
+(`ChunkBasedSegment.EnterBatchMode`/`ExitBatchMode`), flushing dirty pages only every 1,024 entities rather than after
+every single one. (The hoisted per-index accessors Phase A originally added went away with the per-`ComponentTable`
+indexes (#629); the batch mode itself remains, bounding dirty-page inflation for the component and revision segments.) This is unconditional for every commit touching a
+`Versioned` component — there is no size threshold or opt-in. **Phase B (not yet
 implemented):** deferring secondary-index writes until after the per-entity commit loop, sorting them by key per
 index, and applying them in sorted order — turning random index-page and value-buffer access into sequential,
 cache-friendly access. Phase B is where most of the modeled savings live; Phase A alone does not reorder anything,
@@ -34,7 +34,7 @@ so index operations during a bulk commit still land in entity-iteration order to
 ## 💻 Usage
 
 ```csharp
-[Component]
+[Component("Game.Item", 1)]
 public struct ItemData
 {
     [Index(AllowMultiple = true)] public int ItemTypeId;
@@ -47,17 +47,14 @@ for (int i = 0; i < 200_000; i++)
 {
     tx.Spawn<Item>(Item.Data.Set(GenerateItem(i)));
 }
-tx.Commit();   // accessor-reuse batching (Phase A) already applies transparently; sorted application
+tx.Commit();   // batch-mode flushing (Phase A) already applies transparently; sorted application
                // (Phase B) does not exist yet — index writes still happen in entity-iteration order
 ```
 
 ## ⚠️ Guarantees & limits
 
-- **Phase A is shipped and unconditional:** per-component-type accessor hoisting plus suppressed/periodic
-  `CommitChanges` (every 1,024 entities) is live for every commit of a `Versioned` component with indexed fields —
-  see `Transaction._batchIndexActive`/`_batchIndexAccessors` and the batched overloads of `IndexMaintainer.UpdateIndices`
-  / `RemoveSecondaryIndices` that accept pre-created accessors. No size threshold gates it; even a single-entity
-  commit goes through the hoisted-accessor path.
+- **Phase A is shipped and unconditional:** suppressed/periodic `CommitChanges` (every 1,024 entities) is live for every
+  commit of a `Versioned` component. No size threshold gates it; even a single-entity commit runs in batch mode.
 - **Phase B (sort-by-key, deferred apply) is not implemented.** No `IndexOpBuffer`, `DeferredIndexOp`, or sorted
   apply pass exist in the codebase — index operations within a commit are still applied in entity-iteration order,
   not key order. This is the larger share of the design's modeled savings (sorted VSBS/page-cache locality was
@@ -69,8 +66,6 @@ tx.Commit();   // accessor-reuse batching (Phase A) already applies transparentl
   on index maintenance specifically — that combined figure is design-time only until Phase B ships.
 - Scoped to commit-path restructuring only — no change to B+Tree node layout, the OLC protocol, or split/merge
   behavior; index operations are not parallelized across threads.
-- The primary-key index is and remains unaffected by either phase — entities are already iterated in PK order
-  during commit, so it keeps its existing inline, sequential update path.
 - Phase B's design analysis covers MVCC visibility (the brief window between revision commit and deferred index
   apply is not observable under snapshot isolation), unique-constraint semantics under reordering, WAL impact
   (none — WAL serializes component data, not index state), and view-notification ordering (safe — same-TSN delta

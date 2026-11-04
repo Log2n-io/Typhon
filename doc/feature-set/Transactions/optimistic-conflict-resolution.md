@@ -20,8 +20,9 @@ its write lands, the only options are accept data loss or build retry/merge logi
 ## ⚙️ How it works (in brief)
 
 Pass a `ConcurrencyConflictHandler` to `Commit`. While committing, each entity is checked for a conflict (another
-transaction committed a newer value since this transaction's read); detection uses a monotonic per-entity commit
-counter rather than chain position, so background revision-chain compaction can't produce a false negative. When a
+transaction committed a value past this transaction's snapshot); detection compares commit stamps, including a
+committer already past its commit point but not yet published, rather than chain position, so neither chain order
+nor background revision-chain compaction can produce a false negative. When a
 conflict fires, a `ConcurrencyConflictSolver` is populated with the entity's read/committed/committing state and the
 handler is invoked once for that entity, under the entity's revision-chain lock — detection and resolution are one
 atomic step, no other writer can interleave. The handler resolves the conflict by writing the value it wants
@@ -80,7 +81,7 @@ revision joins the chain the first one created. The handler then sees `ReadWasAb
 
 ## 🔗 Related
 
-- Related feature: [Write-Conflict Baseline Tracking](../Revision/optimistic-conflict-baseline.md) (the underlying per-entity baseline/CommitSequence mechanism), [Unit of Work](./unit-of-work.md)
+- Related feature: [Write-Conflict Baseline Tracking](../Revision/optimistic-conflict-baseline.md) (the underlying per-entity baseline and stamp-based detection), [Unit of Work](./unit-of-work.md)
 - Source: [`ConcurrencyConflictSolver`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/ConcurrencyConflictSolver.cs), [`Transaction.DetectAndResolveConflict`/`Commit`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.cs), [`CommitContext`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/CommitContext.cs)
 
 <!-- Deep dive: claude/design/Transactions/transaction-overview.md §4.2 (#42-conflict-detection--two-paths) -->

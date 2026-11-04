@@ -132,7 +132,7 @@ part of the fence that does not get cheaper when you add cores.
 ### 3. Inter-cell migration — paid per entity that leaves its cell
 
 An entity whose centre leaves its cell by more than a hysteresis margin is queued during Prep and moved during
-the fence's Migrate phase: component data, secondary index entries and the spatial back-pointer move together.
+the fence's Migrate phase: component data, secondary index entries and the EntityMap location record move together.
 Migration is systematic and never refused — it is what makes the cluster-cell invariant hold, so the engine will
 always pay it.
 
@@ -267,7 +267,7 @@ tick should be small against the cell side**, or every entity migrates most tick
 - **The promotion threshold is one number for the whole database** — there is no per-archetype or per-cell override, and it is read once while archetypes initialise, so it cannot be changed on a running engine. A world whose archetypes want different boundaries has to pick one.
 - **The 24× is derived, the 90% is measured** — the cluster-coverage mean comes from a spatial lab measurement; the 24× swing in clusters opened is arithmetic on top of it and has never been measured end to end.
 - **There is no budget-to-tightness curve** — neither achieved nanoseconds per entity for batched re-clustering nor achieved tightness under sustained motion is published. Choose a repair budget by watching telemetry, not by consulting a curve.
-- **The cell layer is not rebuilt after a hard crash** — entity data and storage survive, but the per-cell state is derived and is reconstructed only on a clean reopen. A reopen after an unclean shutdown has been observed to leave the cell layer unallocated.
+- **The cell layer is derived, and rebuilt on every open** — nothing per-cell is persisted; a reopen, including one after a crash and its WAL replay, files every cluster into its cell (and realm) again before the first tick, and slots a replay left in the wrong cell or realm are handed to the first fence.
 
 ## 🧪 Tests
 

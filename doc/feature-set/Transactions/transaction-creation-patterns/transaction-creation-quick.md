@@ -43,7 +43,7 @@ tx.Spawn<Unit>(Unit.Pos.Set(new Position { X = 1, Y = 0, Z = 0 }));
 tx.Commit();                      // tx.Dispose() also disposes its owning UoW
 
 // Forgetting to commit is safe — Dispose() auto-rolls-back the transaction
-// and still disposes (and, for non-Deferred modes, flushes) the owned UoW.
+// and still disposes the owned UoW (nothing committed, so no flush in any mode).
 using (var tx2 = dbe.CreateQuickTransaction())
 {
     tx2.Spawn<Unit>(Unit.Pos.Set(new Position { X = 2 }));

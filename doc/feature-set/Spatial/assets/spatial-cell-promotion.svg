@@ -23,7 +23,7 @@
 
   <rect x="40" y="80" width="1120" height="40" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5" rx="4"/>
   <text class="big" x="60" y="106">The engine decides, per cell.</text>
-  <text class="b"   x="278" y="106">A half promotes at 1024 clusters and falls back at 512. Move the boundary with <tspan class="mono" font-weight="700">Spatial.CellTreePromoteThreshold</tspan> &#8212; <tspan class="mono" font-weight="700">int.MaxValue</tspan> keeps every cell on the left.</text>
+  <text class="b"   x="278" y="106">Opt-in: a half promotes at <tspan class="mono" font-weight="700">Spatial.CellTreePromoteThreshold</tspan> clusters, falls back at half; the default <tspan class="mono" font-weight="700">int.MaxValue</tspan> keeps every cell on the left.</text>
 
   <!-- ══════════ LEFT: linear ══════════ -->
   <rect x="40" y="144" width="480" height="336" fill="#fafafa" stroke="#d4d4d8" rx="4"/>

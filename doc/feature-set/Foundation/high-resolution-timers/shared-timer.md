@@ -11,7 +11,7 @@ description: 'One thread multiplexing many periodic callbacks, each at its own r
 
 ## 🎯 What it solves
 
-A dedicated thread per periodic task doesn't scale: the deadline watchdog (200Hz), telemetry flush (10Hz), and epoch advancement (10-100Hz) are all lightweight, non-critical, and would otherwise each pay for an idle OS thread. `HighResolutionSharedTimerService` lets any number of independent periodic callbacks register on one thread, each keeping its own period, without one slow registration starving the others' accuracy under normal load.
+A dedicated thread per periodic task doesn't scale: lightweight, non-critical periodic tasks like the deadline watchdog (200Hz) would otherwise each pay for an idle OS thread. `HighResolutionSharedTimerService` lets any number of independent periodic callbacks register on one thread, each keeping its own period, without one slow registration starving the others' accuracy under normal load.
 
 ## ⚙️ How it works (in brief)
 
@@ -21,6 +21,7 @@ Each `Register()` call adds a callback with its own interval to a copy-on-write 
 
 ```csharp
 // Engine-internal usage — application code does not register callbacks directly.
+// (Illustrative callbacks: today the engine's only registration is DeadlineWatchdog's 200Hz poll.)
 var shared = new HighResolutionSharedTimerService(
     parent: resourceRegistry.Timer,
     logger: loggerFactory.CreateLogger<HighResolutionSharedTimerService>());

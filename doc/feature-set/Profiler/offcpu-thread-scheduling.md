@@ -38,10 +38,9 @@ Nothing to call — flip the config flag and the engine wires up the ETW pump fo
 // typhon.telemetry.json next to your executable:
 // {
 //   "Typhon": {
-//     "Telemetry": { "Enabled": true },
 //     "Profiler": {
 //       "Enabled": true,
-//       "Runtime": { "ThreadScheduling": { "Enabled": true } }
+//       "Runtime": { "Enabled": true, "ThreadScheduling": { "Enabled": true } }
 //     }
 //   }
 // }
@@ -60,7 +59,7 @@ TyphonProfiler.Stop();   // optional; ordinary shutdown stops the ETW session an
 
 | Option | Default | Effect |
 |---|---|---|
-| `Typhon:Profiler:Runtime:ThreadScheduling:Enabled` | `false` | Opens the NT Kernel Logger session and emits one `ThreadContextSwitch` record per closed on-CPU slice |
+| `Typhon:Profiler:Runtime:ThreadScheduling:Enabled` | inherits `Runtime:Enabled` (`false`) | Opens the NT Kernel Logger session and emits one `ThreadContextSwitch` record per closed on-CPU slice. Requires `Typhon:Profiler:Runtime:Enabled = true` — a subtree leaf is off whenever its parent is |
 
 ## ⚠️ Guarantees & limits
 
@@ -74,15 +73,16 @@ TyphonProfiler.Stop();   // optional; ordinary shutdown stops the ETW session an
   — gracefully, with a diagnostic, never aborting the trace.
 - **Scoped to Typhon's own threads.** Only OS threads Typhon has registered are recorded; pool,
   finalizer, GC-server threads, other processes, and the pump's own thread are filtered out.
-- **Off by default, opt-in, and independent.** Gated by its own config key; costs nothing when
-  disabled and can be enabled without turning on any other profiler sub-feature.
+- **Off by default, opt-in.** Gated by its own key (`RuntimeThreadSchedulingActive`); costs nothing
+  when disabled. It sits in the `Runtime` tracing subtree, so `Runtime:Enabled` must be on — and with it
+  every other `Runtime` child that is not explicitly set to `false`.
 - **Precise, not statistical.** Every on-CPU slice for a tracked thread is captured exactly from
   kernel events — this is not sampling, so short slices are not missed the way a fixed-rate
   sampler would miss them.
 - **Complements, does not replace, CPU sampling.** This gives exact off-CPU *timing* and wait
   reason with no call stack; the separate CPU-sampling feature gives a statistical call stack at
-  the cost of a fixed sampling cadence. Enabling CPU sampling enables this capture by default
-  where supported, so the on-CPU/off-CPU classification in the Workbench has both signals.
+  the cost of a fixed sampling cadence. The two are enabled separately; turn both on for the
+  Workbench's on-CPU/off-CPU classification to have both signals.
 - **Timestamps cross-walk directly.** The kernel's QPC clock is the same clock
   `Stopwatch.GetTimestamp()` uses on Windows, so slice timestamps need no conversion to line up
   with the rest of the trace.

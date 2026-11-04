@@ -56,7 +56,7 @@ while (running)
 | Incremental | Single `WhereField` branch | O(changes since last refresh) |
 | OR | `WhereField` with `\|\|` (multiple branches, max 16) | O(changes), per-entity branch bitmap |
 | Membership | No predicate (archetype-only: no `WhereField`, no `.Where`, no spatial, no `Enabled`/`Disabled` filter) | O(1) when nothing spawned/died; O(changes) otherwise — fed by the per-archetype spawn/destroy channel, never a full rescan |
-| Pull | No `WhereField`, but an opaque `.Where(lambda)`, a spatial predicate, or an `Enabled`/`Disabled` filter | O(full result set), every call — correct, but not incremental |
+| Pull | No `WhereField`, but an opaque `.Where(lambda)`, a spatial predicate, or an `Enabled`/`Disabled` filter — or a `WhereField` combined with an `Enabled`/`Disabled` filter | O(full result set), every call — correct, but not incremental |
 
 ## ⚠️ Guarantees & limits
 

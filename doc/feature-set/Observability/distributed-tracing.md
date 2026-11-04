@@ -64,7 +64,7 @@ activity?.SetTag(TyphonSpanAttributes.EntityId, entityId);
   whatever activity was current on the thread that scheduled the work; this is .NET runtime behavior, not configurable.
 
 ## 🔗 Related
-- Sibling: [Telemetry Configuration & Gating](./telemetry-config-gating.md) — gates whether this `ActivitySource`'s spans (and the Profiler) are active
+- Sibling: [Telemetry Configuration & Gating](./telemetry-config-gating.md) — the gate surface the Profiler reads; it gates nothing on this `ActivitySource` today, since the engine starts no spans on it
 - Sibling: [Profiler](../Profiler/README.md) — the typed-event pipeline that actually instruments engine internals today; this `ActivitySource` doesn't yet
 
 <!-- Deep dive: claude/overview/09-observability.md §9.3 Traces — note the "Implemented Trace Spans" table there describes Profiler typed events, not literal Activity spans on this source -->

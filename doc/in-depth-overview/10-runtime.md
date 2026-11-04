@@ -159,20 +159,24 @@ The user code **must not** commit or dispose its `Transaction` — the scheduler
 The struct handed to every `CallbackSystem` / `QuerySystem` body:
 
 ```csharp
-public struct TickContext {
+public struct TickContext {   // init-only properties, shown as fields for brevity
     public long          TickNumber;
+    public long          WorldTick;
     public float         DeltaTime;
     public Transaction   Transaction;
     public EntityAccessor Accessor;        // per-worker, non-Versioned parallel path
     public IReadOnlyCollection<EntityId> Entities;
     public EventQueueBase[] ConsumedQueues;
-    public Func<DurabilityMode, Transaction> CreateSideTransaction;
+    public SideTransactionFactory CreateSideTransaction;
     public int WorkerId, ChunkIndex, ChunkCount;
     public int StartClusterIndex, EndClusterIndex;
     public int[] ClusterIds;
     public float AmortizedDeltaTime;
     public TierBudgetMetrics TierBudgetMetrics;
     public SpatialGridAccessor SpatialGrid;
+    public RealmsAccessor Realms;
+    public SubscriptionsCommands Subscriptions;
+    public EntityCommands Commands { get; }   // deferred structural changes
     // …
 }
 ```

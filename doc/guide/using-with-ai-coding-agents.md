@@ -19,7 +19,7 @@ Typhon publishes machine-readable documentation for exactly this purpose:
   automatically; if yours doesn't, paste the URL into your prompt.
 - **Every page has a clean-markdown twin** at `<url>.md` (e.g. `.../key-concepts/transaction.html.md`) —
   no navigation chrome, ideal for a context window.
-- **`https://doc.typhondb.io/latest/llms-full.txt`** — the Guide, Key Concepts, and In-Depth Overview
+- **`https://doc.typhondb.io/llms-full.txt`** — the Guide, Key Concepts, and In-Depth Overview
   concatenated into one file, for when you want to load the whole mental model at once.
 
 The XML documentation shipped inside the NuGet package grounds *API signatures* on disk; the docs above
@@ -40,14 +40,29 @@ API; the rest are strong recommendations.
 | # | Do | Don't |
 |---|----|-------|
 | 1 | Declare `[Component("Name", rev)]` / `[Archetype]` types in **any namespace** — including the global namespace of a top-level-statements file | Assume they *must* be wrapped in a named `namespace` — the generator supports both; a named one is just tidier for a real project |
-| 2 | Make components **≥ 8 bytes** with **`public`** fields | Use a single 4-byte field, or `private` padding — the schema sizes on public fields, not `sizeof(T)` |
-| 3 | Query with the fluent builder `tx.Query<TArch>().Where<TComp>(x => …).Count()` | Write LINQ-to-SQL style `tx.Query(x => x.Score >= 50)` — the filtered component is a separate generic argument |
-| 4 | **Read/mutate each entity via `tx.Open(id)`** (query to *find*, open to *read*) | Read directly off the reference the query enumerator yields |
+| 2 | Make **Versioned** components total **≥ 8 bytes** (`sizeof(T)`, padding included; SingleVersion/Transient have no minimum) and put every value you index, migrate or inspect in a **`public`** field | Use a single 4-byte field — the open throws; or keep data in `private` fields, which the schema does not see (private *padding* is fine) |
+| 3 | Query with the fluent builder: `tx.Query<TArch>().WhereField<TComp>(x => x.Field == v)` on an `[Index]`ed field, then refine with `Where<TComp>(x => …)` | Write LINQ-to-SQL style `tx.Query(x => x.Score >= 50)`; or lead with `Where<T>` — it is a per-entity predicate over a **full scan** |
+| 4 | Read the `foreach` variable directly (it is a read-only `EntityRef`); **write through `tx.OpenMut(e.Id)`** | Try to `Set` through the enumerated reference — it has no write member |
 | 5 | Spawn with `tx.Spawn<TArch>(TArch.Handle.Set(new TComp{…}))` | Pass field values or a constructed instance to `Spawn` |
 | 6 | Bootstrap with `DatabaseEngine.Open(path, …)`, or DI `services.AddTyphon(…)` (`AddLogging()` is optional — it's self-registered) | `new DatabaseEngine(...)` (no public constructor) |
 | 7 | `using Typhon.Schema.Definition;` for the attributes | Rely on `using Typhon.Engine;` alone — `Archetype<T>` (base class) and `[Archetype]` (attribute) share a name and collide |
 | 8 | Do all writes **inside a transaction** and `Commit()` | Assume `Commit()` implies durability — that depends on the unit-of-work's durability mode |
 | 9 | Pick a **storage mode per component** (`Versioned` = full ACID, `SingleVersion`, `Transient`) | Treat storage/ACID as a global switch; or list `Committed` as a fourth mode — there are exactly three `StorageMode` values; `CommitDiscipline.Commit` is a separate per-transaction axis on `SingleVersion` |
+| 10 | **Register every component** an archetype uses (`o.Register<T>()`) | Leave one out — the archetype is skipped at open and the first `Spawn` into it throws "not registered with this database" |
+| 11 | **Bump the revision** with the change: fields or storage mode → `[Component]` revision; component set → `[Archetype]` revision | Change a struct and reopen as-is — the open is refused (a storage-mode change too) |
+
+### Inside a `TyphonRuntime` tick
+
+Systems add four idioms whose failure **nothing reports** — get them right up front:
+
+| # | Do | Don't |
+|---|----|-------|
+| 12 | Declare every component a system touches in `Configure`: `Writes<T>()`, `Reads<T>()`, `ReadsFresh<T>()`, `ReadsSnapshot<T>()` (Versioned only), `SideWrites<T>()`; order two same-phase writers with `.After("Other")` | Leave a read undeclared — the scheduler never inspects the body, so the system races the writer silently. `Build()` only catches declared conflicts; `Typhon:Checks:Enabled` + `Typhon:Checks:DeclaredAccess` assert undeclared *writes* in development |
+| 13 | Write `SingleVersion`, `Transient` and spatial-archetype components **inside a system** | Write them from another thread (a request handler, a timer) — only Versioned components of a non-spatial archetype are safe off-tick; the rest races the tick fence with no error |
+| 14 | Call `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`) after changing a replicated entity | Expect clients to see a plain write — under the default `PushDetection.Explicit` an unmarked change is never sent |
+| 15 | Write an `[Index]`ed `SingleVersion`/`Transient` component with `cluster.Set(…)` / `entity.Set(…)` | Write it through `GetSpan`/`Get` — that throws; and don't store `0` in a `[Index(Sparse = true)]` field expecting to find it — `0` means "no data" and is never indexed |
+
+Every idiom in this section is compiled in the guide's example project (`doc/guide/example/AgentIdioms.cs`), so it tracks the API.
 
 ## 4. A minimal program that compiles
 
@@ -62,12 +77,13 @@ using Typhon.Schema.Definition;
 
 namespace Shard;   // (1) a named namespace is tidier for a real project — the global namespace also works
 
-// (2) a component is a blittable struct, >= 8 bytes, public fields
+// (2) a component is a blittable struct with public fields; a Versioned one is >= 8 bytes
 [Component("Shard.CharacterData", 1, StorageMode = StorageMode.Versioned)]  // (9) per-component storage mode
 public struct CharacterData
 {
+    public long Credits;   // widest field first: no padding (the TYPHON010 analyzer flags avoidable padding)
     public int Faction;
-    public long Credits;
+    public int Level;
 }
 
 // an archetype is the entity's shape: partial class : Archetype<TSelf>, one Comp<T> handle per component
@@ -106,12 +122,12 @@ using (var tx = dbe.CreateQuickTransaction())
     tx.Commit();
 }
 
-// (3) query to FIND, (4) Open to READ
+// (3) query to FIND, (4) read the enumerated EntityRef directly
 using (var tx = dbe.CreateQuickTransaction())
 {
     foreach (var e in tx.Query<Character>())
     {
-        var c = tx.Open(e.Id).Read(Character.Data);
+        var c = e.Read(Character.Data);
         Console.WriteLine($"Faction={c.Faction} Credits={c.Credits}");   // Faction=1 Credits=10
     }
 }
@@ -126,16 +142,18 @@ If your agent isn't reading `llms.txt` automatically, paste this block into your
 
 ```text
 Typhon is an ECS database (not SQL) from the `Typhon` NuGet package. Rules:
-- Model data as `[Component("Name", 1)]` blittable structs (>= 8 bytes, public fields) — the name + revision
-  are REQUIRED attribute args. Add `using Typhon.Schema.Definition;`. (Any namespace works, including the
+- Model data as `[Component("Name", 1)]` blittable structs (public fields; >= 8 bytes when Versioned) — the name + revision
+  are REQUIRED attribute args. Add `using Typhon.Schema.Definition;`. Changing fields or storage mode needs a revision bump. (Any namespace works, including the
   global namespace of a top-level-statements file.)
 - An archetype is `[Archetype] partial class Foo : Archetype<Foo>` (no id arg — identity is the type name, or
   `[Archetype(Name="…")]`) with `public static readonly Comp<T> X = Register<T>();`. Archetypes self-register at assembly load.
-- Open the engine with DatabaseEngine.Open(path, o => o.Register<T>()) — register components; archetypes need no registration call.
+- Open the engine with DatabaseEngine.Open(path, o => o.Register<T>()) — register EVERY component an archetype uses; archetypes need no registration call.
 - All changes happen in a transaction: `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`.
   Spawn: `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`. Mutate: `var e = tx.OpenMut(id); var x = e.Read(Foo.X); x.Field = …; e.Set(Foo.X, x);` — reads copy, writes are `Set`; there is no `Write`.
-- Query with the fluent view API: `tx.Query<Foo>().Where<T>(x => …).Count()` — NOT LINQ. To read an
-  entity, use `tx.Open(id).Read(Foo.X)`, not the query-enumerated reference.
+- Query with the fluent view API — NOT LINQ: `tx.Query<Foo>().WhereField<T>(x => x.Field == v)` uses an [Index];
+  `Where<T>(x => …)` is a full scan. `foreach (var e in query)` yields a read-only EntityRef: `e.Read(Foo.X)`; write via `tx.OpenMut(e.Id)`.
+- In systems: declare every component touched (Writes/Reads/ReadsFresh/ReadsSnapshot/SideWrites) — undeclared reads race silently;
+  write SingleVersion/Transient/spatial data only inside systems; call ctx.Subscriptions.Replicate(in cluster, slot) after a replicated change.
 - Full docs: https://doc.typhondb.io/llms.txt
 ```
 

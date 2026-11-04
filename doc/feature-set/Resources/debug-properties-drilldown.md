@@ -48,7 +48,7 @@ foreach (var (key, value) in ct.GetDebugProperties())
 // ...
 
 // Or drill into any node reached via the resource tree, without holding a typed reference
-var node = resourceGraph.FindByPath("Storage/ManagedPagedMMF");
+var node = resourceGraph.FindByPath("Storage/ManagedPagedMMF_MyGame");   // path relative to Root; node id is ManagedPagedMMF_{DatabaseName}
 if (node is IDebugPropertiesProvider provider)
 {
     var props = provider.GetDebugProperties();
@@ -72,8 +72,8 @@ if (node is IDebugPropertiesProvider provider)
   `GetDebugProperties()` across every node; call it per node yourself (directly, or after an
   `is IDebugPropertiesProvider` check while walking `IResource.Children`).
 - Currently implemented on `ComponentTable`, `ManagedPagedMMF`, `DatabaseEngine`,
-  `TransactionChain`, `MemoryAllocator`, `ConcurrentBitmapL3All`, `PinnedMemoryBlock`,
-  `MemoryBlockArray`, `MemoryBlockBase`, and `StagingBufferPool`.
+  `TransactionChain`, `MemoryAllocator`, `ConcurrentBitmapL3All`, `MemoryBlockBase` (and so
+  `PinnedMemoryBlock` / `MemoryBlockArray`), `LargePinnedMemoryBlock`, and `StagingBufferPool`.
 
 ## 🧪 Tests
 - [OwnerAggregatesTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/OwnerAggregatesTests.cs) — `ComponentTable.GetDebugProperties()`

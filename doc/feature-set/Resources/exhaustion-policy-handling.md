@@ -23,9 +23,9 @@ message string.
 Each `ResourceNode` records an `ExhaustionPolicy` (`None`, `FailFast`, `Wait`, `Evict`, `Degrade`)
 at construction, describing how that component is *supposed* to behave when full. Today this is
 **diagnostic metadata only** — nothing reads it to dispatch behavior. The actual FailFast paths are
-hand-coded independently at each call site: UoW ID allocation (`UowRegistry.AllocateUowId`),
-segment growth (`ChunkBasedSegment.AllocateChunk`/`AllocateChunks`), and the epoch thread registry
-all throw `ResourceExhaustedException` directly when they hit capacity. Wait/Evict/Degrade
+hand-coded independently at each call site: transaction creation past `MaxActiveTransactions`
+(`TransactionChain.CreateTransaction`), UoW ID allocation (`UowRegistry.AllocateUowId`), segment growth
+(`ChunkBasedSegment.AllocateChunk`/`AllocateChunks`), and the epoch thread registry all throw `ResourceExhaustedException` directly when they hit capacity. Wait/Evict/Degrade
 components (page cache, WAL staging buffers, transaction pooling) implement the described behavior
 in their own code, not through the enum. Treat `ExhaustionPolicy` as documentation you can read off
 a node, not a switch you can hook.
@@ -37,22 +37,21 @@ using Typhon.Engine;
 
 try
 {
-    var uowId = uowRegistry.AllocateUowId(); // FailFast: throws if no slot is free
+    using var tx = dbe.CreateQuickTransaction(); // FailFast: throws past Resources.MaxActiveTransactions
 }
 catch (ResourceExhaustedException ex)
 {
-    // ex.ResourcePath   -> "Execution/UowRegistry/AllocateUowId"
+    // ex.ResourcePath   -> "Data/TransactionChain/CreateTransaction"
     // ex.CurrentUsage / ex.Limit / ex.Utilization
     if (ex.IsTransient)
     {
-        // Safe to retry after a short backoff — slots free up as other UoWs finish.
+        // Safe to retry after a short backoff — slots free up as other transactions finish.
     }
 }
 
-// The deadline-bounded overload waits instead of failing immediately, then throws
-// ResourceExhaustedException only once the deadline expires:
-var wc = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(50));
-var uowId2 = uowRegistry.AllocateUowId(ref wc);
+// CreateUnitOfWork waits for a free UoW registry slot instead of failing immediately, and throws
+// ResourceExhaustedException ("Execution/UowRegistry/AllocateUowId") only once its deadline expires:
+using var uow = dbe.CreateUnitOfWork(timeout: TimeSpan.FromMilliseconds(50));
 
 // ExhaustionPolicy is inspectable but purely informational:
 var node = (ResourceNode)registry.FindByPath("Root/Durability/StagingBufferPool");
@@ -63,9 +62,12 @@ Console.WriteLine(node.ExhaustionPolicy); // ExhaustionPolicy.Wait — describes
 
 - `ResourceExhaustedException.IsTransient` is always `true` — the resource may self-heal (a slot
   frees up, a pool drains); callers should treat it as retryable, not fatal.
-- Confirmed FailFast throw sites today: `UowRegistry.AllocateUowId` (with and without a deadline),
-  `ChunkBasedSegment.AllocateChunk`/`AllocateChunks` (segment at max capacity), and the epoch
-  thread registry (`ThrowHelper.ThrowEpochRegistryExhausted`).
+- Confirmed FailFast throw sites today (all engine-internal; you meet them through public calls such as
+  `CreateQuickTransaction` / `CreateUnitOfWork`): `TransactionChain.CreateTransaction` (past
+  `MaxActiveTransactions`), `UowRegistry.AllocateUowId` (with and without a deadline),
+  `ChunkBasedSegment.AllocateChunk`/`AllocateChunks`/`EnsureCapacity` (segment at max capacity),
+  `PagedHashMap` bucket split, the revision-chain length cap, and the epoch thread registry
+  (`ThrowHelper.ThrowEpochRegistryExhausted`).
 - `ExhaustionPolicy` on `ResourceNode` is **not** enforced anywhere — setting it, or reading it back,
   has no runtime effect. Don't build logic that branches on a node's `ExhaustionPolicy`; it will not
   match actual behavior for every component and may not be updated when a component's real strategy
@@ -80,7 +82,7 @@ Console.WriteLine(node.ExhaustionPolicy); // ExhaustionPolicy.Wait — describes
 - [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — `ExhaustionPolicy` enum values,
   `ResourceExhaustedException` construction/utilization/message formatting
 - [ExhaustionPolicyTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Errors/ExhaustionPolicyTests.cs) — real FailFast enforcement at
-  `TransactionPool.CreateTransaction` and `ChunkBasedSegment.AllocateChunk`/`AllocateChunks`, `ResourceNode.ExhaustionPolicy` metadata
+  `TransactionChain.CreateTransaction` (past `MaxActiveTransactions`) and the `ChunkBasedSegment.AllocateChunk`/`AllocateChunks` throw paths, `ResourceNode.ExhaustionPolicy` metadata
 
 ## 🔗 Related
 

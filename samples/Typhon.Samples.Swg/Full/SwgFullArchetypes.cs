@@ -28,7 +28,7 @@ public class ResourceTypeArch : Archetype<ResourceTypeArch>
     public static readonly Comp<ResourceType> ResourceType = Register<ResourceType>();
 }
 
-[Archetype(1, "Receipe")]
+[Archetype(1, "Recipe")]
 public class RecipeArch : Archetype<RecipeArch>
 {
     public static readonly Comp<Recipe> Recipe = Register<Recipe>();

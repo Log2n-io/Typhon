@@ -29,7 +29,8 @@ self-describing, versioned independently of the server's code, and exact across 
 
 **Blocks** inside a `TICK`, each length-prefixed so an unknown one is skipped: `ENTITIES` (one archetype's enters, updates, leaves),
 `EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `SOURCES` (group lifecycle: `GROUP_COMPLETE`, `GROUP_RELEASED`; a Region set's truncation: `GROUP_TRUNCATED`;
-and the answers to `SubscribeRequest`, built-in command 1), `EXT`.
+and the answers to `SubscribeRequest`, built-in command 1), `REALM` (the realm a `RESET` switches to: bounds, cell, position width,
+kind, tag — [Sessions in realms](realms.md)), `EXT`.
 
 **The catalog** is canonical JSON — archetypes with their position and fields (codec, group, section), commands with their rate and
 roles, events, group sets (name, selector, key type, members), metrics, limits, the tick rate — sorted so the same declarations in any order produce the same bytes and the same hash.
@@ -50,6 +51,7 @@ TypeScript.
 | 1011 | internal error (a flush failure closes every session) | yes |
 | 1013 | try later: server full, or lagging | yes, backoff |
 | 4001 / 4002 / 4003 | no acknowledgement / `HELLO` timeout / admission rejected | yes / yes / no |
+| 4004 | the client refused the stream (sent by the client in `BYE`, for a fault a browser cannot close with 1002/1007/1009) | — |
 | 4100–4999 | application (`Kick`, `Admission.Reject`) | app-declared |
 
 ## ⚠️ Guarantees & limits

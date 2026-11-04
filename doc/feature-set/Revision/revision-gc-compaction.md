@@ -40,7 +40,7 @@ tx1.Commit();
 
 // A long-running reader holds back the cleanup cutoff while updates accumulate.
 using var reader = dbe.CreateQuickTransaction(DurabilityMode.Immediate);
-reader.OpenRead(unit, Unit.Health);
+reader.Open(unit).Read(Unit.Health);
 
 for (var i = 0; i < 50; i++)
 {
@@ -83,6 +83,8 @@ Console.WriteLine($"pending={props["DeferredCleanup.QueueSize"]} processed={prop
 - A deleted entity's chain isn't removed immediately — it keeps a single "deleted" marker alive until no
   transaction could possibly observe the entity again, so concurrent readers reliably see "deleted" rather than
   "never existed".
+- A compaction runs only when what it keeps fits in the chain's root chunk; one that would keep more is put off
+  (the chain left unchanged) until it does.
 - Compaction never changes what a transaction can observe — it only discards copies that are already provably
   invisible to every active and future transaction.
 - This applies to `Versioned`-mode components only; `SingleVersion`/`Transient` storage has no revision chain

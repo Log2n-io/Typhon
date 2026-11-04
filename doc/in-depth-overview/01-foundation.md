@@ -280,14 +280,14 @@ All collections live under [`Foundation/Collections/internals/`](https://github.
 
 | Type | Shape | Use |
 |---|---|---|
-| `HashMap<TKey>` | Set of unmanaged keys, open addressing + linear probing | Fast in-memory set lookup; entries on Pinned Object Heap (no GC moves) |
+| `HashMap<TKey>` | Set of unmanaged keys, open addressing + linear probing | Fast in-memory set lookup; entries in a managed array reached by `ref` |
 | `HashMap<TKey, TValue>` | Same with values | KV variant |
 | `ConcurrentHashMap<TKey>` | Lock-free / lock-striped variant | Multi-writer maps |
 | `ConcurrentHashMap<TKey, TValue>` | Same KV | Multi-writer KV |
 | `PagedHashMap<…>` / `PagedHashMapBase<TStore>` | Hash map backed by Typhon's paged store ([02-storage](02-storage.md)) | Persistent in-DB hash maps (component fields, indexes) |
 | `RawValueHashMap` + `IRawValueUpdater` | Hash map where values are raw byte ranges with custom update logic | Specialized internal use |
 
-`HashMap<T>` uses POH (Pinned Object Heap) allocation + software prefetch on resize, backward-shift deletion to avoid tombstones, 0.75 max load factor. `Capacity` is rounded up to a power of two.
+`HashMap<T>` stores its entries in an ordinary managed `byte[]` reached through `ref`s (no pinning, no raw pointers, so no software prefetch on resize), backward-shift deletion to avoid tombstones, 0.75 max load factor. `Capacity` is rounded up to a power of two.
 
 ### Concurrent containers
 
@@ -344,7 +344,7 @@ Layered on top of `MemoryAllocator`:
 - [`ChainedBlockAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/ChainedBlockAllocator.cs) — chain of blocks for variable-size sequences
 - [`StructAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/StructAllocator.cs) / [`UnmanagedStructAllocator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/UnmanagedStructAllocator.cs) — typed slab allocators for `unmanaged` value types
 - [`MemoryBlockArray`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/MemoryBlockArray.cs) / [`PinnedMemoryBlock`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/PinnedMemoryBlock.cs) — block handles
-- [`StoreSpan`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/StoreSpan.cs) — span helpers over the above
+- [`LargePinnedMemoryBlock`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Memory/internals/LargePinnedMemoryBlock.cs) — one contiguous 64-bit native block (`AllocateLargePinned`), used for the page cache beyond 2 GiB
 
 These are the building blocks Typhon's persistence layer ([02-storage](02-storage.md)) uses to materialize page-backed data structures in unmanaged memory.
 
@@ -382,7 +382,7 @@ Some types Typhon engine users *will* touch don't live in `Typhon.Engine` — th
 |---|---|
 | [`String64`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/String64.cs) | 64-byte fixed-width inline string (no GC, blittable) |
 | [`Variant`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Variant.cs) | Tagged-union value for runtime-typed fields |
-| [`PackedDateTime`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/PackedDateTime.cs) | Compact 8-byte timestamp |
+| [`PackedDateTime48` / `PackedTimeSpan32` / `PackedTimeSpan48`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/PackedDateTime.cs) | Compact packed timestamp / duration types |
 | [`SpatialTypes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/SpatialTypes.cs) (`Point2F/3F/4F/2D/3D/4D`, `QuaternionF/D`, AABB/BSphere variants) | Geometric primitive types |
 | [`ISpatialBox`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/ISpatialBox.cs) | Marker interface for spatial query payloads |
 | [`FieldType`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/FieldType.cs) | Enum of supported component field kinds (full set incl. `Unsigned` / `DoubleFloat` flags and AABB/BSphere variants) |

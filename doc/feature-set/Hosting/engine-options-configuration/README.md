@@ -27,7 +27,7 @@ your `configure` delegate via `.Configure(...)`. The resulting `IOptions<TOption
 inside that service's factory when the container first builds it, so values are effectively frozen
 at `BuildServiceProvider()` for singleton registrations. `DatabaseEngineOptions` is a composite: it
 groups per-subsystem option types (`Resources`, `Timeouts`, `DeferredCleanup`, `Wal`, `Transient`,
-`Statistics`, `Spatial`) instead of one flat bag of properties, so you only touch the knobs you need.
+`Statistics`, `Spatial`, `Backup`) instead of one flat bag of properties, so you only touch the knobs you need.
 
 ## 💻 Usage
 
@@ -82,11 +82,12 @@ services
 
 var provider = services.BuildServiceProvider();
 var engine   = provider.GetRequiredService<DatabaseEngine>();
+engine.InitializeArchetypes();                    // the per-Add* path leaves this to the caller
 ```
 
 | Options type | Registered by | Key knobs |
 |---|---|---|
-| `DatabaseEngineOptions` | `AddDatabaseEngine` | `Resources`, `Timeouts`, `DeferredCleanup`, `Wal`, `Transient`, `Statistics`, `Spatial` |
+| `DatabaseEngineOptions` | `AddDatabaseEngine` | `Resources`, `Timeouts`, `DeferredCleanup`, `Wal`, `Transient`, `Statistics`, `Spatial`, `Backup`, `ArchetypeSetMigration`, `SchemaMatch` |
 | `PagedMMFOptions` / `ManagedPagedMMFOptions` | `AddPagedMemoryMappedFile` / `AddManagedPagedMMF` | `DatabaseName`, `DatabaseDirectory`, `DatabaseCacheSize` |
 | `MemoryAllocatorOptions` | `AddMemoryAllocator` | `Name` (diagnostics label only) |
 | `ResourceRegistryOptions` | `AddResourceRegistry` | `Name` (diagnostics label only) |

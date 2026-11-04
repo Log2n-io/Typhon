@@ -18,7 +18,7 @@ report, without needing the original process to still be running.
 
 ## ⚙️ How it works (in brief)
 
-`FileExporter` owns one `.typhon-trace` v3 binary file for the session: a header plus system/archetype/component
+`FileExporter` owns one versioned `.typhon-trace` binary file for the session: a header plus system/archetype/component
 tables written at start, then one LZ4-compressed block per drained batch (capped at 256 KB uncompressed,
 matching the batch size). At session stop it appends optional trailer sections — source-location manifest, CPU
 samples, interned query strings — and rewrites the header with their offsets. The file is chosen by setting a
@@ -29,8 +29,7 @@ it the first time it's opened.
 
 ```csharp
 // typhon.telemetry.json — zero code:
-// { "Typhon": { "Telemetry": { "Enabled": true,
-//     "Profiler": { "Enabled": true, "Trace": "session.typhon-trace" } } } }
+// { "Typhon": { "Profiler": { "Enabled": true, "Trace": "session.typhon-trace" } } }
 
 using Typhon.Engine;
 
@@ -55,7 +54,7 @@ var provider = services.BuildServiceProvider();
 
 | Config key | Default | Effect |
 |---|---|---|
-| `Typhon:Profiler:Trace` | unset (no file export) | Path the `.typhon-trace` file is written to; setting it attaches a `FileExporter` for the session |
+| `Typhon:Profiler:Trace` | unset → a capture in the database bundle's `profilings/` directory (unless `Live` is set) | Path the `.typhon-trace` file is written to; `none` collects without writing any file |
 
 ## ⚠️ Guarantees & limits
 
@@ -71,8 +70,9 @@ var provider = services.BuildServiceProvider();
   path concurrently.
 - **Trailer sections are best-effort** — a CPU-sample or query-string encoding failure is caught and logged; it
   never costs the rest of the trace, which stays fully readable without that section.
-- **Unbounded file size** — a long-running session keeps appending compressed blocks indefinitely; rotation and
-  retention are the operator's responsibility, not the exporter's.
+- **Unbounded file size** — a long-running session keeps appending compressed blocks indefinitely; the exporter
+  never rotates. Only the default `profilings/` destination prunes *older* captures (its retention policy runs
+  before a new file is created); an explicit `Trace` path is the operator's to manage.
 
 ## 🧪 Tests
 

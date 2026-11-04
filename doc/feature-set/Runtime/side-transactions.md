@@ -57,7 +57,7 @@ protected override void Execute(TickContext ctx)
 
 | Option | Default | Effect |
 |---|---|---|
-| `mode` (`DurabilityMode`) | `Immediate` | `Immediate` blocks `Commit()` until the WAL record is on stable media (~15-85µs); `Deferred`/`GroupCommit` are also accepted but defeat the point of a side-transaction |
+| `mode` (`DurabilityMode`) | required (`TyphonRuntime.CreateSideTransaction` defaults to `Immediate`) | `Immediate` blocks `Commit()` until the WAL record is on stable media (~15-85µs); `Deferred`/`GroupCommit` are also accepted but defeat the point of a side-transaction |
 | `discipline` (`CommitDiscipline`) | `TickFence` | Only matters for `SingleVersion`-layout components; pass `Commit` for atomic, zero-loss, no-revision-chain writes without full MVCC. No effect on `Versioned` components (always commit-scoped) |
 
 ## ⚠️ Guarantees & limits
@@ -69,7 +69,8 @@ protected override void Execute(TickContext ctx)
 - Subsequent systems in the tick (new `Transaction`, higher TSN) can see committed side-tx writes,
   but this is incidental ordering, not a contract — don't depend on it across DAG reorderings.
 - The caller must `Commit()` and dispose the side-transaction explicitly; nothing rolls it into the
-  main tick's UoW lifecycle.
+  main tick's UoW lifecycle. Do both before the system that opened it returns (rule EW-01) — committed later, it can land
+  while the tick fence is rewriting the structures it writes.
 - `Immediate` durability costs ~15-85µs per commit (FUA) versus ~0.1ms for the *entire* tick's
   Deferred flush — use it only for the operations that need it, not as a default.
 - Declare side-tx writes with `SystemBuilder.SideWrites<T>()` so tooling (Schema Inspector,
@@ -82,8 +83,8 @@ protected override void Execute(TickContext ctx)
 
 ## 🔗 Related
 
+- Parent feature: [Tick Lifecycle & Transaction Management](./tick-lifecycle/README.md)
 - Related feature: [Typed Event Queues](./typed-event-queues.md)
-- Sibling: [Side-Transactions (Immediate Durability)](./tick-lifecycle/side-transactions.md) — same feature, separately written up under the tick-lifecycle grouping; not a duplicate to merge, kept for now.
 
 <!-- Deep dive: claude/design/Runtime/01-tick-lifecycle.md §Immediate Side-Transactions -->
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md §Q12 -->

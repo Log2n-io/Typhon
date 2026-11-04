@@ -21,7 +21,7 @@ op/sec rate — against a single, stable structure instead of live, moving count
 
 `GetSnapshot()` walks the resource tree once, calls `ReadMetrics()` on every node that implements
 `IMetricSource`, and returns an immutable `ResourceSnapshot` whose `Nodes` dictionary is keyed by full path
-(e.g. `"Root/Storage/PageCache"`). `GetSnapshot(IResource subtreeRoot)` does the same walk starting partway
+(e.g. `"Root/Storage/ManagedPagedMMF_MyGame"`). `GetSnapshot(IResource subtreeRoot)` does the same walk starting partway
 down the tree, for when you already know which subsystem to inspect. `ResourceSnapshot`'s query methods
 (`GetSubtreeMemory`, `FindMostUtilized`, `GetNode`, `FindByType`, `GetSubtree`) run entirely against the frozen
 `Nodes` dictionary — no further tree walk, safe to call from any thread. `Rates` is computed automatically by
@@ -38,8 +38,8 @@ IResourceGraph resourceGraph = new ResourceGraph(registry); // or resolve via DI
 // Full tree snapshot — call on demand, or every 1-5s for monitoring/health checks.
 ResourceSnapshot snapshot = resourceGraph.GetSnapshot();
 
-// Path-based lookup — full paths are rooted at "Root/...".
-NodeSnapshot pageCache = snapshot.GetNode("Root/Storage/PageCache");
+// Path-based lookup — full paths are rooted at "Root/...". The page cache reports on its store node.
+NodeSnapshot pageCache = snapshot.GetNode("Root/Storage/ManagedPagedMMF_MyGame");
 if (pageCache?.Capacity is { } capacity)
     Console.WriteLine($"PageCache: {capacity.Utilization:P0} ({capacity.Current}/{capacity.Maximum})");
 
@@ -58,7 +58,7 @@ ResourceSnapshot durabilitySnap = resourceGraph.GetSnapshot(durability);
 // Throughput rates — null on the first snapshot this IResourceGraph instance ever took.
 if (snapshot.Rates is { } rates)
 {
-    double hitsPerSec = rates.GetRate("Root/Storage/PageCache", "CacheHits");
+    double hitsPerSec = rates.GetRate("Root/Storage/ManagedPagedMMF_MyGame", "CacheHits");
     Console.WriteLine($"Cache hits/sec: {hitsPerSec:F0}");
 }
 
@@ -72,7 +72,7 @@ resourceGraph.ResetAllPeaks(); // start a fresh peak-measurement window across a
 - Cost is ~50 ns/node; a typical 50-100 node tree costs ~2.5-5 μs to snapshot, with no allocations beyond the
   returned snapshot's own arrays/dictionary.
 - `Nodes` keys are full paths including the `"Root/"` prefix; `GetSubtreeMemory`/`GetSubtree` match on exact
-  segment boundaries (`"Storage"` matches `"Storage"` and `"Storage/PageCache"`, never `"StorageX"`).
+  segment boundaries (`"Root/Storage"` matches `"Root/Storage"` and `"Root/Storage/ManagedPagedMMF_MyGame"`, never `"Root/StorageX"`).
 - `FindMostUtilized()`, `GetNode()`, and `FindByType()` return `null`/empty rather than throwing when nothing
   has `Capacity` metrics or nothing matches — no exceptions for "not found".
 - `GetSnapshot(subtreeRoot)` computes `Rates` against the last *full-tree* snapshot, but does not itself become

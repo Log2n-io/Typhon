@@ -53,7 +53,7 @@ without paying for a revision chain.
 
 ## 🧪 Tests
 
-- [StorageModeReadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — an entity mixing all three modes, uniform `Read`/`Write` across them, per-mode rollback/dirty-bitmap behavior
+- [StorageModeReadWriteTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeReadWriteTests.cs) — an entity mixing all three modes, uniform `Read`/`Set` across them, per-mode rollback/dirty-bitmap behavior
 - [StorageModeInfrastructureTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/StorageModeInfrastructureTests.cs) — `[Component(StorageMode = ...)]` attribute defaults, per-mode segment allocation differences
 - [StorageModeRevisionLockTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/StorageModeRevisionLockTests.cs) — a `(name, revision)` re-declared with a different `StorageMode` on reopen throws
 

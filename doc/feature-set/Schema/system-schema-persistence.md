@@ -11,7 +11,7 @@ description: 'A Typhon database file describes its own component/field metadata 
 
 ## 🎯 What it solves
 
-Interpreting a database file requires knowing every component's name, fields, types, offsets, and indexes. Keeping that metadata in a separate sidecar file invites drift — the file gets lost, copied out of sync, or simply doesn't travel with the `.bin` when it's moved. Typhon avoids the problem by storing its own schema *inside* the database: component and field definitions are persisted as ordinary entities, in the same storage engine that holds user data. Any process that opens the file — the real application, or a throwaway inspector — recovers the full schema from the file alone.
+Interpreting a database file requires knowing every component's name, fields, types, offsets, and indexes. Keeping that metadata in a separate sidecar file invites drift — the file gets lost, copied out of sync, or simply doesn't travel with the database when it's moved. Typhon avoids the problem by storing its own schema *inside* the database: component and field definitions are persisted as ordinary entities, in the same storage engine that holds user data. Any process that opens the file — the real application, or a throwaway inspector — recovers the full schema from the file alone.
 
 ## ⚙️ How it works (in brief)
 
@@ -39,7 +39,7 @@ There is no direct API for this layer — it activates automatically on `Registe
 
 ## ⚠️ Guarantees & limits
 
-- A `.bin` file is self-describing: full component/field/index metadata travels with the data, recoverable without application code (this is what `DatabaseSchema.Inspect` reads — see Related).
+- A database's data file (`data`, inside the `{name}.typhon` bundle directory) is self-describing: full component/field/index metadata travels with the data, recoverable without application code (this is what `DatabaseSchema.Inspect` reads — see Related).
 - System schema rows have no revision history and are not part of WAL crash recovery — they're written via direct page writes inside an explicit `ChangeSet`, flushed to disk synchronously at the point of registration, independent of the WAL pipeline used for user transactions.
 - Reopen cost scales with the number of distinct registered component types (one chunk scanned per component), not with entity count — cheap even on large databases.
 - This is internal infrastructure, not a user-facing API: there's no supported way to read or write `ComponentR1`/`FieldR1` rows directly; the only entry points are component registration (write path) and `DatabaseSchema.Inspect` (read path).

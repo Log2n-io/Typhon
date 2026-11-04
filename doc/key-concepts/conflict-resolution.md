@@ -12,7 +12,7 @@ description: 'The write side of MVCC. Typhon takes no write locks, so write-writ
 
 Pass a `ConcurrencyConflictHandler` to `Commit(handler)` and you decide, per conflicting entity. The engine populates a `ConcurrencyConflictSolver` with three views of the entity — what you **read**, what was **committed** underneath you, and what you're **committing** — and invokes your handler once for that entity, *under the entity's revision-chain lock*, so detection and resolution are one atomic step no other writer can interleave. Your handler picks `TakeRead` (drop your change), `TakeCommitted` (accept theirs), `TakeCommitting` (keep yours — the default), or writes a custom value into `ToCommitData` to rebase / merge / clamp. There is **no abort path** — a handler chooses the value that commits, it cannot fail the commit.
 
-> ⚠️ **Versioned only.** Detection needs a revision chain to compare against, so it applies to [`Versioned`](xref:concept-storage-mode) components; `SingleVersion` / `Committed` / `Transient` are last-writer-wins by construction — there is no prior revision to reconcile. Handlers run under a lock on the commit path — keep them fast and allocation-light (no I/O, no calls back into the engine).
+> ⚠️ **Versioned only.** Detection needs a revision chain to compare against, so it applies to [`Versioned`](xref:concept-storage-mode) components; `SingleVersion` (under either commit discipline) / `Transient` are last-writer-wins by construction — there is no prior revision to reconcile. Handlers run under a lock on the commit path — keep them fast and allocation-light (no I/O, no calls back into the engine).
 
 ## How it relates
 

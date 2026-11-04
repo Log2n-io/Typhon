@@ -69,7 +69,7 @@ It opens three kinds of thing, and the views light up according to which one you
 
 The shell ties it together: a dockable, persisted multi-panel workspace, a `Ctrl+K`-style command palette (commands and a `#`-prefixed jump-to-resource search), a Detail pane, and a Logs panel. A live attach session can also be saved to a self-contained `.typhon-replay` for later offline study.
 
-**How to open it.** Start it with `pwsh -File wb-dev.ps1 start` from the repo root (it launches the backend on `:5200` and the UI on `:5173`), browse to `http://localhost:5173`, and from the welcome screen pick **Open .typhon File**, **Open .typhon-trace**, or **Attach to Engine**. For an attach session, run your engine with the profiler's TCP exporter enabled (`typhon.telemetry.json`, above) and point the Workbench at the port; for a trace, just open the `.typhon-trace` the run left behind.
+**How to open it.** Run `typhon ui` (or `typhon ui world-shard.typhon` to open a database directly); it starts a local host on `127.0.0.1:5200` and opens your browser. From the welcome screen pick **Open .typhon File**, **Open .typhon-trace**, or **Attach to Engine** — see [The Workbench](../tools/workbench/index.md). For an attach session, run your engine with the profiler's TCP exporter enabled (`typhon.telemetry.json`, above) and point the Workbench at the port; for a trace, just open the `.typhon-trace` the run left behind.
 
 > ⚠️ The performance views need profiler data — a `.typhon-trace` from a **profiler-enabled run**, or a live attach to an engine started with the TCP exporter on. Open a `.typhon` database (directory) with the profiler off and you still get the schema and File-Map views, but the timeline has nothing to show.
 
@@ -80,18 +80,17 @@ The shell ties it together: a dockable, persisted multi-panel workspace, a `Ctrl
 The engine manages its own memory: a paged store with its own page cache, the WAL stage, transaction pools. You never allocate a page. What you *do* set is a few **caps**, at engine-build time, and the engine lives within them.
 
 ```csharp
-.AddScopedManagedPagedMemoryMappedFile(o =>
-{
-    o.DatabaseName    = "skirmish";
-    o.DatabaseDirectory = ".";
-    o.DatabaseCacheSize = 512UL * 1024 * 1024;   // page-cache size in bytes
-})
-.AddScopedDatabaseEngine(o =>
-{
-    o.Resources.MaxActiveTransactions = 1000;        // per-knob limits — range-checked automatically at DI resolution
-    o.Wal = new WalWriterOptions();                  // enable the WAL (durability)
-});
+using var dbe = DatabaseEngine.Open("skirmish.typhon", o => o
+    .Register<Transform>()                                 // … your components, as in ch.1
+    .PageCacheSize(512UL * 1024 * 1024)                    // page-cache size in bytes
+    .ConfigureEngine(e =>
+    {
+        e.Resources.MaxActiveTransactions = 1000;          // per-knob limits — range-checked automatically at DI resolution
+        e.Wal.GroupCommitIntervalMs = 5;                   // WAL tuning — the WAL itself is always on
+    }));
 ```
+
+The same options work through `services.AddTyphon(o => o.DatabaseFile("skirmish.typhon")…)` in a DI host.
 
 The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`) — a production-shaped default, not a development one. Size it to your workload's transaction working set; the minimum is 8 MiB and there is no configured maximum: a size the host cannot grant (on Windows the commit limit, RAM plus page file; on Linux the kernel's overcommit policy) is refused at startup with a `StorageException` naming the setting. Every wired `Resources` knob is **range-checked automatically at DI resolution** by `DatabaseEngineOptionsValidator`, so an out-of-range configuration fails at startup rather than at first use — there is no manual validation step to remember.
 
@@ -99,7 +98,7 @@ The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`)
 
 When a bounded resource fills, each one has a baked-in policy: a cache **evicts**, the WAL **waits** (applying backpressure to commits), and hard client-facing limits **fail fast** with a `ResourceExhaustedException` (which is transient — see [§3](#3--error-handling-ground-rules)). You don't choose these per resource; they're semantic properties of each subsystem.
 
-> 💡 **Why you don't get a hundred tuning knobs.** The budget surface is deliberately tiny because the engine knows its own access patterns better than a config file does. You declare the *envelope* (how much memory it may use, where the data lives, whether durability is on); it self-manages the rest. If you ever need to see *where* the budget is going, that's exactly what the resource graph in [§1](#1--seeing-inside-a-running-engine) shows you — observe first, then resize the one cap that matters.
+> 💡 **Why you don't get a hundred tuning knobs.** The budget surface is deliberately tiny because the engine knows its own access patterns better than a config file does. You declare the *envelope* (how much memory it may use, where the data lives, how often the WAL group-commits); it self-manages the rest. If you ever need to see *where* the budget is going, that's exactly what the resource graph in [§1](#1--seeing-inside-a-running-engine) shows you — observe first, then resize the one cap that matters.
 
 ---
 
@@ -109,7 +108,7 @@ Typhon's error model is small and has three rules worth internalising before you
 
 **1. The engine throws; it never retries.** When an operation can't proceed — a lock timed out, the cache is under backpressure, a WAL write failed — it raises an exception and stops. Retry *policy* is yours: a game server skips the tick, a batch job waits and tries again, a test asserts it never happens. None of that belongs inside the engine.
 
-**2. Catch `TyphonException`, route on `IsTransient`.** Every engine exception derives from `TyphonException` and carries an `ErrorCode` plus a transience hint:
+**2. Catch `TyphonException`, route on `IsTransient`.** Engine exceptions derive from `TyphonException` and carry an `ErrorCode` plus a transience hint (the one exception is `ArchetypeSchemaException`, below, an `InvalidOperationException` thrown at open):
 
 ```csharp
 try
@@ -137,7 +136,7 @@ catch (TyphonException ex)
 |---|---|
 | `UniqueConstraintViolationException` | inserting a duplicate key into a `[Index]` (unique) field ([ch.2](02-modeling.md)) |
 | `SchemaValidationException` / `SchemaDowngradeException` | reopening a database with a changed struct and no revision bump, or with an *older* app than wrote it ([ch.2](02-modeling.md)) |
-| `ArchetypeSchemaException` | reopening with an archetype whose component set changed without an `[Archetype]` revision bump, lost a component, or went back a revision ([Archetype Component-Set Evolution](../feature-set/Schema/archetype-set-evolution.md)) |
+| `ArchetypeSchemaException` | reopening with an archetype whose component set changed without an `[Archetype]` revision bump, lost a component, or went back a revision ([Archetype Component-Set Evolution](../feature-set/Schema/archetype-set-evolution.md)). An `InvalidOperationException`, not a `TyphonException` |
 | `TyphonTimeoutException` | a lock or transaction blew its deadline under contention — transient |
 
 > ⚠️ Typhon's `TyphonTimeoutException` does **not** derive from `System.TimeoutException` — catch the Typhon type. And don't write speculative `catch` blocks for exceptions the docs list as *reserved but not yet thrown* (`TransactionConflictException`, etc.) — they'd be dead code until those types ship.
@@ -181,4 +180,4 @@ Where to go from here:
 
 **Concepts:** [DatabaseEngine](../key-concepts/database-engine.md) · [Page cache & paged store](../key-concepts/page-cache.md) · [WAL & checkpoint](../key-concepts/wal-checkpoint.md).
 
-**Exact calls:** `AddTyphonObservabilityBridge` / `ObservabilityBridgeOptions` · `typhon.telemetry.json` (profiler config) · `.typhon-trace` (recorded run) / `.typhon-replay` (saved attach session) · the Workbench (`tools/Typhon.Workbench`, `http://localhost:5173`) · `DatabaseCacheSize` · `DatabaseEngineOptions.Resources` (`MaxActiveTransactions`, `WalRingBufferSizeBytes`, `PageChecksumVerification`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs`) · `WalWriterOptions` · `TyphonException` (`ErrorCode` / `IsTransient`) · `TyphonTimeoutException` · `ResourceExhaustedException` · `UniqueConstraintViolationException` · `SchemaValidationException`.
+**Exact calls:** `AddTyphonObservabilityBridge` / `ObservabilityBridgeOptions` · `typhon.telemetry.json` (profiler config) · `.typhon-trace` (recorded run) / `.typhon-replay` (saved attach session) · the Workbench (`typhon ui`, `http://127.0.0.1:5200`) · `DatabaseCacheSize` · `DatabaseEngineOptions.Resources` (`MaxActiveTransactions`, `WalRingBufferSizeBytes`, `PageChecksumVerification`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs`) · `WalWriterOptions` · `TyphonException` (`ErrorCode` / `IsTransient`) · `TyphonTimeoutException` · `ResourceExhaustedException` · `UniqueConstraintViolationException` · `SchemaValidationException`.

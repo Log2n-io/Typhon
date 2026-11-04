@@ -74,7 +74,8 @@ archetype — are named as not checked: only the open reads the entities.
 - Slots are matched by component name. A set or order change **without** a revision increase is refused, a same-count swap included; nothing of the
   archetype is touched.
 - Removing a component is refused in this version, as is a lower runtime revision (the file was written by a newer build).
-- No default or backfill: an added component is absent — a Versioned one has no value until `Enable(comp, value)`, a SingleVersion one reads zero.
+- No default or backfill: an added component is absent — a Versioned one has no value until `Enable(comp, value)` (`Enable(comp)` alone throws), a SingleVersion one reads zero
+  once `Enable(comp)` turns it on.
 - An added component cannot carry a populated spatial archetype's position or realm key, nor a unique non-sparse index: those opens are refused. After
   a crash, the entities the WAL replays count as populating it too.
 - A crash open under `Refuse` whose WAL holds records of an archetype the policy skipped fails with error 7013, nothing applied: open with `Apply`.

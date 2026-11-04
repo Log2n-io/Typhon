@@ -7,7 +7,7 @@ description: 'Per-region occupant diffing against the per-cell cluster index emi
 # Trigger Volumes (Enter / Leave / Stay)
 > Per-region occupant diffing against the per-cell cluster index emits Enter/Leave/Stay events at a configurable per-region frequency.
 
-**Status:** ✅ Implemented · **Visibility:** Public · **Category:** [Spatial](./README.md)
+**Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Spatial](./README.md)
 
 ## 🎯 What it solves
 
@@ -48,7 +48,8 @@ triggers.DestroyRegion(zone);
 |---|---|---|
 | `bounds` | required | `[minX, minY, maxX, maxY]` for a 2D component, `[minX, minY, minZ, maxX, maxY, maxZ]` for a 3D one |
 | `categoryMask` | `0` | `0` = no filtering; non-zero admits a cluster on any bit overlap, the same semantic the cluster broadphase applies |
-| `evaluationFrequency` | `1` | Minimum ticks between real evaluations; `0` is coerced to `1` |
+| `evaluationFrequency` | `1` | Minimum ticks between real evaluations (a `byte`); `0` is coerced to `1` |
+| `realm` | realm 0 | The realm whose grid the region queries ([Realms](./realms.md)) |
 
 ## ⚠️ Guarantees & limits
 

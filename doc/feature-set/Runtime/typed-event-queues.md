@@ -137,7 +137,7 @@ allocation-free) — and that buys pushing from every chunk worker at once. Adva
 
 ## 🔗 Related
 
-- Related feature: [Declarative System Scheduling](./declarative-system-scheduling.md)
+- Related feature: [Declarative System Scheduling](./declarative-scheduling/README.md)
 - Sibling: [CallbackSystem](./system-types/callback-system.md) — a common proactive producer/consumer for these queues.
 
 <!-- Deep dive: claude/design/Runtime/02-system-scheduling.md §Typed Event Queues -->

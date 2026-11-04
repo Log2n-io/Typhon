@@ -19,7 +19,7 @@ memory, is structurally part of the same ECS entity as your durable components, 
 
 ## ⚙️ How it works (in brief)
 
-A `Transient` component's chunks live in pinned heap memory rather than the page cache over the data file — there is no
+A `Transient` component's chunks live in pinned native memory rather than the page cache over the data file — there is no
 WAL record, no checkpoint participation, and no dirty tracking; the JIT eliminates the dirty-tracking branches
 entirely for this mode. Reads and writes are direct pointer arithmetic. On crash or restart, `Transient`
 component segments come back empty — the application is responsible for re-initializing any state it needs.
@@ -53,7 +53,7 @@ e.Set(Actor.Anim, anim);               // ~40 ns write, no dirty tracking, no WA
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `TransientOptions.MaxMemoryBytes` | 256 MB | `AllocateChunk` throws once total `Transient` allocation across the engine exceeds the cap |
+| `DatabaseEngineOptions.Transient.MaxMemoryBytes` | 256 MB | Per transient store (each `Transient` component table and cluster segment has its own): page allocation throws `InsufficientMemoryException` once that store exceeds the cap |
 
 ## ⚠️ Guarantees & limits
 
@@ -80,7 +80,7 @@ e.Set(Actor.Anim, anim);               // ~40 ns write, no dirty tracking, no WA
 
 ## 🔗 Related
 
-- Sibling: [Entity Clusters](../entity-clusters.md) — `Transient` components live in a parallel heap-backed cluster segment with the same SoA layout
+- Sibling: [Entity Clusters](../entity-clusters.md) — `Transient` components live in a parallel native-memory cluster segment with the same SoA layout
 - Sibling: [SingleVersion (Tick-Fence Durable)](./storage-mode-singleversion.md) — same near-zero write cost, but durable to the last tick fence instead of never persisted
 - Parent feature: [Storage Modes](./README.md)
 

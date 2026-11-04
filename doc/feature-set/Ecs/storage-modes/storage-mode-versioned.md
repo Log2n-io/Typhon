@@ -65,7 +65,7 @@ tx2.Commit();                 // new revision becomes HEAD, durable
 
 ## 🧪 Tests
 
-- [EcsSpawnMvccTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsSpawnMvccTests.cs) — copy-on-write on `Write`, concurrent transaction still seeing old data, rollback freeing the new chunk, revision-chain creation
+- [EcsSpawnMvccTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EcsSpawnMvccTests.cs) — copy-on-write on `Set`, concurrent transaction still seeing old data, rollback freeing the new chunk, revision-chain creation
 
 ## 🔗 Related
 

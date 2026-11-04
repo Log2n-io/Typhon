@@ -65,11 +65,13 @@ Typhon is new — it's in no model's training data, so a coding agent will guess
 default. Point it at **<https://doc.typhondb.io/llms.txt>** (most agent tools probe it automatically),
 or paste this primer:
 
-> Typhon is an ECS database (not SQL). Model data as `[Component]` blittable structs (≥ 8 bytes, public
-> fields) declared **inside a namespace**; an archetype is `[Archetype] partial class Foo : Archetype<Foo>`
-> with `public static readonly Comp<T> X = Register<T>();`. Open with `DatabaseEngine.Open(...)`; do all
-> writes in `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`. Query with
-> `tx.Query<Foo>().Where<T>(x => …)` (not LINQ); read an entity via `tx.Open(id).Read(Foo.X)`.
+> Typhon is an ECS database (not SQL). Model data as `[Component("Name", 1)]` blittable structs (public
+> fields, ≥ 8 bytes when Versioned; any namespace); an archetype is `[Archetype] partial class Foo : Archetype<Foo>` with
+> `public static readonly Comp<T> X = Register<T>();`. Open with `DatabaseEngine.Open(path, o => o.Register<T>())`,
+> registering every component; do all writes in `using var tx = dbe.CreateQuickTransaction(); … tx.Commit();`,
+> mutating via `tx.OpenMut(id)`. Query with `tx.Query<Foo>().WhereField<T>(x => …)` on an `[Index]` (not LINQ;
+> `Where<T>` is a full scan); read an entity via `tx.Open(id).Read(Foo.X)`. In systems, declare every component
+> touched (`Writes<T>()`/`Reads<T>()`/…) — undeclared reads race silently.
 
 Full guide: <https://doc.typhondb.io/latest/guides/using-with-ai-coding-agents.html>
 

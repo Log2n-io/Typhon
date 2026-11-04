@@ -26,7 +26,7 @@ Both variants use open addressing with linear probing over a single flat entry a
 - `internal` engine types (`Typhon.Engine.Internals`) — engine plumbing, not callable from application code; none of the four types are `[PublicAPI]`.
 - `TKey` must be `unmanaged` and `IEquatable<TKey>`; `TValue` may be any type (managed values land in a parallel array instead of inline storage).
 - Lookup is typically 1.5-3x faster than `Dictionary<TKey,TValue>`; insert is roughly on par at small sizes (resize cost dominates).
-- All four implement `IDisposable` — entries live in GC-pinned arrays (Pinned Object Heap), not unmanaged memory, but still require explicit disposal to drop the reference promptly.
+- All four implement `IDisposable` — entries live in plain managed arrays, not unmanaged memory, but still require explicit disposal to drop the reference promptly.
 - Not a drop-in replacement for every use of `Dictionary`: no ordered enumeration/range queries (use a B+Tree for that), and short-lived collections under ~100 entries don't justify the `Dispose()` discipline.
 
 ## 🧪 Tests

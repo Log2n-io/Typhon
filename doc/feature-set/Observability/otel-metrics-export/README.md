@@ -16,7 +16,8 @@ transient memory pressure — in the dashboards and scrapers they already run (P
 `dotnet-counters`). Hand-instrumenting every internal counter as an OTel instrument, and keeping that
 instrumentation in sync as resources and archetypes come and go, is repetitive work every host application would
 otherwise duplicate. Typhon exposes two purpose-built `Meter`s instead, each translating a different slice of
-engine state into standard `System.Diagnostics.Metrics` instruments.
+engine state into standard `System.Diagnostics.Metrics` instruments (plus a third, `Typhon.Backup`, for backup status —
+see `AddTyphonBackupMetrics`).
 
 ## ⚙️ How it works (in brief)
 
@@ -32,7 +33,7 @@ attached pays nothing beyond — for the Resource Graph bridge — the backgroun
 | Sub-feature | Exports | Use it when... |
 |---|---|---|
 | [Resource Graph Metrics Bridge](./resource-graph-metrics-bridge.md) | Memory/Capacity/DiskIO/Throughput/Duration for every `IResourceGraph` node | Wiring Prometheus/OTLP/Grafana dashboards for engine-wide resource pressure (page cache, WAL ring, transaction pool, ...) |
-| [ECS Metrics Exporter](./ecs-metrics-exporter.md) | Per-archetype entity/EntityMap gauges, per-component transient memory gauges | Watching archetype growth, EntityMap hashing health, or Transient-mode component memory in a dashboard |
+| [ECS Metrics Exporter](./ecs-metrics-exporter.md) | Per-archetype entity/EntityMap gauges, per-component transient memory gauges, spatial-partitioning migration/cluster gauges | Watching archetype growth, EntityMap hashing health, or Transient-mode component memory in a dashboard |
 
 ## ⚠️ Guarantees & limits
 
@@ -44,14 +45,15 @@ attached pays nothing beyond — for the Resource Graph bridge — the backgroun
   The broader metrics catalog in the [per-domain named-metrics catalog](../per-domain-metrics-catalog.md)
   (transaction counts, lock contention, B+Tree mutations, WAL/checkpoint counters) is captured by the
   [Typed-Event Profiler](../README.md) and `TickTelemetryRing`, not yet bridged into OTel instruments.
-- `EcsMetricsExporter` has no DI registration extension yet (unlike the Resource Graph bridge's
-  `AddTyphonObservabilityBridge`) — construct it directly against a `DatabaseEngine` and register its `Meter`
-  with your `MeterProvider`.
+- `EcsMetricsExporter` registers with `services.AddTyphonEcsMetrics()` (a singleton built from the container's
+  `DatabaseEngine`), or construct it directly against a `DatabaseEngine`; either way, add its `Meter` to your
+  `MeterProvider`.
 - Cardinality is bounded by resource-node count / archetype count / component-type count, not by entity count or
   operation volume — these are gauges over current state, not per-event counters.
 
 ## 🧪 Tests
-- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — exercises the shared observable-callback pattern (snapshot-backed gauges, per-kind opt-out, `MeterListener` instrument registration) via the Resource Graph bridge; the ECS exporter sub-feature has no dedicated coverage yet
+- [ObservabilityBridgeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/Bridge/ObservabilityBridgeTests.cs) — exercises the shared observable-callback pattern (snapshot-backed gauges, per-kind opt-out, `MeterListener` instrument registration) via the Resource Graph bridge
+- [SpatialMigrationTelemetryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Observability/SpatialMigrationTelemetryTests.cs) — scrapes the ECS exporter's spatial instruments through a `MeterListener` and checks them against the engine-side values
 
 ## 🔗 Related
 

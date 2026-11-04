@@ -87,8 +87,10 @@ catch (InvalidOperationException)
   TSN) triggers `DeferredCleanupManager.ProcessDeferredCleanups` on `Dispose()`/`Commit()`/`Rollback()`. A long-lived
   transaction at the tail stalls revision-chain reclamation engine-wide — the same hazard PostgreSQL's vacuum has
   against `xmin`.
-- **TSN space is large but finite** — TSNs are assigned via `Interlocked.Increment`; the engine logs a warning as
-  the practical ceiling (`1 << 46`) approaches (no enforcement failure observed at realistic throughput).
+- **TSN space is large but finite** — TSNs (and commit stamps, drawn from the same counter) are assigned via
+  `Interlocked.Increment` and stored in 48 bits. The engine logs a warning once past `1 << 46`, and refuses to
+  start a transaction from `2^47 − 2^24` on with `TransactionSequenceExhaustedException` (not transient: migrate to
+  a fresh database) — far out of reach at realistic throughput, but enforced rather than allowed to wrap.
 - **Known scaling limit (not yet implemented)** — `Remove`'s exclusive lock and O(n) scan remain a serialization
   point projected to matter only past ~64-128 cores. A lock-free `TransactionRegistry` redesign is drafted (see
   Related) but not built; `TransactionChain` is the shipping implementation.

@@ -23,8 +23,9 @@ distinct lifecycle, operators can act on its metrics, its count is bounded (unde
 tracking it aids debugging — structs/ref structs are never nodes. Everything that fails the test
 (latches, chunks, segments, revision chains, entities) is **aggregated into its owning node**: the
 owner reports the rolled-up numbers via `IMetricSource`, and exposes a per-child breakdown on
-demand via `IDebugPropertiesProvider`. Latch contention specifically flows up through the
-`IContentionTarget` callback. The target shape is 3 levels deep (System → Subsystem → Component /
+demand via `IDebugPropertiesProvider`. Latch contention is not a resource-graph metric: the former
+`IContentionTarget` callback was removed, and lock waits are now visible only as profiler trace events (the
+`Concurrency` tracing domain). The target shape is 3 levels deep (System → Subsystem → Component /
 Per-type Instance); a 4th level is added only when a sub-resource has its own distinct metrics or
 resource pool worth isolating.
 
@@ -48,10 +49,10 @@ public class ComponentTable : ResourceNode, IMetricSource, IDebugPropertiesProvi
 
 // Consumers see one node, with drill-down available on request:
 var ct = dbe.GetComponentTable<Player>();
-Console.WriteLine(ct.Children.Count); // 0 — segments are not children
+Console.WriteLine(ct.Children.Count()); // 0 — segments are not children
 
 var snapshot = resourceGraph.GetSnapshot();
-var node = snapshot.GetNode("Root/DataEngine/ComponentTable_Player");
+var node = snapshot.GetNode(ct.GetPath()); // "Root/DataEngine/DatabaseEngine_{id}/ComponentTable_Player"
 Console.WriteLine(node.Capacity.Value.Utilization); // aggregated across all segments
 
 foreach (var (k, v) in ct.GetDebugProperties())     // per-segment breakdown, on demand
@@ -60,7 +61,7 @@ foreach (var (k, v) in ct.GetDebugProperties())     // per-segment breakdown, on
 
 | Decision input | Node? | Example |
 |---|---|---|
-| Distinct lifecycle, bounded count (<500), actionable metrics | Yes | `ComponentTable<T>`, `PageCache`, `PrimaryKeyIndex` |
+| Distinct lifecycle, bounded count (<500), actionable metrics | Yes | `ComponentTable<T>`, `ManagedPagedMMF` (page cache), `WalWriter` |
 | struct / ref struct | Never | `AtomicChange`, lock guards |
 | Fine-grained, unbounded, or pure data | No — aggregate into owner | latches, chunks, segments, revision chains, entities |
 

@@ -48,7 +48,7 @@ public class InputDrain : CallbackSystem
 dag.Add(new InputDrain());
 
 // Lambda shorthand — trivial logic, no class boilerplate
-dag.CallbackSystem("Cleanup", ctx => ctx.FlushDestroys(), after: "InputDrain");
+dag.CallbackSystem("Cleanup", ctx => DestroyExpired(ctx), after: "InputDrain");
 
 // Conditional proactive system — skips most ticks
 dag.CallbackSystem("ZoneRotation", ctx => RotateZone(ctx),

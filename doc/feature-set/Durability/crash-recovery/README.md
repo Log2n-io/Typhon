@@ -20,8 +20,8 @@ involved.
 
 ## ⚙️ How it works (in brief)
 
-On open, the engine scans its retained WAL segments and CRC-validates the chunk chain, stopping at the first
-torn chunk. A transaction's records are applied only if its commit marker falls inside that valid prefix —
+On open, the engine scans its retained WAL segments and CRC-validates the chunk chain, stopping at the first torn chunk or at a break in the segment chain (a file with no valid header below a valid
+segment, or a segment whose `PrevSegmentLSN` does not follow the chain). A transaction's records are applied only if its commit marker falls inside that valid prefix —
 everything else (partial writes, never-committed transactions) is discarded. Applicable records replay in
 strict ascending LSN order through the same write primitives live transactions use (spawn-if-absent,
 destroy-if-present, value-overwrite), so re-running any prefix twice converges to the same state — a crash
@@ -54,7 +54,7 @@ catch (CorruptionException ex)
 
 ## ⚠️ Guarantees & limits
 
-- **Fully automatic** — no recovery API, flag, or manual step; it runs only after an unclean close (no `CleanShutdown` flag set on disk); a clean reopen skips it entirely (rules CS-06, CS-07).
+- **Fully automatic** — it runs after an unclean close (no `CleanShutdown` flag set on disk) or on an open that forces it (`typhon repair`'s regeneration, or a restore whose marker asks for it); any other clean reopen skips it entirely (rules CS-06, CS-07).
 - **Transaction is the atomicity unit** (LOG-04) — a `Deferred`/`GroupCommit` UoW recovers as exactly its
   durably-marked transactions, each whole, the set possibly a true prefix of what you committed. A crash never
   yields a half-applied transaction.

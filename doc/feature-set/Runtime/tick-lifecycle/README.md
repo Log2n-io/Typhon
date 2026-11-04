@@ -26,7 +26,7 @@ call `Commit`/`Dispose` on it. Entities spawned or destroyed through that Transa
 systems that run later in the tick (their Transactions get a higher TSN) but not to systems already running or
 running in parallel. After the last system completes, the Runtime flushes the UoW once — a single WAL fsync
 covering every system's commits for the whole tick — then disposes it. `PipelineSystem`s do not receive a
-Transaction at all; their entity access goes through Gather/Scatter pipelines instead.
+Transaction at all; a chunk action that touches entities creates and manages its own.
 
 ## 💻 Usage
 
@@ -61,11 +61,12 @@ runtime.Shutdown();
 
 ## ⚠️ Guarantees & limits
 
-- Exactly one `Transaction` per `CallbackSystem`/`QuerySystem` invocation; parallel `QuerySystem`s get one
-  Transaction per chunk. Never call `Commit`/`Dispose` on `ctx.Transaction` — the Runtime owns its lifecycle.
+- Exactly one `Transaction` per `CallbackSystem`/`QuerySystem` invocation; parallel `QuerySystem`s get a
+  `ctx.Accessor` per chunk, or one Transaction per chunk when they declare `WritesVersioned()`. Never call
+  `Commit`/`Dispose` on `ctx.Transaction` — the Runtime owns its lifecycle.
 - The tick's main UoW uses Deferred durability: one WAL flush at tick end (~0.1ms) regardless of write count.
   A crash mid-tick loses at most that one tick's uncommitted work (acceptable for SV/Transient data) — see
-  [Side-Transactions](./side-transactions.md) for writes that cannot tolerate that loss.
+  [Side-Transactions](../side-transactions.md) for writes that cannot tolerate that loss.
 - Spawn/Destroy via a system's Transaction is visible to systems that run later in the DAG (new Transaction,
   higher TSN) and to the spawning system itself (pending-spawns map) — NOT to systems already executing or
   running in parallel with it.
@@ -78,6 +79,6 @@ runtime.Shutdown();
 
 ## 🔗 Related
 
-- Sub-features: [Side-Transactions (Immediate Durability)](./side-transactions.md), [Parallel Tick Fence (WriteTickFence)](./parallel-tick-fence.md)
+- Related features: [Side-Transactions for Immediate Durability](../side-transactions.md), [Parallel Tick Fence](../tick-execution-engine/parallel-tick-fence.md), [Tick-Based Execution Engine](../tick-execution-engine/README.md)
 
 <!-- Deep dive: claude/design/Runtime/01-tick-lifecycle.md, claude/overview/13-runtime.md -->

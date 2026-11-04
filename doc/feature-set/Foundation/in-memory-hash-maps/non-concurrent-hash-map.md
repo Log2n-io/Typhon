@@ -13,13 +13,13 @@ description: 'Single-threaded open-addressing hash set/map — the default repla
 Most hot-path sets and maps in the engine are touched by exactly one thread at a time — a query's result set, a view's tracked entity-ID set, a per-system dirty-entity map rebuilt every tick. `Dictionary`/`HashSet` work, but each entry is a separate heap-tracked node and every lookup pays a `GetHashCode()`/modulo cost that's overkill for blittable keys like `long` entity IDs. `HashMap<TKey>` and `HashMap<TKey, TValue>` give the same semantics over a single flat, contiguous array with no per-entry allocation.
 
 ## ⚙️ How it works (in brief)
-Entries are packed `[hash | key]` (set) or `[hash | key | value]` (map) in one array on the Pinned Object Heap, sized to a power of two and grown by doubling once the 0.75 load factor is crossed. Lookups probe linearly from the key's hash bucket; deletes use backward-shift to avoid leaving tombstones behind. If `TValue` contains managed references, values are stored in a parallel array instead of inline — transparent to the caller, just slightly slower than the fully-inline unmanaged path.
+Entries are packed `[hash | key]` (set) or `[hash | key | value]` (map) in one ordinary managed array, sized to a power of two and grown by doubling once the 0.75 load factor is crossed. Lookups probe linearly from the key's hash bucket; deletes use backward-shift to avoid leaving tombstones behind. If `TValue` contains managed references, values are stored in a parallel array instead of inline — transparent to the caller, just slightly slower than the fully-inline unmanaged path.
 
 ## 💻 Usage
 ```csharp
 // Set: tracking a result set of entity IDs (the actual pattern used by EcsQuery's full-scan path)
 var pkResult = new HashMap<long>();          // initialCapacity defaults to 64
-reader.ExecuteFullScan(plan, evaluators, ct, tx, pkResult);
+query.ExecuteFullScanAcrossArchetypes(plan, plan.OrderedEvaluators, ct, pkResult);
 
 foreach (long pk in pkResult)
 {
@@ -54,7 +54,7 @@ cache.Dispose();
 - `TKey` must be `unmanaged, IEquatable<TKey>`; `TValue` is unconstrained on the map variant.
 - O(1) average for add/lookup/remove; worst case O(n) under pathological hash collisions (not expected with the built-in hash strategy).
 - Lookup is ~1.5-3x faster than `Dictionary<TKey,TValue>` in measured benchmarks; insert is roughly on par (resize cost dominates at small sizes).
-- Entries live in a GC-pinned array, not unmanaged memory — `Dispose()` drops the reference but the GC still reclaims it; disposal isn't strictly required for correctness, only for prompt release.
+- Entries live in a plain (movable) managed array, not unmanaged memory — `Dispose()` drops the reference but the GC still reclaims it; disposal isn't strictly required for correctness, only for prompt release.
 - `internal` (`Typhon.Engine.Internals`) — engine plumbing only.
 
 ## 🧪 Tests

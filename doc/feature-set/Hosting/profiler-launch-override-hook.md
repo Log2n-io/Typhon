@@ -33,7 +33,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Typhon.Engine;
 
 var services = new ServiceCollection();
-services.AddDatabaseEngine();
+services.AddTyphon(o => o.DatabaseFile("game.typhon"));
 
 // Layer CLI args on top of typhon.telemetry.json / env — CLI wins where it sets a value.
 services.AddTyphonProfiler(resolved => resolved.MergedWith(ProfilerLaunchConfig.FromArgs(args)));
@@ -47,7 +47,7 @@ var runtime = TyphonRuntime.Create(engine, sched => { /* register systems */ }, 
 
 | Registration | Effect |
 |---|---|
-| `AddTyphonProfiler(resolved => resolved.MergedWith(ProfilerLaunchConfig.FromArgs(args)))` | CLI flags (`--trace`, `--live [port]`, `--bind-address <addr>`, `--live-wait <ms>`) override unset-only fields of the file/env config. An omitted `--bind-address` leaves a bind set in the file/env config intact — it does not reset the listener to loopback. |
+| `AddTyphonProfiler(resolved => resolved.MergedWith(ProfilerLaunchConfig.FromArgs(args)))` | CLI flags (`--trace`, `--live [port]`, `--bind-address <addr>`, `--live-wait <ms>`) win over the file/env config for the fields they set; fields the CLI leaves unset keep their file/env value. An omitted `--bind-address` leaves a bind set in the file/env config intact — it does not reset the listener to loopback. |
 | `AddTyphonProfiler(resolved => resolved with { TraceFilePath = ComputePath() })` | Fully computed trace path, ignoring whatever the file/env supplied. |
 
 ## ⚠️ Guarantees & limits
@@ -63,9 +63,10 @@ var runtime = TyphonRuntime.Create(engine, sched => { /* register systems */ }, 
 - **Cannot enable profiling from a closed master gate.** The delegate only runs once
   `typhon.telemetry.json`'s master `Typhon:Profiler:Enabled` is already on; it can add or change *where* output goes
   (trace file / live port), not flip profiling on for a session where it's off. If the resulting
-  config still has no output channel, nothing is exported.
+  config names no trace path and no live port, the capture goes to the database bundle's `profilings/`
+  directory; only a `SuppressCapture` config (`Trace = none`) with no live port exports nothing.
 - **Best-effort.** Profiler startup — including your delegate — runs inside a try/catch that never
-  crashes the host; a throwing delegate disables profiling for that session with a logged diagnostic,
+  crashes the host; a throwing delegate disables profiling for that session with a diagnostic on `Console.Error`,
   it does not fault application startup.
 - **Runs once per process.** The hook fires the first time `TyphonRuntime.Create` self-wires the
   profiler; it is not re-invoked per runtime instance.

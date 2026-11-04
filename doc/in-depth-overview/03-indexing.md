@@ -43,7 +43,7 @@ Every node carries the same header fields at the same offsets (so a generic `Bas
 
 | Field | Type | Purpose |
 |---|---|---|
-| `Control` | int (4 B) | Packed: `StateFlags` (lo 16 b) ∣ `ContentionHint` (b16-23) ∣ `Start` (b24-31, ring-buffer head) ∣ `Count` (b32-39) — wait, `Count` is byte 3 of the int. The packing is byte-3=Count, byte-2=Start, byte-1=ContentionHint, low 16 b = StateFlags. |
+| `Control` | int (4 B) | Packed by byte: byte 3 = `Count`, byte 2 = `Start` (ring-buffer head), byte 1 = `ContentionHint`; `StateFlags` is read as the low 16 bits, its flags (`IsLeaf` = 0x02) living in byte 0. |
 | `OlcVersion` | int (4 B) | OLC latch state — bit 0 locked, bit 1 obsolete, bits 2-31 monotonic version counter |
 | `PrevChunk` | int (4 B) | Left sibling at leaf level (doubly-linked leaf chain) |
 | `NextChunk` | int (4 B) | Right sibling — the B-link |

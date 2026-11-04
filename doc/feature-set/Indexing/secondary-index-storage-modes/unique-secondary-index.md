@@ -96,7 +96,7 @@ using (var tx = dbe.CreateQuickTransaction())
 - `Move` is the commit-time operation for a value change: one descent, at most two leaf write-locks, never a
   separate remove-then-insert pair.
 - A duplicate key **within one archetype** on create or update throws `UniqueConstraintViolationException`
-  (`TyphonErrorCode.UniqueConstraintViolation`, 4001; non-transient) at `Commit()`, not at `Spawn`/`Write` time — the
+  (`TyphonErrorCode.UniqueConstraintViolation`, 4001; non-transient) at `Commit()`, not at `Spawn`/`Set` time — the
   key is only resolved against the B+Tree at commit.
 - **A duplicate key across two archetypes sharing the component is accepted, and both entities remain reachable.**
   The scope of the constraint is the archetype, not the archetype tree — see the note above. Model a field as

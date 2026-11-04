@@ -15,7 +15,7 @@ Leaderboards, inventory lists, and any paginated UI need results in a specific o
 
 ## ⚙️ How it works (in brief)
 
-`OrderByField`/`OrderByFieldDescending` designate an indexed field on the component identified by a preceding `WhereField` call; when it's the same field the predicate narrowed, the planner reuses that already-narrowed index range as the iteration order directly — no separate sort step. `Skip`/`Take` bound how much of that ordered stream is materialized. `ExecuteOrdered()` is the only terminal that honors this ordering, returning a `List<EntityId>`; `Execute()`, `Count()`, and `Any()` ignore `OrderByField`/`Skip`/`Take` entirely. Queries spanning a polymorphic archetype subtree still come back as one globally ordered list — matching archetypes are merged transparently.
+`OrderByField`/`OrderByFieldDescending` designate an indexed field on the component identified by a preceding `WhereField` call; when it's the same field the predicate narrowed, the planner reuses that already-narrowed index range as the iteration order directly — no separate sort step. `Skip`/`Take` bound how much of that ordered stream is materialized. `ExecuteOrdered()` is the only terminal that honors this ordering, returning a `List<EntityId>`; `Execute()` throws when `OrderByField` is set, and `Count()`/`Any()` throw when `Skip`/`Take` is set, rather than silently ignore them. Queries spanning a polymorphic archetype subtree still come back as one globally ordered list — matching archetypes are merged transparently.
 
 ## 💻 Usage
 
@@ -61,7 +61,7 @@ var allByLevel = tx.Query<PlayerArch>()
 - **Not supported on `ToView()`** — Views are unordered live sets; chaining `OrderByField`/`Skip`/`Take` before `.ToView()` throws. Re-run `ExecuteOrdered()` per refresh cycle for "paged + live" use cases.
 - **Not supported with OR predicates** — a `WhereField` with `||` produces multiple independently-planned branches; merging them into one global order isn't implemented. Restructure as a single AND predicate, or run one ordered query per branch.
 - **Not supported with spatial predicates or `.Where(lambda)`** — `WhereNearby`/`WhereInAABB`/`WhereRay` and the opaque post-filter are both unordered scans; sort the result client-side instead.
-- **`Count()`/`Any()` ignore `Skip`/`Take`** — they report the full match count / existence regardless of paging; use `ExecuteOrdered().Count` for a paged count.
+- **`Count()`/`Any()` reject `Skip`/`Take`** — they report the full match count / existence, so a paged query throws `InvalidOperationException`; use `ExecuteOrdered().Count` for a paged count.
 - **No chained `.Where(lambda)`** — fold any extra condition into the `WhereField` expression; `ExecuteOrdered()` throws if an opaque filter is attached.
 
 ## 🧪 Tests

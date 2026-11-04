@@ -23,11 +23,10 @@ replaced rather than trusted, patched, or guessed at.
 After the WAL window is applied and every Versioned revision chain is collapsed to its single committed value,
 the engine clears each derived structure — secondary B+Tree indexes (and their multi-value buffers), the
 EntityMap, the page-occupancy bitmap — and repopulates it by scanning the now-final primary data: indexes from
-each table's committed values, the EntityMap from cluster occupancy slots (or revision-chain heads for flat
-archetypes), occupancy from actual page ownership. A torn page that happened to belong to one of these
+each table's committed values, the EntityMap from cluster occupancy slots (every archetype is cluster-backed),
+occupancy from actual page ownership. A torn page that happened to belong to one of these
 structures needs no special handling — it's simply part of what gets discarded. Primary data (component
-content, cluster slots, and the rare EntityMap that has no cluster/chain source to rebuild from) follows a
-different rule: heal silently if no longer referenced by anything live, or fail the open loudly if it still
+content, revision chains, collections and cluster slots) follows a different rule: heal silently if no longer referenced by anything live, or fail the open loudly if it still
 backs live data. There is no Full-Page-Image repair anywhere in the engine — this rebuild-or-loud-fail net
 stands in its place.
 
@@ -54,8 +53,8 @@ catch (CorruptionException ex)
 
 ## ⚠️ Guarantees & limits
 
-- **Always rebuilt, never repaired** — secondary B+Tree indexes and the EntityMap of
-  any "rebuildable" archetype (cluster-eligible, or every non-`Transient` slot `Versioned`) are unconditionally
+- **Always rebuilt, never repaired** — secondary B+Tree indexes and every archetype's
+  EntityMap are unconditionally
   cleared and rebuilt after every crash recovery; a CRC-clean derived page on disk is not even consulted.
   The **page-occupancy bitmap** follows the same rebuild path with one additional guard: if a persisted archetype
   or component segment pointer cannot be read during reconstruction, `RederiveOccupancyOnCrash` throws rather than

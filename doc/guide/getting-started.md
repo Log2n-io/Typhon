@@ -116,9 +116,10 @@ stable schema identity; the number is its revision. `StorageMode.Versioned` is t
 spelling out. Add `[Index]` to a field to make it fast to filter on.
 
 ```csharp
-using Typhon.Schema.Definition; // [Component], [Field], [Index], [Archetype], Comp<T>
+using Typhon.Engine;            // Archetype<T>, Comp<T>
+using Typhon.Schema.Definition; // [Component], [Field], [Index], [Archetype], StorageMode
 
-namespace Shard;   // component + archetype types must live in a namespace, not the global one
+namespace Shard;   // keeps a growing project tidy; the global namespace works too
 
 [Component("Shard.Faction", 1, StorageMode = StorageMode.SingleVersion)]
 public struct Faction
@@ -156,6 +157,7 @@ Writes go through a short-lived transaction; reads see a consistent point-in-tim
 
 ```csharp
 using Typhon.Engine;            // DatabaseEngine, EntityId, transactions, queries
+using Shard;                    // the types declared above
 
 using var dbe = DatabaseEngine.Open("shard.typhon", o => o
     .Register<Faction>()
@@ -227,7 +229,7 @@ those relax the transactional model on purpose. See [Changing data: transactions
 
 ## Next steps
 
-- **[Start here — your first app](01-first-app.md)** — the fuller walkthrough, piece by piece (it *is* the scaffold's `Program.cs`).
+- **[Start here — your first app](01-first-app.md)** — the fuller walkthrough, piece by piece, on the scaffold's data model.
 - **[Modeling your world](02-modeling.md)** — archetypes, indexes, the three storage modes, and spatial queries.
 - **[Changing data: transactions & durability](03-transactions.md)** — the real transaction model and what survives
   a crash.

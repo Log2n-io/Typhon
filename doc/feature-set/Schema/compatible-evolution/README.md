@@ -79,8 +79,8 @@ using (var dbe = host.Services.GetRequiredService<DatabaseEngine>())
 
 ## ⚠️ Guarantees & limits
 
-- ChunkId is preserved across migration — the primary-key index, surviving secondary indexes, and revision-chain
-  pointers need no rebuild. Only a newly-indexed field pays an O(N) B+Tree build.
+- Entities move to a new cluster segment (they do not keep their ChunkId), so every secondary index of the archetype is
+  rebuilt from cluster data — not only a newly-indexed field's (see the callout above).
 - Supported widenings are exact and lossless: integer sign/zero-extension, `Float`→`Double`, `PointNF`→`PointND`
   / `QuaternionF`→`QuaternionD` (per-component), `String64`→`String1024`. Anything not lossless (narrowing,
   signed↔unsigned, cross-type, semantic change) is classified `Breaking` and is **not** handled here — it

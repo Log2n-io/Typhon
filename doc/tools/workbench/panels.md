@@ -47,12 +47,24 @@ panel simultaneously — the "linked time selection" pattern from every profiler
 | **Query Analyzer** | The query catalog with P50/P95/P99 latency and selectivity, plus per-query Plan and Executions tabs. |
 | **Source Preview** | The source location (`file:line`) behind a span or frame. |
 | **Engine / Live Health** | (Attach only) Consolidated live health metrics with jump-to-anomaly. |
+| **Requests** | Each HTTP request and client command as a root: what the engine did for it and where its time went. |
+| **Entity Lifecycle** | Spawn/destroy cohorts per tick, joined with the database to show which of them are still alive. |
+| **Realms** | The worlds the engine holds: identity and geometry from the catalog, run state and spatial work from the trace. |
+| **Subscriptions** | (Attach) Push replication as an operator sees it — sessions, outbound bytes/s, skips, frame-pool pressure. |
+| **Spatial Maintenance** | (Attach only) Per-tick spatial write and fence counters. |
 
 ## Query & authoring
 
 | Panel | What it shows |
 |-------|---------------|
 | **Query Console** | (Open mode) Chip/DSL query authoring with a live cost estimate, a result grid, saved queries, and history. |
+
+## Operations
+
+| Panel | What it shows |
+|-------|---------------|
+| **Integrity** | Scan a database, read the verdict, then plan and apply a repair — the GUI face of `typhon check` / `typhon repair`. Works with no session open. |
+| **Backups** | A backup store's health, points and WAL archive, and the actions on them: back up now, verify, drill, compact, retention, restore. |
 
 ## Always available
 

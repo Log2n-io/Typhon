@@ -24,13 +24,14 @@ Everything starts from `tx.Query<TArchetype>()`.
 ### Which entities — by component shape
 
 ```csharp
-tx.Query<PlayerArch>()
-  .With<Membership>()      // only players who have a Membership component
-  .Without<Wallet>()       // …and no Wallet at all
-  .Enabled<Session>()      // …whose Session component is currently enabled (i.e. online)
+tx.Query<StructureArch>()        // polymorphic: every Harvester AND every Factory
+  .With<Hopper>()                // only archetypes that declare a Hopper (the harvesters)
+  .Enabled<MaintenanceState>()   // …and, per entity, whose MaintenanceState is enabled (not broken)
+
+tx.Query<PlayerArch>().Disabled<Session>()   // every offline player
 ```
 
-`With`/`Without` filter on component presence; `Enabled`/`Disabled` filter on the per-entity enable flag — a cheap per-entity toggle that costs no storage and no index. It's how the sample shard models states rather than deleting data: an **offline** player is one whose `Session` is disabled, a **depleted** deposit is one whose `Deposit` is disabled (the data stays readable), a **broken** harvester is one whose `MaintenanceState` is disabled.
+`With`/`Without` filter on the archetype's **declared shape** — keep only the archetypes that declare (or don't declare) a component type, so they matter once a query spans an archetype hierarchy; every entity of a fixed archetype has all its components. `Enabled`/`Disabled` filter on the per-entity enable flag — a cheap per-entity toggle that costs no storage and no index. It's how the sample shard models states rather than deleting data: an **offline** player is one whose `Session` is disabled, a **depleted** deposit is one whose `Deposit` is disabled (the data stays readable), a **broken** harvester is one whose `MaintenanceState` is disabled.
 
 `Exclude<TArch>()` drops a whole sub-archetype — useful with the archetype hierarchy from [ch.2 §4](02-modeling.md#4-relationships--when-one-archetype-isnt-enough):
 

@@ -69,10 +69,12 @@ if (TelemetryConfig.DataMvccChainWalkActive)
 | `Typhon:Profiler:Storage:Enabled` / `:Memory:Enabled` | `false` | Segment / FileHandle / OccupancyMap / DirtyWalk / AlignmentWaste — fully wired |
 | `Typhon:Profiler:Data:Enabled` | `false` | Transaction lifecycle + MVCC cleanup wired; BTree Search/RangeScan/NodeCow ship gate + codec, producer call deferred |
 | `Typhon:Profiler:Query:Enabled` / `:ECS:Enabled` | `false` | Parse/Plan and low-frequency ECS paths wired; hot-loop Iterate/Filter/ProcessEntry deferred |
-| `Typhon:Profiler:Scheduler:Enabled` / `:Runtime:Enabled` | `true`\* / `false` | System / Worker / Overload / Graph + UoW phase markers wired |
+| `Typhon:Profiler:Scheduler:Enabled` / `:Runtime:Enabled` | `false`\* / `false` | System / Worker / Overload / Graph + UoW phase markers wired |
 | `Typhon:Profiler:Durability:Enabled` | `false` | WAL split spans + Recovery phase set wired; extreme-frequency `Frame` / `Record` / `UoW:State` ship gate + codec only |
 
-\* `Scheduler` keeps its pre-expansion default; the new leaves underneath it default off.
+\* The `Scheduler` subtree is off by default like every other domain root; its gauge toggles
+(`Scheduler:Gauges:TransitionLatency` / `WorkerUtilization` / `StragglerGap`) and `Scheduler:ArchetypeTouches`
+are raw leaves read independently of it, and default `true`.
 
 ## ⚠️ Guarantees & limits
 
@@ -90,9 +92,11 @@ if (TelemetryConfig.DataMvccChainWalkActive)
   path; no new tooling is required to view them.
 - **Config resolves once at class load** — editing `typhon.telemetry.json` or the `TYPHON__PROFILER__*` env
   vars after the process starts has no effect until restart.
-- **Extreme-frequency leaves stay deny-listed even when their parent category is on** — e.g. per-step
-  `AdaptiveWaiter` events and `Durability:Recovery:Record` stay off under a broad `Enabled: true` to avoid
-  saturating the trace ring; they require explicitly enabling the leaf.
+- **Extreme-frequency kinds stay deny-listed even when their parent category is on** — `DataMvccChainWalk`,
+  `DataIndexBTreeSearch`/`NodeCow`, `QueryExecuteIterate`/`Filter`/`Pagination`, `EcsQueryMaskAnd`,
+  `EcsViewProcessEntry`/`Or` and `DurabilityWalFrame` sit on the engine's default suppression list
+  (`TyphonEvent.SuppressedKinds`) to avoid saturating the trace ring. Configuration cannot lift it — even an
+  explicit leaf `Enabled: true` leaves them off; only the internal `TyphonEvent.UnsuppressKind` does.
 
 ## 🧪 Tests
 
@@ -102,7 +106,7 @@ if (TelemetryConfig.DataMvccChainWalkActive)
 ## 🔗 Related
 
 - Sibling features: [Built-in Engine Instrumentation Catalog](./builtin-subsystem-instrumentation.md) (the nine-subsystem baseline this expansion builds on), [Configuration & Performance Tuning](./profiler-configuration-tuning.md) (the gating mechanism these new flags plug into)
-- Source: `src/Typhon.Engine/Observability/public/TelemetryConfig.cs`, `src/Typhon.Engine/Profiler/internals/{SpatialQueryEvents,SpatialMaintainEvents,SpatialRTreeEvents,SpatialMiscEvents,DataPlaneEvents,DurabilityEvents,StorageMemoryEvents,SubscriptionDispatchEvents}.cs`
+- Source: `src/Typhon.Engine/Observability/public/TelemetryConfig.cs`, `src/Typhon.Engine/Profiler/internals/{SpatialQueryEvents,SpatialMaintainEvents,SpatialRTreeEvents,SpatialMiscEvents,DataPlaneEvents,DurabilityEvents,StorageMemoryEvents,SubscriptionsTelemetryEvent}.cs`
 
 <!-- Deep dive: claude/design/Profiler/07-tracing-instrumentation/README.md — umbrella (architecture, category tree, phasing, decisions) -->
 <!-- Per-domain design: claude/design/Profiler/07-tracing-instrumentation/01-tier2-gating-infrastructure.md, 02-concurrency.md, 03-spatial.md, 04-scheduler-runtime.md, 05-storage-memory.md, 06-data-plane.md, 07-query-ecs-view.md, 08-durability.md, 09-subscription-dispatch.md -->

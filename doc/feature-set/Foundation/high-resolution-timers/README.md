@@ -1,17 +1,17 @@
 ---
 uid: feature-foundation-high-resolution-timers-index
 title: 'High-Resolution Timers'
-description: 'Self-calibrating sub-millisecond periodic timers (Sleep→Yield→Spin) powering the deadline watchdog, telemetry flush, and epoch advancement.'
+description: 'Self-calibrating sub-millisecond periodic timers (Sleep→Yield→Spin) powering the deadline watchdog and any other periodic engine task.'
 ---
 
 # High-Resolution Timers
-> Self-calibrating sub-millisecond periodic timers (Sleep→Yield→Spin) powering the deadline watchdog, telemetry flush, and epoch advancement.
+> Self-calibrating sub-millisecond periodic timers (Sleep→Yield→Spin) powering the deadline watchdog and any other periodic engine task.
 
 **Status:** ✅ Implemented · **Visibility:** Internal · **Category:** [Foundation](../README.md)
 
 ## 🎯 What it solves
 
-Several engine subsystems need periodic execution well below `Thread.Sleep`'s nominal granularity — a deadline watchdog scanning for expirations every 5ms, telemetry flushing every 100ms, epoch advancement at 10ms. `Thread.Sleep(1)` actually resolves anywhere from ~0.5ms (modern Windows/Linux) to ~15.6ms (older Windows), and that gap varies by platform and OS version — a naive timer either misses its window badly on some machines or burns a full core spinning on all of them. High-resolution timers give every periodic subsystem a shared, drift-free metronome instead of each one reinventing wait logic.
+Periodic engine work can need execution well below `Thread.Sleep`'s nominal granularity — the deadline watchdog scans for expirations every 5ms. `Thread.Sleep(1)` actually resolves anywhere from ~0.5ms (modern Windows/Linux) to ~15.6ms (older Windows), and that gap varies by platform and OS version — a naive timer either misses its window badly on some machines or burns a full core spinning on all of them. High-resolution timers give every periodic subsystem a shared, drift-free metronome instead of each one reinventing wait logic.
 
 ## ⚙️ How it works (in brief)
 
@@ -22,11 +22,11 @@ A three-phase wait (`Thread.Sleep(1)` while far from the target → `Thread.Yiel
 | Sub-feature | Thread model | Use it when... |
 |---|---|---|
 | [Dedicated Timer](./dedicated-timer.md) | One thread per timer | A single handler needs guaranteed isolation from every other periodic task (e.g. a heartbeat) |
-| [Shared Timer](./shared-timer.md) | One thread, many callbacks | Several lightweight periodic tasks (deadline watchdog, telemetry, epoch advance) shouldn't each pay for a dedicated thread |
+| [Shared Timer](./shared-timer.md) | One thread, many callbacks | Several lightweight periodic tasks (e.g. the deadline watchdog) shouldn't each pay for a dedicated thread |
 
 ## ⚠️ Guarantees & limits
 
-- Both timer flavors are `internal` engine plumbing — application code never constructs one directly; they're the infrastructure behind `DeadlineWatchdog`, telemetry flush, and epoch advancement.
+- Both timer flavors are `internal` engine plumbing — application code never constructs one directly; they're the infrastructure behind `DeadlineWatchdog`, today the only in-tree consumer (it registers on the shared timer; the dedicated timer has no production user yet).
 - Timing error is sub-50µs on a lightly loaded system regardless of interval length — it's dominated by the Yield→Spin handoff, not by how long the wait is.
 - Sub-millisecond intervals keep a logical core busy in the Yield+Spin phases (the Sleep phase has no room to engage); intervals ≥5ms on modern OSes let the Sleep phase absorb most of the wait, dropping CPU usage to near zero.
 - A callback that throws is caught, logged, and skipped — one bad handler never kills the timer thread.

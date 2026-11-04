@@ -20,7 +20,7 @@ Set per [Unit of Work](xref:concept-unit-of-work). Applies to every commit in th
 | `GroupCommit` | automatically, ~every 5 ms | ~1–2 µs | ≤ one flush interval |
 | `Immediate` | `fsync` on every `Commit` | ~15–85 µs | nothing |
 
-`Deferred` and `GroupCommit` commit at the *same* speed and are **visible before durable**; only `Immediate` blocks `Commit()` until the change is on disk. A single critical transaction can *escalate* to `Immediate` — never downgrade.
+`Deferred` and `GroupCommit` commit at the *same* speed and are **visible before durable**; only `Immediate` blocks `Commit()` until the change is on disk. There is no per-transaction override: to make one critical write zero-loss inside a `Deferred` / `GroupCommit` batch, commit it through its own `Immediate` unit of work (`dbe.CreateQuickTransaction(DurabilityMode.Immediate)`, or `ctx.CreateSideTransaction(DurabilityMode.Immediate)` from a system).
 
 ## `CommitDiscipline` — *how* a SingleVersion write is made durable
 

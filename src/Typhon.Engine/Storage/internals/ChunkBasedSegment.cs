@@ -114,14 +114,13 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
         if (stride < sizeof(long))
         {
             // Chunk-based segments (component storage, VSBS, string chunks) require a stride >= 8 bytes: chunk 0 is a reserved sentinel and free chunks store
-            // an 8-byte next-chunk link in-place. The usual consumer trigger is a Versioned component whose PUBLIC fields total < 8 bytes — the stride is
-            // derived from public fields, so a `private` padding field does NOT count. Remedy: add public padding (e.g. a second `public int`) so the
-            // component is at least 8 bytes. (SingleVersion/Transient components already clear 8 bytes via their internal per-entity key, so this typically
-            // only bites a Versioned component with a single 4-byte field.)
+            // an 8-byte next-chunk link in-place. The usual consumer trigger is a Versioned component whose struct is < 8 bytes — the stride is sizeof(T)
+            // (SCHEMA-06), padding included, so any field, public or private, brings it up to 8. (SingleVersion/Transient components already clear 8 bytes
+            // via their internal per-entity key, so this only bites a Versioned component with a single 4-byte field.)
             throw new Exception(
                 $"Invalid component/chunk stride: {stride} bytes, but a chunk-based segment requires at least {sizeof(long)} bytes. "
-                + "If this is a component, its size is derived from its PUBLIC fields (a private padding field is not counted) — "
-                + "add public padding so the component totals at least 8 bytes, e.g. a second 'public int'.");
+                + "If this is a Versioned component, its struct is smaller than 8 bytes — widen a field (e.g. int to long) or add one "
+                + "(a private padding field counts) so sizeof reaches 8.");
         }
 
         _epochManager = epochManager;

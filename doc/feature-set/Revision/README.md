@@ -23,5 +23,5 @@ description: 'The per-component MVCC revision-chain subsystem: stores every live
 | Feature | Summary | Status |
 |---|---|---|
 | [Revision Chain Storage](revision-chain-storage.md) | Per-entity, per-component circular-buffer chunk chain holding every live revision of a `Versioned` component, allocated on first write and grown on demand | ✅ Implemented |
-| [Chain Walk Correctness Under Compaction](mvcc-visibility-walk.md) (part of [MVCC Snapshot Visibility](mvcc-snapshot-visibility.md)) | The visibility walk scans the whole chain instead of breaking on the first too-new entry, because background GC compaction can reorder entries without changing their TSNs | ✅ Implemented |
+| [Chain Walk Correctness Under Compaction](mvcc-visibility-walk.md) (part of [MVCC Snapshot Visibility](mvcc-snapshot-visibility.md)) | The visibility walk scans the whole chain instead of breaking on the first too-new entry, because a chain's physical order is not its commit-stamp order | ✅ Implemented |
 | [Crash-Recovery Chain Scrub & Orphan Sweep](crash-recovery-chain-scrub.md) | Post-crash recovery step that collapses every `Versioned` chain to its single committed HEAD and frees unreachable revision-table chunks, guaranteeing pre-crash MVCC history never survives into the recovered base | ✅ Implemented |

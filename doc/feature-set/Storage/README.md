@@ -13,9 +13,9 @@ description: 'The persistence layer underlying every Typhon data structure: an e
 
 | Feature | Summary | Status | Level |
 |---|---|---|---|
-| [Transient Store (heap-backed)](pluggable-storage-backend/transient-store.md) *(part of [Pluggable Storage Backend](pluggable-storage-backend/README.md))* | Pinned heap blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code — tune via `TransientOptions` | ✅ Implemented | 🔵 Core |
+| [Transient Store (native-memory)](pluggable-storage-backend/transient-store.md) *(part of [Pluggable Storage Backend](pluggable-storage-backend/README.md))* | Pinned native-memory blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code — tune via `TransientOptions` | ✅ Implemented | 🔵 Core |
 | [Database File Locking & Lifecycle](file-locking-lifecycle.md) | Two-layer protection against concurrent multi-process opens — OS `FileShare.Read` plus an advisory `.lock` sidecar with stale/live/cross-machine PID detection — plus create/open/delete lifecycle handling | ✅ Implemented | 🔵 Core |
-| [Page Cache & Clock-Sweep Eviction](page-cache.md) | 8 KiB pages, 4-state lifecycle, clock-sweep eviction with sequential-allocation optimization, async I/O, and backpressure handling | ✅ Implemented | 🟣 Advanced |
+| [Page Cache & Clock-Sweep Eviction](page-cache.md) | 8 KiB pages, 4-state lifecycle, scan-resistant clock-sweep eviction (adaptive probation for first loads) with sequential-allocation optimization, async I/O, and backpressure handling | ✅ Implemented | 🟣 Advanced |
 | [Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing](page-integrity.md) | Hardware CRC32C page checksums, seqlock-protected checkpoint snapshots, and A/B slot pairing for structural pages that can't be rebuilt | ✅ Implemented | 🟣 Advanced |
 | [Variable-Sized Buffer Storage (VSBS)](vsbs.md) | Linked-chunk-chain storage for variable-length, reference-counted buffers — backs multi-value B+Tree index entries and per-element-type `ComponentCollection<T>` pools | ✅ Implemented | 🟣 Advanced |
 | [Storage Introspection & Integrity Diagnostics](storage-introspection.md) | Read-only APIs exposing segment/page topology and auditing occupancy-vs-segment consistency, powering the Workbench Database File Map | ✅ Implemented | 🟣 Advanced |

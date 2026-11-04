@@ -49,7 +49,7 @@ cache.Dispose();
 - `Count`/`StripeCount` are diagnostic, not transactional — `Count` can be stale by the time it returns under concurrent mutation.
 - Measured 3-4x faster than `ConcurrentDictionary` on disjoint-key inserts across thread counts, ~25-35% faster on a 90/10 read/write mix.
 - Enumeration (`foreach`) is best-effort and unlocked — it may observe a partial state under concurrent writes; don't use it where a consistent snapshot is required.
-- Entries live in GC-pinned arrays (Pinned Object Heap); `Dispose()` releases all stripes' references.
+- Entries live in plain managed arrays; `Dispose()` releases all stripes' references.
 - `internal` (`Typhon.Engine.Internals`) — engine plumbing only.
 
 ## 🧪 Tests

@@ -25,8 +25,8 @@ within it, used for crash recovery), an absolute deadline, and — for `Deferred
 by the transactions the UoW creates via `CreateTransaction()`. `uow.CreateTransaction()` draws transactions from this scope; each commits
 independently (its own atomicity/isolation), but none of them control *when* their WAL records become crash-safe —
 that is `Flush()`/`FlushAsync()`'s job, driven by the UoW's `DurabilityMode`. `Dispose()` always releases the
-`UowId` back to the registry; for `GroupCommit`/`Immediate` it also flushes for durability, while `Deferred` leaves
-that decision to the caller.
+`UowId` back to the registry; for `GroupCommit`/`Immediate` it also flushes for durability when at least one
+transaction committed, while `Deferred` leaves that decision to the caller.
 
 ## 💻 Usage
 
@@ -61,13 +61,12 @@ Console.WriteLine(uow.CommittedTransactionCount);
   `WritesVersioned()` creates internally — rent a separate `ChangeSet` from the pool instead (rule PS-05a).
 - **`Deferred` dispose does not flush** — WAL records committed under a `Deferred` UoW stay volatile until an
   explicit `Flush()`/`FlushAsync()` (or the WAL buffer's own back-pressure forces an earlier write); `GroupCommit`
-  and `Immediate` flush automatically on `Dispose()`.
+  and `Immediate` flush automatically on `Dispose()` **when at least one transaction committed** (`CommittedTransactionCount > 0`); a UoW that committed nothing (rollback, refusal, nothing written) does not flush on dispose.
 - **Bounded registry slots** — `UowId` is allocated from a fixed-size registry; under sustained pressure
   `CreateUnitOfWork` blocks until a slot frees and throws `ResourceExhaustedException` if its deadline expires first.
 - **Cross-UoW concurrency is cheap** — independent UoWs on different threads contend only if they touch the same
   page or the same B+Tree index node; otherwise they run fully in parallel.
-- **Counters are observational only** — `TransactionCount`/`CommittedTransactionCount` track activity for
-  diagnostics; they do not gate `Flush()` or `Dispose()`.
+- **Counters** — `TransactionCount` is observational only. `CommittedTransactionCount` gates the automatic flush inside `Dispose()` for non-`Deferred` UoWs: a UoW that committed nothing does not flush on dispose; explicit `Flush()`/`FlushAsync()` calls are unaffected and always run.
 
 ## 🧪 Tests
 

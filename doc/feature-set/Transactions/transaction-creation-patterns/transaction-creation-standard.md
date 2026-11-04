@@ -65,8 +65,7 @@ Console.WriteLine(uow.CommittedTransactionCount);
   creates, unlike `CreateQuickTransaction`.
 - UoWs are flat, not nestable — `CreateUnitOfWork()` called while another is "logically" in scope just allocates a
   second, independent UoW with its own `UowId` and deadline.
-- `TransactionCount`/`CommittedTransactionCount` on the `UnitOfWork` are observational counters; they do not gate
-  `Flush()` or `Dispose()`.
+- `TransactionCount` on the `UnitOfWork` is observational. `CommittedTransactionCount` gates the automatic flush inside `Dispose()` for non-`Deferred` UoWs: a UoW that committed nothing does not flush on dispose; explicit `Flush()`/`FlushAsync()` calls are unaffected.
 - `CreateUnitOfWork` blocks (and can throw `ResourceExhaustedException`) if the UoW Registry is full and the
   deadline expires before a slot frees — the standard pattern is the only one of the three that can hit this,
   since it is the only one that allocates a registry slot the caller controls the lifetime of.

@@ -7,7 +7,7 @@ description: 'Systems declare phase and read/write access; the scheduler derives
 # Declarative Scheduling — Auto-DAG (RFC 07)
 > Systems declare phase and read/write access; the scheduler derives the DAG and rejects unsafe overlaps at Build().
 
-**Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Runtime](../README.md)
+**Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Runtime](../README.md)
 
 ## 🎯 What it solves
 
@@ -28,6 +28,39 @@ writer), and throws — with a copy-paste-ready fix — for relationships it can
 same component, same phase, no declared order). The derived graph is an ordinary dependency DAG; the
 any-worker, claim-on-CAS dispatch loop that executes it at runtime is unchanged by this RFC — only how
 the DAG gets *built* changed.
+
+## 💻 Usage
+
+```csharp
+var schedule = RuntimeSchedule.Create(new RuntimeOptions { BaseTickRate = 60, WorkerCount = 8 });
+
+var dag = schedule.PublicTrack.DeclareDag("Game")
+    .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+    .DefaultPhase(Phase.Simulation);
+
+dag.Add(new MovementSystem());    // Configure(): b.Name("Movement").Phase(Phase.Simulation).Writes<Position>();
+dag.Add(new RenderSyncSystem());  // Configure(): b.Name("RenderSync").Phase(Phase.Output).ReadsFresh<Position>();
+
+using var scheduler = dag.Build(parentResource);
+```
+
+A system declaring a same-phase write conflict must disambiguate explicitly:
+
+```csharp
+protected override void Configure(SystemBuilder b) => b
+    .Name("Clamp")
+    .Phase(Phase.Simulation)
+    .Writes<Position>()
+    .After("Movement");   // both write Position in Simulation — Build() requires this edge
+```
+
+| Declaration | Effect |
+|---|---|
+| `Reads<T>()` | Plain read; legal only if no same-phase writer of `T` exists |
+| `ReadsFresh<T>()` | Ordered after same-phase writers of `T` — sees this-tick value |
+| `ReadsSnapshot<T>()` | Ordered before same-phase writers of `T` — sees previous-tick value (requires Versioned `T`) |
+| `Writes<T>()` | Mutates `T`; two same-phase writers require `.After()` / `.Before()` |
+| `ExclusivePhase()` | System runs alone in its phase |
 
 ## Sub-features
 
@@ -50,13 +83,26 @@ the DAG gets *built* changed.
 - This is declaration, not inference — Typhon never inspects a system body to detect its actual
   reads/writes. An undeclared access is simply invisible to the scheduler (and, with the check on, only the
   write side is cross-checked at runtime).
+- `ReadsSnapshot<T>()` requires `T` to use Versioned storage; SingleVersion/Transient components have no
+  prior-tick history to freeze to and are rejected at `Build()`.
+- Phases order systems within one DAG only. Cross-DAG ordering is structural (track sequence), not
+  access-derived — `.After()` / `.Before()` spanning DAGs is rejected at `Build()`.
+- Cross-phase edges are conflict-driven, not all-to-all: a straggler in phase N gates only the systems in
+  phase N+1 with a declared data dependency on it, not every system in the phase.
 - `Build()` validation has no suppress switch — it's a one-shot startup cost; a false positive should
   be fixed by correcting the declaration, not disabled.
+
+## 🧪 Tests
+
+- [AccessDagDerivationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/AccessDagDerivationTests.cs) — W×W same-phase throws, `.After()`/`.Before()` disambiguation, `ReadsFresh`/`ReadsSnapshot` edge derivation, `ReadsSnapshot` on SingleVersion rejected
+- [SystemBuilderFluentTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemBuilderFluentTests.cs) — `Reads`/`Writes`/`ReadsFresh`/`ReadsSnapshot` declaration API, dedup, `Before`/`After` cycle detection
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — opt-in assert that `EntityRefMut.Set<T>()` matches the system's declared writes
 
 ## 🔗 Related
 
 - Sub-features: [Track → DAG → Phase Partitioning](./track-dag-phase-partitioning.md), [Access Declarations & Build-Time Conflict Detection](./access-conflict-detection.md)
 
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md -->
+<!-- Deep dive: claude/design/Runtime/02-system-scheduling.md -->
 <!-- Deep dive: rules/runtime-scheduling.md -->
 <!-- Deep dive: claude/adr/052-track-dag-partitioning-hierarchy.md -->

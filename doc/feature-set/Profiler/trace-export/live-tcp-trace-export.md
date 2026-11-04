@@ -31,8 +31,7 @@ profiler stop, a Shutdown frame closes the session cleanly.
 
 ```csharp
 // typhon.telemetry.json — zero code:
-// { "Typhon": { "Telemetry": { "Enabled": true,
-//     "Profiler": { "Enabled": true, "Live": 9100, "LiveWaitMs": 5000 } } } }
+// { "Typhon": { "Profiler": { "Enabled": true, "Live": 9100, "LiveWaitMs": 5000 } } }
 
 using Typhon.Engine;
 
