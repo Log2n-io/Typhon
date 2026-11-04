@@ -423,7 +423,10 @@ internal sealed class MissionDeskChecks : ServedChecks
 
     private static EntityId CharacterOf(TatooineSim sim, EntityId account)
     {
-        Assert.That(CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True, "the account has no character");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = account;
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         return character;
     }
 

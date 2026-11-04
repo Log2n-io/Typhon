@@ -477,7 +477,10 @@ internal sealed class BotMarketDeskChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         Worlds.Park(sim, link.Session, at.X, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return new Trader(link, character);
@@ -676,6 +679,14 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     // measure was tuned on — and BotBrain.MarketStacks' ten slots left.
     private const int PartSlots = ItemLedger.Slots - 30;
 
+    // The parts and kits that stay stacks, worth nothing to the vendor: the extractor's modules (36, 38, 39) became instances with a grade in C5a, and a
+    // stack grant of one lands nowhere — the bots never held their ten. Nine such templates, none with a Mk: the first is granted one unit past a full
+    // stack, which takes two slots.
+    private static readonly (ushort Template, int Count)[] Parts =
+    [
+        (37, ItemLedger.StackMax + 1), (40, 1), (41, 1), (42, 1), (43, 1), (ItemCatalog.KitWeaponRepair, 1), (ItemCatalog.KitArmorRepair, 1), (64, 1), (65, 1),
+    ];
+
     private long LostOverQuests(bool market, string dir, out (bool Ok, string Why) audits)
     {
         var config = Worlds.Served(dir);
@@ -690,10 +701,10 @@ internal sealed class BotMarketDeskChecks : ServedChecks
             var at = (home.X + 2.5f, home.Z + (i * 0.6f));
             var t = LogIn(sim, 0x9200UL + (ulong)i, at, i + 1);
             bots.Add((t, TatooineReplication.ControlledBy(sim.Dbe, t.Link.Session), at));
-            for (var p = 0; p < PartSlots; p++)
+            foreach (var (template, count) in Parts)
             {
-                // The modules, the swoop's parts and two kits: stacks no plan sells (no value) and nothing drops.
-                sim.Bridge.StageTransfer(ItemLedger.World, t.Key, (ushort)(p < 8 ? 36 + p : 62 + p - 8), 0, 1, ItemMoveKind.Kill, 1);
+                // Stacks no plan sells (no value) and nothing drops.
+                sim.Bridge.StageTransfer(ItemLedger.World, t.Key, template, 0, count, ItemMoveKind.Kill, 1);
             }
         }
 

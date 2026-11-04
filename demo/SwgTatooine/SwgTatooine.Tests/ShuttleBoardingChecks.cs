@@ -104,8 +104,8 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
     /// ticks after a landing with a single tick allowed: the trickle boards at phase p with probability 1/(500 − p) a tick, so it passes this case
     /// about one time in two hundred and fifty; the session's rule always. (Three ticks at a uniform phase was 3.7 %, the review found.) The single tick
     /// counts from the fare (SimBridge.Fares.cs): the Ledger charges it after Shuttle has run, so the tick after is the soonest a paid passenger flies —
-    /// and a wallet not open yet refuses the fare, so the client logs in with its wallet open. Asked before, it failed on PR #1590's CI run, three tries
-    /// out of three.
+    /// and a wallet not open yet refuses the fare, so the client logs in with its wallet open. The count is seen as the Ledger writes it, inside the
+    /// charging tick, so the flight is two tick boundaries away: one, and the next tick had only started (PR #1590's CI, three tries out of three).
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
@@ -131,7 +131,7 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
 
         link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
         SessionHarness.Until(() => sim.Bridge.FaresPaid >= 1, "the fare to be paid");
-        Harness.Ticks(1);
+        Harness.Ticks(2);
 
         var (x, z) = Where(sim, player);
         Assert.Multiple(() =>
@@ -552,7 +552,10 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
         SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True);
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return (link, character);

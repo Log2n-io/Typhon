@@ -43,7 +43,10 @@ internal sealed class CraftDeskChecks : ServedChecks
         Harness.Ticks(2);
         var station = sim.Index.Stations[0];
         var body = atStation ? Worlds.Park(sim, link.Session, station.X + 2f, station.Z) : Worlds.Park(sim, link.Session, station.X + 60f, station.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True);
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return new Crafter(link, body, character);
