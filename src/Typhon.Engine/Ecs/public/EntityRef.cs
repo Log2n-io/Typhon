@@ -296,6 +296,42 @@ public unsafe ref struct EntityRef
         return ReadSlotRef<T>(slot);
     }
 
+    /// <summary>
+    /// The text of <paramref name="field"/>, a <see cref="String1024"/> field of a value of <paramref name="comp"/> read through this handle; empty for no
+    /// text.
+    /// A value read from a Versioned component reads the text of its own revision (#1094).
+    /// </summary>
+    public readonly string ReadText<T>(Comp<T> comp, in String1024 field) where T : unmanaged =>
+        _accessor.ReadText(TextTable(comp._componentTypeId), field._chunkId);
+
+    /// <summary>
+    /// Copies the UTF-8 text of <paramref name="field"/> into <paramref name="utf8"/> (no terminator) and returns the bytes copied: at most
+    /// <see cref="String1024.MaxUtf8Bytes"/>, fewer when <paramref name="utf8"/> is shorter.
+    /// </summary>
+    public readonly int ReadText<T>(Comp<T> comp, in String1024 field, Span<byte> utf8) where T : unmanaged =>
+        _accessor.ReadText(TextTable(comp._componentTypeId), field._chunkId, utf8);
+
+    /// <summary>The table of the component at <paramref name="slot"/>: what an untyped reader (the Workbench, the shell) resolves a text handle
+    /// through.</summary>
+    internal readonly ComponentTable ComponentTableAt(int slot) => _engineState.SlotToComponentTable[slot];
+
+    private readonly ComponentTable TextTable(int componentTypeId)
+    {
+        byte slot = _archetype.GetSlot(componentTypeId);
+        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
+        {
+            ThrowHelper.ThrowInvalidOp($"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
+        }
+
+        var table = _engineState.SlotToComponentTable[slot];
+        if (!table.HasText)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component '{table.Definition.Name}' declares no String1024 field: read a text through the component that holds it.");
+        }
+
+        return table;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Component access — by type (slot lookup, slower)
     // ═══════════════════════════════════════════════════════════════════════

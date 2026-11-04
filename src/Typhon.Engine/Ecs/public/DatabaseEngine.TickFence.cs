@@ -223,7 +223,7 @@ public partial class DatabaseEngine
                 for (var c = 0; c < slotIndices.Length; c++)
                 {
                     var table = engineState.SlotToComponentTable[slotIndices[c]];
-                    if (!table.HasCollections)
+                    if (!table.HasOutOfLineData)
                     {
                         continue;
                     }
@@ -380,9 +380,9 @@ public partial class DatabaseEngine
                             // Wire identity is the per-archetype slot (LOG-06); resolve from this entity's archetype (routing id in the PK).
                             var slot = (ushort)GetMetaByRouting(EntityId.FromRaw(entityPk).ArchetypeId).GetSlot(componentTypeId);
                             var value = src.Slice(overhead, stride);
-                            batch.AddSlot(entityPk, slot, value, table.CollectionHandleRanges);
+                            batch.AddSlot(entityPk, slot, value, table.OutOfLineHandleRanges);
                             batchBytes += recOverhead + stride;
-                            if (table.HasCollections)
+                            if (table.HasOutOfLineData)
                             {
                                 // Mandatory, not opportunistic: the Slot payload's handle is zeroed (LOG-06), so applying it without a fold to follow would
                                 // empty a collection whose content was previously safe on the checkpoint timeline. See CollectionContentEmitter.
@@ -2532,7 +2532,8 @@ public partial class DatabaseEngine
         var handleRangeCount = 0;
         for (var c = 0; c < columnCount; c++)
         {
-            handleRangeCount += engineState.SlotToComponentTable[plan.SlotIndices[c]].CollectionFields.Length;
+            var columnTable = engineState.SlotToComponentTable[plan.SlotIndices[c]];
+            handleRangeCount += columnTable.CollectionFields.Length + columnTable.TextFields.Length;
         }
 
         plan.EnsureHandleRanges(handleRangeCount);
@@ -2542,9 +2543,16 @@ public partial class DatabaseEngine
             var hr = 0;
             for (var c = 0; c < columnCount; c++)
             {
-                foreach (var f in engineState.SlotToComponentTable[plan.SlotIndices[c]].CollectionFields)
+                var columnTable = engineState.SlotToComponentTable[plan.SlotIndices[c]];
+                foreach (var f in columnTable.CollectionFields)
                 {
                     plan.ColumnHandleRanges[hr++] = RecordCodec.PackColumnHandleRange(c, f.OffsetInComponentStorage, f.HandleSize);
+                }
+
+                // A text handle likewise (#1094): the text rides behind the block as one CollectionDelta element.
+                foreach (var f in columnTable.TextFields)
+                {
+                    plan.ColumnHandleRanges[hr++] = RecordCodec.PackColumnHandleRange(c, f.OffsetInComponentStorage, sizeof(int));
                 }
             }
         }

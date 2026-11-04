@@ -119,8 +119,8 @@ internal class ArchetypeMetadata
     internal byte TransientSlotCount;
 
     /// <summary>
-    /// Bitmask of component slots whose component declares a <c>ComponentCollection</c> field. <c>EntityRefMut.Set</c> tests it to keep the stored
-    /// collection handles (#1362).
+    /// Bitmask of component slots whose component declares an out-of-line field — a <c>ComponentCollection</c> or a <c>String1024</c>. <c>EntityRefMut.Set</c>
+    /// tests it to keep the stored handles (#1362, #1094).
     /// </summary>
     internal ushort CollectionSlotMask;
 

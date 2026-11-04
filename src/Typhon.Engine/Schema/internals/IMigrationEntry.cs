@@ -25,7 +25,8 @@ internal interface IMigrationEntry
 
     /// <summary>
     /// Executes the migration on raw bytes. <paramref name="source"/> contains the old component data,
-    /// <paramref name="destination"/> receives the new component data (pre-zeroed by caller).
+    /// <paramref name="destination"/> receives the new component data (pre-zeroed by caller). <paramref name="context"/> is what a function that sets texts
+    /// writes through (#1094).
     /// </summary>
-    void Execute(ReadOnlySpan<byte> source, Span<byte> destination);
+    void Execute(ReadOnlySpan<byte> source, Span<byte> destination, MigrationContext context);
 }

@@ -13,6 +13,7 @@ namespace Typhon.Engine.Internals;
 internal sealed class TypedMigrationEntry<TOld, TNew> : IMigrationEntry where TOld : unmanaged where TNew : unmanaged
 {
     private readonly MigrationFunc<TOld, TNew> _func;
+    private readonly ContextMigrationFunc<TOld, TNew> _contextFunc;
 
     public string ComponentName { get; }
     public int FromRevision { get; }
@@ -20,9 +21,21 @@ internal sealed class TypedMigrationEntry<TOld, TNew> : IMigrationEntry where TO
     public int OldSize { get; }
     public int NewSize { get; }
 
-    public TypedMigrationEntry(MigrationFunc<TOld, TNew> func)
+    public TypedMigrationEntry(MigrationFunc<TOld, TNew> func) : this(func, null)
     {
-        ArgumentNullException.ThrowIfNull(func);
+    }
+
+    /// <summary>A migration function that sets texts through its <see cref="MigrationContext"/> (#1094).</summary>
+    public TypedMigrationEntry(ContextMigrationFunc<TOld, TNew> func) : this(null, func)
+    {
+    }
+
+    private TypedMigrationEntry(MigrationFunc<TOld, TNew> func, ContextMigrationFunc<TOld, TNew> contextFunc)
+    {
+        if (func == null && contextFunc == null)
+        {
+            throw new ArgumentNullException(nameof(func));
+        }
 
         var oldAttr = typeof(TOld).GetCustomAttribute<ComponentAttribute>();
         var newAttr = typeof(TNew).GetCustomAttribute<ComponentAttribute>();
@@ -52,6 +65,7 @@ internal sealed class TypedMigrationEntry<TOld, TNew> : IMigrationEntry where TO
         }
 
         _func = func;
+        _contextFunc = contextFunc;
         ComponentName = oldAttr.Name;
         FromRevision = oldAttr.Revision;
         ToRevision = newAttr.Revision;
@@ -59,10 +73,16 @@ internal sealed class TypedMigrationEntry<TOld, TNew> : IMigrationEntry where TO
         NewSize = Unsafe.SizeOf<TNew>();
     }
 
-    public void Execute(ReadOnlySpan<byte> source, Span<byte> destination)
+    public void Execute(ReadOnlySpan<byte> source, Span<byte> destination, MigrationContext context)
     {
         ref var oldRef = ref Unsafe.As<byte, TOld>(ref MemoryMarshal.GetReference(source));
         ref var newRef = ref Unsafe.As<byte, TNew>(ref MemoryMarshal.GetReference(destination));
+        if (_contextFunc != null)
+        {
+            _contextFunc(ref oldRef, out newRef, context ?? new MigrationContext(null));
+            return;
+        }
+
         _func(ref oldRef, out newRef);
     }
 }

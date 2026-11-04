@@ -1484,7 +1484,8 @@ internal sealed class CommandExecutor
         try
         {
             var ptr = (byte*)handle.AddrOfPinnedObject();
-            return TextToStructConverter.ReadFields(ptr, schema.StructSize, schema);
+            var table = tx.DBE.GetComponentTable(componentType);
+            return TextToStructConverter.ReadFields(ptr, schema.StructSize, schema, table == null ? null : id => EntityAccessor.ReadTextOf(table, id));
         }
         finally
         {

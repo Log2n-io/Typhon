@@ -189,7 +189,10 @@ public enum ComponentTableFlags
     None                = 0x00,
 
     /// <summary>The component declares at least one collection-typed field (variable-sized buffer storage).</summary>
-    HasCollections      = 0x01
+    HasCollections      = 0x01,
+
+    /// <summary>The component declares at least one <c>String1024</c> field, whose text lives out of line in the text segment (#1094).</summary>
+    HasText             = 0x02
 }
 
 /// <summary>
@@ -273,10 +276,14 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     internal ChunkBasedSegment<TransientStore> TransientDefaultIndexSegment { get; private set; }
     internal ChunkBasedSegment<TransientStore> TransientString64IndexSegment { get; private set; }
 
+    /// <summary>A Transient component's text segment (#1094): heap-backed like its data, so a text never outlives the process its component lives in.</summary>
+    internal ChunkBasedSegment<TransientStore> TransientTextSegment { get; private set; }
+
     // ── Transient stores (one per CBS — struct-copy of _pageCount requires independent instances) ──
     private TransientStore? _transientComponentStore;
     private TransientStore? _transientDefaultIndexStore;
     private TransientStore? _transientString64IndexStore;
+    private TransientStore? _transientTextStore;
 
     // ── SingleVersion dirty tracking (non-null only when StorageMode == SingleVersion) ──
     internal DirtyBitmap DirtyBitmap { get; private set; }
@@ -334,6 +341,15 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     /// <summary><c>true</c> when the component declares at least one collection-typed field (<see cref="ComponentTableFlags.HasCollections"/> is set).</summary>
     public bool HasCollections => (_flags & ComponentTableFlags.HasCollections) != 0;
 
+    /// <summary><c>true</c> when the component declares at least one <c>String1024</c> field (<see cref="ComponentTableFlags.HasText"/> is set).</summary>
+    public bool HasText => (_flags & ComponentTableFlags.HasText) != 0;
+
+    /// <summary>
+    /// <c>true</c> when the component holds a handle to data stored outside its value bytes — a collection or a text. The whole-value paths that log a value
+    /// check this one flag: the handle is zeroed out of the log and the referent emitted behind it (LOG-06, DC-01).
+    /// </summary>
+    internal bool HasOutOfLineData => (_flags & (ComponentTableFlags.HasCollections | ComponentTableFlags.HasText)) != 0;
+
     internal DatabaseEngine DBE { get; private set; }
     internal int ComponentOverhead => Definition.ComponentStorageOverhead;
     internal int ComponentTotalSize => Definition.ComponentStorageTotalSize;
@@ -384,10 +400,35 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     internal CollectionFieldInfo[] CollectionFields { get; private set; } = [];
 
     /// <summary>
-    /// The collection handles' byte ranges packed as <c>(offset &lt;&lt; 16) | length</c>, ready to hand to <c>CommitBatchBuilder.AddSlot</c> so the codec
-    /// zeroes them out of the logged payload (LOG-06). Offsets are relative to the component's VALUE bytes, which is exactly the span a Slot record carries.
+    /// The out-of-line handles' byte ranges — every collection field's and every text field's — packed as <c>(offset &lt;&lt; 16) | length</c>, ready to hand
+    /// to <c>CommitBatchBuilder.AddSlot</c> so the codec zeroes them out of the logged payload (LOG-06). Offsets are relative to the component's VALUE bytes,
+    /// which is exactly the span a Slot record carries.
     /// </summary>
-    internal uint[] CollectionHandleRanges { get; private set; } = [];
+    internal uint[] OutOfLineHandleRanges { get; private set; } = [];
+
+    /// <summary>One <c>String1024</c> field of this component: where its chunk handle sits inside the component's value bytes, and its schema field
+    /// id.</summary>
+    internal readonly struct TextFieldInfo
+    {
+        /// <summary>Byte offset of the 4-byte chunk handle within the component's value bytes — i.e. excluding <see cref="ComponentOverhead"/>.</summary>
+        public readonly int OffsetInComponentStorage;
+
+        /// <summary>Schema field index — the text's durable identity inside a CollectionDelta record, which carries a text as one element (#1094).</summary>
+        public readonly ushort FieldId;
+
+        /// <summary>Creates the descriptor for one text field.</summary>
+        public TextFieldInfo(int offsetInComponentStorage, ushort fieldId)
+        {
+            OffsetInComponentStorage = offsetInComponentStorage;
+            FieldId = fieldId;
+        }
+    }
+
+    /// <summary>The component's <c>String1024</c> fields, in offset order. Empty (never null) when <see cref="HasText"/> is <c>false</c>.</summary>
+    internal TextFieldInfo[] TextFields { get; private set; } = [];
+
+    /// <summary>The persistent text segment holding this component's texts; null for a Transient component or one without text fields.</summary>
+    internal ChunkBasedSegment<PersistentStore> TextSegment { get; private set; }
 
     /// <summary>
     /// Monotonically increasing counter incremented each time index layout changes (e.g., schema migration adds/removes indexes).
@@ -514,6 +555,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         BuildIndexedFieldInfo(false, changeSet);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
         BuildComponentCollectionInfo(changeSet);
+        BuildTextFieldInfo();
 
         // Derive spatial field metadata if [SpatialIndex] is present. Allocates nothing: the entities themselves are indexed by the per-cell cluster trees
         // the SpatialGrid owns, not by anything hanging off this table (#872 step 13).
@@ -592,6 +634,9 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             BuildComponentCollectionInfo(changeSet);
         }
 
+        // Text fields need no such guard: the text segment loads before any table, and no system table declares a String1024.
+        BuildTextFieldInfo();
+
         if (storageMode == StorageMode.SingleVersion)
         {
             DirtyBitmap = new DirtyBitmap(ComponentSegment.ChunkCapacity);
@@ -627,6 +672,8 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         {
             BuildComponentCollectionInfo(changeSet);
         }
+
+        BuildTextFieldInfo();
     }
 
     /// <summary>
@@ -667,6 +714,17 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
 
         BuildIndexedFieldInfo(false);
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
+        BuildTextFieldInfo();
+        if (HasText)
+        {
+            // Allocate-before-construct, see the component segment above.
+            _transientTextStore = new TransientStore(opts, dbe.MemoryAllocator, em, this);
+            var textStore = _transientTextStore.Value;
+            Span<int> textPages = stackalloc int[ComponentSegmentStartingSize];
+            textStore.AllocatePages(ref textPages, 0, null);
+            TransientTextSegment = new ChunkBasedSegment<TransientStore>(em, textStore, TextChunks.Stride);
+            TransientTextSegment.Create(PageBlockType.None, StorageSegmentKind.Text, textPages);
+        }
 
         if (IndexedFieldInfos.Length > 0)
         {
@@ -831,7 +889,7 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         if (fields == null)
         {
             CollectionFields = [];
-            CollectionHandleRanges = [];
+            RebuildOutOfLineHandleRanges();
             return;
         }
 
@@ -840,11 +898,60 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         fields.Sort(static (a, b) => a.OffsetInComponentStorage.CompareTo(b.OffsetInComponentStorage));
 
         CollectionFields = [.. fields];
-        CollectionHandleRanges = new uint[fields.Count];
-        for (var i = 0; i < fields.Count; i++)
+        RebuildOutOfLineHandleRanges();
+    }
+
+    /// <summary>
+    /// Builds <see cref="TextFields"/> from the definition and binds a persistent table that has one to the database's text segment, created on first use. A
+    /// Transient table's own heap-backed text segment is created by its caller.
+    /// </summary>
+    private void BuildTextFieldInfo()
+    {
+        List<TextFieldInfo> fields = null;
+        foreach (var field in Definition.FieldsByName.Values)
         {
-            CollectionHandleRanges[i] = ((uint)fields[i].OffsetInComponentStorage << 16) | (uint)(ushort)fields[i].HandleSize;
+            if (field.Type != FieldType.String1024 || field.IsStatic)
+            {
+                continue;
+            }
+
+            (fields ??= []).Add(new TextFieldInfo(field.OffsetInComponentStorage, (ushort)field.FieldId));
+            _flags |= ComponentTableFlags.HasText;
         }
+
+        if (fields == null)
+        {
+            TextFields = [];
+            RebuildOutOfLineHandleRanges();
+            return;
+        }
+
+        // Offset order, as the collection fields: the records a commit emits, and so the recovery fold's keys, appear in a layout-stable order.
+        fields.Sort(static (a, b) => a.OffsetInComponentStorage.CompareTo(b.OffsetInComponentStorage));
+        TextFields = [.. fields];
+        RebuildOutOfLineHandleRanges();
+        if (StorageMode != StorageMode.Transient)
+        {
+            TextSegment = DBE.GetOrCreateTextSegment();
+        }
+    }
+
+    /// <summary>Recomputes <see cref="OutOfLineHandleRanges"/> from <see cref="CollectionFields"/> and <see cref="TextFields"/>.</summary>
+    private void RebuildOutOfLineHandleRanges()
+    {
+        var ranges = new uint[CollectionFields.Length + TextFields.Length];
+        var i = 0;
+        foreach (var f in CollectionFields)
+        {
+            ranges[i++] = ((uint)f.OffsetInComponentStorage << 16) | (uint)(ushort)f.HandleSize;
+        }
+
+        foreach (var f in TextFields)
+        {
+            ranges[i++] = ((uint)f.OffsetInComponentStorage << 16) | sizeof(int);
+        }
+
+        OutOfLineHandleRanges = ranges;
     }
 
     /// <summary>
@@ -945,11 +1052,13 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
             ComponentSegment?.Dispose();
 
             // Transient segments
+            TransientTextSegment?.Dispose();
             TransientString64IndexSegment?.Dispose();
             TransientDefaultIndexSegment?.Dispose();
             TransientComponentSegment?.Dispose();
 
             // Transient stores (release heap-pinned memory blocks)
+            _transientTextStore?.Dispose();
             _transientString64IndexStore?.Dispose();
             _transientDefaultIndexStore?.Dispose();
             _transientComponentStore?.Dispose();

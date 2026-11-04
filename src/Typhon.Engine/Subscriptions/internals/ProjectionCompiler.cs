@@ -559,6 +559,7 @@ internal static class ProjectionCompiler
             Shape = field.Shape,
             ComponentCount = 1,
             TextCapacity = textCapacity,
+            OutOfLineTextComponent = source.DotNetType == typeof(Typhon.Schema.Definition.String1024) ? meta._slotToComponentType[slot] : null,
             ReferenceTarget = path == ColumnPath.EntityRef ? CodecPairing.ReferenceTarget(source.DotNetType) : null,
             Collection = collection,
         };

@@ -79,6 +79,7 @@ const PAGE_TYPE_STRIPE_ORDER: readonly DbPageType[] = [
   DbPageType.Spatial,
   DbPageType.Cluster,
   DbPageType.Vsbs,
+  DbPageType.Text,
   DbPageType.StringTable,
   DbPageType.EntityMap,
   DbPageType.System,

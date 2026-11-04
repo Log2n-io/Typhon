@@ -796,6 +796,12 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
 
             var table = _engineState.SlotToComponentTable[slotIndex];
+            if (TryGetTextField(table, fieldId, out var textField))
+            {
+                ApplyTextFold(recordPtr, table, slotIndex, textField, elements);
+                continue;
+            }
+
             if (!TryGetCollectionField(table, fieldId, out var field))
             {
                 continue;   // the schema no longer has this collection field (a migration dropped it) — nothing to restore it into
@@ -844,6 +850,67 @@ internal sealed unsafe class RecoveryApplier : IDisposable
         return buffer;
     }
 
+    /// <summary>
+    /// A text field's fold (#1094): its folded content is the text's UTF-8 bytes — one element at most, the commit having logged a Clear and the text behind
+    /// it. Written into a fresh chunk of the text segment, never into the chunk the row held before the Slot apply zeroed it: that one may be named by an
+    /// older revision or simply be torn, and the crash open's sweep frees it once nothing names it (TXT-03). Idempotent as a collection's: a re-applied window
+    /// writes the same text into another fresh chunk, and the previous pass's goes to the sweep (AP-12, AP-13).
+    /// </summary>
+    private void ApplyTextFold(byte* recordPtr, ComponentTable table, ushort slotIndex, in ComponentTable.TextFieldInfo field, List<byte[]> elements)
+    {
+        var segment = table.TextSegment;
+        if (segment == null)
+        {
+            return;   // a Transient component: never logged, never recovered
+        }
+
+        var length = 0;
+        foreach (var e in elements)
+        {
+            length += e.Length;
+        }
+
+        var chunkId = 0;
+        if (length > 0)
+        {
+            var bytes = new byte[length];
+            var at = 0;
+            foreach (var e in elements)
+            {
+                e.CopyTo(bytes, at);
+                at += e.Length;
+            }
+
+            var accessor = segment.CreateChunkAccessor(_changeSet);
+            try
+            {
+                chunkId = TextChunks.Allocate(segment, ref accessor, _changeSet, bytes.AsSpan(0, TextChunks.FitUtf8(bytes)));
+            }
+            finally
+            {
+                accessor.CommitChanges();
+                accessor.Dispose();
+            }
+        }
+
+        WriteHandle(recordPtr, table, slotIndex, field.OffsetInComponentStorage, chunkId);
+    }
+
+    private static bool TryGetTextField(ComponentTable table, ushort fieldId, out ComponentTable.TextFieldInfo field)
+    {
+        foreach (var f in table.TextFields)
+        {
+            if (f.FieldId == fieldId)
+            {
+                field = f;
+                return true;
+            }
+        }
+
+        field = default;
+        return false;
+    }
+
     private static bool TryGetCollectionField(ComponentTable table, ushort fieldId, out ComponentTable.CollectionFieldInfo field)
     {
         foreach (var f in table.CollectionFields)
@@ -860,7 +927,11 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     }
 
     /// <summary>Writes a freshly-set buffer handle into every storage home the component's value occupies.</summary>
-    private void WriteCollectionHandle(byte* recordPtr, ComponentTable table, ushort slotIndex, in ComponentTable.CollectionFieldInfo field, int bufferId)
+    private void WriteCollectionHandle(byte* recordPtr, ComponentTable table, ushort slotIndex, in ComponentTable.CollectionFieldInfo field, int bufferId) =>
+        WriteHandle(recordPtr, table, slotIndex, field.OffsetInComponentStorage, bufferId);
+
+    /// <summary>Writes an out-of-line handle at <paramref name="fieldOffset"/> into every storage home the component's value occupies.</summary>
+    private void WriteHandle(byte* recordPtr, ComponentTable table, ushort slotIndex, int fieldOffset, int bufferId)
     {
         if (_hasClusterAccessor)
         {
@@ -871,14 +942,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             var compSize = layout.ComponentSize(slotIndex);
 
             // A cluster slot carries no component overhead, so the field's value-relative offset is already slot-relative.
-            *(int*)(clusterBase + layout.ComponentOffset(slotIndex) + (slotIdx * compSize) + field.OffsetInComponentStorage) = bufferId;
+            *(int*)(clusterBase + layout.ComponentOffset(slotIndex) + (slotIdx * compSize) + fieldOffset) = bufferId;
         }
 
         if (_appliedContentChunkBySlot.TryGetValue(slotIndex, out var contentChunkId) && contentChunkId != 0)
         {
             var info = GetRecoveryInfo(table);
             byte* contentBase = info.CompContentAccessor.GetChunkAddress(contentChunkId, true);
-            *(int*)(contentBase + info.ComponentOverhead + field.OffsetInComponentStorage) = bufferId;
+            *(int*)(contentBase + info.ComponentOverhead + fieldOffset) = bufferId;
         }
     }
 

@@ -40,7 +40,11 @@ internal static class TextToStructConverter
     /// <summary>
     /// Reads all field values from a struct buffer for display.
     /// </summary>
-    public static unsafe Dictionary<string, object> ReadFields(byte* buffer, int bufferSize, ComponentSchema schema)
+    /// <param name="buffer">The component's value bytes.</param>
+    /// <param name="bufferSize">Their size.</param>
+    /// <param name="schema">The component's schema.</param>
+    /// <param name="readText">Resolves a <c>String1024</c> handle to its text (#1094); null shows the handle.</param>
+    public static unsafe Dictionary<string, object> ReadFields(byte* buffer, int bufferSize, ComponentSchema schema, Func<int, string> readText = null)
     {
         var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
@@ -51,7 +55,9 @@ internal static class TextToStructConverter
                 continue;
             }
 
-            result[field.Name] = ReadField(buffer + field.Offset, field);
+            result[field.Name] = field.Type == FieldType.String1024
+                ? ReadText(*(int*)(buffer + field.Offset), readText)
+                : ReadField(buffer + field.Offset, field);
         }
 
         return result;
@@ -105,10 +111,9 @@ internal static class TextToStructConverter
                 *(String64*)ptr = s64;
                 break;
             case FieldType.String1024:
-                var s1024 = new String1024();
-                s1024.AsString = cleanText;
-                *(String1024*)ptr = s1024;
-                break;
+                // A handle to an out-of-line text (#1094): its text is stored through the entity, never written into the value's bytes.
+                throw new NotSupportedException($"Field '{field.Name}' is a String1024, whose text is stored out of line: the shell cannot set it. Set it "
+                    + "from code with EntityRefMut.SetText.");
             case FieldType.Point2F:
             {
                 var c = ParseTupleComponents(cleanText, 2, field.Name);
@@ -208,6 +213,9 @@ internal static class TextToStructConverter
         }
     }
 
+    private static string ReadText(int chunkId, Func<int, string> readText) =>
+        chunkId == 0 ? string.Empty : readText != null ? readText(chunkId) : $"(text #{chunkId})";
+
     private static unsafe object ReadField(byte* ptr, ComponentSchema.FieldInfo field) =>
         field.Type switch
         {
@@ -224,7 +232,6 @@ internal static class TextToStructConverter
             FieldType.Long     => *(long*)ptr,
             FieldType.ULong    => *(ulong*)ptr,
             FieldType.String64     => (*(String64*)ptr).ToString(),
-            FieldType.String1024   => (*(String1024*)ptr).AsString,
             FieldType.Point2F      => *(Point2F*)ptr,
             FieldType.Point3F      => *(Point3F*)ptr,
             FieldType.Point4F      => *(Point4F*)ptr,

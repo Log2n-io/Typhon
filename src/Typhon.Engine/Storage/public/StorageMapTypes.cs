@@ -50,6 +50,9 @@ public enum StoragePageType : byte
 
     /// <summary>An engine-internal system page (UoW registry and other non-user structures).</summary>
     System,
+
+    /// <summary>A page of the out-of-line text segment backing <c>String1024</c> fields (one 1 024-byte chunk per text, #1094).</summary>
+    Text,
 }
 
 /// <summary>Runtime role of a logical segment, as reported by <see cref="DatabaseEngine.EnumerateStorageSegments"/>.</summary>
@@ -91,6 +94,9 @@ public enum StorageSegmentKind : byte
 
     /// <summary>An engine-internal system segment (UoW registry and other non-user structures).</summary>
     System,
+
+    /// <summary>The out-of-line text segment backing <c>String1024</c> fields: one 1 024-byte chunk per text (#1094).</summary>
+    Text,
 }
 
 /// <summary>
@@ -195,6 +201,18 @@ public enum StorageIntegrityIssueKind : byte
     /// reopen rebuild, spatial cluster migration) and failed to fold the entity's TSNs into the summary.
     /// </summary>
     ClusterVisibilitySummaryUnsound,
+
+    /// <summary>
+    /// A live row or a revision names a <c>String1024</c> text chunk the text segment holds free (#1094, TXT-01): the text is lost, and the next allocation
+    /// hands the chunk to another entity, which then shares it. Always a lifecycle bug — a free while a value still named the chunk.
+    /// </summary>
+    TextHandleDangling,
+
+    /// <summary>
+    /// A text chunk is allocated and no live row or revision names it (#1094, TXT-01): space held until the next crash open's sweep. A leak, never a loss —
+    /// unless a transaction still holds it, which is why the audit is meaningful only with no transaction in flight.
+    /// </summary>
+    TextChunkOrphan,
 }
 
 /// <summary>

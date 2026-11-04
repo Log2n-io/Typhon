@@ -204,6 +204,7 @@ function EncodingLegend({ encoding }: { encoding: DbMapEncoding }) {
           DbPageType.Spatial,
           DbPageType.EntityMap,
           DbPageType.System,
+          DbPageType.Text,
         ].map((t) => ({
           label: t === DbPageType.Free ? 'Free (allocated, unused)' : PAGE_TYPE_LABELS[t],
           color: rgbCss(PAGE_TYPE_RGB[t]),

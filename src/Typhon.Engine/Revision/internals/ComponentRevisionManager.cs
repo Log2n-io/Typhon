@@ -703,6 +703,7 @@ internal ref struct ComponentRevisionManager
         var contentFreeCount = 0;
         var stepProbe = ct.DBE?.CompactionStepProbe;
         Span<byte> destSpan;
+        List<int> textFrees;
 
         try
         {
@@ -849,8 +850,13 @@ internal ref struct ComponentRevisionManager
                 skipCount--;
             }
 
+            // The texts the dropped revisions name and no kept one does (#1094, TXT-01): read off the old chain while it is intact, before the rewrite.
+            textFrees = ct.HasText && contentFreeCount > 0
+                ? CollectTextFrees(ct, ref compRevTableAccessor, ref compContentAccessor, firstChunkId, contentFrees[..contentFreeCount])
+                : null;
+
             // The room for every deferred free, and the root's page, taken before the rewrite: past it, nothing may throw.
-            deferredChunkFrees?.EnsureCapacity(deferredChunkFrees.Count + contentFreeCount + chunksToFreeCount);
+            deferredChunkFrees?.EnsureCapacity(deferredChunkFrees.Count + contentFreeCount + chunksToFreeCount + (textFrees?.Count ?? 0));
             destSpan = compRevTableAccessor.GetChunkAsSpan(firstChunkId, true);
         }
         catch
@@ -874,6 +880,22 @@ internal ref struct ComponentRevisionManager
         for (var i = 0; i < contentFreeCount; i++)
         {
             DeferOrFreeContentChunk(ct, ref compContentAccessor, contentFrees[i], hasCollections, deferredChunkFrees);
+        }
+
+        // Their texts likewise, deferred with them: the last revision naming each one is gone.
+        if (textFrees != null)
+        {
+            foreach (var textChunk in textFrees)
+            {
+                if (deferredChunkFrees != null)
+                {
+                    deferredChunkFrees.Add(new DeferredCleanupManager.DeferredChunkFreeEntry { Table = ct, ChunkId = textChunk, Text = true });
+                }
+                else
+                {
+                    ct.TextSegment.FreeChunk(textChunk);
+                }
+            }
         }
 
         // The old overflow chunks, now that nothing names them: deferred with the content frees, past every transaction alive now — a rollback or a
@@ -1558,6 +1580,62 @@ internal ref struct ComponentRevisionManager
         {
             frees[count++] = chunkId;
         }
+    }
+
+    /// <summary>
+    /// The text chunks to free when a compaction drops the revisions whose content chunks are <paramref name="droppedContent"/> (#1094): those the dropped
+    /// revisions name and no kept revision does. A text is shared only by revisions of one entity — a write that leaves it unchanged copies the handle — so the
+    /// kept revisions of this chain are the only other possible holders (rule TXT-01). Reads the chain as it stands, before any rewrite; the caller holds its
+    /// exclusive lock. Null when nothing is to be freed.
+    /// </summary>
+    private static List<int> CollectTextFrees(ComponentTable ct, ref ChunkAccessor<PersistentStore> compRevTableAccessor,
+        ref ChunkAccessor<PersistentStore> compContentAccessor, int firstChunkId, ReadOnlySpan<int> droppedContent)
+    {
+        var dropped = new HashSet<int>(droppedContent.Length);
+        foreach (var c in droppedContent)
+        {
+            if (c != 0)
+            {
+                dropped.Add(c);
+            }
+        }
+
+        HashSet<int> kept = null;
+        HashSet<int> candidates = null;
+        using (var enumerator = new RevisionEnumerator(ref compRevTableAccessor, firstChunkId, false, true, CleanupLockWc))
+        {
+            while (enumerator.MoveNext())
+            {
+                var contentChunk = enumerator.Current.ComponentChunkId;
+                if (contentChunk == 0 || enumerator.Current.IsVoid)
+                {
+                    continue;
+                }
+
+                var value = compContentAccessor.GetChunkAsReadOnlySpan(contentChunk)[ct.ComponentOverhead..];
+                var isDropped = dropped.Contains(contentChunk);
+                foreach (var f in ct.TextFields)
+                {
+                    var text = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(value[f.OffsetInComponentStorage..]);
+                    if (text != 0)
+                    {
+                        (isDropped ? candidates ??= [] : kept ??= []).Add(text);
+                    }
+                }
+            }
+        }
+
+        if (candidates == null)
+        {
+            return null;
+        }
+
+        if (kept != null)
+        {
+            candidates.ExceptWith(kept);
+        }
+
+        return candidates.Count == 0 ? null : [.. candidates];
     }
 
     /// <summary>

@@ -29,8 +29,8 @@ struct ProjTag
 }
 
 /// <summary>
-/// A biography, in the owner section. A <see cref="String64"/>: a <see cref="String1024"/> cannot be in a replicated archetype at all, since cluster
-/// storage needs eight entities to a page and eight kilobytes of text do not fit one.
+/// A biography, in the owner section. A <see cref="String64"/>; a <see cref="String1024"/>, stored out of line since #1094, is covered by
+/// <see cref="TextReplicationTests"/>.
 /// </summary>
 [Component("Typhon.Test.Proj.Bio", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential, Pack = 4)]

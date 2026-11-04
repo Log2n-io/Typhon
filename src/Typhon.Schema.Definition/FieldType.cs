@@ -44,7 +44,8 @@ public enum FieldType
     Char        = 7,
     /// <summary>Fixed 64-byte inline UTF-8 string (<see cref="T:Typhon.Schema.Definition.String64"/>).</summary>
     String64    = 8,
-    /// <summary>Fixed 1024-byte inline UTF-8 string (<see cref="T:Typhon.Schema.Definition.String1024"/>).</summary>
+    /// <summary>UTF-8 text of up to 1 023 bytes stored out of line: a 4-byte chunk handle in the component (<see
+    /// cref="T:Typhon.Schema.Definition.String1024"/>).</summary>
     String1024  = 9,
     /// <summary>A <see cref="Variant"/> holding a string; reserved for a variable-length string field, which has no storage yet: no field declares it.</summary>
     String      = 10,
@@ -234,7 +235,7 @@ public static class DatabaseSchemaExtensions
             case FieldType.String: return 32;  // Don't count the overflow in VSB
             case FieldType.Variant:
             case FieldType.String64: return 64;
-            case FieldType.String1024: return 1024;
+            case FieldType.String1024: return 4;  // the handle: the text lives out of line (#1094)
 
             case FieldType.QuaternionF: return 16;
             case FieldType.QuaternionD: return 32;

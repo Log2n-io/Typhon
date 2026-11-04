@@ -1760,3 +1760,85 @@ cost 12 µs at 20M entries (#1205).
             inherited, the images-of-images cases; the count each read saw replaced by the start count, ten of twelve and the concurrent test;
             AnyEntry bounded by the start count, its test. StreamingForeachTests.AMapSplitBetweenFills_LosesAndRepeatsNothing [VerifiesRule] — a foreach
             whose map splits under it between two fills yields exactly its snapshot's entities
+
+## Module: TEXT — `String1024` stored out of line (#1094)
+
+A `String1024` field is a 4-byte handle: the id of a 1 024-byte chunk in a text segment (the database's persistent one, or a
+Transient table's own), 0 for no text. The text is out of the component so the archetype's cluster stays dense; the price is
+that the engine, not the value, owns the text. These rules are what "owns" means.
+
+### TXT-01: A text chunk has one owner: a live row, or one contiguous run of revisions of one Versioned entity `[fatal]` `[silent]`
+  invariant ∀ allocated text chunk c not held by a free quarantine: c is named by exactly one SingleVersion or Transient cluster
+            slot, or by the revisions of one Versioned entity — and those revisions are consecutive, since a store that changes a
+            text gives it a new chunk and a store that keeps it copies the handle
+  invariant ∀ handle h ≠ 0 in a live row or a revision: h names an allocated chunk no free holds back
+  never a store reuses in place a chunk a committed value still names: under Versioned, or SingleVersion under the Commit
+        discipline, the first store of a transaction takes a fresh chunk the transaction owns until it ends
+  never a chunk is freed while a value that is not being dropped names it. Revision cleanup frees a dropped revision's chunk
+        only when no kept revision names it; a whole-chain release frees each distinct chunk once; rollback frees only the
+        chunks the transaction took (and a spawn's that never lands); a conflict handler that keeps the committed text frees
+        the transaction's
+  invariant a Commit-discipline publish replaces HEAD's text only when its transaction set or cleared it — then HEAD's chunk is
+            freed; an untouched text takes HEAD's handle as it is at the publish, since staging and publish take no
+            per-entity lock (CM-03) and another publish may have replaced it since the stage
+  note: in that race the WAL carries the stager's view of the untouched text, so a crash recovers the text the stager read —
+        a committed value either way, the same last-writer-wins a scalar field of the component gets
+  scope: EntityAccessor.StoreText, EntityAccessor.ReleaseOwnedTextChunks, EntityAccessor.ReleaseOwnedTextsIn,
+         EntityAccessor.ReleaseSpawnTexts, EntityAccessor.ClearedText, Transaction.ResolveConflictUnderLock,
+         ArchetypeClusterState.ReleaseSlotTexts, ComponentRevisionManager.CollectTextFrees,
+         DeferredCleanupManager.AddChainTextFrees, Transaction.PublishStagedValue, DatabaseEngine.CheckTextChunks
+  on_violation: a dangling handle reads another entity's text once the chunk is re-issued, and the two owners free it
+                twice; a lost free leaks a kilobyte per text for the database's lifetime
+  verified: TextFieldTests.Versioned_RevisionCleanupFreesEachReplacedTextOnce [VerifiesRule] — text changes interleaved with
+            writes that keep it, then cleanup: one live chunk, zero double frees. TextFieldTests.Versioned_OlderSnapshotReadsTheOldText,
+            CommitDiscipline_HeadKeepsItsTextUntilCommit_PublishFreesTheReplacedOne, Versioned_RollbackFreesOnlyTheTransactionsChunks,
+            IntegrityCheck_FindsNoTextIssueOnAHealthyDatabase_AndBothWhenBroken [VerifiesRule] (the audit reports a dangling
+            handle and an orphan when each is staged), CommitDiscipline_TwoPublishesOverOneEntity_KeepHeadOnALiveChunk
+            [VerifiesRule] (red with the staged handle copied blindly: HEAD read the old text out of a freed chunk),
+            ASpawnThatNeverLands_GivesItsTextsBack, Versioned_AConflictHandlerKeepingTheCommittedText_FreesTheTransactionsOwn [VerifiesRule]
+            (red without the release after the handler: the dropped chunk leaked)
+
+### TXT-02: A whole-value store never changes a text `[fatal]` `[silent]`
+  invariant a `Set` / `ClusterRef.Set` keeps the handles the stored component holds: an empty one in the value takes the stored
+            one, an equal one is kept, any other is refused; a spawn's value carries no handle at all
+  invariant a cluster span (ClusterRef.GetSpan) is refused on a component with a text: a store through it bypasses the rule
+  scope: CollectionHandles.Keep, CollectionHandles.RefuseSpawnedText, Transaction.SpawnInternal, Transaction.SpawnBatch,
+         Transaction.WriteSpawnValueKeepingTexts, Transaction.RefuseSpawnedTexts, ClusterRef.GetSpan, EntityRefMut.SetText,
+         EntityRefMut.ClearText
+  on_violation: copying a handle from another entity makes two owners of one chunk (TXT-01), each freeing it; an empty
+                handle stored over a text orphans it
+  verified: TextFieldTests.Set_CarryingAnotherEntitysText_IsRefused [VerifiesRule], TextFieldTests.Spawn_WithATextHandle_IsRefused
+            [VerifiesRule], TextFieldTests.SpawnBatch_WithASharedTextHandle_IsRefused [VerifiesRule],
+            TextFieldTests.SetText_StaleCopy_IsRefused, TextFieldTests.GetSpan_OnAComponentWithAText_IsRefused
+
+### TXT-03: A crash open takes every named text chunk before the replay and frees every unnamed one after the scrub `[fatal]` `[silent]`
+  invariant before the replay allocates: ∀ handle in an allocated content chunk or a cluster slot on disk, its chunk is allocated
+            (the bitmap a crash left is not trusted to have it); the replay gives each text it applies a fresh chunk
+  invariant until that reservation, the segment allocates only past the capacity it was loaded with: a schema migration of the
+            same open writes its texts before the reservation runs
+  invariant after the scrub: ∀ allocated text chunk named by no occupied slot and no remaining revision: freed — unless a
+            persisted component or archetype this process does not load could name it, where the sweep stands down
+  scope: DatabaseEngine.ReserveTextChunksAfterCrash, DatabaseEngine.SweepTextOrphans, DatabaseEngine.CollectNamedTextChunks,
+         RecoveryApplier.ApplyTextFold, CollectionContentEmitter.EmitTexts
+  on_violation: without the reservation, the replay hands a row's text chunk to another entity and both read one text; without
+                the sweep, every chunk a replayed row held before the crash leaks
+  verified: TextDurabilityTests.CheckpointedTexts_SurviveAHardCrash_AndAreNotReissued [VerifiesRule] — texts checkpointed, half
+            rewritten, crash: every text intact, the rewritten rows' old chunks swept, and new texts after the open collide
+            with none. TextDurabilityTests.CommittedTexts_SurviveAHardCrash, TickFenceTexts_SurviveAHardCrash,
+            ClearedTexts_StayClearedAcrossAHardCrash
+
+### TXT-04: A schema migration writes its texts before its commit and frees what it unnamed only after `[fatal]` `[silent]`
+  invariant a migration into a layout with a `String1024` gives each text it produces (a widened `String64`, a
+            `MigrationContext.SetText`) a fresh chunk, never one an old value names, and saves those pages before the flip
+            that commits the migration (SCHEMA-09, DC-01)
+  invariant the chunks the migration leaves unnamed — a dropped field's, a revision it did not carry — are freed after the
+            commit, never before: until then the pre-migration image is the durable one
+  scope: TextMigration, MigrationContext, SchemaEvolutionEngine.ApplyWidening, SchemaEvolutionEngine.ConvertValue,
+         DatabaseEngine.SaveMigrationTexts, DatabaseEngine.SweepTextOrphansAfterMigration, DatabaseEngine.PrepareSchemaCommit
+  on_violation: a text freed before the commit leaves an open that fails before it with rows naming free chunks; a text
+                written after the flip leaves a durable row naming a chunk the disk never got
+  verified: TextMigrationTests.SingleVersion_WidenString64ToString1024_KeepsEveryValue [VerifiesRule],
+            TextMigrationTests.Versioned_WidenString64ToString1024_KeepsEveryValue,
+            TextMigrationTests.SingleVersion_MigrationFunction_SetsATextThroughItsContext,
+            TextMigrationTests.DroppingAString1024Field_GivesItsTextsBackOnceTheMigrationCommits [VerifiesRule],
+            TextDurabilityTests.ACrashOpenThatWidens_ReplaysOldLayoutValuesIntoTexts

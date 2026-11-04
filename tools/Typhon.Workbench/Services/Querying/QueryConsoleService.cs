@@ -244,7 +244,7 @@ public sealed class QueryConsoleService
                 {
                     var field = def[fieldId];
                     if (field == null) continue;
-                    var dto = ComponentValueDecoder.Decode(field, raw);
+                    var dto = ComponentValueDecoder.Decode(field, raw, entity.ComponentTableAt(slot));
                     cells.Add(new QueryCellDto(typeName, fieldId, field.Name, dto.Value, dto.Raw));
                 }
             }

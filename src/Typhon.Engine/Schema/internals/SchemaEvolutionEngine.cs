@@ -39,6 +39,9 @@ internal readonly struct MigrationResult
     /// </summary>
     public MigrationChain? Chain { get; init; }
 
+    /// <summary>The text segment as this migration writes to it, when the new layout has a <c>String1024</c> field (#1094); null otherwise.</summary>
+    public TextMigration Text { get; init; }
+
     /// <summary>
     /// The segments this migration replaced. Freed only once the migration has committed (SCHEMA-09): until then the persisted catalog still names them, and
     /// an open that fails before the commit must find the pre-migration image intact. Null when the migration replaced none (SingleVersion).
@@ -123,14 +126,14 @@ internal static class SchemaEvolutionEngine
     /// <paramref name="dst"/>. A field the map does not name keeps what <paramref name="dst"/> holds: zero, for a fresh value. The one remap shared by the
     /// segment migration, the cluster migration (#671) and the replay of an old-layout WAL value (#1469).
     /// </summary>
-    internal static unsafe void CopySurvivingFields(byte* src, byte* dst, FieldMapEntry[] fieldMap)
+    internal static unsafe void CopySurvivingFields(byte* src, byte* dst, FieldMapEntry[] fieldMap, TextMigration text)
     {
         for (var i = 0; i < fieldMap.Length; i++)
         {
             ref readonly var entry = ref fieldMap[i];
             if (entry.NeedsWidening)
             {
-                ApplyWidening(src + entry.OldOffset, dst + entry.NewOffset, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize);
+                ApplyWidening(src + entry.OldOffset, dst + entry.NewOffset, entry.OldType, entry.NewType, entry.OldSize, entry.NewSize, text);
             }
             else
             {
@@ -143,14 +146,17 @@ internal static class SchemaEvolutionEngine
     /// Converts one component value from <paramref name="migration"/>'s old layout at <paramref name="src"/> to its new layout at <paramref name="dst"/> (which
     /// the caller has zeroed): through the user migration chain when the migration ran one, through the field map otherwise.
     /// </summary>
-    internal static unsafe void ConvertValue(in MigrationResult migration, byte* src, int oldSize, byte* dst, int newSize)
+    internal static unsafe void ConvertValue(in MigrationResult migration, byte* src, int oldSize, byte* dst, int newSize, bool materialize)
     {
+        // A value converted only to be read (a realm key, a spatial bound) gets no text: its handles would be named by nothing.
+        var text = materialize ? migration.Text : null;
         if (migration.Chain is { } chain)
         {
             var oldValue = new ReadOnlySpan<byte>(src, oldSize);
+            var context = new MigrationContext(text);
             if (chain.MaxIntermediateSize <= 1024)
             {
-                ExecuteChainStackalloc(chain, oldValue, dst, newSize, chain.MaxIntermediateSize);
+                ExecuteChainStackalloc(chain, oldValue, dst, newSize, chain.MaxIntermediateSize, context);
                 return;
             }
 
@@ -158,7 +164,7 @@ internal static class SchemaEvolutionEngine
             var bufB = ArrayPool<byte>.Shared.Rent(chain.MaxIntermediateSize);
             try
             {
-                ExecuteChainPooled(chain, oldValue, dst, newSize, bufA, bufB);
+                ExecuteChainPooled(chain, oldValue, dst, newSize, bufA, bufB, context);
             }
             finally
             {
@@ -173,7 +179,7 @@ internal static class SchemaEvolutionEngine
             throw new InvalidOperationException("A schema migration carries neither a field map nor a migration chain.");
         }
 
-        CopySurvivingFields(src, dst, migration.FieldMap);
+        CopySurvivingFields(src, dst, migration.FieldMap, text);
     }
 
     /// <summary>
@@ -215,7 +221,7 @@ internal static class SchemaEvolutionEngine
             var dst = scratch + payload.Length;
             payload.CopyTo(new Span<byte>(src, payload.Length));
             new Span<byte>(dst, newSize).Clear();
-            ConvertValue(in migration, src, payload.Length, dst, newSize);
+            ConvertValue(in migration, src, payload.Length, dst, newSize, materialize: true);
             return new ReadOnlySpan<byte>(dst, newSize).ToArray();
         }
         finally
@@ -231,7 +237,7 @@ internal static class SchemaEvolutionEngine
     /// Applies a widening conversion from old type to new type at the given pointers.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static unsafe void ApplyWidening(byte* src, byte* dst, FieldType oldType, FieldType newType, int oldSize, int newSize)
+    internal static unsafe void ApplyWidening(byte* src, byte* dst, FieldType oldType, FieldType newType, int oldSize, int newSize, TextMigration text = null)
     {
         // Signed integer widening: sign-extend
         if (IsSignedInteger(oldType) && IsSignedInteger(newType))
@@ -281,10 +287,12 @@ internal static class SchemaEvolutionEngine
             return;
         }
 
-        // String64 → String1024: copy bytes (remaining already zero)
+        // String64 → String1024: the inline text moves out of line (#1094) — a fresh chunk of the text segment, its handle in the new field. With no text
+        // context (a value converted only to be read) the field is left empty.
         if (oldType == FieldType.String64 && newType == FieldType.String1024)
         {
-            Buffer.MemoryCopy(src, dst, newSize, oldSize);
+            var inline = new ReadOnlySpan<byte>(src, oldSize);
+            *(int*)dst = text?.Allocate(inline[..TextChunks.FitUtf8(inline)]) ?? 0;
             return;
         }
 
@@ -313,7 +321,7 @@ internal static class SchemaEvolutionEngine
     /// Migrates all occupied entities from old segment to new segment using the field map. Preserves ChunkIds by reserving the same indices in the new segment.
     /// </summary>
     internal static unsafe int MigrateEntities(ChunkBasedSegment<PersistentStore> oldSeg, ChunkBasedSegment<PersistentStore> newSeg, FieldMapEntry[] fieldMap, int oldOverhead, int newOverhead,
-        ChangeSet changeSet)
+        ChangeSet changeSet, TextMigration text = null)
     {
         var capacity = oldSeg.ChunkCapacity;
         var entitiesMigrated = 0;
@@ -347,7 +355,7 @@ internal static class SchemaEvolutionEngine
                     Buffer.MemoryCopy(oldPtr, newPtr, overheadCopySize, overheadCopySize);
                 }
 
-                CopySurvivingFields(oldPtr + oldOverhead, newPtr + newOverhead, fieldMap);
+                CopySurvivingFields(oldPtr + oldOverhead, newPtr + newOverhead, fieldMap, text);
 
                 entitiesMigrated++;
             }
@@ -471,7 +479,8 @@ internal static class SchemaEvolutionEngine
     /// Orchestrates a full compatible schema migration.
     /// </summary>
     internal static MigrationResult Migrate(ManagedPagedMMF mmf, EpochManager epochManager, SchemaDiff diff, FieldR1[] persistedFields,
-        ComponentR1 persistedComp, DBComponentDefinition newDefinition, ILogger log, Action<MigrationProgressEventArgs> progressCallback = null)
+        ComponentR1 persistedComp, DBComponentDefinition newDefinition, ILogger log, Action<MigrationProgressEventArgs> progressCallback = null,
+        TextMigration text = null)
     {
         var sw = Stopwatch.StartNew();
 
@@ -514,7 +523,7 @@ internal static class SchemaEvolutionEngine
         });
 
         // Migrate entity data
-        var entitiesMigrated = MigrateEntities(oldCompSeg, newCompSeg, fieldMap, oldOverhead, newOverhead, changeSet);
+        var entitiesMigrated = MigrateEntities(oldCompSeg, newCompSeg, fieldMap, oldOverhead, newOverhead, changeSet, text);
 
         progressCallback?.Invoke(new MigrationProgressEventArgs
         {
@@ -537,7 +546,8 @@ internal static class SchemaEvolutionEngine
             EntitiesMigrated = entitiesMigrated, TotalEntities = entitiesMigrated, PercentComplete = 90, Elapsed = sw.Elapsed,
         });
 
-        // Flush all changes to disk before updating SPIs
+        // Flush all changes to disk before updating SPIs — the texts the migration wrote included: the rows naming them follow them (DC-01).
+        text?.Save();
         changeSet.SaveChanges();
         mmf.FlushToDisk();
 
@@ -563,6 +573,7 @@ internal static class SchemaEvolutionEngine
             EntitiesMigrated = entitiesMigrated,
             ElapsedMs = sw.ElapsedMilliseconds,
             FieldMap = fieldMap,
+            Text = text,
             OldCompSize = persistedComp.CompSize,
             SupersededSegments = [oldCompSeg, oldRevSeg],
         };
@@ -575,7 +586,7 @@ internal static class SchemaEvolutionEngine
     /// </summary>
     internal static MigrationResult MigrateWithFunction(ManagedPagedMMF mmf, EpochManager epochManager, SchemaDiff diff, FieldR1[] persistedFields,
         ComponentR1 persistedComp, DBComponentDefinition newDefinition, MigrationChain chain, ILogger log,
-        Action<MigrationProgressEventArgs> progressCallback = null)
+        Action<MigrationProgressEventArgs> progressCallback = null, TextMigration text = null)
     {
         var sw = Stopwatch.StartNew();
 
@@ -620,7 +631,7 @@ internal static class SchemaEvolutionEngine
 
         // Migrate entity data using user-provided migration function(s)
         var (entitiesMigrated, failures) = MigrateEntitiesWithFunction(
-            oldCompSeg, newCompSeg, chain, oldOverhead, newOverhead, oldCompSize, newCompSize, changeSet);
+            oldCompSeg, newCompSeg, chain, oldOverhead, newOverhead, oldCompSize, newCompSize, changeSet, text);
 
         // If any entities failed, throw before updating SPIs — old segments remain untouched
         if (failures != null && failures.Count > 0)
@@ -651,7 +662,8 @@ internal static class SchemaEvolutionEngine
             EntitiesMigrated = entitiesMigrated, TotalEntities = entitiesMigrated, PercentComplete = 90, Elapsed = sw.Elapsed,
         });
 
-        // Flush all changes to disk before updating SPIs
+        // Flush all changes to disk before updating SPIs — the texts the migration wrote included: the rows naming them follow them (DC-01).
+        text?.Save();
         changeSet.SaveChanges();
         mmf.FlushToDisk();
 
@@ -683,6 +695,7 @@ internal static class SchemaEvolutionEngine
             // error. This value is about the archetype's geometry, not about this component's own migration strategy.
             OldCompSize = persistedComp.CompSize,
             Chain = chain,
+            Text = text,
             SupersededSegments = [oldCompSeg, oldRevSeg],
         };
     }
@@ -693,8 +706,9 @@ internal static class SchemaEvolutionEngine
     /// </summary>
     internal static unsafe (int EntitiesMigrated, List<MigrationFailure> Failures) MigrateEntitiesWithFunction(
         ChunkBasedSegment<PersistentStore> oldSeg, ChunkBasedSegment<PersistentStore> newSeg, MigrationChain chain,
-        int oldOverhead, int newOverhead, int oldCompSize, int newCompSize, ChangeSet changeSet)
+        int oldOverhead, int newOverhead, int oldCompSize, int newCompSize, ChangeSet changeSet, TextMigration text = null)
     {
+        var context = new MigrationContext(text);
         var capacity = oldSeg.ChunkCapacity;
         var entitiesMigrated = 0;
         List<MigrationFailure> failures = null;
@@ -749,11 +763,11 @@ internal static class SchemaEvolutionEngine
 
                     if (usePool)
                     {
-                        ExecuteChainPooled(chain, oldCompData, newPtr + newOverhead, newCompSize, pooledBufA, pooledBufB);
+                        ExecuteChainPooled(chain, oldCompData, newPtr + newOverhead, newCompSize, pooledBufA, pooledBufB, context);
                     }
                     else
                     {
-                        ExecuteChainStackalloc(chain, oldCompData, newPtr + newOverhead, newCompSize, maxBufSize);
+                        ExecuteChainStackalloc(chain, oldCompData, newPtr + newOverhead, newCompSize, maxBufSize, context);
                     }
 
                     entitiesMigrated++;
@@ -794,13 +808,14 @@ internal static class SchemaEvolutionEngine
     /// Executes a migration chain using stackalloc double-buffers (for small components ≤1024 bytes).
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)] // NoInlining to contain the stackalloc frame
-    private static unsafe void ExecuteChainStackalloc(MigrationChain chain, ReadOnlySpan<byte> oldData, byte* destPtr, int destSize, int maxBufSize)
+    private static unsafe void ExecuteChainStackalloc(MigrationChain chain, ReadOnlySpan<byte> oldData, byte* destPtr, int destSize, int maxBufSize,
+        MigrationContext context)
     {
         if (chain.StepCount == 1)
         {
             // Single-step: transform directly into destination
             var destSpan = new Span<byte>(destPtr, destSize);
-            chain.Steps[0].Execute(oldData, destSpan);
+            chain.Steps[0].Execute(oldData, destSpan, context);
             return;
         }
 
@@ -815,7 +830,7 @@ internal static class SchemaEvolutionEngine
 
         // First intermediate step: old data → bufA
         bufA.Slice(0, steps[0].NewSize).Clear();
-        steps[0].Execute(oldData, bufA.Slice(0, steps[0].NewSize));
+        steps[0].Execute(oldData, bufA.Slice(0, steps[0].NewSize), context);
 
         // Remaining steps: ping-pong between bufA and bufB
         for (int i = 1; i < steps.Length; i++)
@@ -827,13 +842,13 @@ internal static class SchemaEvolutionEngine
             if (isLast)
             {
                 var destSpan = new Span<byte>(destPtr, destSize);
-                step.Execute(src.Slice(0, steps[i - 1].NewSize), destSpan);
+                step.Execute(src.Slice(0, steps[i - 1].NewSize), destSpan, context);
             }
             else
             {
                 var dst = (i % 2 != 0) ? bufB : bufA;
                 dst.Slice(0, step.NewSize).Clear();
-                step.Execute(src.Slice(0, steps[i - 1].NewSize), dst.Slice(0, step.NewSize));
+                step.Execute(src.Slice(0, steps[i - 1].NewSize), dst.Slice(0, step.NewSize), context);
             }
         }
     }
@@ -841,12 +856,13 @@ internal static class SchemaEvolutionEngine
     /// <summary>
     /// Executes a migration chain using ArrayPool-rented buffers (for large components &gt;1024 bytes).
     /// </summary>
-    private static unsafe void ExecuteChainPooled(MigrationChain chain, ReadOnlySpan<byte> oldData, byte* destPtr, int destSize, byte[] bufA, byte[] bufB)
+    private static unsafe void ExecuteChainPooled(MigrationChain chain, ReadOnlySpan<byte> oldData, byte* destPtr, int destSize, byte[] bufA, byte[] bufB,
+        MigrationContext context)
     {
         if (chain.StepCount == 1)
         {
             var destSpan = new Span<byte>(destPtr, destSize);
-            chain.Steps[0].Execute(oldData, destSpan);
+            chain.Steps[0].Execute(oldData, destSpan, context);
             return;
         }
 
@@ -861,13 +877,13 @@ internal static class SchemaEvolutionEngine
             if (isLast)
             {
                 var destSpan = new Span<byte>(destPtr, destSize);
-                step.Execute(currentSrc, destSpan);
+                step.Execute(currentSrc, destSpan, context);
             }
             else
             {
                 var dst = (i % 2 == 0) ? bufA.AsSpan() : bufB.AsSpan();
                 dst.Slice(0, step.NewSize).Clear();
-                step.Execute(currentSrc, dst.Slice(0, step.NewSize));
+                step.Execute(currentSrc, dst.Slice(0, step.NewSize), context);
                 currentSrc = dst.Slice(0, step.NewSize);
             }
         }

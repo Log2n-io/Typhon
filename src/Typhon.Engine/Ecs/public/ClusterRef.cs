@@ -255,6 +255,12 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         {
             ThrowWritableIndexedMemory(slot, nameof(GetSpan));
         }
+        if (_state?.OutOfLineTableBySlot?[slot]?.HasText == true)
+        {
+            // A whole-value store through the span would drop or duplicate a text handle, which the engine owns (TXT-02, #1094).
+            ThrowHelper.ThrowInvalidOp("GetSpan on a component with a String1024 field: a store through the span could drop or copy a text handle. Use "
+                + "ClusterRef.Set, which keeps the stored handles, and EntityRefMut.SetText for the text.");
+        }
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
         {
             ThrowHelper.ThrowInvalidOp(
@@ -338,6 +344,29 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         NotePageWritten(componentSlot);
     }
 
+    /// <summary>
+    /// The text of <paramref name="field"/>, a <see cref="String1024"/> field of a value of <paramref name="comp"/> read from this cluster (its span, or a
+    /// copy of one of its elements); empty for no text. One indirection into the text segment per call (#1094).
+    /// </summary>
+    public readonly string ReadText<T>(Comp<T> comp, in String1024 field) where T : unmanaged =>
+        EntityAccessor.ReadTextOf(TextTableOf(comp._componentTypeId), field._chunkId);
+
+    /// <summary>Copies the UTF-8 text of <paramref name="field"/> into <paramref name="utf8"/> and returns the bytes copied, as
+    /// <c>EntityRef.ReadText</c>.</summary>
+    public readonly int ReadText<T>(Comp<T> comp, in String1024 field, Span<byte> utf8) where T : unmanaged =>
+        EntityAccessor.ReadTextOf(TextTableOf(comp._componentTypeId), field._chunkId, utf8);
+
+    private readonly ComponentTable TextTableOf(int componentTypeId)
+    {
+        var table = _state?.OutOfLineTableBySlot?[_meta.GetSlot(componentTypeId)];
+        if (table == null || !table.HasText)
+        {
+            ThrowHelper.ThrowInvalidOp($"Component type {componentTypeId} of this cluster declares no String1024 field.");
+        }
+
+        return table;
+    }
+
     /// <summary>Get a read-only span of component data for all N slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
@@ -415,26 +444,14 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var stored = (T*)(ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T));
         if ((_meta.CollectionSlotMask & (1 << slot)) != 0)
         {
-            CollectionHandles.Keep(CollectionFieldsOf(slot), (byte*)&copy, (byte*)stored, false, typeof(T).Name);   // as EntityRefMut.Set (#1362)
+            CollectionHandles.Keep(_state.OutOfLineTableBySlot[slot], (byte*)&copy, (byte*)stored, false);   // as EntityRefMut.Set (#1362)
         }
         RecordWrite(slot, slotIndex, (byte*)&copy);
         *stored = copy;
         NotePageWritten(slot);
     }
 
-    /// <summary>The collection fields of SingleVersion component <paramref name="slot"/> — the only kind a <c>Set</c> here writes.</summary>
-    private readonly ComponentTable.CollectionFieldInfo[] CollectionFieldsOf(byte slot)
-    {
-        foreach (var s in _state.CollectionSlots)
-        {
-            if (s.Slot == slot)
-            {
-                return s.Fields;
-            }
-        }
 
-        return [];
-    }
 
     /// <summary>
     /// Store several entities' values of a component in one call: <see cref="Set{T}(Comp{T}, int, in T)"/> for every slot of <paramref name="slots"/>,
@@ -504,12 +521,12 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.NoInlining)]
     private readonly void SetKeepingCollections<T>(byte slot, ulong slots, scoped ReadOnlySpan<T> values, T* column) where T : unmanaged
     {
-        var fields = CollectionFieldsOf(slot);
+        var table = _state.OutOfLineTableBySlot[slot];
         for (var rest = slots; rest != 0; rest &= rest - 1)
         {
             var i = BitOperations.TrailingZeroCount(rest);
             var copy = values[i];   // on the stack
-            CollectionHandles.Keep(fields, (byte*)&copy, (byte*)(column + i), false, typeof(T).Name);
+            CollectionHandles.Keep(table, (byte*)&copy, (byte*)(column + i), false);
         }
 
         RecordWrites(slot, slots, values);
@@ -517,7 +534,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         {
             var i = BitOperations.TrailingZeroCount(rest);
             var copy = values[i];
-            CollectionHandles.Keep(fields, (byte*)&copy, (byte*)(column + i), false, typeof(T).Name);
+            CollectionHandles.Keep(table, (byte*)&copy, (byte*)(column + i), false);
             column[i] = copy;
         }
 

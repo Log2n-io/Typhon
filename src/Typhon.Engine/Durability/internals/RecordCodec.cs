@@ -600,7 +600,7 @@ internal static class RecordCodec
     /// </summary>
     /// <remarks>
     /// A single self-describing span rather than the parallel (ranges, per-column counts) pair: the emitter builds this once per archetype from each
-    /// column's <c>ComponentTable.CollectionHandleRanges</c>, and one span cannot get out of step with itself the way two can.
+    /// column's <c>ComponentTable.OutOfLineHandleRanges</c>, and one span cannot get out of step with itself the way two can.
     /// </remarks>
     internal static ulong PackColumnHandleRange(int column, int offsetInComponent, int length) =>
         ((ulong)(uint)column << 32) | ((uint)offsetInComponent << 16) | (uint)(ushort)length;

@@ -1273,6 +1273,9 @@ public partial class DatabaseEngine
         // ─── Cluster MVCC visibility summary ─
         CheckClusterVisibilitySummaries(issues, out var visibilityClustersChecked);
 
+        // ─── String1024 text ownership (TXT-01) ─
+        CheckTextChunks(issues);
+
         return new StorageIntegrityReport
         {
             Issues = issues,
@@ -1460,6 +1463,7 @@ public partial class DatabaseEngine
         StorageSegmentKind.EntityMap => StoragePageType.EntityMap,
         StorageSegmentKind.ComponentCollection => StoragePageType.Vsbs,
         StorageSegmentKind.System => StoragePageType.System,
+        StorageSegmentKind.Text => StoragePageType.Text,
         _ => StoragePageType.Unknown,
     };
 }

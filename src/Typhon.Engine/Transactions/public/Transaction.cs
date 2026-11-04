@@ -306,6 +306,13 @@ public unsafe partial class Transaction : EntityAccessor
         // Clean up ECS state BEFORE nulling _dbe — CleanupEcsState needs _dbe._archetypeStates
         CleanupEcsState();
 
+        // A rolled-back transaction's text chunks: never committed, named by nothing that survives it (#1094). After CleanupEcsState, which frees the ones
+        // its spawns' payloads name and takes them out of the set. A transaction whose rollback failed keeps neither: the base reset drops the set (a leak).
+        if (State == TransactionState.Rollbacked)
+        {
+            ReleaseOwnedTextChunks();
+        }
+
         // After CleanupEcsState, which still reads staged payloads to release ComponentCollection buffers (DC-01), and before the base reset. Rewinds only —
         // the blocks are kept for this pooled instance's next use. TransactionChain frees them when the instance is discarded rather than pooled.
         ResetSpawnArena();
@@ -378,6 +385,13 @@ public unsafe partial class Transaction : EntityAccessor
     {
         CheckConfig.Require(CheckConfig.Enabled, IsLegalTransition(State, newState), $"Illegal transaction state transition: {State} → {newState}");
         State = newState;
+
+        // The text chunks this transaction took under copy-on-write stores (#1094): the committed values that name them own them now. A rollback's are
+        // released at the reset (ResetCore), after the spawn payloads give back theirs.
+        if (newState == TransactionState.Committed)
+        {
+            AdoptOwnedTextChunks();
+        }
     }
 
     private static bool IsLegalTransition(TransactionState from, TransactionState to) => (from, to) switch
@@ -2451,6 +2465,19 @@ public unsafe partial class Transaction : EntityAccessor
 
             conflictSolver.Setup(pk, info, readChunkAddr, committedChunkAddr, committingChunkAddr, toCommitChunkAddr, readCompChunkId == 0);
             context.Handler(ref conflictSolver);
+
+            // A text this transaction set that the resolved value no longer names — the handler kept the committed one — is no one's (#1094, TXT-01).
+            if (info.ComponentTable.HasText)
+            {
+                foreach (var f in info.ComponentTable.TextFields)
+                {
+                    var set = TextChunks.HandleAt(committingChunkAddr, f.OffsetInComponentStorage);
+                    if (context.Tx != null && context.Tx.OwnsTextChunk(set) && TextChunks.HandleAt(toCommitChunkAddr, f.OffsetInComponentStorage) != set)
+                    {
+                        context.Tx.ReleaseOwnedTextChunk(set);
+                    }
+                }
+            }
         }
         finally
         {
@@ -3676,7 +3703,7 @@ public unsafe partial class Transaction : EntityAccessor
                 ReconcileClusterIndexAndViews(es, clusterState, compSlot, clusterChunkId, clusterLocation, entityId, headPtr, staged);
             }
 
-            PublishStagedValue(info, clusterState, compSlot, clusterChunkId, slotIndex, headPtr, staged, compSize);
+            PublishStagedValue(info, clusterState, compSlot, clusterChunkId, slotIndex, headPtr, staged, compSize, pk);
         }
         finally
         {
@@ -3688,8 +3715,9 @@ public unsafe partial class Transaction : EntityAccessor
     }
 
     /// <summary>The staged value's collection references given back: a staged write <see cref="PublishStagedEntry"/> drops, its entity destroyed.</summary>
-    private static void ReleaseStagedCollections(ComponentTable table, byte* staged)
+    private void ReleaseStagedCollections(ComponentTable table, byte* staged)
     {
+        ReleaseStagedTexts(table, staged);
         if (!table.HasCollections)
         {
             return;
@@ -3701,9 +3729,15 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>
+    /// A staged value that is never published gives back the text chunks it took (#1094): those this transaction owns. A handle it shares with HEAD is HEAD's.
+    /// Each handle is zeroed once released, so a second pass releases nothing twice.
+    /// </summary>
+    private void ReleaseStagedTexts(ComponentTable table, byte* staged) => ReleaseOwnedTextsIn(table, staged);
+
     /// <summary>The HEAD half of <see cref="PublishStagedEntry"/>: the staged value copied over HEAD, HEAD's collection references given back.</summary>
     private void PublishStagedValue(ComponentInfo info, ArchetypeClusterState clusterState, int compSlot, int clusterChunkId, byte slotIndex, byte* headPtr,
-        byte* staged, int compSize)
+        byte* staged, int compSize, long pk)
     {
         // HEAD's collection handles, read before the memcpy replaces them: HEAD's references are given back once the staged value — which holds its own
         // (ShareStagedCollections) — has taken HEAD's place (#1362). Never before: HEAD would name a buffer freed under it.
@@ -3715,11 +3749,40 @@ public unsafe partial class Transaction : EntityAccessor
             replacedHandles[i] = Unsafe.ReadUnaligned<int>(headPtr + collectionFields[i].OffsetInComponentStorage);
         }
 
+        // HEAD's texts (#1094, TXT-01). The staged value took its handles when it was staged, and HEAD may have changed since — another Commit-discipline
+        // publish, a TickFence writer: staging and publish take no per-entity lock (CM-03). So a text this transaction did not change takes HEAD's handle
+        // as it is NOW, and frees nothing; one it set (a chunk it owns) or cleared replaces HEAD's, which then goes. Copying the staged handle blindly let a
+        // second publish restore a handle the first had freed.
+        var textFields = table.HasText ? table.TextFields : null;
+        var replacedTexts = textFields != null ? stackalloc int[textFields.Length] : default;
+        for (var i = 0; i < replacedTexts.Length; i++)
+        {
+            var offset = textFields[i].OffsetInComponentStorage;
+            var head = TextChunks.HandleAt(headPtr, offset);
+            var mine = TextChunks.HandleAt(staged, offset);
+            if (OwnsTextChunk(mine) || ClearedText(table, pk, offset))
+            {
+                replacedTexts[i] = head != mine ? head : 0;
+            }
+            else
+            {
+                TextChunks.SetHandleAt(staged, offset, head);
+            }
+        }
+
         // Visibility act: publish the staged value to the cluster HEAD, then mark dirty (CM-03: memcpy THEN dirty).
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
         for (var i = 0; i < replacedHandles.Length; i++)
         {
             ReleaseCollectionBuffer(collectionFields[i], replacedHandles[i]);
+        }
+
+        for (var i = 0; i < replacedTexts.Length; i++)
+        {
+            if (replacedTexts[i] != 0)
+            {
+                table.TextSegment.FreeChunk(replacedTexts[i]);
+            }
         }
         // Same as the Versioned publish above: compSlot is the component being published, so name it rather than falling back to "emit everything" (M31).
         clusterState.SetDirty(clusterChunkId, slotIndex, compSlot);
@@ -3770,7 +3833,7 @@ public unsafe partial class Transaction : EntityAccessor
         foreach (var info in _componentInfos.Values)
         {
             var table = info.ComponentTable;
-            if (info.CommitStaged is not { Count: > 0 } || table.StorageMode != StorageMode.SingleVersion || !table.HasCollections)
+            if (info.CommitStaged is not { Count: > 0 } || table.StorageMode != StorageMode.SingleVersion || !table.HasOutOfLineData)
             {
                 continue;
             }
@@ -3783,6 +3846,7 @@ public unsafe partial class Transaction : EntityAccessor
                 }
 
                 var value = _commitStagingBuffer + staged.Value.Offset;
+                ReleaseStagedTexts(table, value);
                 foreach (var f in table.CollectionFields)
                 {
                     var bufferId = Unsafe.ReadUnaligned<int>(value + f.OffsetInComponentStorage);
@@ -4036,8 +4100,8 @@ public unsafe partial class Transaction : EntityAccessor
                         var payload = new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize);
                         // Wire identity is the per-archetype slot (LOG-06); here it's the spawn-iteration slot index.
                         var value = payload.Slice(info.ComponentOverhead, table.ComponentStorageSize);
-                        batch.AddSlot((long)s.Id.RawValue, (ushort)slot, value, table.CollectionHandleRanges);
-                        if (table.HasCollections)
+                        batch.AddSlot((long)s.Id.RawValue, (ushort)slot, value, table.OutOfLineHandleRanges);
+                        if (table.HasOutOfLineData)
                         {
                             CollectionContentEmitter.Emit(ref batch, table, (long)s.Id.RawValue, (ushort)slot, value);
                         }
@@ -4076,8 +4140,8 @@ public unsafe partial class Transaction : EntityAccessor
                 // THIS entity's archetype (routing id embedded in the PK).
                 var slot = (ushort)_dbe.GetMetaByRouting(EntityId.FromRaw(cacheEntry.Key).ArchetypeId).GetSlot(componentTypeId);
                 var value = payload.Slice(overhead, storageSize);
-                batch.AddSlot(cacheEntry.Key, slot, value, info.ComponentTable.CollectionHandleRanges);
-                if (info.ComponentTable.HasCollections)
+                batch.AddSlot(cacheEntry.Key, slot, value, info.ComponentTable.OutOfLineHandleRanges);
+                if (info.ComponentTable.HasOutOfLineData)
                 {
                     // The value read above is the NEW revision's content chunk, so its handle is the post-copy-on-write buffer — this transaction's own view.
                     CollectionContentEmitter.Emit(ref batch, info.ComponentTable, cacheEntry.Key, slot, value);
@@ -4093,8 +4157,8 @@ public unsafe partial class Transaction : EntityAccessor
                 {
                     var slot = (ushort)_dbe.GetMetaByRouting(EntityId.FromRaw(staged.Key).ArchetypeId).GetSlot(componentTypeId);
                     var value = new ReadOnlySpan<byte>(_commitStagingBuffer + staged.Value.Offset, storageSize);
-                    batch.AddSlot(staged.Key, slot, value, info.ComponentTable.CollectionHandleRanges);
-                    if (info.ComponentTable.HasCollections)
+                    batch.AddSlot(staged.Key, slot, value, info.ComponentTable.OutOfLineHandleRanges);
+                    if (info.ComponentTable.HasOutOfLineData)
                     {
                         CollectionContentEmitter.Emit(ref batch, info.ComponentTable, staged.Key, slot, value);
                     }
@@ -4424,7 +4488,7 @@ public unsafe partial class Transaction : EntityAccessor
             _dbe.CommitAfterReserveProbe?.Invoke();
 
             var conflictSolver = handler != null ? ConcurrencyConflictSolver.GetConflictSolver() : null;
-            var context = new CommitContext { Solver = conflictSolver, Handler = handler };
+            var context = new CommitContext { Solver = conflictSolver, Handler = handler, Tx = this };
 #pragma warning disable CS9093 // ref-assign is safe: CommitContext is a ref struct that never escapes this method
             context.Ctx = ref ctx;
 #pragma warning restore CS9093

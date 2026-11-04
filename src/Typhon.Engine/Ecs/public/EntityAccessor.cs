@@ -839,6 +839,10 @@ public partial class EntityAccessor : IDisposable
     /// <summary>Reset base fields for reuse. Subclasses call this AFTER their own cleanup.</summary>
     private protected virtual void ResetCore()
     {
+        // A pooled accessor never inherits text chunks: one that ended without a commit or a rollback (a failed rollback) leaks them, rather than letting
+        // its next use rewrite or free a chunk another value owns since (#1094).
+        _ownedTextChunks?.Clear();
+        _clearedTexts?.Clear();
         _dbe = null;
         _epochManager = null;
         _owningThreadId = 0;

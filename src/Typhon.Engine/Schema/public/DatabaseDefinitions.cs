@@ -225,7 +225,8 @@ public class DatabaseDefinitions
     private static void ThrowUnmappableField(Type componentType, string fieldName, Type fieldType) =>
         throw new InvalidOperationException(
             $"Component '{componentType.Name}' field '{fieldName}' has type '{fieldType.Name}', which has no schema field type. Use one of the supported "
-            + "types (the primitives, String64 / String1024 / Variant, the Point / Quaternion / AABB / BSphere families, a nested [Component] "
+            + "types (the primitives, String64 / String1024 (stored out of line) / Variant, the Point / Quaternion / AABB / BSphere families, a nested "
+            + "[Component] "
             + "struct, ComponentCollection<T>, EntityId, or EntityLink<T> for a typed entity reference). A field with no schema type was previously dropped "
             + "silently, which left it invisible to the Workbench, un-indexable and absent from replication.");
 
@@ -289,6 +290,65 @@ public class DatabaseDefinitions
         }
 
         return new ComponentSchemaSpec(ca.Name ?? t.Name, ca.Revision, fields.ToArray(), ca.StorageMode, ca.DefaultDiscipline);
+    }
+
+    /// <summary>
+    /// A <see cref="String1024"/> is a handle the engine owns the text of (#1094), so it may only be a top-level, single, unindexed field of a component: the
+    /// engine finds its handles by the component's own fields. Nested in a <c>[Component]</c> struct or a collection element, or as an array, its handles would
+    /// be bytes nobody frees, logs or recovers. An index would key on the handle, not the text.
+    /// </summary>
+    private static void RefuseMisplacedText(Type pocoType, string componentName, in ComponentFieldSpec f, FieldType fieldType)
+    {
+        var where = $"Component '{pocoType?.Name ?? componentName}' field '{f.Name}'";
+        if (fieldType == FieldType.String1024)
+        {
+            if (f.HasIndex)
+            {
+                throw new InvalidOperationException($"{where} is a String1024 with an [Index]: a String1024 is stored out of line and cannot be "
+                    + "indexed. Index a String64 instead.");
+            }
+
+            if (f.ArrayLength > 0)
+            {
+                throw new InvalidOperationException($"{where} is an array of String1024: declare each text as its own field.");
+            }
+
+            return;
+        }
+
+        if ((fieldType == FieldType.Collection || fieldType == FieldType.Component) && f.DotNetType != null)
+        {
+            var nested = fieldType == FieldType.Collection ? f.DotNetType.GenericTypeArguments[0] : f.DotNetType;
+            if (HoldsText(nested, 0))
+            {
+                var what = fieldType == FieldType.Collection ? "collection whose element" : "nested component that";
+                throw new InvalidOperationException($"{where} is a {what} holds a String1024. A String1024 can only be a field of the component itself, "
+                    + "where the engine owns its text.");
+            }
+        }
+    }
+
+    private static bool HoldsText(Type t, int depth)
+    {
+        if (t == typeof(String1024))
+        {
+            return true;
+        }
+
+        if (depth > 8 || !t.IsValueType || t.IsPrimitive || t.IsEnum)
+        {
+            return false;
+        }
+
+        foreach (var fi in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            if (HoldsText(fi.FieldType, depth + 1))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -368,6 +428,11 @@ public class DatabaseDefinitions
                 }
 
                 ThrowUnmappableField(pocoType, f.Name, f.DotNetType);
+            }
+
+            if (!f.IsStatic)
+            {
+                RefuseMisplacedText(pocoType, spec.Name, f, fieldType);
             }
 
             var resolvedId = resolver?.ResolveFieldId(f.Name, f.PreviousName, f.ExplicitFieldId) ?? (f.ExplicitFieldId ?? fieldId++);

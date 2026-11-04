@@ -306,6 +306,9 @@ public static class DatabaseSchema
 
         public void RegisterMigration<TOld, TNew>(MigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged => Registry.Register(func);
 
+        public void RegisterMigration<TOld, TNew>(ContextMigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged =>
+            Registry.Register(func);
+
         public void RegisterByteMigration(string name, int fromRev, int toRev, int oldSize, int newSize, ByteMigrationFunc func) =>
             Registry.RegisterByte(name, fromRev, toRev, oldSize, newSize, func);
     }

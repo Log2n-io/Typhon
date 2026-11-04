@@ -44,5 +44,5 @@ internal sealed class ByteMigrationEntry : IMigrationEntry
         NewSize = newSize;
     }
 
-    public void Execute(ReadOnlySpan<byte> source, Span<byte> destination) => _func(source, destination);
+    public void Execute(ReadOnlySpan<byte> source, Span<byte> destination, MigrationContext context) => _func(source, destination);
 }

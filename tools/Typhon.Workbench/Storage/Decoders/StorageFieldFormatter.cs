@@ -48,8 +48,10 @@ internal static class StorageFieldFormatter
                 return bytes.Length >= 4 ? Round(BinaryPrimitives.ReadSingleLittleEndian(bytes)) : Hex(bytes);
             case FieldType.Double:
                 return bytes.Length >= 8 ? Round(BinaryPrimitives.ReadDoubleLittleEndian(bytes)) : Hex(bytes);
-            case FieldType.String64:
             case FieldType.String1024:
+                // A chunk handle into the text segment (#1094): the page holds no text to show.
+                return bytes.Length >= 4 ? TextHandle(BinaryPrimitives.ReadInt32LittleEndian(bytes)) : Hex(bytes);
+            case FieldType.String64:
             case FieldType.String:
             case FieldType.Variant:
                 return InlineString(bytes);
@@ -75,6 +77,9 @@ internal static class StorageFieldFormatter
                 return Hex(bytes);
         }
     }
+
+    /// <summary>A String1024 chunk handle (#1094): the page holds the handle, not the text.</summary>
+    private static string TextHandle(int chunkId) => chunkId == 0 ? "(no text)" : $"text #{chunkId}";
 
     /// <summary>UTF-8 of an inline fixed string, trimmed at the first NUL; non-printable content falls back to hex.</summary>
     private static string InlineString(ReadOnlySpan<byte> bytes)

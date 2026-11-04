@@ -147,7 +147,7 @@ public sealed class DataBrowserService
                     && definitions.TryGetValue(spec.TypeName, out var def)
                     && spec.FieldId >= 0 && spec.FieldId < def.MaxFieldId && def[spec.FieldId] is { } field)
                 {
-                    values[s] = ComponentValueDecoder.Decode(field, entity.ReadRaw(slot));
+                    values[s] = ComponentValueDecoder.Decode(field, entity.ReadRaw(slot), entity.ComponentTableAt(slot));
                 }
                 else
                 {
@@ -223,7 +223,7 @@ public sealed class DataBrowserService
                 fields = new ComponentValueDto[ordered.Length];
                 for (var f = 0; f < ordered.Length; f++)
                 {
-                    fields[f] = ComponentValueDecoder.Decode(ordered[f], raw);
+                    fields[f] = ComponentValueDecoder.Decode(ordered[f], raw, entity.ComponentTableAt(slot));
                 }
             }
             else
