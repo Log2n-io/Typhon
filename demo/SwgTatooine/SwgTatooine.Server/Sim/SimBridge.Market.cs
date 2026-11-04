@@ -854,12 +854,34 @@ public sealed partial class SimBridge
         }
     }
 
+    // The mail the Market's transaction sends its sellers (mail.md § 5): handed to the Workshop's queue only once it commits.
+    private readonly List<(long Owner, byte Kind, long Ref, string Subject, string Text)> _marketMail = [];
+
+    private static readonly string[] MkNumerals = ["", "I", "II", "III", "IV", "V"];
+
+    /// <summary>What a listing holds, as a mail names it: <c>50 Hide Mk II</c>, <c>DL-44 Blaster Mk I</c>.</summary>
+    private static string ListingWhat(ushort template, byte mk, int units)
+    {
+        var name = ItemCatalog.TryGet(template, out var t) ? t.Name : "Unknown";
+        var numeral = mk is >= 1 and <= 5 ? " Mk " + MkNumerals[mk] : "";
+        return units > 1 ? FormattableString.Invariant($"{units:N0} {name}{numeral}") : name + numeral;
+    }
+
     /// <summary>
-    /// The desk's transaction ended. Committed: its counts and the book's are published, and the prices it sold at join their rings. Not, and it wrote
-    /// anything: the book is read again on the next use.
+    /// The desk's transaction ended. Committed: its counts and the book's are published, the prices it sold at join their rings, and its mail is queued.
+    /// Not, and it wrote anything: the book is read again on the next use, and its mail dropped with it.
     /// </summary>
     private void EndMarket(bool committed)
     {
+        if (committed)
+        {
+            foreach (var (owner, kind, reference, subject, text) in _marketMail)
+            {
+                QueueSystemMail(owner, kind, reference, subject, text);
+            }
+        }
+
+        _marketMail.Clear();
         if (committed)
         {
             Interlocked.Add(ref _marketSales, _marketCounts.Sales);
@@ -1051,7 +1073,7 @@ public sealed partial class SimBridge
         // equipped one is unequipped first.
         var item = EntityId.FromRawValue(v.Item);
         var stats = ItemCatalog.HasStats(v.Template);
-        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk, v.Quantity) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
+        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk, (int)v.Quantity) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketNoItems);
             return;
@@ -1097,7 +1119,7 @@ public sealed partial class SimBridge
         CountListing(entry, +1);
         MarkCityDirty(in entry.L);
         _marketWritten = true;
-        if (ItemTransfer(tx, seller, key, v.Template, v.Mk, v.Quantity, ItemMoveKind.List, key, worldTick, item) != v.Quantity
+        if (ItemTransfer(tx, seller, key, v.Template, v.Mk, (int)v.Quantity, ItemMoveKind.List, key, worldTick, item) != v.Quantity
             || !Transfer(tx, seller, EconomyLedger.World, fee, TransferKind.ListFee, key, worldTick))
         {
             _marketAbort = true;
@@ -1202,6 +1224,7 @@ public sealed partial class SimBridge
         // Validated: the sale, the tax, the state, and — here, with room — the goods.
         _marketWritten = true;
         var seller = entry.L.Seller;
+        var units = entry.L.Quantity;
         var tax = TatooineData.SalesTax(total);
         if (!Transfer(tx, buyer, seller, total, TransferKind.Sale, listingKey, worldTick)
             || (tax > 0 && !Transfer(tx, seller, EconomyLedger.World, tax, TransferKind.Tax, listingKey, worldTick))
@@ -1213,6 +1236,11 @@ public sealed partial class SimBridge
         }
 
         _pendingSalePrices.Add((KeyOf(entry.L.Template, entry.L.Mk), entry.L.UnitPrice));
+        // The seller is told by mail (mail.md § 5): the sale may happen while they are offline, or far from any chat that would keep it.
+        var what = ListingWhat(entry.L.Template, entry.L.Mk, units);
+        _marketMail.Add((seller, MailKind.Sold, listingKey, $"Sold: {what}",
+            FormattableString.Invariant(
+                $"{NameOfOther(tx, buyer)} bought your {what} for {total:N0} cr, {tax:N0} cr of it sales tax. The credits are in your wallet.")));
         _marketCounts.Sales++;
         _marketCounts.Volume += total;
         _marketCounts.SalesTax += tax;
@@ -1352,7 +1380,7 @@ public sealed partial class SimBridge
 
         var item = EntityId.FromRawValue(v.Item);
         var stats = ItemCatalog.HasStats(v.Template);
-        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk, v.Quantity) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
+        if (stats ? !HoldsInstance(seller, item, v.Template, v.Mk, (int)v.Quantity) : UnitsOf(ItemsOf(seller), v.Template, v.Mk) < v.Quantity)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketNoItems);
             return;
@@ -1361,7 +1389,7 @@ public sealed partial class SimBridge
         // An item with stats is paid by the condition it has left (Loïc, 2026-11-03): one sold worn pays for what it still has, and one broken, or worn
         // so far that it pays nothing, is taken for nothing — scrapped, its end a decay row, not a sale. Selling worn gear at its full value made the end
         // of an item's life a faucet, and items were sold long before their repairs were used.
-        var payout = MarketValues.VendorPayout(v.Template, v.Mk, v.Quantity);
+        var payout = MarketValues.VendorPayout(v.Template, v.Mk, (int)v.Quantity);
         var worn = default(ItemInstance);
         var scrap = false;
         if (stats && TryStatsOf(tx, item, out worn) && worn.MaxCondition > 0)
@@ -1397,7 +1425,7 @@ public sealed partial class SimBridge
         _marketWritten = true;
         var firstItemSeq = _itemHead.LastSeq + 1;
         var creditSeq = _head.LastSeq + 1;
-        if (ItemTransfer(tx, seller, ItemLedger.World, v.Template, v.Mk, v.Quantity, ItemMoveKind.Vendor, creditSeq, worldTick, item) != v.Quantity
+        if (ItemTransfer(tx, seller, ItemLedger.World, v.Template, v.Mk, (int)v.Quantity, ItemMoveKind.Vendor, creditSeq, worldTick, item) != v.Quantity
             || !Transfer(tx, EconomyLedger.World, seller, payout, TransferKind.Vendor, firstItemSeq, worldTick))
         {
             _marketAbort = true;
@@ -1504,7 +1532,7 @@ public sealed partial class SimBridge
         var v = command.Value;
         var quantity = Math.Max(1, (int)v.Quantity);
         var price = Equipment.StandardMaterialPrice(v.Template, quantity);
-        if (quantity > ItemLedger.StackMax || price <= 0)
+        if (quantity > Equipment.StandardMaterialMax || price <= 0)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
             return;
@@ -1572,12 +1600,17 @@ public sealed partial class SimBridge
         foreach (var entry in _marketScratch)
         {
             _marketWritten = true;
+            var units = entry.L.Quantity;
             if (!Close(tx, tick0, entry, ListingState.Returned, entry.L.Seller, worldTick))
             {
                 _marketAbort = true;
                 return;
             }
 
+            var what = ListingWhat(entry.L.Template, entry.L.Mk, units);
+            var city = entry.L.City >= 1 && entry.L.City <= CityDisplayNames.Length ? CityDisplayNames[entry.L.City - 1] : "its city";
+            _marketMail.Add((entry.L.Seller, MailKind.Expired, (long)entry.Id.RawValue, $"Listing expired: {what}",
+                $"Your listing of {what} expired unsold. It is kept for you: collect it at a bazaar terminal in {city}."));
             _marketCounts.Expired++;
         }
     }

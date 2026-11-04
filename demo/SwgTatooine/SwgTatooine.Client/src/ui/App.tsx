@@ -5,6 +5,7 @@ import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
 import { InventoryWindow } from './InventoryWindow';
+import { MailWindow } from './MailWindow';
 import { BazaarPanel } from './BazaarPanel';
 import { CraftPanel } from './CraftPanel';
 import { NavPane } from './NavPane';
@@ -100,6 +101,7 @@ export function App() {
       <MissionTerminal />
       <MissionJournalPanel />
       <InventoryWindow />
+      <MailWindow />
       <BazaarPanel />
       <CraftPanel />
       <CharacterWindow />

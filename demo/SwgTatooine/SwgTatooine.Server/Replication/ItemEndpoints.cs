@@ -720,8 +720,9 @@ public static class ItemEndpoints
             ok = false;
         }
 
-        // A pack or an unpack moves units between two stacks of one owner (crafting-catalog.md § 11.2); every other row moves them between two.
-        if (r.From == r.To && r.Kind is not (ItemMoveKind.Pack or ItemMoveKind.Unpack))
+        // A pack, an unpack or a move moves units between two stacks of one owner (crafting-catalog.md § 11.2, inventory-loot.md § 10); every other row
+        // moves them between two.
+        if (r.From == r.To && r.Kind is not (ItemMoveKind.Pack or ItemMoveKind.Unpack or ItemMoveKind.Move))
         {
             result.Violation($"seq {r.Seq}: both sides are {r.From}");
             ok = false;
@@ -779,6 +780,7 @@ public static class ItemEndpoints
             case ItemMoveKind.Decay:
             case ItemMoveKind.Repair:
             case ItemMoveKind.AdminTake:
+            case ItemMoveKind.Discard:
                 if (r.From == ItemLedger.World || isListing(r.From) || r.To != ItemLedger.World)
                 {
                     result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a character to World, not {r.From} to {r.To}");
@@ -826,6 +828,15 @@ public static class ItemEndpoints
                     result.Violation(
                         $"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must move items with stats between two stacks of one character, naming its crate, "
                         + $"not {r.From} to {r.To} for {r.Ref}");
+                }
+
+                break;
+            case ItemMoveKind.Move:
+                // Units between two stacks of one character, split or merged; an item with stats moves slot without a row.
+                if (r.From != r.To || r.From == ItemLedger.World || isListing(r.From) || ItemCatalog.HasStats(r.Template) || r.FromStack == r.ToStack
+                    || r.Ref != 0)
+                {
+                    result.Violation($"seq {r.Seq}: a move row must move units between two stacks of one character, not {r.From} to {r.To} for {r.Ref}");
                 }
 
                 break;

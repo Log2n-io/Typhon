@@ -341,6 +341,9 @@ public sealed partial class TatooineSim : IDisposable
 
         // Waypoints (client.md C38): a character's own, Versioned and non-spatial like an installation.
         Dbe.RegisterComponentFromAccessor<WaypointCore>();
+
+        // Mail (mail.md § 2): a character's inbox, Versioned and non-spatial like a waypoint; the text apart from the header the list reads.
+        Dbe.RegisterComponentFromAccessor<MailCore>();
         Dbe.RegisterComponentFromAccessor<CraftState>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerEntry>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerHead>();

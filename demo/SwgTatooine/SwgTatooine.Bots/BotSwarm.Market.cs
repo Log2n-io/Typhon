@@ -262,7 +262,13 @@ public sealed partial class BotSwarm
         /// <summary>What the brain is told of the market: the stacks held and the goods reserved.</summary>
         private Perceived WithMarket(Perceived world) =>
             _trades
-                ? world with { InventoryStacks = _inventory.Stacks, Reserved = _mine.Reserved, Trading = Volatile.Read(ref _tradeBusy) != 0 || _sender.Busy }
+                ? world with
+                {
+                    InventoryStacks = _inventory.Stacks,
+                    InventorySlots = _inventory.Slots,
+                    Reserved = _mine.Reserved,
+                    Trading = Volatile.Read(ref _tradeBusy) != 0 || _sender.Busy,
+                }
                 : world;
 
         /// <summary>The bot stands at a bazaar: read what the plan needs, and plan. One at a time; a trade asked while one is read is the same trade.</summary>
@@ -415,7 +421,7 @@ public sealed partial class BotSwarm
                 if (_relist.TryPeek(out var won) && won.Template != 0)
                 {
                     _relist.Dequeue();
-                    plan.Add(MarketCommand.List(won.Template, won.Mk, Math.Min(won.Count, MarketPlan.StackMax), 1));
+                    plan.Add(MarketCommand.List(won.Template, won.Mk, Math.Min(won.Count, MarketPlan.LotSize), 1));
                 }
                 else if (_relist.Count > 0)
                 {

@@ -1,3 +1,4 @@
+import type { ChatTab } from '../data/chat-tabs';
 import { create } from 'zustand';
 import {
   defaultLayout,
@@ -40,6 +41,10 @@ export interface WindowsState {
   readonly toggleDebug: () => void;
   /** Shows or leaves out a kind of row in the waypoint pane (C38). */
   readonly setNavShown: (key: string, shown: boolean) => void;
+  /** The chat's tabs, kept with the layout (client.md C44). */
+  readonly setChatTabs: (tabs: readonly ChatTab[]) => void;
+  /** Opens or closes the inventory's preview panel with the window's rect it widens or narrows, kept as one (client.md C43). */
+  readonly setInventoryPreview: (open: boolean, rect: WindowRect) => void;
   /** Every window back where it opens by default, every bar where it is drawn; the lock and the debug layer as they were. */
   readonly resetLayout: () => void;
   /** The Options window (client.md C36): the player's settings, the lock, the debug layer, the reset. */
@@ -113,9 +118,17 @@ export const useWindows = create<WindowsState>((set, get) => {
       const hidden = layout.navHidden.filter((k) => k !== key);
       keep({ ...layout, navHidden: shown ? hidden : [...hidden, key] });
     },
-    resetLayout: () => {
+    setChatTabs: (chatTabs) => {
+      keep({ ...get().layout, chatTabs });
+    },
+    setInventoryPreview: (inventoryPreview, rect) => {
       const { layout } = get();
-      keep({ ...layout, windows: {}, bars: {}, chatW: 0, chatH: 0 });
+      keep({ ...layout, windows: { ...layout.windows, inventory: rect }, inventoryPreview });
+    },
+    resetLayout: () => {
+      // The preview closes with it: the window opens at its narrow default.
+      const { layout } = get();
+      keep({ ...layout, windows: {}, bars: {}, chatW: 0, chatH: 0, inventoryPreview: false });
     },
     optionsOpen: false,
     toggleOptions: () => {

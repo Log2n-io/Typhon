@@ -7,6 +7,8 @@ import { useWaypoints } from './waypoints-store';
 import { useStats } from './stats-store';
 import { useMap } from './map-store';
 import { namedWaypoints } from '../data/waypoints';
+import { useMail } from './mail-store';
+import { useMarket } from './market-store';
 
 /**
  * Carries out a chat command (`parseChatCommand`): its refusals and its answers are the client's own lines.
@@ -73,6 +75,30 @@ export function runChatCommand(command: ChatCommand): boolean {
       chat.notice(`${w.active ? '▶ ' : ''}${w.name} — ${String(Math.round(w.x))}, ${String(Math.round(w.z))}`);
     }
 
+    return true;
+  }
+
+  if (command.kind === 'tell' || command.kind === 'reply') {
+    const to = command.kind === 'tell' ? command.to : useMail.getState().lastTellFrom;
+    if (to === null) {
+      chat.notice('/r: nobody has told you anything yet — /tell <player> <text>', 'tells');
+      return true;
+    }
+
+    // Said once the server has it: its echo is the line, as speech's is (mail.md § 3).
+    if (!useMarket.getState().sendCommand({ kind: 'tell', to, text: command.text })) {
+      chat.notice(
+        `/${command.kind === 'tell' ? 'tell' : 'r'}: not sent — wait a moment and press Enter again`,
+        'tells',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  if (command.kind === 'mail') {
+    useMail.getState().write({ to: command.to, subject: command.subject });
     return true;
   }
 

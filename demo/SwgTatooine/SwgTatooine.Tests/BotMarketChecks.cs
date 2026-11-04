@@ -180,6 +180,49 @@ public sealed class BotMarketChecks
         Assert.That(MarketPlan.Plan(held, new MarketMine([1, 2, 3, 4, 5], 0), Prices, ref rng, listMaterial: true, null), Is.Empty);
     }
 
+    /// <summary>
+    /// Stacks past a lot (inventory-loot.md § 10): a bot counts them in lots of 99, lists one lot of a bigger core or material stack and keeps the rest for
+    /// the vendor, sells the rest lot by lot down to the floor, and never plans more than a visit's worth of sales, however big the stack.
+    /// </summary>
+    [Test]
+    public void StacksPastALot_AreCountedListedAndSoldLotByLot()
+    {
+        var rng = 11u;
+        var bones = new List<HeldStack> { Material("mat_bone", 3, 300) };
+        var lots = (MarketPlan.Lots(1, false), MarketPlan.Lots(99, false), MarketPlan.Lots(100, false), MarketPlan.Lots(300, false), MarketPlan.Lots(7, true));
+        var wide = MarketPlan.Plan(bones, MarketMine.None, Prices, ref rng, listMaterial: true, null, gridStacks: 30);
+        var narrow = MarketPlan.Plan(bones, MarketMine.None, Prices, ref rng, listMaterial: true, null, gridStacks: 10);
+        var huge = MarketPlan.Plan([Material("mat_bone", 3, 100_000)], MarketMine.None, Prices, ref rng, listMaterial: false, null, gridStacks: 2_000);
+        var core = MarketPlan.Plan([Core("core_armor", 2, 150)], MarketMine.None, Prices, ref rng, listMaterial: false, null, gridStacks: 30);
+        Assert.Multiple(() =>
+        {
+            Assert.That(lots, Is.EqualTo((1, 1, 2, 4, 1)));
+            Assert.That(wide.Select(c => (c.Step, c.Quantity)), Is.EqualTo(new[]
+            {
+                (MarketStep.List, MarketPlan.LotSize), (MarketStep.Vendor, MarketPlan.LotSize), (MarketStep.Vendor, MarketPlan.LotSize),
+                (MarketStep.Vendor, 3),
+            }), "one lot listed, the other 201 units sold lot by lot");
+            Assert.That(
+                narrow.Select(c => (c.Step, c.Quantity)),
+                Is.EqualTo(new[] { (MarketStep.List, MarketPlan.LotSize), (MarketStep.Vendor, MarketPlan.LotSize) }),
+                "10 lots, one listed: one more sold reaches the floor of 8");
+            Assert.That(huge.Count(c => c.Step == MarketStep.Vendor), Is.EqualTo(MarketPlan.MaxVendorSalesPerVisit), "a stack of 100 000 is sold over visits");
+            Assert.That(core.Select(c => (c.Step, c.Quantity)), Is.EqualTo(new[] { (MarketStep.List, MarketPlan.LotSize), (MarketStep.Vendor, 51) }),
+                "a core stack past a lot lists one, and the vendor takes the rest");
+        });
+    }
+
+    /// <summary>The inventory's lots for the floors, and its slots for a drop lost: 300 units are four lots in one slot; an item, one of each.</summary>
+    [Test]
+    public void AnInventory_IsCountedInLotsAndInSlots()
+    {
+        const string Json = "{\"open\":true,\"slots\":40,\"lost\":[],\"items\":[{\"id\":\"1\",\"slot\":1,\"item\":\"mat_bone\",\"name\":\"Bone\","
+            + "\"category\":\"material\",\"template\":9,\"mk\":3,\"count\":300},{\"id\":\"2\",\"slot\":2,\"item\":\"blaster_dl44\",\"name\":\"DL-44\","
+            + "\"category\":\"weapon\",\"template\":69,\"mk\":1,\"count\":1,\"stats\":{\"wears\":101,\"condition\":1,\"maxCondition\":1}}]}";
+        var view = InventoryView.Parse(Json, InventoryView.None, count: false, out _);
+        Assert.That((view.Stacks, view.Slots), Is.EqualTo((5, 2)));
+    }
+
     /// <summary>A core or add-on is listed at its value × U(0.9, 1.3); a full material stack at × U(0.9, 1.1) — never past either, whatever the draw.</summary>
     [Test]
     public void ListPrices_AreTheValueTimesTheirBand()
@@ -189,7 +232,7 @@ public sealed class BotMarketChecks
         for (var seed = 1u; seed < 400u; seed++)
         {
             var rng = seed * 2246822519u | 1u;
-            var held = new List<HeldStack> { Core("core_armor", 2), Material("mat_bone", 3, MarketPlan.StackMax) };
+            var held = new List<HeldStack> { Core("core_armor", 2), Material("mat_bone", 3, MarketPlan.LotSize) };
             var plan = MarketPlan.Plan(held, MarketMine.None, Prices, ref rng, listMaterial: true, null);
             core.Add(plan.Single(c => c.Template == MarketCatalog.TemplateOf("core_armor")).UnitPrice);
             material.Add(plan.Single(c => c.Template == MarketCatalog.TemplateOf("mat_bone") && c.Step == MarketStep.List).UnitPrice);

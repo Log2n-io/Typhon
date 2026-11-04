@@ -8,10 +8,11 @@ import type { InventoryItem } from './items';
 /** The fee, thousandths of the output's market value. */
 export const REFINE_FEE_PER_MILLE = 50;
 
-/** The most cores or add-ons one refine makes: a crate's capacity. A material refines a stack's worth. */
+/** The most cores or add-ons one refine makes: a crate's capacity. */
 export const REFINE_MAX_ITEMS = 10;
 
-const STACK_MAX = 99;
+/** The most outputs one refine of a material makes: the server's `Refining.MaxMaterialsPerAction`. */
+export const REFINE_MAX_MATERIALS = 99;
 const ITEM_RATIO = [0, 3, 4, 5, 7];
 const MATERIAL_RATIO = [0, 12, 3, 4, 6];
 
@@ -30,7 +31,11 @@ export function refineRatio(category: string, mk: number): number {
 
 /** The most outputs one refine of a category makes; 0 when it does not refine. */
 export function refineMaxOutputs(category: string): number {
-  return category === 'material' ? STACK_MAX : category === 'core' || category === 'addon' ? REFINE_MAX_ITEMS : 0;
+  return category === 'material'
+    ? REFINE_MAX_MATERIALS
+    : category === 'core' || category === 'addon'
+      ? REFINE_MAX_ITEMS
+      : 0;
 }
 
 /** The fee for `outputs` of the next Mk, from one unit's value at that Mk (credits, a material's decimal), whole credits rounded down — 1 at least. */

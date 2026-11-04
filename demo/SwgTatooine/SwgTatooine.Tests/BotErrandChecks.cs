@@ -182,6 +182,7 @@ public sealed class BotErrandChecks
             MissionLairX = Lair?.X ?? 0f,
             MissionLairZ = Lair?.Z ?? 0f,
             InventoryStacks = Stacks,
+            InventorySlots = Stacks,
             Reserved = Reserved,
             NearestCreature = Creature?.Id ?? 0u,
             NearestCreatureX = Creature?.X ?? 0f,

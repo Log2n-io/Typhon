@@ -220,6 +220,9 @@ public static class Equipment
     public static long StandardMaterialMilli(ushort template)
         => IsStandardMaterial(template) ? MarketValues.MilliOf(template, 1) * TatooineData.VendorSellsPerMille / 1000 : 0;
 
+    /// <summary>The most units of a material one standard-issue sale makes: the vendor's lot (1-99, the command's byte), not a stack.</summary>
+    public const int StandardMaterialMax = 99;
+
     /// <summary>What <paramref name="quantity"/> units cost, whole credits, rounded down; 0 for none or a material it does not sell.</summary>
     public static long StandardMaterialPrice(ushort template, int quantity) => StandardMaterialMilli(template) * Math.Max(0, quantity) / 1000;
 

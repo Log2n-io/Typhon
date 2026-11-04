@@ -110,6 +110,19 @@ export interface EventSink {
    * client never reads the ledger: this is the only way it hears of a drop, a tip or a sale.
    */
   onNotice?(notice: PlayerNotice): void;
+  /** A mail arrived for this session's character (`MailNotice`, mail.md § 3): the inbox is read again. */
+  onMail?(mail: MailArrival): void;
+  /** A /tell, heard from `other` — or this player's own, sent to `other` (`outgoing`). */
+  onWhisper?(other: string, text: string, outgoing: boolean): void;
+}
+
+/** What a `MailNotice` says: the mail, its kind, the unread count with it, who sent it (empty for the game), its subject. */
+export interface MailArrival {
+  readonly mail: string;
+  readonly kind: number;
+  readonly unread: number;
+  readonly from: string;
+  readonly subject: string;
 }
 
 /** A simulated network link: the mock has one, a real connection does not. */
@@ -144,6 +157,43 @@ interface MutableDebugView {
  * admissible values — so this is the one place the client's idea of them lives, and a value the server does not grant is
  * refused and counted rather than silently clamped.
  */
+/**
+ * The server commands a {@link MarketCommand} is sent as (`marketWire`'s names), looked up in the catalog at bind. A name missing here is never sent: the
+ * store says "Not sent" and the server hears nothing — the inventory window's moves were lost so on their first live run (client.md C43), which
+ * `market-wire-names.test.ts` now checks for every kind.
+ */
+export const MARKET_COMMAND_NAMES: readonly string[] = [
+  'MarketList',
+  'MarketCancel',
+  'MarketBuy',
+  'MarketCollect',
+  'SellToVendor',
+  'BuyStandard',
+  'Equip',
+  'Unequip',
+  'CraftStart',
+  'CraftExperiment',
+  'CraftEnhance',
+  'CraftFinish',
+  'RepairItem',
+  'SalvageItem',
+  'RefineItems',
+  'PackItem',
+  'UnpackItem',
+  'MoveItem',
+  'DiscardItem',
+  'ReadMail',
+  'DeleteMail',
+  'TellPlayer',
+  'PlaceInstallation',
+  'CollectInstallation',
+  'PayUpkeep',
+  'PickUpInstallation',
+  'CreateWaypoint',
+  'DeleteWaypoint',
+  'SetActiveWaypoint',
+];
+
 export const SpeedClass = {
   stop: 0,
   walk: 1,
@@ -455,6 +505,8 @@ export class TyphonSource implements DataSource {
   private attack: MessagePlan | null = null;
   private chat: MessagePlan | null = null;
   private notice: MessagePlan | null = null;
+  private mailNotice: MessagePlan | null = null;
+  private whisper: MessagePlan | null = null;
   private pauseCommand: MessagePlan | null = null;
   private viewRealmCommand: MessagePlan | null = null;
   private spectateCommand: MessagePlan | null = null;
@@ -1091,6 +1143,8 @@ export class TyphonSource implements DataSource {
     this.attack = plan.eventByName('Attack');
     this.chat = plan.eventByName('Chat');
     this.notice = plan.eventByName('PlayerNotice');
+    this.mailNotice = plan.eventByName('MailNotice');
+    this.whisper = plan.eventByName('Whisper');
 
     // A demo control: the server stops simulating for everyone. Absent from a catalog that does not declare it, in which
     // case pausing does what it did before — nothing but hold the region.
@@ -1113,32 +1167,7 @@ export class TyphonSource implements DataSource {
     this.giveCreditsCommand = plan.commandByName('GiveCredits');
     this.overviewCommand = plan.commandByName('Overview');
     this.marketCommands = new Map();
-    for (const name of [
-      'MarketList',
-      'MarketCancel',
-      'MarketBuy',
-      'MarketCollect',
-      'SellToVendor',
-      'BuyStandard',
-      'Equip',
-      'Unequip',
-      'CraftStart',
-      'CraftExperiment',
-      'CraftEnhance',
-      'CraftFinish',
-      'RepairItem',
-      'SalvageItem',
-      'RefineItems',
-      'PackItem',
-      'UnpackItem',
-      'PlaceInstallation',
-      'CollectInstallation',
-      'PayUpkeep',
-      'PickUpInstallation',
-      'CreateWaypoint',
-      'DeleteWaypoint',
-      'SetActiveWaypoint',
-    ]) {
+    for (const name of MARKET_COMMAND_NAMES) {
       const command = plan.commandByName(name);
       if (command !== null) {
         this.marketCommands.set(name, command);
@@ -1321,6 +1350,22 @@ export class TyphonSource implements DataSource {
         other: other === '' ? null : other,
         name: event.text('name'),
       });
+      return;
+    }
+
+    if (this.mailNotice !== null && event.type === this.mailNotice) {
+      this.options.events.onMail?.({
+        mail: String(event.integer64('mail') ?? 0n),
+        kind: event.number('kind'),
+        unread: event.number('unread'),
+        from: event.text('from'),
+        subject: event.text('subject'),
+      });
+      return;
+    }
+
+    if (this.whisper !== null && event.type === this.whisper) {
+      this.options.events.onWhisper?.(event.text('other'), event.text('text'), event.number('outgoing') !== 0);
       return;
     }
 

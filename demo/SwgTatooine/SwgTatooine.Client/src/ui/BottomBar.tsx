@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { panelKey } from '../app/panel-keys';
 import { useChat } from '../state/chat-store';
 import { useItems } from '../state/items-store';
+import { useMail } from '../state/mail-store';
 import { useCharacter } from '../state/character-store';
 import { useMap } from '../state/map-store';
 import { useMissions } from '../state/mission-store';
@@ -37,6 +38,8 @@ export function BottomBar() {
   const characterOpen = useCharacter((s) => s.open);
   const characterTab = useCharacter((s) => s.tab);
   const toggleCharacter = useCharacter((s) => s.toggle);
+  const mailOpen = useMail((s) => s.open);
+  const unread = useMail((s) => s.unread);
   const optionsOpen = useWindows((s) => s.optionsOpen);
   const toggleOptions = useWindows((s) => s.toggleOptions);
 
@@ -51,7 +54,7 @@ export function BottomBar() {
         return;
       }
 
-      if (panel === 'journal' && !playing) {
+      if ((panel === 'journal' || panel === 'mail') && !playing) {
         return;
       }
 
@@ -67,6 +70,8 @@ export function BottomBar() {
         useCharacter.getState().toggle();
       } else if (panel === 'options') {
         useWindows.getState().toggleOptions();
+      } else if (panel === 'mail') {
+        useMail.getState().toggle();
       } else if (panel === 'craft') {
         const craft = useCraft.getState();
         if (craft.open || craft.atStation) {
@@ -149,6 +154,17 @@ export function BottomBar() {
               aria-pressed={characterOpen && characterTab === 'structures'}
             >
               <span aria-hidden="true">⛏</span> Lots
+            </button>
+            <button
+              type="button"
+              className={mailOpen ? 'active' : unread > 0 ? 'unread' : ''}
+              onClick={() => {
+                useMail.getState().toggle();
+              }}
+              title={unread > 0 ? `Mail (N): ${String(unread)} unread` : 'Mail (N)'}
+              aria-pressed={mailOpen}
+            >
+              <span aria-hidden="true">✉</span> Mail{unread > 0 ? ` (${String(unread)})` : ''}
             </button>
           </>
         ) : null}

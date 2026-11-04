@@ -1,3 +1,4 @@
+import { DEFAULT_TABS } from '../src/data/chat-tabs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   clampOffset,
@@ -120,7 +121,20 @@ describe('a stored layout', () => {
       locked: true,
       debug: true,
       navHidden: [],
+      chatTabs: DEFAULT_TABS,
+      inventoryPreview: false,
     });
+  });
+
+  it('keeps the inventory preview with the rect it widened, and closes it with a reset (client.md C43)', () => {
+    const windows = useWindows.getState();
+    windows.setInventoryPreview(true, { x: 10, y: 20, w: 602, h: 0 });
+    expect(useWindows.getState().layout.inventoryPreview).toBe(true);
+    expect(useWindows.getState().layout.windows.inventory).toEqual({ x: 10, y: 20, w: 602, h: 0 });
+    expect(parseLayout(JSON.stringify(useWindows.getState().layout), defaultLayout(true)).inventoryPreview).toBe(true);
+    useWindows.getState().resetLayout();
+    expect(useWindows.getState().layout.inventoryPreview).toBe(false);
+    expect(useWindows.getState().layout.windows.inventory).toBeUndefined();
   });
 
   it('is not kept when storage refuses, and reads as the fallback', () => {

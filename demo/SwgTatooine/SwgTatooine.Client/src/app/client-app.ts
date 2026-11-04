@@ -61,6 +61,7 @@ import { useCraft } from '../state/craft-store';
 import { useInstallations } from '../state/installations-store';
 import { installationAt, installationMenu, type InstallationList } from '../data/installations';
 import { useWaypoints } from '../state/waypoints-store';
+import { useMail } from '../state/mail-store';
 import { useCharacter } from '../state/character-store';
 import { edgeArrow, WaypointPillar } from '../render/waypoint-marker';
 import { colorOf, GROUP_COLORS, groupOf } from '../data/waypoints';
@@ -922,6 +923,16 @@ export class ClientApp {
 
         this.noticeBatch.push(notice);
       },
+      // Mail (mail.md § 6): the inbox read again, and a line in the chat; a /tell, a line of the Tells category.
+      onMail: (mail) => {
+        useMail.getState().arrived(mail);
+      },
+      onWhisper: (other, text, outgoing) => {
+        useChat.getState().say({ tick: 0, speaker: 0, text, atMs: performance.now(), tell: { other, outgoing } });
+        if (!outgoing) {
+          useMail.getState().heardFrom(other);
+        }
+      },
     };
     this.labels = new Labels(overlay);
     this.bubbles = new SpeechBubbles(overlay);
@@ -1177,6 +1188,9 @@ export class ClientApp {
       // The inventory's icons (inventory-loot.md § 6): every 32 px icon of the catalogue, found by the asset id the server
       // names an item by.
       useItems.getState().setIcons(itemIcons(mount.library.catalogue, (file) => set.base + file));
+      // And their models, for the window's preview (client.md C43).
+      const library = mount.library;
+      useItems.getState().setModels((id) => library.modelOf(id));
       this.shapeCache = [];
       this.staticAssets = new StaticAssets(
         mount.library,
@@ -1518,6 +1532,7 @@ export class ClientApp {
     useCraft.getState().reset();
     useInstallations.getState().reset();
     useWaypoints.getState().reset();
+    useMail.getState().reset();
     useCharacter.getState().reset();
     this.mine.clear();
     this.mineVersion = -1;
@@ -1957,7 +1972,7 @@ export class ClientApp {
     // The player's own waypoints (client.md C38), after the missions, the active one first: read once a session can, then after each own command.
     const waypoints = useWaypoints.getState();
     waypoints.ensure();
-    useInstallations.getState().watch();
+    useMail.getState().ensure();
     const own = [...(waypoints.list ?? [])].sort((a, b) => Number(b.active) - Number(a.active));
     own.forEach((w, i) => {
       this.navTargets.push({
@@ -4307,7 +4322,7 @@ export class ClientApp {
 
       const reached = this.levelWatch.update(source.selfNetId, this.selfField('level'));
       if (reached !== null) {
-        useChat.getState().notice(`You reached combat level ${reached}.`);
+        useChat.getState().notice(`You reached combat level ${reached}.`, 'combat');
       }
     }
 
@@ -4337,6 +4352,9 @@ export class ClientApp {
       const items = this.items.value;
       if (items !== null) {
         useItems.getState().setSnapshot(items);
+        // The grid moved, so the window's last move, pack or equip landed: the next is sent at once rather than after the in-flight guard's 5 s — a
+        // drag followed by another was dropped otherwise (client.md C43, seen live 2026-11-04).
+        useMarket.getState().settle('gear');
         // What is worn is not for sale until it is taken off (crafting-build.md § 2.2).
         useMarket.getState().setStacks(items.items.filter((i) => !isEquipSlot(i.slot)));
         // A craft's steps move the items revision: its state is read again with them while the panel shows it (crafting-build.md C2) — opening it

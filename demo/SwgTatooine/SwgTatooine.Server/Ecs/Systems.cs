@@ -720,6 +720,11 @@ internal sealed class WorkshopSystem : CallbackSystem
         // Installations (SimBridge.Installations.cs): their truth through its side transaction, their markers through the tick's, after it commits.
         .SideWrites<InstallationCore>()
         .SideWrites<WaypointCore>()
+
+        // Mail (SimBridge.Mail.cs): the inboxes, through the side transaction; a name resolved as a login does, by the account's and the character's index.
+        .SideWrites<MailCore>()
+        .Reads<Account>()
+        .Reads<Character>()
         .Writes<InstallationPlacement>()
         .Writes<InstallationView>()
         .Writes<InstallationRealm>();

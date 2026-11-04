@@ -54,6 +54,13 @@ struct SayWrongType
     public uint Text;
 }
 
+/// <summary>A command naming someone beside what it says to them: a /tell. Two 256-byte texts would be past the command ceiling; the name is 64.</summary>
+struct TellText
+{
+    public Utf8Text64 To;
+    public Utf8Text256 Text;
+}
+
 /// <summary>A command whose str cap and whose field's capacity disagree. Only ever passed to a binder that must refuse it.</summary>
 struct SayWrongCapacity
 {
@@ -118,6 +125,10 @@ class IngressDrainTests : TestBase<IngressDrainTests>
                 .Rate(10_000, 20_000)
                 .Field(t => t.Text, Codec.Str(Utf8Text256.Capacity))
                 .Field(t => t.Channel, Codec.U8));
+            Subs.Command<TellText>(c => c
+                .Rate(10_000, 20_000)
+                .Field(t => t.To, Codec.Str(32))
+                .Field(t => t.Text, Codec.Str(Utf8Text256.Capacity)));
             Subs.Command<Transfer64>(c => c.Rate(10_000, 20_000));
             Subs.Freeze();
 
@@ -950,6 +961,37 @@ class IngressDrainTests : TestBase<IngressDrainTests>
 
             Assert.That(seen[2].Utf8, Has.Length.EqualTo(Utf8Text256.Capacity), "text at the declared cap arrives whole");
             Assert.That(seen[2].Channel, Is.EqualTo(5));
+        });
+    }
+
+    /// <summary>
+    /// The 64-byte inline type binds as the 256-byte one does — its capacity read from the type, its layout checked — so a command carries a name and a
+    /// text side by side under the command ceiling, each decoded byte for byte.
+    /// </summary>
+    [Test]
+    public void ACommandCarriesANameBesideItsText()
+    {
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+
+        const string Name = "señor_ñandú";
+        var text = new string('x', Utf8Text256.Capacity);
+        harness.Ingress.OnCommands(session, Encode(harness.Plan, 1u,
+            ("TellText", 1, new RecordValues { ["To"] = FieldValue.Of(Name), ["Text"] = FieldValue.Of(text) })));
+        harness.Tick();
+
+        var seen = new List<(byte[] To, byte[] Text)>();
+        foreach (ref readonly var c in harness.Api.Commands<TellText>())
+        {
+            seen.Add((c.Value.To.Utf8.ToArray(), c.Value.Text.Utf8.ToArray()));
+        }
+
+        Assert.That(seen, Has.Count.EqualTo(1));
+        Assert.Multiple(() =>
+        {
+            Assert.That(seen[0].To, Is.EqualTo(System.Text.Encoding.UTF8.GetBytes(Name)), "the name decoded byte for byte, multi-byte characters included");
+            Assert.That(seen[0].Text, Has.Length.EqualTo(Utf8Text256.Capacity), "the text after it arrived whole, at its cap");
         });
     }
 

@@ -62,8 +62,20 @@ public static class MarketPlan
     /// <remarks>18 left twelve, and the bots back at the bazaar after a quest were full again within it (live, 2026-10-27; see BotBrain.MarketStacks).</remarks>
     public const int KeepStacks = 8;
 
-    /// <summary>A full stack, the server's <c>ItemLedger.StackMax</c>.</summary>
-    public const int StackMax = 99;
+    /// <summary>
+    /// The units a bot lists, sells or counts as one: the server's stack before it held 100 000 (inventory-loot.md § 10). A bot's inventory pressure — the
+    /// bazaar errand at <c>BotBrain.MarketStacks</c>, the vendor's floor at <see cref="KeepStacks"/> — is counted in these lots, so a bot carrying 300 Hide
+    /// in one stack trades as it did when that was four (<see cref="Lots"/>).
+    /// </summary>
+    public const int LotSize = 99;
+
+    /// <summary>
+    /// The most vendor sales one visit plans: a grid of 40 slots over the floor of <see cref="KeepStacks"/>, what a visit sold at most when a slot was a lot.
+    /// </summary>
+    public const int MaxVendorSalesPerVisit = 32;
+
+    /// <summary>What a grid entry counts for against the floors: its lots for units, one for an item with stats.</summary>
+    public static int Lots(int count, bool stats) => stats ? 1 : Math.Max(1, (count + LotSize - 1) / LotSize);
 
     /// <summary>The highest unit price the server lists at (<c>TatooineData.MaxUnitPrice</c>).</summary>
     public const long MaxUnitPrice = 1_000_000;
@@ -477,6 +489,7 @@ public static class MarketPlan
 
         // Stacks still in the grid as the plan goes: each listed or vendored stack leaves it.
         var left = new List<HeldStack>(held);
+        var gone = 0;
         var listed = mine.Listed;
         for (var i = 0; i < left.Count && listed < MaxListed; i++)
         {
@@ -484,20 +497,38 @@ public static class MarketPlan
             var value = prices.ValueOf(s.Item, s.Mk);
             if (s.Category is MarketCategory.Core or MarketCategory.Addon && s.Template != 0 && value > 0d && s.Count > 0)
             {
-                plan.Add(MarketCommand.List(s.Template, s.Mk, Math.Min(s.Count, StackMax), Price(value, ListLow, ListHigh, ref rng)));
-                left.RemoveAt(i--);
+                // One lot of the stack, as a material's: the rest stays for the vendor, and one lot leaves the grid.
+                plan.Add(MarketCommand.List(s.Template, s.Mk, Math.Min(s.Count, LotSize), Price(value, ListLow, ListHigh, ref rng)));
+                gone++;
                 listed++;
+                if (s.Count <= LotSize)
+                {
+                    left.RemoveAt(i--);
+                }
+                else
+                {
+                    left[i] = s with { Count = s.Count - LotSize };
+                }
             }
         }
 
         if (listMaterial && listed < MaxListed)
         {
-            var full = left.FindIndex(s => s.Category == MarketCategory.Material && s.Template != 0 && s.Count >= StackMax && prices.ValueOf(s.Item, s.Mk) > 0d);
+            var full = left.FindIndex(s => s.Category == MarketCategory.Material && s.Template != 0 && s.Count >= LotSize && prices.ValueOf(s.Item, s.Mk) > 0d);
             if (full >= 0)
             {
+                // One lot of the stack: the rest stays for the vendor.
                 var s = left[full];
-                plan.Add(MarketCommand.List(s.Template, s.Mk, StackMax, Price(prices.ValueOf(s.Item, s.Mk), MaterialLow, MaterialHigh, ref rng)));
-                left.RemoveAt(full);
+                plan.Add(MarketCommand.List(s.Template, s.Mk, LotSize, Price(prices.ValueOf(s.Item, s.Mk), MaterialLow, MaterialHigh, ref rng)));
+                gone++;
+                if (s.Count == LotSize)
+                {
+                    left.RemoveAt(full);
+                }
+                else
+                {
+                    left[full] = s with { Count = s.Count - LotSize };
+                }
             }
         }
 
@@ -511,21 +542,40 @@ public static class MarketPlan
         });
         // The floor counts the whole grid when it is known — a crafter's kept inputs, its parts and its items too — not only what this plan may sell: a
         // grid full of what it keeps sends the bot back here for good, freeing nothing (review, 2026-11-02).
-        var stacks = gridStacks >= 0 ? gridStacks - (held.Count - left.Count) : left.Count;
+        var stacks = gridStacks - gone;
+        if (gridStacks < 0)
+        {
+            stacks = 0;
+            foreach (var s in left)
+            {
+                stacks += Lots(s.Count, false);
+            }
+        }
+
+        var sales = 0;
         foreach (var s in materials)
         {
-            if (stacks <= KeepStacks)
+            // A lot at a time, the stack's last lot whatever it holds: as many sales as when the stack was that many stacks — and no more than a visit
+            // held when a slot was a lot, so a stack of 100 000 is sold over visits, not in one plan of a thousand commands.
+            var units = s.Count;
+            while (stacks > KeepStacks && units > 0 && sales < MaxVendorSalesPerVisit)
+            {
+                var take = Math.Min(units, LotSize);
+                if (VendorPayout(take, prices.ValueOf(s.Item, s.Mk)) == 0)
+                {
+                    break;   // the vendor refuses a sale that pays nothing (MarketWorthless): the stack stays
+                }
+
+                plan.Add(MarketCommand.Vendor(s.Template, s.Mk, take));
+                units -= take;
+                stacks--;
+                sales++;
+            }
+
+            if (stacks <= KeepStacks || sales >= MaxVendorSalesPerVisit)
             {
                 break;
             }
-
-            if (VendorPayout(Math.Min(s.Count, StackMax), prices.ValueOf(s.Item, s.Mk)) == 0)
-            {
-                continue;   // the vendor refuses a sale that pays nothing (MarketWorthless): the stack stays
-            }
-
-            plan.Add(MarketCommand.Vendor(s.Template, s.Mk, Math.Min(s.Count, StackMax)));
-            stacks--;
         }
 
         if (buy is { } row)

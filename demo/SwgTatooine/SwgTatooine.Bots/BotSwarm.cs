@@ -131,6 +131,12 @@ public sealed class BotSwarmOptions
     /// </summary>
     public int InstallPercent { get; init; } = 10;
 
+    /// <summary>Percent of the trading bots that write mail and /tells to the fleet (mail.md § 7); every bot reads and acts on its own mail.</summary>
+    public int MailPercent { get; init; } = 2;
+
+    /// <summary>A bot's character name by index — its account's — for the mail and /tells bots write each other; null without an accounts file.</summary>
+    public Func<int, string> NameFor { get; init; }
+
     /// <summary>The load test's city by name (<c>--market-rush</c>, bazaar.md § 8), or null: every thinking bot goes there and does nothing but trade.</summary>
     public string MarketRush { get; init; }
 
@@ -2607,6 +2613,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 SetUpMarket(index, options);
                 SetUpCraft(index, options, book);
                 SetUpInstall(index, options);
+                SetUpMail(index, options);
                 TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
@@ -2779,6 +2786,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
             PollInventory(tick);
             PollMine(tick);
             PollInstallations(tick);
+            PollMail(tick);
             var missions = _missions;
             world = WithInstall(WithCraft(WithMarket(world))) with
             {

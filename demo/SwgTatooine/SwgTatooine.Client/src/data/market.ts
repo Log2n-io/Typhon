@@ -1,4 +1,4 @@
-import type { ItemStats } from './items';
+import { STACK_MAX, type ItemStats } from './items';
 import { CITIES } from './world-data';
 
 /**
@@ -12,7 +12,7 @@ import { CITIES } from './world-data';
  */
 
 /** A listing's quantity: one stack's worth (B2). */
-export const MAX_LISTING_QTY = 99;
+export const MAX_LISTING_QTY = STACK_MAX;
 
 /** The dearest unit price a listing may ask: `TatooineData.MaxUnitPrice`. */
 export const MAX_UNIT_PRICE = 1_000_000;
@@ -359,6 +359,12 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   195: 'You keep 100 waypoints already: delete one first',
   196: 'No such waypoint of yours',
   197: 'You cannot build in town: go out into the open, at least 50 m past the edge of the town',
+  198: 'It cannot go there: a slot holds one stack, and part of a stack only joins the same item',
+  199: 'Nothing to throw away there',
+  200: 'No player has that name',
+  201: 'A mail needs a subject, and not to yourself; a tell needs something to say',
+  202: 'No such mail of yours',
+  203: 'That player is not online: send a mail, which waits for them',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -447,6 +453,17 @@ export type MarketCommand =
   | { readonly kind: 'pack'; readonly item: string; readonly into: string }
   /** Take `count` items out of a crate, each into a free slot. */
   | { readonly kind: 'unpack'; readonly item: string; readonly count: number }
+  /**
+   * The inventory window's (inventory-loot.md § 10): `count` of a stack into grid slot `slot` — split into a free one, merged into the same item, swapped
+   * with another (whole); slot 0 is the lowest free one. And `count` of a stack thrown away; an item with stats or a crate whole.
+   */
+  | { readonly kind: 'move'; readonly item: string; readonly slot: number; readonly count: number }
+  | { readonly kind: 'discard'; readonly item: string; readonly count: number }
+  /** Mail (mail.md § 3): one of the player's own marked read, or deleted ('0': every read one). Sending is `POST /swg/mail`, its text past a command. */
+  | { readonly kind: 'mailRead'; readonly mail: string }
+  | { readonly kind: 'mailDelete'; readonly mail: string }
+  /** A /tell: a line to one player online, by name. */
+  | { readonly kind: 'tell'; readonly to: string; readonly text: string }
   /** Installations (crafting-build.md § 10): a kit placed on the lot the body stands in, drawing `family`; a hopper collected; upkeep paid; one picked up. */
   | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
   | { readonly kind: 'installCollect'; readonly installation: string }
@@ -536,6 +553,16 @@ export function marketWire(
       return { name: 'PackItem', values: { item: itemOf(command.item), into: itemOf(command.into) } };
     case 'unpack':
       return { name: 'UnpackItem', values: { item: itemOf(command.item), count: command.count } };
+    case 'move':
+      return { name: 'MoveItem', values: { item: itemOf(command.item), slot: command.slot, count: command.count } };
+    case 'discard':
+      return { name: 'DiscardItem', values: { item: itemOf(command.item), count: command.count } };
+    case 'mailRead':
+      return { name: 'ReadMail', values: { mail: itemOf(command.mail) } };
+    case 'mailDelete':
+      return { name: 'DeleteMail', values: { mail: itemOf(command.mail) } };
+    case 'tell':
+      return { name: 'TellPlayer', values: { to: command.to, text: command.text } };
     case 'installPlace':
       return { name: 'PlaceInstallation', values: { item: itemOf(command.item), family: command.family } };
     case 'installCollect':
@@ -577,7 +604,14 @@ export function commandRow(command: MarketCommand): string {
     case 'unequip':
     case 'pack':
     case 'unpack':
+    case 'move':
+    case 'discard':
       return 'gear';
+    case 'mailRead':
+    case 'mailDelete':
+      return 'mail';
+    case 'tell':
+      return 'tell';
     case 'installPlace':
     case 'installCollect':
     case 'installPay':

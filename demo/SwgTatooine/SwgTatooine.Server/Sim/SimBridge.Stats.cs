@@ -290,6 +290,15 @@ public sealed partial class SimBridge
         Num(j, "created", WaypointsCreated).Append(',');
         Num(j, "deleted", WaypointsDeleted);
 
+        // Mail (SimBridge.Mail.cs, mail.md § 8): sent by players and by the game, read, deleted, dropped, expired; /tell said and refused.
+        j.Append("},\"mail\":");
+        AppendMailJson(j);
+        j.Append(",\"mailRefusedBy\":{");
+        Num(j, "noSuchPlayer", WorkshopRefused(TatooineReplication.MailNoSuchPlayer)).Append(',');
+        Num(j, "bad", WorkshopRefused(TatooineReplication.MailBad)).Append(',');
+        Num(j, "unknown", WorkshopRefused(TatooineReplication.MailUnknown)).Append(',');
+        Num(j, "offline", WorkshopRefused(TatooineReplication.TellOffline));
+
         // Who answers a player's attack (SimBridge.Combat.cs, V33 and 2026-11-03): the crowd's bodies that fought back, fled and joined, the creatures
         // that joined a fight started on one of them.
         j.Append("},\"reactions\":{");

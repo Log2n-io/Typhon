@@ -147,7 +147,7 @@ internal sealed class InstanceChecks : ServedChecks
 
         Expect(() => BuyStandard(a.Link, ItemCatalog.Crystal, Equipment.StandardMaterialPrice(ItemCatalog.Crystal, 10) + 1, 10), TatooineReplication.MarketSold,
             "another price");
-        Expect(() => BuyStandard(a.Link, ItemCatalog.Crystal, 999, 100), TatooineReplication.MarketBadListing, "past a stack");
+        Expect(() => BuyStandard(a.Link, ItemCatalog.Crystal, 999, 100), TatooineReplication.MarketBadListing, "past the vendor's lot");
         Expect(() => BuyStandard(a.Link, ItemCatalog.Hide, 3, 1), TatooineReplication.MarketBadListing, "a material the beasts drop is not sold");
         AuditsOk(sim, "after the materials");
     }

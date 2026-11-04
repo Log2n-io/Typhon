@@ -39,6 +39,10 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        MailEndpoints.Send = request => _bridge != null
+            ? _bridge.SendPlayerMail(request)
+            : System.Threading.Tasks.Task.FromResult(new MailOutcome(false, 0, TatooineReplication.CraftFailed, "the simulation is not started"));
+        MailEndpoints.Clock = () => (_bridge?.MailWorldTick ?? 0, _config.TickRateHz);
         AdminEndpoints.Desk = request => _bridge != null
             ? _bridge.Admin(request)
             : System.Threading.Tasks.Task.FromResult(new AdminOutcome(false, "the simulation is not started"));

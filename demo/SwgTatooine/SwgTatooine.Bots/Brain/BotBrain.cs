@@ -238,7 +238,7 @@ public sealed partial class BotBrain
     public const int MarketStacks = 30;
 
     /// <summary>A bot this full is losing drops: the errand says so (<see cref="GoalWhy.MarketFull"/>) — the measure of headroom too small.</summary>
-    /// <remarks>One slot short of the 40 (crafting-build.md O-9): the next drop of a new key is lost.</remarks>
+    /// <remarks>One slot short of the 40 (crafting-build.md O-9): the next drop of a new key is lost. Slots, not lots (inventory-loot.md § 10).</remarks>
     public const int MarketFullStacks = 39;
 
     /// <summary>A bazaar errand, made or failed, is not chosen again for this long, in seconds: a vendor that refuses cannot hold a bot at the bazaar.</summary>
@@ -714,7 +714,7 @@ public sealed partial class BotBrain
             && Bazaar(in world, here) is { } bazaar && Routing.Distance(world.X, world.Z, bazaar.At.X, bazaar.At.Z) <= ErrandReachM)
         {
             _marketAt = tick + Ticks(MarketRetrySeconds);
-            var why = world.InventoryStacks >= MarketFullStacks ? GoalWhy.MarketFull : GoalWhy.MarketChosen;
+            var why = world.InventorySlots >= MarketFullStacks ? GoalWhy.MarketFull : GoalWhy.MarketChosen;
             if (StartVisitAt(in world, tick, Routing.BazaarKind, why, bazaar))
             {
                 return Visit(in world, tick);

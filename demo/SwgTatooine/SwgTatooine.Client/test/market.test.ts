@@ -9,7 +9,7 @@ import {
   type TicketTerminal,
 } from '../src/app/ticket-terminal';
 import { panelKey } from '../src/app/panel-keys';
-import { parseInventory, type InventoryItem } from '../src/data/items';
+import { parseInventory, STACK_MAX, type InventoryItem } from '../src/data/items';
 import type { PlayerNotice } from '../src/data/notices';
 import {
   browseUrl,
@@ -112,11 +112,11 @@ describe('the fees', () => {
 });
 
 describe('a refusal', () => {
-  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, the installations' 188-193, the waypoints' 194-196, building in town's 197, and NotInWorld reused", () => {
+  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, the installations' 188-193, the waypoints' 194-196, building in town's 197, the inventory window's 198-199, the mail's 200-203, and NotInWorld reused", () => {
     expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([
       142,
       ...Array.from({ length: 32 }, (_, i) => 151 + i),
-      ...Array.from({ length: 14 }, (_, i) => 184 + i),
+      ...Array.from({ length: 20 }, (_, i) => 184 + i),
     ]);
     expect(marketRefusal(184)).toContain('refine');
     expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
@@ -733,7 +733,7 @@ describe("the mock's desk", () => {
       MarketReason.NoItems,
     );
     // Over a stack's worth is malformed before it is short (§ 3.1's check order).
-    expect(m.desk.apply({ kind: 'vendor', template: stack.template, mk: stack.mk, quantity: 100 })).toBe(
+    expect(m.desk.apply({ kind: 'vendor', template: stack.template, mk: stack.mk, quantity: STACK_MAX + 1 })).toBe(
       MarketReason.BadListing,
     );
     expect(m.desk.apply({ kind: 'vendor', template: 99, mk: 1, quantity: 1 })).toBe(MarketReason.BadListing);

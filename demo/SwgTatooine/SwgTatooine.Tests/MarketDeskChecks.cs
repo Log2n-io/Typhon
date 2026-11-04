@@ -168,7 +168,8 @@ internal sealed class MarketDeskChecks : ServedChecks
         using var sim = Start();
         var home = Home(sim);
         var a = LogIn(sim, 0x8101, At(home), 1);
-        Mint(sim, a, Hide, 2, 110);
+        // A full stack and 11 more: the listing takes the 11 of the second stack first, then 88 of the full one.
+        Mint(sim, a, Hide, 2, ItemLedger.StackMax + 11);
         var balance = Ledgers.Balance(sim, a.Character);
         var itemRows = Items.Rows(sim).Count;
         var creditRows = Ledgers.Rows(sim).Count;
@@ -190,7 +191,7 @@ internal sealed class MarketDeskChecks : ServedChecks
             Assert.That(rows.All(r => r.Kind == ItemMoveKind.List && r.From == a.Key && r.To == id && r.ToStack == id && r.Ref == id), Is.True);
             Assert.That(rows.Select(r => r.ToAfter), Is.EqualTo(new[] { 11, 99 }), "the escrow's count after");
             Assert.That((l.LastSeq, l.Rows), Is.EqualTo((rows[^1].Seq, 2)));
-            Assert.That(Market.Units(sim, a.Character, Hide, 2), Is.EqualTo(11));
+            Assert.That(Market.Units(sim, a.Character, Hide, 2), Is.EqualTo(ItemLedger.StackMax - 88));
             Assert.That(credits, Has.Count.EqualTo(1), "one fee row");
             Assert.That((credits[0].Kind, credits[0].From, credits[0].To, credits[0].Amount, credits[0].Ref),
                 Is.EqualTo((TransferKind.ListFee, a.Key, EconomyLedger.World, 6L, id)), "max(1, 1 % of 693) is 6");
@@ -201,7 +202,7 @@ internal sealed class MarketDeskChecks : ServedChecks
             Assert.That(sim.Bridge.MarketListingsCreated, Is.EqualTo(1));
             Assert.That(sim.Bridge.MarketListFees, Is.EqualTo(6));
             Assert.That(sim.Bridge.MarketEscrowUnits, Is.EqualTo(99));
-            Assert.That(sim.Bridge.ItemsHeld(Hide, 2), Is.EqualTo(11), "escrow counted as held in the inventory counters");
+            Assert.That(sim.Bridge.ItemsHeld(Hide, 2), Is.EqualTo(ItemLedger.StackMax - 88), "escrow counted as held in the inventory counters");
         });
         AuditsOk(sim, "after the listing");
 
@@ -267,7 +268,7 @@ internal sealed class MarketDeskChecks : ServedChecks
         Expect(a, TatooineReplication.MarketBadListing, "a list of no units", () => Market.List(a.Link, Bone, 3, 0, 10));
         Expect(a, TatooineReplication.MarketBadListing, "a list at no price", () => Market.List(a.Link, Bone, 3, 1, 0));
         Expect(a, TatooineReplication.MarketBadListing, "a list of a Mk the template refuses", () => Market.List(a.Link, Bone, 0, 1, 10));
-        Expect(a, TatooineReplication.MarketBadListing, "a list of more than a stack", () => Market.List(a.Link, Bone, 3, 100, 10));
+        Expect(a, TatooineReplication.MarketBadListing, "a list of more than a stack", () => Market.List(a.Link, Bone, 3, ItemLedger.StackMax + 1, 10));
         Expect(a, TatooineReplication.MarketBadListing, "a list above the highest price", () => Market.List(a.Link, Bone, 3, 1, (uint)TatooineData.MaxUnitPrice + 1));
         Expect(a, TatooineReplication.MarketNoItems, "a list of more than held", () => Market.List(a.Link, Bone, 3, 4, 10));
         Expect(a, TatooineReplication.MarketNotEnough, "a list whose fee the wallet does not cover", () => Market.List(a.Link, Bone, 3, 3, 1_000_000));
@@ -705,13 +706,14 @@ internal sealed class MarketDeskChecks : ServedChecks
         using var sim = Start();
         var home = Home(sim);
         var a = LogIn(sim, 0x8701, At(home), 1);
-        Mint(sim, a, Hide, 2, 120);
+        // A full stack and 21 more: the sale takes the 21 of the second stack first, then 9 of the full one.
+        Mint(sim, a, Hide, 2, ItemLedger.StackMax + 21);
         var balance = Ledgers.Balance(sim, a.Character);
         var itemRows = Items.Rows(sim).Count;
         var creditRows = Ledgers.Rows(sim).Count;
 
         Market.Vendor(a.Link, Hide, 2, 30);
-        SessionHarness.Until(() => Market.Units(sim, a.Character, Hide, 2) == 90, "the vendor sale");
+        SessionHarness.Until(() => Market.Units(sim, a.Character, Hide, 2) == ItemLedger.StackMax - 9, "the vendor sale");
         Harness.Ticks(2);
         var rows = Items.Rows(sim).Skip(itemRows).ToList();
         var credit = Ledgers.Rows(sim).Skip(creditRows).Single();

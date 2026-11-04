@@ -4,6 +4,7 @@ import { useMissions } from './mission-store';
 import { useCraft } from './craft-store';
 import { useMarket } from './market-store';
 import { useInstallations } from './installations-store';
+import { useItems } from './items-store';
 
 /** One row of the navigation pane. */
 export interface NavRow {
@@ -39,6 +40,7 @@ export interface CameraRequest {
   readonly seq: number;
 }
 
+import type { PromptMode } from '../data/inventory-grid';
 import type { BazaarTab } from '../data/market';
 import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
@@ -126,7 +128,9 @@ export type ContextAction =
   | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
   | { readonly kind: 'equip'; readonly item: string }
   | { readonly kind: 'pack'; readonly item: string; readonly into: string }
-  | { readonly kind: 'unpack'; readonly item: string; readonly count: number };
+  | { readonly kind: 'unpack'; readonly item: string; readonly count: number }
+  /** The inventory window's count prompt on an item (client.md C43): a split, an unpack of some, or a throw-away to confirm. */
+  | { readonly kind: 'itemPrompt'; readonly item: string; readonly mode: PromptMode };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -701,6 +705,9 @@ export const useUi = create<UiState>()((set, get) => ({
         break;
       case 'unpack':
         useMarket.getState().unpack(action.item, action.count);
+        break;
+      case 'itemPrompt':
+        useItems.getState().openPrompt({ mode: action.mode, item: action.item, slot: 0 });
         break;
     }
   },

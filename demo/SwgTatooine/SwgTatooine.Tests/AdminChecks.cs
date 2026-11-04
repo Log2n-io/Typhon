@@ -164,7 +164,8 @@ internal sealed class AdminChecks : ServedChecks
     }
 
     /// <summary>
-    /// Items given and taken: 150 Hide Mk II as two stacks; a Mk V blaster with the operator's stats (only an operator, a mission or a craft mints Mk V);
+    /// Items given and taken: a stack and 50 more of Hide Mk II, as two stacks; a Mk V blaster with the operator's stats (only an operator, a mission or a
+    /// craft mints Mk V);
     /// 30 hide taken, the blaster taken; every row an <c>admingrant</c> or <c>admintake</c>; a template, a Mk or a count the catalogue refuses written nowhere;
     /// the item audit clean.
     /// </summary>
@@ -178,7 +179,7 @@ internal sealed class AdminChecks : ServedChecks
         var hide = Req(AdminAction.AddItem, character);
         hide.Template = ItemCatalog.Hide;
         hide.Mk = 2;
-        hide.Count = 150;
+        hide.Count = ItemLedger.StackMax + 50;
         Assert.That(Do(sim, hide).Ok, Is.True);
 
         var blaster = Req(AdminAction.AddItem, character);
@@ -194,8 +195,8 @@ internal sealed class AdminChecks : ServedChecks
         var stats = InTick(sim, tx => tx.Open(minted.Id).Read(ItemInstanceArch.Stats));
         Assert.Multiple(() =>
         {
-            Assert.That(Market.Units(sim, character, ItemCatalog.Hide, 2), Is.EqualTo(150));
-            Assert.That(stacks.Count(s => s.Stack.Template == ItemCatalog.Hide), Is.EqualTo(2), "99 and 51");
+            Assert.That(Market.Units(sim, character, ItemCatalog.Hide, 2), Is.EqualTo(ItemLedger.StackMax + 50));
+            Assert.That(stacks.Count(s => s.Stack.Template == ItemCatalog.Hide), Is.EqualTo(2), "a full stack and 50");
             Assert.That((stats.Stat0, stats.Stat1, stats.Stat2, stats.Condition, stats.MaxCondition), Is.EqualTo((900, 600, 300, 50_000, 60_000)));
         });
 
@@ -241,9 +242,12 @@ internal sealed class AdminChecks : ServedChecks
         var admin = Items.Rows(sim).Where(e => e.Kind is ItemMoveKind.AdminGrant or ItemMoveKind.AdminTake).ToList();
         Assert.Multiple(() =>
         {
-            Assert.That(Market.Units(sim, character, ItemCatalog.Hide, 2), Is.EqualTo(120));
+            Assert.That(Market.Units(sim, character, ItemCatalog.Hide, 2), Is.EqualTo(ItemLedger.StackMax + 20));
             Assert.That(Items.Stacks(sim, character).Any(s => s.Id == minted.Id), Is.False, "the blaster destroyed");
-            Assert.That(admin.Where(e => e.Kind == ItemMoveKind.AdminGrant).Sum(e => e.Count), Is.EqualTo(152), "the hide, the blaster, the part");
+            Assert.That(
+                admin.Where(e => e.Kind == ItemMoveKind.AdminGrant).Sum(e => e.Count),
+                Is.EqualTo(ItemLedger.StackMax + 52),
+                "the hide, the blaster, the part");
             Assert.That(admin.Where(e => e.Kind == ItemMoveKind.AdminTake).Sum(e => e.Count), Is.EqualTo(31));
             Assert.That(admin.All(e => (e.Kind == ItemMoveKind.AdminGrant) == (e.From == ItemLedger.World)), Is.True);
         });

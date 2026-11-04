@@ -567,6 +567,7 @@ public static class TatooineHost
         app.MapCrafting(runtime.Engine);
         app.MapInstallations(runtime.Engine);
         app.MapWaypoints(runtime.Engine);
+        app.MapMail(runtime.Engine);
         // The bazaar's board is the simulation's, published by its desk: asked at each request. Required — MapMarket refuses to start without it.
         app.MapMarket(runtime.Engine, marketBoard);
         app.MapProgress(runtime.Engine);

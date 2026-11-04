@@ -40,10 +40,13 @@ public static class Refining
         };
     }
 
+    /// <summary>The most outputs one refine of a material makes: what a stack held before it held 100 000, under the command's byte.</summary>
+    public const int MaxMaterialsPerAction = 99;
+
     /// <summary>The most outputs one refine of <paramref name="template"/> makes; 0 when it does not refine.</summary>
     public static int MaxOutputs(ushort template)
         => !ItemCatalog.TryGet(template, out var t) ? 0
-            : t.Category == ItemCategory.Material ? ItemLedger.StackMax
+            : t.Category == ItemCategory.Material ? MaxMaterialsPerAction
             : t.Category is ItemCategory.Core or ItemCategory.Addon ? MaxItemsPerAction : 0;
 
     /// <summary>

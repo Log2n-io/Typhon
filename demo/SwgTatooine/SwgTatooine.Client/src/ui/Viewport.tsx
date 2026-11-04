@@ -155,7 +155,7 @@ function factoryFor(
       onMarketRefused,
       onTipRefused: (reason) => {
         // "Not enough credits", "too far": an accepted tip is never answered — the wallet moves instead.
-        useChat.getState().notice(`Tip refused: ${tipRefusal(reason)}`);
+        useChat.getState().notice(`Tip refused: ${tipRefusal(reason)}`, 'economy');
       },
       onSpectateRefused: () => {
         // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the

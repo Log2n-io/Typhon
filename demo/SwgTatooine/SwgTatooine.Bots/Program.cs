@@ -26,6 +26,7 @@ bool noMissions;
 bool noMarket;
 int crafters;
 int installers;
+int mailers;
 string marketRush;
 int marketRushListings;
 string marketLog;
@@ -85,6 +86,7 @@ try
         min: 0);
     // --brain only: the installation owners (crafting-build.md § 10, O-7), the next share by index after the crafters; 0 is the A/B arm.
     installers = r.Int("--installers", defaults.InstallPercent, "percent of the trading bots that keep an extractor; 0 for none", min: 0);
+    mailers = r.Int("--mailers", defaults.MailPercent, "percent of the trading bots that write mail and /tells to the fleet; 0 for none", min: 0, max: 100);
     // --brain only: the bazaar's load test (bazaar.md § 8, M5-1): every bot to one city's bazaars, one in ten keeping 1 cr listings, the rest racing
     // to buy them. Two flags where the design wrote one with two values: the strict reader takes one value a flag.
     marketRush = r.Str("--market-rush", null, "the bazaar load test in this city: sellers keep 1 cr listings, the rest race to buy them", "<city>");
@@ -277,6 +279,8 @@ var options = new BotSwarmOptions
     Market = !noMarket,
     CraftPercent = Math.Min(100, crafters),
     InstallPercent = Math.Min(100 - Math.Min(100, crafters), installers),
+    MailPercent = mailers,
+    NameFor = accounts == null ? null : index => accounts[index]?.Name,
     MarketRush = marketRush,
     MarketRushListings = marketRushListings,
     OnMarketWin = winLog == null
@@ -411,11 +415,15 @@ string Trade()
     var m = swarm.Market();
     var c = swarm.Crafting();
     var i = swarm.Installing();
+    var mail = swarm.Mailing();
     return (m.Trades == 0 ? string.Empty : $"  market {m.Trades} trades {m.Listed} listed {m.Vendored} vendored {m.Bought} bought {m.Won} won {m.BuyLost} lost")
         + (c.Started + c.Resumed == 0 ? string.Empty : $"  craft {c.Started} started {c.Finished} finished")
         + (i.Owners == 0
             ? string.Empty
-            : $"  install {i.Owners} owners {i.Kits} kits {i.Tends} tends {i.Placed} placed {i.Collects} collects {i.Payments} paid");
+            : $"  install {i.Owners} owners {i.Kits} kits {i.Tends} tends {i.Placed} placed {i.Collects} collects {i.Payments} paid")
+        + (mail.Heard + mail.Sent + mail.Tells == 0
+            ? string.Empty
+            : $"  mail {mail.Heard} heard {mail.Acted} acted {mail.Sent} sent {mail.Refused} refused {mail.Tells} tells {mail.TellsHeard} told");
 }
 
 // TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
@@ -591,7 +599,7 @@ if (brain)
         $"missions: {missions.Asked} take(s) sent, {missions.Taken} taken, {missions.Completed} completed (paid), {missions.Cancelled} cancelled after "
         + $"{SwgTatooine.Bots.Brain.BotBrain.QuestSeconds:F0} s");
     var items = swarm.Items();
-    Console.WriteLine($"items: {items.LootRows} loot row(s) read, {items.UnitsLost} unit(s) lost to a full inventory, {items.Stacks} stack(s) held");
+    Console.WriteLine($"items: {items.LootRows} loot row(s) read, {items.UnitsLost} unit(s) lost to a full inventory, {items.Stacks} lot(s) held");
     if (noMarket)
     {
         Console.WriteLine("market: off (--no-market)");
@@ -636,6 +644,10 @@ if (brain)
         Console.WriteLine(
             $"installations: {inst.Owners} owner(s); {inst.Kits} kit buy(s) chosen, {inst.Tends} errand(s), {inst.Placed} place(s), "
             + $"{inst.Collects} collect(s), {inst.Payments} upkeep payment(s) sent");
+        var mailing = swarm.Mailing();
+        Console.WriteLine(
+            $"mail: {mailing.Heard} told, {mailing.Acted} acted on, {mailing.Sent} sent, {mailing.Refused} refused; {mailing.Tells} tell(s) sent, "
+            + $"{mailing.TellsHeard} heard");
     }
 
     var tips = swarm.Tips();

@@ -1,3 +1,4 @@
+import type { ChatCategory } from './chat-tabs';
 import { itemList } from './items';
 import { marketWalletLine } from './market';
 import { formatCredits } from './wallet';
@@ -58,6 +59,24 @@ const DROP_PREFIX: Readonly<Partial<Record<string, string>>> = {
   admingrant: 'Given by an operator',
 };
 
+/** Which chat category a drop's line goes under (client.md C44): what came out of the world is loot, what the bazaar handed over is economy. */
+const DROP_CATEGORY: Readonly<Partial<Record<string, ChatCategory>>> = {
+  buy: 'economy',
+  return: 'economy',
+  standard: 'economy',
+  extract: 'structures',
+  pickup: 'structures',
+};
+
+/** The credit kinds said under another category than economy. */
+const CREDIT_CATEGORY: Readonly<Partial<Record<string, ChatCategory>>> = { upkeep: 'structures' };
+
+/** A chat line of a batch of notices, with the category it is said under. */
+export interface NoticeEntry {
+  readonly text: string;
+  readonly category: ChatCategory;
+}
+
 /** The drop kinds whose line names the credits the same kind paid on the same tick: a vendor buy's price, a refine's fee. */
 const PRICED_DROPS: ReadonlySet<string> = new Set(['standard', 'refine']);
 
@@ -73,7 +92,15 @@ export function noticeLines(
   batch: readonly PlayerNotice[],
   saleItem: (amount: number, ref: string) => string | null = () => null,
 ): string[] {
-  const lines: { tick: number; order: number; text: string }[] = [];
+  return noticeEntries(batch, saleItem).map((e) => e.text);
+}
+
+/** {@link noticeLines}, each line with its chat category. */
+export function noticeEntries(
+  batch: readonly PlayerNotice[],
+  saleItem: (amount: number, ref: string) => string | null = () => null,
+): NoticeEntry[] {
+  const lines: { tick: number; order: number; text: string; category: ChatCategory }[] = [];
   const drops = new Map<string, { tick: number; order: number; prefix: string; items: PlayerNotice[] }>();
   batch.forEach((n, order) => {
     if (n.items) {
@@ -95,7 +122,7 @@ export function noticeLines(
 
     const text = creditLine(n, batch, saleItem);
     if (text !== null) {
-      lines.push({ tick: n.tick, order, text });
+      lines.push({ tick: n.tick, order, text, category: CREDIT_CATEGORY[n.kind] ?? 'economy' });
     }
   });
 
@@ -107,11 +134,16 @@ export function noticeLines(
     const kind = drop.items[0].kind;
     const price = PRICED_DROPS.has(kind) ? paid.findIndex((n) => n.kind === kind && n.tick === drop.tick) : -1;
     const cost = price < 0 ? '' : ` for ${formatCredits(paid.splice(price, 1)[0].amount)}`;
-    lines.push({ tick: drop.tick, order: drop.order, text: `${drop.prefix}: ${itemList(entries)}${cost}` });
+    lines.push({
+      tick: drop.tick,
+      order: drop.order,
+      text: `${drop.prefix}: ${itemList(entries)}${cost}`,
+      category: DROP_CATEGORY[kind] ?? 'loot',
+    });
   }
 
   lines.sort((a, b) => a.tick - b.tick || a.order - b.order);
-  return lines.map((l) => l.text);
+  return lines.map((l) => ({ text: l.text, category: l.category }));
 }
 
 // A move of credits as the chat says it, or null for one it does not say (a grant, a list fee or a tax said alone).

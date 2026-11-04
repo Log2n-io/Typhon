@@ -147,6 +147,22 @@ export interface InventorySnapshot {
   readonly lost: readonly LostNote[];
 }
 
+/** The most units one stack holds: the server's `ItemLedger.StackMax` (inventory-loot.md § 10). */
+export const STACK_MAX = 100_000;
+
+/**
+ * A count as a slot draws it, in four characters at most: `7`, `9999`, then `12.3K` (down, never up: 99 999 is `99.9K`, not `100K`), `100K`. The slot's
+ * tooltip and the preview say the exact count.
+ */
+export function slotCount(count: number): string {
+  if (count < 10_000) {
+    return String(count);
+  }
+
+  const tenths = Math.floor(count / 100) / 10;
+  return count < 100_000 ? `${tenths.toFixed(1)}K` : `${String(Math.floor(count / 1000))}K`;
+}
+
 /** The size the grid draws an icon at, in pixels: the catalogue publishes it at that size, and it is never scaled. */
 export const ITEM_ICON_PX = 32;
 

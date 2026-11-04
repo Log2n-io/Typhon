@@ -289,7 +289,7 @@ public static class CraftPlan
                 continue;
             }
 
-            var quantity = Math.Clamp(want.Count, 1, MarketPlan.StackMax);
+            var quantity = Math.Clamp(want.Count, 1, MarketPlan.LotSize);
             var price = o.PriceMilli * quantity / 1000;
             return price > 0 && price <= budget ? MarketCommand.Standard(o.Template, price, quantity) : null;
         }

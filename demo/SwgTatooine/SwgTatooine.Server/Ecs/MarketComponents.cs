@@ -32,7 +32,8 @@ public static class ListingState
 }
 
 /// <summary>
-/// A listing on the bazaar (bazaar.md § 2.1): one (template, Mk), 1-99 units, at one fixed unit price, in one city. Written by the <c>Market</c> system alone.
+/// A listing on the bazaar (bazaar.md § 2.1): one (template, Mk), 1 to <see cref="ItemLedger.StackMax"/> units, at one fixed unit price, in one city. Written
+/// by the <c>Market</c> system alone.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -72,7 +73,7 @@ public struct Listing
     /// <summary>The list fee paid for it, credits (its <c>listfee</c> row's amount).</summary>
     [Field] public long Fee;
 
-    /// <summary>Units in escrow, 1-99: the escrow stack's count.</summary>
+    /// <summary>Units in escrow, 1..<see cref="ItemLedger.StackMax"/>: the escrow stack's count.</summary>
     [Field] public int Quantity;
 
     /// <summary>How many item ledger rows moved its units.</summary>

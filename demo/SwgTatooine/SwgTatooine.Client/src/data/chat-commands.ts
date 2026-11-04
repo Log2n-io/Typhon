@@ -25,7 +25,12 @@ export type ChatCommand =
   /** Deletes the player's own waypoints of a name. */
   | { readonly kind: 'waydel'; readonly name: string }
   /** Lists the player's own waypoints in chat. */
-  | { readonly kind: 'waylist' };
+  | { readonly kind: 'waylist' }
+  /** A line to one player online, by name (mail.md § 3); `/r` to the last who told this player something. */
+  | { readonly kind: 'tell'; readonly to: string; readonly text: string }
+  | { readonly kind: 'reply'; readonly text: string }
+  /** The mail window, writing to a player, about a subject, where given. */
+  | { readonly kind: 'mail'; readonly to: string; readonly subject: string };
 
 export interface CommandSpec {
   readonly name: string;
@@ -91,6 +96,28 @@ export const COMMANDS: readonly CommandSpec[] = [
     usage: '/waylist',
     help: 'lists your waypoints',
     parse: () => ({ kind: 'waylist' }),
+  },
+  {
+    name: 'tell',
+    usage: '/tell <player> <text>',
+    help: 'says something to one player, wherever they are, if they are online',
+    parse: (args) =>
+      args.length < 2
+        ? { kind: 'error', message: 'Usage: /tell <player> <text>' }
+        : { kind: 'tell', to: args[0], text: args.slice(1).join(' ') },
+  },
+  {
+    name: 'r',
+    usage: '/r <text>',
+    help: 'answers the last player who told you something',
+    parse: (args) =>
+      args.length === 0 ? { kind: 'error', message: 'Usage: /r <text>' } : { kind: 'reply', text: args.join(' ') },
+  },
+  {
+    name: 'mail',
+    usage: '/mail [player] [subject]',
+    help: 'writes a mail, which waits for the player if they are offline (N opens your mail)',
+    parse: (args) => ({ kind: 'mail', to: args[0] ?? '', subject: args.slice(1).join(' ') }),
   },
 ];
 

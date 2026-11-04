@@ -201,6 +201,15 @@ public partial class WaypointArch : Archetype<WaypointArch>
 }
 
 /// <summary>
+/// A mail in a character's inbox (mail.md § 2). Written by the <c>Workshop</c> alone.
+/// </summary>
+[Archetype(1, "Mail")]
+public partial class MailArch : Archetype<MailArch>
+{
+    public static readonly Comp<MailCore> Core = Register<MailCore>();
+}
+
+/// <summary>
 /// What the world sees of an installation: where it stands, what it is and what it is doing. Static and replicated, as a structure, and a view only — rebuilt
 /// from <see cref="InstallationArch"/> when a world opens, so a lost one costs nothing.
 /// </summary>

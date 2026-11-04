@@ -208,8 +208,11 @@ public static class ItemLedger
     /// <summary>The one <see cref="ItemLedgerHead"/>'s key.</summary>
     public const int HeadKey = 1;
 
-    /// <summary>The most units one stack holds.</summary>
-    public const int StackMax = 99;
+    /// <summary>
+    /// The most units one stack holds: every fungible item, materials and ore first (Loïc, 2026-11-04 — 99 held less than a tenth of an extractor's hopper,
+    /// and a structure repair kit takes Ore ×100). An item with stats is one per slot, a crate <see cref="Crates.Capacity"/>.
+    /// </summary>
+    public const int StackMax = 100_000;
 
     /// <summary>A character's inventory grid: slots 1..40 (crafting-build.md O-9: a crafter holds one recipe's inputs and its gear).</summary>
     public const int Slots = 40;

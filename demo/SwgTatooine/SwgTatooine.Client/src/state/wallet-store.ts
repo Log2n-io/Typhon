@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { noticeLines, type PlayerNotice } from '../data/notices';
+import { noticeEntries, type PlayerNotice } from '../data/notices';
 import { type WalletSnapshot } from '../data/wallet';
 import { useChat } from './chat-store';
 import { useMarket } from './market-store';
@@ -61,8 +61,8 @@ export const useWallet = create<WalletState>((set, get) => ({
 export function announceNotices(batch: readonly PlayerNotice[]): void {
   const market = useMarket.getState();
   const chat = useChat.getState();
-  for (const line of noticeLines(batch, (amount, ref) => market.saleItem(amount, ref))) {
-    chat.notice(line);
+  for (const line of noticeEntries(batch, (amount, ref) => market.saleItem(amount, ref))) {
+    chat.notice(line.text, line.category);
   }
 
   // A vendor buy landed (Loïc, 2026-11-02): its row's Buy is back at once, not after the in-flight guard's 5 s.

@@ -416,15 +416,16 @@ internal sealed class InventoryChecks : ServedChecks
 
     // ── IL-5: stacking and the full inventory ───────────────────────────────────────────────────────────────────────
 
-    /// <summary>IL-5: 97 and 4 more of the same template and Mk make 99 and 2 in the lowest free slot: two rows, ToAfter 99 and 2.</summary>
+    /// <summary>IL-5: a stack two short of <see cref="ItemLedger.StackMax"/> and 4 more of the same template and Mk make a full stack and 2 in the lowest free
+    /// slot: two rows, ToAfter StackMax and 2.</summary>
     [Test]
     [CancelAfter(120_000)]
-    public void ADrop_StacksUpTo99_ThenOpensASlot()
+    public void ADrop_StacksUpToStackMax_ThenOpensASlot()
     {
         using var sim = Start();
         var (x, z) = OpenGround(sim);
         var p = LogIn(sim, 0x7405, x, z);
-        Mint(sim, p.Character, 3, (ItemCatalog.Metal, 1, 5), (ItemCatalog.Hide, 2, 97), (ItemCatalog.Bone, 1, 5));
+        Mint(sim, p.Character, 3, (ItemCatalog.Metal, 1, 5), (ItemCatalog.Hide, 2, ItemLedger.StackMax - 2), (ItemCatalog.Bone, 1, 5));
         var hide = Items.Stacks(sim, p.Character).Single(s => s.Stack.Template == ItemCatalog.Hide);
 
         // A hole at slot 1: the metal given back to World, so the next new stack opens there.
@@ -463,8 +464,12 @@ internal sealed class InventoryChecks : ServedChecks
         var (x, z) = OpenGround(sim);
         var p = LogIn(sim, 0x7406, x, z);
 
-        // A frog drops glands only, at Mk I to III for a level-0 frog: three gland stacks at 97, and full stacks of everything else to the last slot.
-        var lines = new List<(ushort, byte, int)> { (ItemCatalog.Gland, 1, 97), (ItemCatalog.Gland, 2, 97), (ItemCatalog.Gland, 3, 97) };
+        // A frog drops glands only, at Mk I to III for a level-0 frog: three gland stacks two short of full, and full stacks of everything else to the last
+        // slot.
+        var lines = new List<(ushort, byte, int)>
+        {
+            (ItemCatalog.Gland, 1, ItemLedger.StackMax - 2), (ItemCatalog.Gland, 2, ItemLedger.StackMax - 2), (ItemCatalog.Gland, 3, ItemLedger.StackMax - 2),
+        };
         foreach (var t in ItemCatalog.Templates)
         {
             for (byte mk = 1; mk <= 3 && lines.Count < ItemLedger.Slots; mk++)
@@ -489,7 +494,7 @@ internal sealed class InventoryChecks : ServedChecks
         var lostPartial = sim.Bridge.ItemsLost;
         var json = ItemEndpoints.InventoryJson(sim.Dbe, p.Character);
 
-        // Nothing fits now — every gland stack topped up to 99, whatever Mk the first drop had — the whole drop lost, no row.
+        // Nothing fits now — every gland stack topped up to full, whatever Mk the first drop had — the whole drop lost, no row.
         for (byte mk = 1; mk <= 3; mk++)
         {
             sim.Bridge.StageTransfer(ItemLedger.World, (long)p.Character.RawValue, ItemCatalog.Gland, mk, 2, ItemMoveKind.Kill, 1);

@@ -41,7 +41,7 @@ RegisterSpotLight();
  * A structure should have no animatable at all, and an avatar only the clips `CharacterRig` is crossfading. Clones from
  * `instantiateModelsToScene` do not inherit a playing state, so this takes nothing away from what we start ourselves.
  */
-const ASSET_LOAD_OPTIONS = { pluginOptions: { gltf: { animationStartMode: ANIMATION_START_NONE } } } as const;
+export const ASSET_LOAD_OPTIONS = { pluginOptions: { gltf: { animationStartMode: ANIMATION_START_NONE } } } as const;
 
 /**
  * Loads published assets and places instances of them.
@@ -182,6 +182,15 @@ export class AssetLibrary {
     }
 
     return pending;
+  }
+
+  /**
+   * An item's model for the inventory's preview (client.md C43): its GLB's URL and its descriptor, or `null` for an asset the catalogue does not hold. The
+   * preview loads the GLB into a scene of its own, so the library's containers — bound to the world's scene — are not shared with it.
+   */
+  async modelOf(id: string): Promise<{ readonly glb: string; readonly descriptor: Descriptor } | null> {
+    const entry = this.catalogue.assets[id];
+    return entry === undefined ? null : { glb: this.base + entry.glb, descriptor: await this.describe(id) };
   }
 
   /** Whether an asset has failed to load; a caller skips it rather than asking again. */

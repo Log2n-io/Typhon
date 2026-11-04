@@ -685,7 +685,8 @@ public sealed partial class SimBridge
         return n;
     }
 
-    /// <summary>How many units of the key fit: a free slot holds a stack, or one item with stats; a stack of the key, the rest of its 99.</summary>
+    /// <summary>How many units of the key fit: a free slot holds a stack, or one item with stats; a stack of the key, what it lacks to <see
+    /// cref="ItemLedger.StackMax"/>.</summary>
     private static int RoomFor(OwnerItems items, ushort template, byte mk)
     {
         var n = 0;
@@ -818,7 +819,11 @@ public sealed partial class SimBridge
             Kind = kind,
         };
         tx.Spawn<ItemLedgerArch>(ItemLedgerArch.Entry.Set(in row));
-        QueueNotice(PlayerNotice.Items, from, to, ItemLedger.World, ItemMoveKind.NameOf(kind), 0, count, template, mk, reference);
+        // A throw-away is the player's own act, said by the grid it leaves (inventory-loot.md § 10): no notice.
+        if (kind != ItemMoveKind.Discard)
+        {
+            QueueNotice(PlayerNotice.Items, from, to, ItemLedger.World, ItemMoveKind.NameOf(kind), 0, count, template, mk, reference);
+        }
         _pendingItemRows++;
         _itemsDirty = true;
     }

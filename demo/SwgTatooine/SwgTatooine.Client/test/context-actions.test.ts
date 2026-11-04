@@ -15,6 +15,7 @@ import {
 } from '../src/data/installations';
 import type { InventoryItem } from '../src/data/items';
 import { useUi } from '../src/state/ui-store';
+import { useItems } from '../src/state/items-store';
 
 /**
  * A window lists, the world acts (client.md C42, Loïc 2026-11-04): a structure is listed with where it stands and a waypoint, and what it does is its
@@ -119,7 +120,26 @@ describe('an item’s own menu (client.md C42)', () => {
     expect(entries).toHaveLength(7);
     expect(entries[0].action).toEqual({ kind: 'installPlace', item: 'k', family: 1 });
     expect(kitMenuItems({ ...kit, slot: 101 })).toEqual([]);
-    expect(itemMenuItems(item('p', 4, 36), [])).toEqual([]);
+    // A single part: thrown away, nothing else (client.md C43); worn, nothing at all — it is the character window's.
+    expect(itemMenuItems(item('p', 4, 36), []).map((e) => e.action)).toEqual([
+      { kind: 'itemPrompt', item: 'p', mode: 'discard' },
+    ]);
+    expect(itemMenuItems({ ...kit, slot: 101 }, [])).toEqual([]);
+  });
+
+  it('splits units with a free slot, and throws anything away through the prompt (client.md C43)', () => {
+    const units = item('u', 3, 36, 50);
+    expect(itemMenuItems(units, [units]).map((e) => e.action)).toEqual([
+      { kind: 'itemPrompt', item: 'u', mode: 'split' },
+      { kind: 'itemPrompt', item: 'u', mode: 'discard' },
+    ]);
+    expect(itemMenuItems(units, [units], 0).map((e) => e.action)).toEqual([
+      { kind: 'itemPrompt', item: 'u', mode: 'discard' },
+    ]);
+    useUi.getState().runContextAction({ kind: 'itemPrompt', item: 'u', mode: 'split' });
+    expect(useItems.getState().prompt).toEqual({ mode: 'split', item: 'u', slot: 0 });
+    expect(useItems.getState().selected).toBe('u');
+    useItems.getState().openPrompt(null);
   });
 
   it('wears an item with stats, packs it with its identical ones, and unpacks a crate', () => {
@@ -129,11 +149,16 @@ describe('an item’s own menu (client.md C42)', () => {
     expect(itemMenuItems(a, [a, b]).map((e) => e.action)).toEqual([
       { kind: 'equip', item: 'a' },
       { kind: 'pack', item: 'a', into: 'b' },
+      { kind: 'itemPrompt', item: 'a', mode: 'discard' },
     ]);
     expect(itemMenuItems(b, [a, b]).map((e) => e.action)).toEqual([
       { kind: 'pack', item: 'a', into: 'b' },
       { kind: 'unpack', item: 'b', count: 1 },
+      { kind: 'itemPrompt', item: 'b', mode: 'unpack' },
       { kind: 'unpack', item: 'b', count: 3 },
+      { kind: 'itemPrompt', item: 'b', mode: 'discard' },
     ]);
+    // No free slot: nothing to unpack into.
+    expect(itemMenuItems(b, [a, b], 0).map((e) => e.action.kind)).toEqual(['pack', 'itemPrompt']);
   });
 });

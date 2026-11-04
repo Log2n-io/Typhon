@@ -126,6 +126,7 @@ internal sealed class BotMarketLiveChecks : ServedChecks
         var world = bot.Eyes.Read(bot.Store, bot.Brain.Facilities) with
         {
             InventoryStacks = bot.Inventory.Stacks,
+            InventorySlots = bot.Inventory.Slots,
             Reserved = bot.Mine.Reserved,
             Trading = bot.Sender.Busy,
         };

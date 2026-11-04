@@ -11,7 +11,7 @@ namespace SwgTatooine.Server;
 /// <para><b>Identical</b>: the same template and Mk, made by the same crafter, every stat line, the max condition and the life factor equal — a blueprint's
 /// items by construction, hand-crafted ones only when their rolls matched. The craft's serial is not compared: a crate keeps the first item's.</para>
 /// <para><b>Pristine</b>: never used nor repaired, its condition whole and not broken — a worn item differs from its twin by its condition.</para>
-/// <para><b>Fungible goods do not crate</b>: materials, cores and add-ons are stacks of 99 already.</para>
+/// <para><b>Fungible goods do not crate</b>: materials, cores and add-ons are stacks already, of up to <see cref="ItemLedger.StackMax"/>.</para>
 /// </remarks>
 public static class Crates
 {

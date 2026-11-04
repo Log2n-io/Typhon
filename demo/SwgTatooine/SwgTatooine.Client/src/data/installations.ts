@@ -116,48 +116,6 @@ export function withinReach(i: Installation, x: number, z: number): boolean {
   return dx * dx + dz * dz <= INSTALLATION_REACH_M * INSTALLATION_REACH_M;
 }
 
-/** Upkeep left under this, seconds, is said once (client.md C39): an hour to pay before it stops. */
-export const UPKEEP_WARN_SECONDS = 3600;
-
-/** The installations already said to be full, and to be running out of upkeep: each said once until it is not any more. */
-export interface InstallationAlerts {
-  readonly full: ReadonlySet<string>;
-  readonly low: ReadonlySet<string>;
-}
-
-export const NO_ALERTS: InstallationAlerts = { full: new Set(), low: new Set() };
-
-/**
- * What a new reading of the installations says (client.md C39): each that has just filled its hopper, each whose upkeep has just gone under an hour —
- * once, until it is emptied or paid again — and what is remembered for the next reading.
- */
-export function installationAlerts(
-  before: InstallationAlerts,
-  list: readonly Installation[],
-): { readonly notices: readonly string[]; readonly next: InstallationAlerts } {
-  const notices: string[] = [];
-  const full = new Set<string>();
-  const low = new Set<string>();
-  for (const i of list) {
-    const where = `${String(Math.round(i.x))}, ${String(Math.round(i.z))}`;
-    if (i.hopper > 0 && i.held >= i.hopper) {
-      full.add(i.id);
-      if (!before.full.has(i.id)) {
-        notices.push(`Your ${i.familyName} extractor at ${where} is full: collect it, or it makes nothing more`);
-      }
-    }
-
-    if (i.paidSeconds > 0 && i.paidSeconds < UPKEEP_WARN_SECONDS) {
-      low.add(i.id);
-      if (!before.low.has(i.id)) {
-        notices.push(`Your ${i.familyName} extractor at ${where} has ${paidText(i.paidSeconds)} of upkeep left`);
-      }
-    }
-  }
-
-  return { notices, next: { full, low } };
-}
-
 /** The upkeep a menu entry buys, hours. */
 export const PAY_HOURS = [1, 8] as const;
 
