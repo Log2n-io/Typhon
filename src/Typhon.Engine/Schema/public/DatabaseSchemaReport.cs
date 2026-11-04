@@ -118,6 +118,12 @@ public interface ISchemaRegistrar
     /// <param name="func">Delegate that transforms an old-revision value into a new-revision value.</param>
     void RegisterMigration<TOld, TNew>(MigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged;
 
+    /// <summary>Registers a migration that reads and sets texts through its <see cref="MigrationContext"/> (#1094).</summary>
+    /// <typeparam name="TOld">The source revision's struct type.</typeparam>
+    /// <typeparam name="TNew">The target revision's struct type.</typeparam>
+    /// <param name="func">Delegate that transforms an old-revision value into a new-revision value.</param>
+    void RegisterMigration<TOld, TNew>(ContextMigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged;
+
     /// <summary>Registers a byte-level migration for a component whose old struct type is no longer available in code.</summary>
     /// <param name="name">Component (schema) name.</param>
     /// <param name="fromRev">Source revision.</param>

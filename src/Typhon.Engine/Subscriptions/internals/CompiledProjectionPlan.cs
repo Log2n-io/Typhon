@@ -225,8 +225,15 @@ internal readonly struct CompiledField
     /// <summary>For a <c>quat3</c> field, its four components' byte offsets inside the component, in wire order; <see langword="null"/> otherwise.</summary>
     public int[] ShapeOffsets { get; init; }
 
-    /// <summary>For a text field, its inline buffer's bytes (64 or 1 024); 0 otherwise. Its text is at most one byte less.</summary>
+    /// <summary>For a text field, its buffer's bytes (64 or 1 024); 0 otherwise. Its text is at most one byte less.</summary>
     public int TextCapacity { get; init; }
+
+    /// <summary>
+    /// For a <c>String1024</c> field, its component's type (#1094): the field holds a chunk handle, and the encoder reads the text through the text segment
+    /// the replication state binds for that component at attach (<c>ArchetypeReplicationState.TextTables</c>) — the plan holds no storage structure
+    /// (SUB-01). Null for an inline text (<c>String64</c>, <c>Variant</c>) and every other field.
+    /// </summary>
+    public System.Type OutOfLineTextComponent { get; init; }
 
     /// <summary>
     /// For a reference field, its index among the archetype's reference fields — public then owner — which is where the netId it last resolved to is kept

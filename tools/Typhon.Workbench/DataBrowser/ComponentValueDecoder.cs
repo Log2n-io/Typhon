@@ -19,7 +19,13 @@ namespace Typhon.Workbench.DataBrowser;
 /// </summary>
 internal static class ComponentValueDecoder
 {
-    public static ComponentValueDto Decode(DBComponentDefinition.Field field, ReadOnlySpan<byte> componentBytes)
+    /// <param name="field">The field.</param>
+    /// <param name="componentBytes">The component's value bytes.</param>
+    /// <param name="table">
+    /// The component's table, which a <c>String1024</c> field's text is read through (#1094): the field holds a chunk handle, the text lives out of line.
+    /// Null shows the handle only.
+    /// </param>
+    public static ComponentValueDto Decode(DBComponentDefinition.Field field, ReadOnlySpan<byte> componentBytes, ComponentTable table = null)
     {
         var offset = field.OffsetInComponentStorage;
         var size = field.SizeInComponentStorage;
@@ -32,8 +38,22 @@ internal static class ComponentValueDecoder
 
         var bytes = componentBytes.Slice(offset, size);
         var raw = Convert.ToHexString(bytes).ToLowerInvariant();
-        var value = field.IsArray ? null : DecodeScalar(field.Type, bytes);
+        var value = field.IsArray ? null
+            : field.Type == FieldType.String1024 ? DecodeText(bytes, table)
+            : DecodeScalar(field.Type, bytes);
         return new ComponentValueDto(field.FieldId, value, raw);
+    }
+
+    // A String1024 is a 4-byte chunk handle: its text is read through the table, and 0 is no text.
+    private static object DecodeText(ReadOnlySpan<byte> handleBytes, ComponentTable table)
+    {
+        var chunkId = BinaryPrimitives.ReadInt32LittleEndian(handleBytes);
+        if (chunkId == 0)
+        {
+            return "";
+        }
+
+        return table != null ? EntityAccessor.ReadTextOf(table, chunkId) : $"(text #{chunkId})";
     }
 
     // Returns a boxed JSON-native scalar (System.Text.Json serializes int/uint/long/float/double/bool→primitive, string→string),
@@ -52,7 +72,7 @@ internal static class ComponentValueDecoder
         FieldType.Float => BinaryPrimitives.ReadSingleLittleEndian(bytes),
         FieldType.Double => BinaryPrimitives.ReadDoubleLittleEndian(bytes),
         FieldType.Char => ((char)BinaryPrimitives.ReadUInt16LittleEndian(bytes)).ToString(),
-        FieldType.String64 or FieldType.String1024 or FieldType.Variant => DecodeUtf8(bytes),
+        FieldType.String64 or FieldType.Variant => DecodeUtf8(bytes),
 
         FieldType.Point2F => FormatTuple(bytes, isDouble: false, 2),
         FieldType.Point3F => FormatTuple(bytes, isDouble: false, 3),

@@ -141,7 +141,7 @@ internal static class PageImage
 
     /// <summary>Whether the kind byte is a defined <see cref="StorageSegmentKind"/>.</summary>
     /// <param name="kind">The kind value to validate.</param>
-    public static bool IsKindDefined(StorageSegmentKind kind) => kind <= StorageSegmentKind.System;
+    public static bool IsKindDefined(StorageSegmentKind kind) => kind <= StorageSegmentKind.Text;
 
     /// <summary>
     /// Verifies a page exactly the way the engine's load path does, honouring whichever checksum form the page declared —

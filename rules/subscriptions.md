@@ -79,6 +79,9 @@
   invariant ∀ projected ComponentCollection<T> field c: c's HANDLE is read through the cluster layout like any field; its ELEMENTS are read
     through T's VariableSizedBufferSegment only, lock-free (ReadElementsUnlocked), with the projection worker's own chunk accessor, inside
     the chunk's EpochGuard, in the replication track only — and the element layout is T's, compiled once at Start
+  invariant ∀ projected String1024 field t (#1094): t's HANDLE is read through the cluster layout like any field; its TEXT is read through
+    the component's text segment, which the replication state binds at attach (ArchetypeReplicationState.TextTables) — the plan carries
+    only the component's type
   never invoke a selector, a delegate or reflection per entity — a declaration's field name becomes an offset once, at Start, or it is
     refused there by name
   scope: ProjectionCompiler.Compile, ProjectionCompiler.VelocityCodec, CompiledField.ComponentSlot,

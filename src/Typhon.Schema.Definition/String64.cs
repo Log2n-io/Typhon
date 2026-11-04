@@ -114,47 +114,38 @@ public struct VarString
 
 }
 
-/// <summary>A fixed 1024-byte inline UTF-8 string buffer — a blittable, fixed-size component field that stores its characters in place (no heap allocation).</summary>
+/// <summary>
+/// A text of up to <see cref="MaxUtf8Bytes"/> UTF-8 bytes, stored <b>out of line</b>: the component holds only this 4-byte handle, the text lives in an
+/// engine-managed segment of 1 024-byte chunks (#1094). A default handle is "no text" and costs nothing but the 4 bytes.
+/// </summary>
+/// <remarks>
+/// The out-of-line storage keeps the component small, so the archetype's cluster stays dense: 1 024 inline bytes per entity would drop a cluster to a
+/// handful of entities and slow down everything that works per cluster. The price is one indirection on access, paid only by code that reads the text.
+/// Read and change the text through the entity handle — <c>EntityRef.ReadText</c>, <c>EntityRefMut.SetText</c> / <c>ClearText</c> — never by copying a
+/// handle from one component into another: a store that carries a handle the entity does not hold is refused.
+/// </remarks>
 [PublicAPI]
-public unsafe struct String1024
+[StructLayout(LayoutKind.Sequential)]
+[DebuggerDisplay("String1024 chunk {_chunkId}")]
+public struct String1024 : IEquatable<String1024>
 {
-    private const int Size = 1024;
-    private fixed byte _data[1024];
+    /// <summary>The longest text a <see cref="String1024"/> holds, in UTF-8 bytes: its chunk less the terminator.</summary>
+    public const int MaxUtf8Bytes = 1023;
 
-    /// <summary>Gets or sets the string value, encoded as inline UTF-8 and null-terminated. The setter truncates input that does not fit the buffer.</summary>
-    public string AsString
-    {
-        get
-        {
-            fixed (byte* a = _data)
-            {
-                return Marshal.PtrToStringUTF8(new IntPtr(a));
-            }
-        }
+    /// <summary>The chunk holding the text in the engine's text segment; 0 is no text (chunk 0 of every chunk-based segment is the null sentinel).</summary>
+    internal int _chunkId;
 
-        set
-        {
-            fixed (char* c = value)
-            fixed (byte* a = _data)
-            {
-                var inLength = value.Length;
-                var sizeRequired = Encoding.UTF8.GetByteCount(c, inLength);
-                if (sizeRequired < Size)
-                {
-                    var l = Encoding.UTF8.GetBytes(c, inLength, a, Size - 1);
-                    a[l] = 0;            // Null terminator
-                }
-                else
-                {
-                    Span<byte> buffer = (sizeRequired < 4096) ? stackalloc byte[sizeRequired] : new byte[sizeRequired];
-                    Encoding.UTF8.GetBytes(value.AsSpan(), buffer);
-                    Span<byte> d = new Span<byte>(a, Size);
-                    buffer.Slice(0, Size).CopyTo(d);
-                    a[Size - 1] = 0;
-                }
-            }
-        }
-    }
+    /// <summary>True when the handle names no text.</summary>
+    public readonly bool IsEmpty => _chunkId == 0;
+
+    /// <inheritdoc />
+    public readonly bool Equals(String1024 other) => _chunkId == other._chunkId;
+
+    /// <inheritdoc />
+    public override readonly bool Equals(object obj) => obj is String1024 other && Equals(other);
+
+    /// <inheritdoc />
+    public override readonly int GetHashCode() => _chunkId;
 }
 
 /// <summary>

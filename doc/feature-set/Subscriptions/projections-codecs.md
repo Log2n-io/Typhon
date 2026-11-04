@@ -61,7 +61,7 @@ The same declarations can be written as attributes on the data ([Replication by 
   in an integer codec, a `float` in `f64` — is refused at declaration.
 - **Text on a field** (`String64`, as `Codec.Exact` or `Codec.Str(n)` with n ≤ 63) is cut at its cap on a character boundary, never inside one,
   and every cut is counted. A group holding text is stored out of line, so it costs the entity's hot entry 8 bytes whatever its length. A
-  `String1024` cannot be in a replicated archetype — cluster storage needs eight entities to a page.
+  `String1024` projects as `str{≤1023}`; its text is read through its out-of-line chunk (#1094).
 - **A reference** (`EntityId` or `EntityLink<T>`, as `entityRef`) carries its target's netId, or 0 when the target is null, gone, or not
   replicated. A target given its identity this tick is resolved the next one. When the target goes, every referrer sends 0 the following tick,
   with no push from the application, long before the netId can be reissued. A reference in an `OnEnter` field or on a `Static` archetype is

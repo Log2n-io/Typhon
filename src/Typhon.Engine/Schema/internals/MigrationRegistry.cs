@@ -24,6 +24,12 @@ internal sealed class MigrationRegistry
         AddEntry(entry);
     }
 
+    public void Register<TOld, TNew>(ContextMigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged
+    {
+        var entry = new TypedMigrationEntry<TOld, TNew>(func);
+        AddEntry(entry);
+    }
+
     /// <summary>
     /// Registers a byte-level migration function for scenarios where the old struct type is no longer in code.
     /// </summary>
@@ -127,7 +133,7 @@ internal sealed class MigrationRegistry
 
         try
         {
-            entry.Execute(oldBuf, newBuf);
+            entry.Execute(oldBuf, newBuf, new MigrationContext(null));
         }
         catch (Exception ex)
         {

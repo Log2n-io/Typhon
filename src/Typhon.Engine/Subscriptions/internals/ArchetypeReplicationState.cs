@@ -398,6 +398,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     internal VariableSizedBufferSegmentBase<PersistentStore>[] CollectionSegments = [];
 
     /// <summary>
+    /// Per component slot, the table whose text segment a projected <c>String1024</c> field of that component is read through (#1094); null for a slot with
+    /// none. The text's handle is read through the cluster layout like any field; its bytes, like a collection's elements, through their own segment.
+    /// </summary>
+    internal ComponentTable[] TextTables = [];
+
+    /// <summary>
     /// Per public group, the catalog section a stored body decodes with when the group holds a collection whose element names entities; <see langword="null"/>
     /// for every other group. Owner groups in <see cref="CollectionReferenceOwnerSections"/>.
     /// </summary>
@@ -412,6 +418,27 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     [ThreadStatic]
     private static uint[] EndScratch;
 
+    /// <summary>Binds each projected <c>String1024</c> field's component slot to the table that owns its texts (<see cref="TextTables"/>).</summary>
+    private void AttachTexts(CompiledProjectionPlan plan, DatabaseEngine engine)
+    {
+        ComponentTable[] tables = null;
+        foreach (var fields in new[] { plan.Fields, plan.OwnerFields })
+        {
+            foreach (var field in fields)
+            {
+                if (field.OutOfLineTextComponent == null)
+                {
+                    continue;
+                }
+
+                tables ??= new ComponentTable[16];
+                tables[field.ComponentSlot] = engine.GetComponentTable(field.OutOfLineTextComponent);
+            }
+        }
+
+        TextTables = tables ?? [];
+    }
+
     /// <summary>
     /// Binds the plan's collections to their buffer segments and, where an element names entities, its groups to the catalog sections their stored bodies
     /// decode with. Once, when the plan is attached; after <see cref="AttachWideSections"/>, whose layout it reads.
@@ -420,6 +447,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     public void AttachCollections(CompiledProjectionPlan plan, DatabaseEngine engine, ArchetypePlan wire)
     {
         ArgumentNullException.ThrowIfNull(plan);
+        AttachTexts(plan, engine);
         if (plan.Collections.Length == 0)
         {
             return;

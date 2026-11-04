@@ -10571,6 +10571,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
         }
 
+        // The same for the slot's texts (#1094): the slot is the sole owner of a SingleVersion or Transient text.
+        if (!isMove && releaseCollections && TextSlots != null)
+        {
+            ReleaseSlotTexts(clusterChunkId, slotIndex, clusterBase, null);
+        }
+
         var slotMask = 1UL << slotIndex;
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);
         var wasOccupied = (prevOccupancy & slotMask) != 0;
@@ -10636,6 +10642,12 @@ internal sealed unsafe partial class ArchetypeClusterState
         NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
 
         var clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
+
+        // A pure-Transient archetype's texts, which its slot owns outright (#1094); a move carries the handles to the destination instead.
+        if (!isMove && TextSlots != null)
+        {
+            ReleaseSlotTexts(clusterChunkId, slotIndex, null, clusterBase);
+        }
 
         var slotMask = 1UL << slotIndex;
         var prevOccupancy = ClearSlotMetadata(clusterBase, slotIndex);

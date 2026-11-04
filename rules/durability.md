@@ -94,7 +94,7 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
   rationale (#514 Phase 2): the old dense ComponentTypeId-on-wire coupled replay to registration order → a crash→reopen under a shifted order could mis-map
            post-checkpoint records (silent data loss). (routingId, slot) is stable across crash→reopen by construction — this dissolves that risk.
   scope: RecordCodec.cs, RecordFormat.cs (SlotRecordBody.SlotIndex, CollectionDeltaRecordBody.SlotIndex); recovery RecoveryApplier maps (routingId, slot) → table
-         ComponentTable.CollectionHandleRanges (the packed ranges the codec zeroes); RecordCodec.PackColumnHandleRange (the columnar twin)
+         ComponentTable.OutOfLineHandleRanges (the packed ranges the codec zeroes: collection handles and String1024 text handles, #1094); RecordCodec.PackColumnHandleRange (the columnar twin)
   on_violation: the log is coupled to physical layout OR to registration order → replay breaks under page relocation / compaction / shifted schema order
   verified: ArchetypeSetMigrationCrashTests.CrashOpen_WindowUnderOldSet_SlotAndFenceBlockReplayByName [VerifiesRule] — the committed-numbering
     amendment (#1394): a window written under the old set replays onto the right components by name, through a set migration that shifts every
@@ -560,7 +560,7 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             X is reconstructible from the log alone
             OR X is durable strictly before R becomes durable
   scope: RecordCodec.ZeroHandleRanges, RecordCodec.PackColumnHandleRange (the codec's handle-zeroing paths);
-         ComponentTable.CollectionHandleRanges; CollectionContentEmitter.Emit; RecoveryApplier.ApplyCollectionFolds;
+         ComponentTable.OutOfLineHandleRanges; CollectionContentEmitter.Emit; CollectionContentEmitter.EmitTexts; RecoveryApplier.ApplyCollectionFolds; RecoveryApplier.ApplyTextFold;
          RecoveryDriver.Run (the allocator watermarks it restores)
   on_violation: dangling durable reference — silent data loss, escalating to cross-entity data disclosure when the
                 referent's allocator re-issues the reference (#389, #697)

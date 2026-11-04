@@ -223,6 +223,9 @@ public partial class DatabaseEngine
     private void PrepareSchemaCommit()
     {
         var pending = _pendingSchemaCommit;
+
+        // The texts the migration's cluster and WAL passes wrote reach the disk before the flip that publishes the rows naming them (#1094, DC-01).
+        SaveMigrationTexts();
         if (pending.Staged != null)
         {
             throw new InvalidOperationException("This open's schema migration failed to commit; reopen the database to run it again.");
@@ -358,6 +361,10 @@ public partial class DatabaseEngine
         ReleaseAbandonedMigrationSegments();
         FreeReplacedFieldLists(pending.ComponentRows);
         FreeReplacedComponentNameLists(pending);
+
+        // The texts the migrated rows no longer name — a dropped field's, a revision the migration did not carry — now that no durable image names them
+        // (#1094).
+        SweepTextOrphansAfterMigration();
 
         // The journal is an audit trail, written last: a crash between the commit and here loses these rows, never the migration.
         if (pending.History.Count > 0)

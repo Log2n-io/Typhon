@@ -555,6 +555,13 @@ internal sealed unsafe partial class ArchetypeClusterState
             ReleaseSlotCollections(clusterBase, slotIndex, changeSet);
         }
 
+        if (TextSlots != null)
+        {
+            // The primary base is the Transient one for a pure-Transient archetype, which has no persistent segment.
+            var pureTransient = ClusterSegment == null;
+            ReleaseSlotTexts(clusterChunkId, slotIndex, pureTransient ? null : clusterBase, pureTransient ? clusterBase : null);
+        }
+
         ClearSlotMetadata(clusterBase, slotIndex);
         FinishVacatedSlot(clusterBase, clusterChunkId, slotIndex, grid);
     }

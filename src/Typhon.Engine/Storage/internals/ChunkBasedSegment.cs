@@ -1086,6 +1086,10 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore>, IQuarantinedFre
     /// <summary>The frees held back from reuse. Diagnostic.</summary>
     internal int QuarantinedFreeCount => _freeQuarantine?.Count ?? 0;
 
+    /// <summary>Whether <paramref name="chunkId"/> is freed and held back from reuse (<see cref="QuarantineFrees"/>): allocated in the bitmap, owned by
+    /// nobody.</summary>
+    internal bool IsFreeHeld(int chunkId) => _freeQuarantine != null && _freeQuarantine.IsHeld(chunkId);
+
     /// <summary>Whether this segment's frees are held back from reuse (<see cref="QuarantineFrees"/>): a free of it may wait for a checkpoint.</summary>
     internal bool HoldsFrees => _freeQuarantine != null;
 

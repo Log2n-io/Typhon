@@ -563,6 +563,9 @@ public unsafe partial class Transaction
             spawnRealm = ValidateSpawnRealm(meta, keyedState, sharedValues);
         }
 
+        // One shared value with a text handle would make N owners of one chunk (TXT-02, #1094): refused before any key is allocated.
+        RefuseSpawnedTexts(meta, engineState, sharedValues);
+
         // Allocate N entity keys in one atomic operation
         long baseKey = Interlocked.Add(ref engineState.NextEntityKey, count) - count + 1;
 
@@ -784,9 +787,50 @@ public unsafe partial class Transaction
 
             byte* ptr = isVersioned ? info.CompContentAccessor.GetChunkAddress(entry.VerLoc[slot], true) : arena.Resolve(entry.Stage[slot]);
 
-            Unsafe.AsRef<T>(ptr + overhead) = values[i];
+            if (table.HasText)
+            {
+                WriteSpawnValueKeepingTexts(table, ptr + overhead, MemoryMarshal.AsBytes(values.Slice(i, 1)));
+            }
+            else
+            {
+                Unsafe.AsRef<T>(ptr + overhead) = values[i];
+            }
+
             entry.EnabledBits |= bitMask;
             RefreshBetweenBatchWrites();
+        }
+    }
+
+    /// <summary>
+    /// A batch write of a spawned value of a component with a text field (TXT-02, #1094): the value may carry no handle — it would be another entity's — and
+    /// a text the spawned entity already holds (set through SetText after the spawn) is kept, as a whole-value Set keeps it.
+    /// </summary>
+    private static void WriteSpawnValueKeepingTexts(ComponentTable table, byte* stored, ReadOnlySpan<byte> value)
+    {
+        CollectionHandles.RefuseSpawnedText(table, value);
+        Span<int> kept = stackalloc int[table.TextFields.Length];
+        for (var f = 0; f < kept.Length; f++)
+        {
+            kept[f] = TextChunks.HandleAt(stored, table.TextFields[f].OffsetInComponentStorage);
+        }
+
+        value.CopyTo(new Span<byte>(stored, value.Length));
+        for (var f = 0; f < kept.Length; f++)
+        {
+            TextChunks.SetHandleAt(stored, table.TextFields[f].OffsetInComponentStorage, kept[f]);
+        }
+    }
+
+    /// <summary>The values a spawn shares across a batch, refused when one carries a text handle (TXT-02).</summary>
+    private static void RefuseSpawnedTexts(ArchetypeMetadata meta, ArchetypeEngineState engineState, ReadOnlySpan<ComponentValue> values)
+    {
+        foreach (ref readonly var v in values)
+        {
+            if (meta.TryGetSlot(v.ComponentTypeId, out var slot) && engineState.SlotToComponentTable[slot].HasText)
+            {
+                CollectionHandles.RefuseSpawnedText(engineState.SlotToComponentTable[slot], MemoryMarshal.CreateReadOnlySpan(
+                    ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in v)), 12), v.DataSize));
+            }
         }
     }
 
@@ -928,7 +972,15 @@ public unsafe partial class Transaction
         }
 
         var size = Math.Min(value.DataSize, table.ComponentStorageSize);
-        value.Payload[..size].CopyTo(new Span<byte>(ptr + table.ComponentOverhead, size));
+        if (table.HasText)
+        {
+            WriteSpawnValueKeepingTexts(table, ptr + table.ComponentOverhead, value.Payload[..size]);
+        }
+        else
+        {
+            value.Payload[..size].CopyTo(new Span<byte>(ptr + table.ComponentOverhead, size));
+        }
+
         entry.EnabledBits |= (ushort)(1 << slot);
         RefreshBetweenBatchWrites();
     }
@@ -982,6 +1034,18 @@ public unsafe partial class Transaction
             if (meta.TryGetSlot(values[v].ComponentTypeId, out byte targetSlot))
             {
                 valueBySlot[targetSlot] = v;
+            }
+        }
+
+        // A spawned value carries no text (#1094): refused before anything is allocated, so a refusal leaves nothing behind.
+        for (int slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            var table = engineState.SlotToComponentTable[slot];
+            if (table.HasText && valueBySlot[slot] >= 0)
+            {
+                var vi = valueBySlot[slot];
+                CollectionHandles.RefuseSpawnedText(table, MemoryMarshal.CreateReadOnlySpan(
+                    ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[vi])), 12), values[vi].DataSize));
             }
         }
 
@@ -5550,7 +5614,10 @@ public unsafe partial class Transaction
                 // tombstone. Not found, the chunk is left allocated: a leak, never a free under an element that still names it.
                 if (ComponentRevisionManager.MakeOwnRevisionTombstone(info, ref cri, cri.CurCompContentChunkId))
                 {
-                    // CC-aware: a copy-on-write took a reference on every collection buffer it shares with the committed revision.
+                    // CC-aware: a copy-on-write took a reference on every collection buffer it shares with the committed revision. A text it shares is
+                    // the committed revision's; one this transaction set is its own, never published, and goes with the chunk (#1094).
+                    ReleaseOwnedTextsIn(info.ComponentTable, info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true)
+                        + info.ComponentTable.ComponentOverhead);
                     DeferredCleanupManager.FreeContentChunk(info.ComponentTable, cri.CurCompContentChunkId);
                 }
                 else
@@ -6098,6 +6165,8 @@ public unsafe partial class Transaction
 
                     if (cri.CurCompContentChunkId > 0)
                     {
+                        // Its texts, all this transaction's: the commit would otherwise adopt them for a value that never exists (#1094).
+                        ReleaseOwnedTextsIn(table, info.CompContentAccessor.GetChunkAddress(cri.CurCompContentChunkId, true) + table.ComponentOverhead);
                         DeferredCleanupManager.FreeContentChunk(table, cri.CurCompContentChunkId, neverCommitted: true);
                     }
 
@@ -6110,12 +6179,17 @@ public unsafe partial class Transaction
                 }
                 else
                 {
-                    // The arena itself is dropped by the reset; the collection buffers its payload names are not (DC-01).
+                    // The arena itself is dropped by the reset; the collection buffers and the texts its payload names are not (DC-01, #1094).
                     var stage = entry.Stage[slot];
                     if (stage != 0 && table.HasCollections)
                     {
                         DeferredCleanupManager.ReleaseCollectionBuffers(
                             table, new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize));
+                    }
+
+                    if (stage != 0 && table.HasText)
+                    {
+                        ReleaseSpawnTexts(table, SpawnArena.Resolve(stage) + table.ComponentOverhead);
                     }
 
                     entry.Stage[slot] = 0;
@@ -6174,7 +6248,8 @@ public unsafe partial class Transaction
                         int chunkId = entry.VerLoc[slot];
                         if (chunkId > 0)
                         {
-                            // CC-aware free: release any ComponentCollection buffers the rolled-back spawn chunk holds before freeing it.
+                            // CC-aware free: release any ComponentCollection buffers the rolled-back spawn chunk holds before freeing it. Its texts are this
+                            // transaction's own, released with the rest of them at the reset (#1094).
                             DeferredCleanupManager.FreeContentChunk(table, chunkId, neverCommitted: true);
                         }
 
@@ -6196,6 +6271,12 @@ public unsafe partial class Transaction
                         {
                             DeferredCleanupManager.ReleaseCollectionBuffers(
                                 table, new ReadOnlySpan<byte>(SpawnArena.Resolve(stage), table.ComponentOverhead + table.ComponentStorageSize));
+                        }
+
+                        // And its texts (#1094): an in-place store into the payload took a chunk nothing else tracks.
+                        if (stage != 0 && table.HasText)
+                        {
+                            ReleaseSpawnTexts(table, SpawnArena.Resolve(stage) + table.ComponentOverhead);
                         }
                     }
                 }

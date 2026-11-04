@@ -59,6 +59,12 @@ public unsafe ref struct EntityRefMut
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly T Read<T>(Comp<T> comp) where T : unmanaged => _ref.Read(comp);
 
+    /// <inheritdoc cref="EntityRef.ReadText{T}(Comp{T}, in String1024)"/>
+    public readonly string ReadText<T>(Comp<T> comp, in String1024 field) where T : unmanaged => _ref.ReadText(comp, in field);
+
+    /// <inheritdoc cref="EntityRef.ReadText{T}(Comp{T}, in String1024, Span{byte})"/>
+    public readonly int ReadText<T>(Comp<T> comp, in String1024 field, Span<byte> utf8) where T : unmanaged => _ref.ReadText(comp, in field, utf8);
+
     /// <inheritdoc cref="EntityRef.Read{T}()"/>
     public readonly T Read<T>() where T : unmanaged => _ref.Read<T>();
 
@@ -156,8 +162,7 @@ public unsafe ref struct EntityRefMut
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void KeepCollectionHandlesCold(byte slot, byte* value, byte* stored, bool adoptIntoEmpty)
     {
-        var table = _ref._engineState.SlotToComponentTable[slot];
-        CollectionHandles.Keep(table.CollectionFields, value, stored, adoptIntoEmpty, table.Name);
+        CollectionHandles.Keep(_ref._engineState.SlotToComponentTable[slot], value, stored, adoptIntoEmpty);
     }
 
     /// <summary>Set a component by type: as <see cref="Set{T}(Comp{T}, in T)"/>, resolving the slot via archetype metadata.</summary>
@@ -302,6 +307,64 @@ public unsafe ref struct EntityRefMut
         }
 
         return _ref._accessor.CreateComponentCollectionAccessorCore(ref field, _ref._id, comp._componentTypeId, offset, &StoreCollectionBufferId<T>);
+    }
+
+    /// <summary>
+    /// Store <paramref name="text"/> into the <see cref="String1024"/> field <paramref name="field"/> of <paramref name="copy"/>, a copy of
+    /// <paramref name="comp"/> read from this handle: <c>var v = e.Read(comp); e.SetText(comp, ref v, ref v.Body, "hello");</c>
+    /// </summary>
+    /// <remarks>
+    /// <para>The text is stored into the entity's component at once, and its handle into <paramref name="field"/>: the text needs no
+    /// <see cref="Set{T}(Comp{T}, in T)"/>. Set the copy only for its other fields — it then carries the same handle.</para>
+    /// <para>Text longer than <see cref="String1024.MaxUtf8Bytes"/> UTF-8 bytes is cut on a code-point boundary. A Versioned component, or a SingleVersion one
+    /// under the Commit discipline, gets the new text in a new chunk: readers of the committed value keep reading the old one (#1094).</para>
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="field"/> is not a field of <paramref name="copy"/>.</exception>
+    /// <exception cref="InvalidOperationException"><paramref name="copy"/> names another text than the stored component: read before the text last
+    /// changed.</exception>
+    public void SetText<T>(Comp<T> comp, ref T copy, ref String1024 field, ReadOnlySpan<char> text) where T : unmanaged
+    {
+        Span<byte> utf8 = stackalloc byte[String1024.MaxUtf8Bytes];
+        var length = TextChunks.Encode(text, utf8);
+        StoreTextCore(comp, ref copy, ref field, utf8[..length], false);
+    }
+
+    /// <summary>
+    /// The UTF-8 overload of <see cref="SetText{T}(Comp{T}, ref T, ref String1024, ReadOnlySpan{char})"/>: <paramref name="utf8"/> ends at its first NUL,
+    /// and is cut on a code-point boundary past <see cref="String1024.MaxUtf8Bytes"/> bytes.
+    /// </summary>
+    public void SetText<T>(Comp<T> comp, ref T copy, ref String1024 field, ReadOnlySpan<byte> utf8) where T : unmanaged =>
+        StoreTextCore(comp, ref copy, ref field, utf8[..TextChunks.FitUtf8(utf8)], false);
+
+    /// <summary>Remove the text of the <see cref="String1024"/> field <paramref name="field"/> of <paramref name="copy"/>: its chunk is given back, the
+    /// handle becomes empty.</summary>
+    /// <exception cref="ArgumentException"><paramref name="field"/> is not a field of <paramref name="copy"/>.</exception>
+    /// <exception cref="InvalidOperationException"><paramref name="copy"/> names another text than the stored component.</exception>
+    public void ClearText<T>(Comp<T> comp, ref T copy, ref String1024 field) where T : unmanaged => StoreTextCore(comp, ref copy, ref field, default, true);
+
+    private void StoreTextCore<T>(Comp<T> comp, ref T copy, ref String1024 field, scoped ReadOnlySpan<byte> utf8, bool clear) where T : unmanaged
+    {
+        var offset = (int)Unsafe.ByteOffset(ref Unsafe.As<T, byte>(ref copy), ref Unsafe.As<String1024, byte>(ref field));
+        if (offset < 0 || offset > sizeof(T) - sizeof(String1024))
+        {
+            throw new ArgumentException("The text must be a field of the copy passed with it.", nameof(field));
+        }
+
+        // The write is recorded first, as for a collection: the copy-on-write revision, the staged slot, or the dirty bit and the page owed to disk. The text
+        // is then stored into THAT value, which is what the log, the publish and the revision chain see.
+        var current = Read(comp);
+        byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        ref var stored = ref WriteSlot<T>(slot, comp._componentTypeId, (byte*)&current);
+        var storedPtr = (byte*)Unsafe.AsPointer(ref stored);
+
+        var storedHandle = TextChunks.HandleAt(storedPtr, offset);
+        if (field._chunkId != storedHandle)
+        {
+            ThrowHelper.ThrowInvalidOp($"The copy of '{typeof(T).Name}' names text chunk {field._chunkId}, the entity holds {storedHandle}: read the "
+                + "component again before changing its text.");
+        }
+
+        field._chunkId = _ref._accessor.StoreText(_ref._engineState.SlotToComponentTable[slot], (long)_ref._id.RawValue, storedPtr, offset, utf8, clear);
     }
 
     /// <summary>

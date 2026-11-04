@@ -39,6 +39,9 @@ internal class DeferredCleanupManager
 
         /// <summary>A revision-chain chunk (freed in the table's revision segment), not a content chunk.</summary>
         public bool Revision;
+
+        /// <summary>A <c>String1024</c> text chunk (freed in the table's text segment) that the last revision naming it took with it (#1094).</summary>
+        public bool Text;
     }
 
     // Primary storage: sorted by blocking TSN for efficient range queries
@@ -462,6 +465,10 @@ internal class DeferredCleanupManager
         {
             FreeChunkWaitingRefreshed(entry.Table.CompRevTableSegment, entry.ChunkId);
         }
+        else if (entry.Text)
+        {
+            FreeChunkWaitingRefreshed(entry.Table.TextSegment, entry.ChunkId);
+        }
         else if (entry.ChunkId != 0)
         {
             if (entry.Table.HasCollections)
@@ -809,6 +816,12 @@ internal class DeferredCleanupManager
                     }
                 }
 
+                // The whole chain goes, so every text its revisions name goes with it, once: a run of revisions shares one (#1094, TXT-01).
+                if (table.HasText)
+                {
+                    AddChainTextFrees(table, ref accessor, firstChunkId, ref header, frees);
+                }
+
                 // The chain's chunks: the root, then its ChainLength - 1 overflow chunks through their leading next-chunk ids — exactly that many: the last
                 // one's link is not trusted to be 0 (a chunk reissued uncleared kept its previous owner's).
                 frees.Add(new DeferredChunkFreeEntry { Table = table, ChunkId = firstChunkId, Revision = true });
@@ -832,6 +845,49 @@ internal class DeferredCleanupManager
         finally
         {
             accessor.Dispose();
+        }
+    }
+
+    /// <summary>The distinct text chunks the revisions of a chain released whole name, added to <paramref name="frees"/>.</summary>
+    private static void AddChainTextFrees(ComponentTable table, ref ChunkAccessor<PersistentStore> revAccessor, int firstChunkId,
+        ref CompRevStorageHeader header, List<DeferredChunkFreeEntry> frees)
+    {
+        HashSet<int> texts = null;
+        var content = table.ComponentSegment.CreateChunkAccessor();
+        try
+        {
+            for (var i = 0; i < header.ItemCount; i++)
+            {
+                ref var element = ref ComponentRevisionManager.GetRevisionElement(ref revAccessor, firstChunkId, (short)(header.FirstItemIndex + i)).Element;
+                if (element.IsVoid || element.ComponentChunkId <= 0)
+                {
+                    continue;
+                }
+
+                var value = content.GetChunkAsReadOnlySpan(element.ComponentChunkId)[table.ComponentOverhead..];
+                foreach (var f in table.TextFields)
+                {
+                    var text = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(value[f.OffsetInComponentStorage..]);
+                    if (text != 0)
+                    {
+                        (texts ??= []).Add(text);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            content.Dispose();
+        }
+
+        if (texts == null)
+        {
+            return;
+        }
+
+        foreach (var text in texts)
+        {
+            frees.Add(new DeferredChunkFreeEntry { Table = table, ChunkId = text, Text = true });
         }
     }
 

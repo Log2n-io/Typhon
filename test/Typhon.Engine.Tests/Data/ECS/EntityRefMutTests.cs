@@ -74,7 +74,7 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         // An ALLOWLIST, so a mutator added under any name (WriteRaw, SetLink...) fails here instead of slipping past a denylist.
         string[] readSurface =
         [
-            "Id", "get_Id", "ArchetypeId", "get_ArchetypeId", "IsValid", "get_IsValid", "ComponentCount", "get_ComponentCount", "Read", "TryRead",
+            "Id", "get_Id", "ArchetypeId", "get_ArchetypeId", "IsValid", "get_IsValid", "ComponentCount", "get_ComponentCount", "Read", "TryRead", "ReadText",
             "IsEnabled", "GetComponentName", "GetComponentSize", "ReadRaw", "Equals", "GetHashCode", "ToString", "GetType", "Realm", "get_Realm",
         ];
         Assert.That(roMembers.Except(readSurface), Is.Empty, "EntityRef's public surface is read-only; review any new member here first");
@@ -142,7 +142,7 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
     [VerifiesRule("ACCESS-01")]
     public void EveryNonWritingMember_IsReadonly()
     {
-        string[] mutators = ["Set", "Enable", "Disable", "CreateComponentCollectionAccessor"];
+        string[] mutators = ["Set", "Enable", "Disable", "CreateComponentCollectionAccessor", "SetText", "ClearText"];
         string[] objectMembers = ["Equals", "GetHashCode", "ToString", "GetType"];
         foreach (var type in new[] { typeof(EntityRef), typeof(EntityRefMut) })
         {

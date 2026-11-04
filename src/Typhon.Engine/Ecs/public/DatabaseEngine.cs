@@ -4103,6 +4103,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
+        // The String1024 text segment, before any component table that names chunks in it is loaded (#1094).
+        LoadTextSegment(bootstrap);
+
         // A migration an earlier session committed but did not finish writing: its component rows, before they are read (SCHEMA-09).
         ApplyCommittedSchemaIntentToComponents();
 
@@ -4833,6 +4836,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // A SingleVersion component's bytes live only in its archetype's cluster slots: its ComponentTable segments are empty and it has no
                     // revision segment to load, so there is nothing for the segment migration to move. The cluster pass runs the chain over every slot
                     // instead (CopyPreMigrationSlot), exactly as it replays a field map for a compatible change (#671).
+                    var chainText = TextMigrationFor(definition);
                     migrationResult = definition.StorageMode == StorageMode.SingleVersion
                         ? new MigrationResult
                         {
@@ -4840,9 +4844,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             NewVersionSPI = persisted.Comp.VersionSPI,
                             Chain = chain.Value,
                             OldCompSize = persisted.Comp.CompSize,
+                            Text = chainText,
                         }
                         : SchemaEvolutionEngine.MigrateWithFunction(
-                            MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, chain.Value, Logger, RaiseMigrationProgress);
+                            MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, chain.Value, Logger, RaiseMigrationProgress, chainText);
                 }
 
                 // A stride change that no field-level diff can see. `SchemaDiff` compares names, types, offsets and sizes; the per-instance STRIDE is none of
@@ -4902,12 +4907,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                     NewVersionSPI = persisted.Comp.VersionSPI,
                                     FieldMap = SchemaEvolutionEngine.BuildFieldMap(persistedFields, definition),
                                     OldCompSize = persisted.Comp.CompSize,
+                                    Text = TextMigrationFor(definition),
                                 };
                             }
                             else
                             {
                                 migrationResult = SchemaEvolutionEngine.Migrate(MMF, EpochManager, diff, persistedFields, persisted.Comp, definition, Logger,
-                                    RaiseMigrationProgress);
+                                    RaiseMigrationProgress, TextMigrationFor(definition));
                             }
                         }
                     }
@@ -5083,6 +5089,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Must be called before <see cref="RegisterComponentFromAccessor{T}"/> / <see cref="RegisterComponentByType"/> for the target component.
     /// </summary>
     public void RegisterMigration<TOld, TNew>(MigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged
+    {
+        _migrationRegistry ??= new MigrationRegistry();
+        _migrationRegistry.Register(func);
+    }
+
+    /// <summary>
+    /// Registers a migration function that can read the old value's texts and set the new value's through its <see cref="MigrationContext"/>: what a new
+    /// revision with a <c>String1024</c> field needs to give it a text (#1094). Otherwise as <see cref="RegisterMigration{TOld, TNew}(MigrationFunc{TOld,
+    /// TNew})"/>.
+    /// </summary>
+    public void RegisterMigration<TOld, TNew>(ContextMigrationFunc<TOld, TNew> func) where TOld : unmanaged where TNew : unmanaged
     {
         _migrationRegistry ??= new MigrationRegistry();
         _migrationRegistry.Register(func);
@@ -5454,7 +5471,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             for (var slot = 0; slot < meta.ComponentCount; slot++)
             {
                 var table = slotToTable[slot];
-                if (table.HasCollections)
+                if (table.HasOutOfLineData)
                 {
                     collectionSlotMask |= (ushort)(1 << slot);
                 }
@@ -5521,7 +5538,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         }
                     }
                 }
-                clusterLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, componentSizes, multipleIndexedFieldCount, versionedSlotMask, transientSlotMask);
+                try
+                {
+                    clusterLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, componentSizes, multipleIndexedFieldCount, versionedSlotMask,
+                        transientSlotMask);
+                }
+                catch (InvalidOperationException e)
+                {
+                    throw new InvalidOperationException(DescribeClusterOverflow(meta, slotToTable), e);
+                }
 
                 // Published for the readers that take it from the metadata, and never read back from there below. ArchetypeMetadata is ONE object
                 // per archetype for the whole process and every engine's InitializeArchetypes writes it: an engine opening another schema version of
@@ -5725,6 +5750,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // Build the SV ComponentCollection descriptor so destroy can release CC buffers held in cluster slots (SV CC has no revision chain — the slot
                 // is the sole owner). No-op for archetypes without an SV CC field.
                 _archetypeStates[meta.ArchetypeId].ClusterState?.InitializeCollections(slotToTable);
+                _archetypeStates[meta.ArchetypeId].ClusterState?.InitializeTexts(slotToTable);
                 _archetypeStates[meta.ArchetypeId].ClusterState?.InitializeWriteMasks(slotToTable);
 
                 // Initialize per-archetype B+Tree indexes for cluster archetypes with indexed fields.
@@ -6205,6 +6231,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Before the replay allocates anything: every chunk the on-disk chains name is taken, so the replay never hands one out again (#1251).
         ReserveChainChunksAfterCrash();
 
+        // Likewise every text chunk a handle in the file names, the content chunks the line above took included (#1094, TXT-03).
+        ReserveTextChunksAfterCrash();
+
         // Recovery's own frees — the replay's, the scrub's, the sweep's — wait for a checkpoint like any other (CK-17): freed at once, the transactions
         // after the open reused them while the disk's pages as of before the scrub still named them, and a second crash recovered #1251 again. A seal
         // that does not complete leaves them held. Past the budget they ask for no cycle: one in the middle of the scrub would write a half-scrubbed
@@ -6272,6 +6301,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Phase 4b — the component-collection segments' orphans (#1307, REAP-02): a buffer named by nothing once the chains are their heads — one whose free a
         // checkpoint had not written, one a swept orphan named — is freed. After the scrub, which releases what dropped revisions named.
         SweepCollectionOrphans();
+
+        // Phase 4b' — the text segment's orphans (#1094, TXT-03): the chunk a replayed row held before the replay gave it a fresh one, a dropped revision's.
+        SweepTextOrphans();
 
         // Phase 4c — the slots hidden when the process died (VIS-09, RB-08): free on disk with their entity ids in place, their claims and cleanups lost.
         // Before
@@ -6835,7 +6867,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             // A user migration chain carries no field map: its functions do the remap, here exactly as in the segment migration.
-            SchemaEvolutionEngine.ConvertValue(in mr, src, oldLayout.ComponentSize(o), dst, newLayout.ComponentSize(slot));
+            SchemaEvolutionEngine.ConvertValue(in mr, src, oldLayout.ComponentSize(o), dst, newLayout.ComponentSize(slot), materialize: true);
         }
     }
 
@@ -7294,7 +7326,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             new Span<byte>(scratch, newSize).Clear();
-            SchemaEvolutionEngine.ConvertValue(in migration, src, Old.Layout.ComponentSize(oldSlot), scratch, newSize);
+            SchemaEvolutionEngine.ConvertValue(in migration, src, Old.Layout.ComponentSize(oldSlot), scratch, newSize, materialize: false);
             return scratch;
         }
     }

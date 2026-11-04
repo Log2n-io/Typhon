@@ -1224,9 +1224,29 @@ internal static unsafe class ProjectionPass
         public bool Write(ref WireWriter writer, in CompiledField field)
         {
             var at = FieldAddress(field);
+            if (field.OutOfLineTextComponent != null)
+            {
+                return WriteOutOfLine(ref writer, field, State.TextTables[field.ComponentSlot], Unsafe.ReadUnaligned<int>(at));
+            }
+
             var stored = new ReadOnlySpan<byte>(at, field.TextCapacity - 1);
             var end = stored.IndexOf((byte)0);
             var utf8 = end < 0 ? stored : stored[..end];
+            var cut = MessageText.ValidPrefix(utf8, field.Codec.MaxBytes);
+            writer.WriteStr(cut, field.Codec.MaxBytes);
+            return cut.Length < utf8.Length;
+        }
+
+        /// <summary>A <c>String1024</c>: the field is a chunk handle, the text is in the table's text segment (#1094). One indirection per row
+        /// encoded.</summary>
+        private static bool WriteOutOfLine(ref WireWriter writer, in CompiledField field, ComponentTable table, int chunkId)
+        {
+            // Over a stack pointer, as the inline path reads over the cluster's: the writer copies the bytes, nothing keeps the span.
+            const int capacity = Typhon.Schema.Definition.String1024.MaxUtf8Bytes;
+            var raw = stackalloc byte[capacity];
+            // The tick path never throws: a handle past the segment reads as no text (the integrity audit is what reports it).
+            var length = EntityAccessor.TryReadTextOf(table, chunkId, new Span<byte>(raw, capacity));
+            var utf8 = new ReadOnlySpan<byte>(raw, length);
             var cut = MessageText.ValidPrefix(utf8, field.Codec.MaxBytes);
             writer.WriteStr(cut, field.Codec.MaxBytes);
             return cut.Length < utf8.Length;

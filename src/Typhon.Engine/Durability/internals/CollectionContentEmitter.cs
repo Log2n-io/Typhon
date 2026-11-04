@@ -100,6 +100,62 @@ internal static class CollectionContentEmitter
             }
         }
 
+        if (table.HasText)
+        {
+            wireBytes += EmitTexts(ref batch, table, entityId, slot, valueBytes);
+        }
+
+        return wireBytes;
+    }
+
+    /// <summary>
+    /// The <c>String1024</c> half of <see cref="Emit"/> (#1094): each text field as a <c>Clear</c> and, when it holds a text, one <c>Append</c> whose
+    /// element is
+    /// the text's UTF-8 bytes. The same record and the same fold as a collection: recovery reads the field id and, the field being a text, writes the element
+    /// into a chunk of the text segment. A null handle emits its Clear, for the reason a collection's does.
+    /// </summary>
+    private static int EmitTexts(ref CommitBatchBuilder batch, ComponentTable table, long entityId, ushort slot, ReadOnlySpan<byte> valueBytes)
+    {
+        var wireBytes = 0;
+        var segment = table.TextSegment;
+        if (segment == null)
+        {
+            return 0;   // a Transient component: never logged
+        }
+
+        var accessor = segment.CreateChunkAccessor();
+        try
+        {
+            foreach (var f in table.TextFields)
+            {
+                if (valueBytes.Length < f.OffsetInComponentStorage + sizeof(int))
+                {
+                    continue;
+                }
+
+                batch.AddCollectionDelta(entityId, slot, f.FieldId, CollectionOp.Clear, 0, default);
+                wireBytes += RecordWireSize(0);
+                var chunkId = BinaryPrimitives.ReadInt32LittleEndian(valueBytes[f.OffsetInComponentStorage..]);
+                if (chunkId == 0)
+                {
+                    continue;
+                }
+
+                var text = TextChunks.Bytes(ref accessor, chunkId);
+                if (text.IsEmpty)
+                {
+                    continue;
+                }
+
+                batch.AddCollectionDelta(entityId, slot, f.FieldId, CollectionOp.Append, 0, text);
+                wireBytes += RecordWireSize(text.Length);
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
         return wireBytes;
     }
 

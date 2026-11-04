@@ -26,6 +26,7 @@ export const PAGE_TYPE_RGB: readonly Rgb[] = [
   [20, 184, 166], //   Spatial   — teal
   [132, 204, 22], //   EntityMap — lime
   [100, 116, 139], //  System    — slate
+  [244, 63, 94], //    Text      — rose
 ];
 
 /** Free / used binary encoding. */

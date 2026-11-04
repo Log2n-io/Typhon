@@ -45,7 +45,7 @@ The closed set of types Typhon understands for a component field. It's a `[Flags
 | Boolean / numeric | `Boolean`, `Byte`, `Short`, `Int`, `Long`, `Float`, `Char` |
 | Unsigned (= `Unsigned \| base`) | `UByte`, `UShort`, `UInt`, `ULong` |
 | Double-precision (= `DoubleFloat \| base`) | `Double` (= `DoubleFloat \| Float`), `Point2D/3D/4D`, `QuaternionD`, `AABB2D/3D`, `BSphere2D/3D` |
-| Strings | `String64` (fixed 64 B), `String1024` (fixed 1024 B), `String` (variable — 32 B inline + VSB overflow), `Variant` (tagged-union, stored as String64) |
+| Strings | `String64` (fixed 64 B), `String1024` (a 4 B handle; up to 1 023 B of UTF-8 stored out of line, #1094), `String` (variable — 32 B inline + VSB overflow), `Variant` (tagged-union, stored as String64) |
 | Points / quaternions (float) | `Point2F`, `Point3F`, `Point4F`, `QuaternionF` |
 | Spatial boxes & spheres (float) | `AABB2F`, `AABB3F`, `BSphere2F`, `BSphere3F` |
 | Spatial boxes & spheres (double) | `AABB2D`, `AABB3D`, `BSphere2D`, `BSphere3D` |

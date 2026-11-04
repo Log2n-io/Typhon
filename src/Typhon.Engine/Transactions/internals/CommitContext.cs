@@ -19,6 +19,11 @@ internal ref struct CommitContext
     public ref ComponentInfo.CompRevInfo CompRevInfo;
     public ConcurrencyConflictSolver Solver;
     public ConcurrencyConflictHandler Handler;
+
+    /// <summary>The committing transaction: what a static step asks whether a text chunk is its own (#1094). Borrowed for the commit, never owned.</summary>
+#pragma warning disable TYPHON005 // a borrowed reference to the transaction that owns this context; the context never outlives the commit call
+    public Transaction Tx;
+#pragma warning restore TYPHON005
     public ref UnitOfWorkContext Ctx;
 
     // Hoisted from per-entity to per-commit: determined once before the entity loop

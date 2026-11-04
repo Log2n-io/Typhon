@@ -223,6 +223,8 @@ export enum DbPageType {
   Spatial = 10,
   EntityMap = 11,
   System = 12,
+  /** The out-of-line text segment behind String1024 fields (#1094). */
+  Text = 13,
 }
 
 /** Live CRC verdict — ordinals mirror the server's `StorageCrcStatus`. */
@@ -264,6 +266,7 @@ export const PAGE_TYPE_LABELS: readonly string[] = [
   'Spatial',
   'Entity hashmap',
   'System',
+  'Text',
 ];
 
 /**
