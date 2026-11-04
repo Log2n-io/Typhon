@@ -9,8 +9,8 @@ exec(open(os.path.join(TH_ROOT, "scripts", "th_helpers.py")).read(), globals())
 #
 # Frame: origin = the middle of the item's footprint on the ground (z 0), resting the way it lies or stands when
 # dropped; front towards -Y. Sizes after the catalogue, the player being 1.8 m tall.
-# Mk I-V (materials, cores, add-ons): one model each. The part that shows the Mk (a band, tag, seams, the crystals,
-# the glow) uses the shared material TH_ItemMk, published at Mk I; the root's item_mk lists every level's colour and
+# Mk I-V (materials, cores, add-ons, armour): one model each. The part that shows the Mk (a band, tag, seams, the crystals,
+# the glow, an armour piece's trim) uses the shared material TH_ItemMk, published at Mk I; the root's item_mk lists every level's colour and
 # glow (MK below), which th_export.py writes into the descriptor for the client to apply (ASSET_FORMAT.md 5.11).
 # The crate's label plate uses TH_ItemLabel and carries a 0..1 UV0 on its face, for the client to draw the content.
 #
@@ -697,7 +697,7 @@ for o in src:
     c.matrix_parent_inverse = Matrix.Identity(4)
     c.matrix_basis = Matrix.Translation((0, 0, -skid_z)) @ sw.matrix_world.inverted() @ o.matrix_world
 
-# ======================= 13.6 armour (rows 4 padded, 5 composite), as objects =======================
+# ======================= 13.6 armour (rows 4 padded, 5 composite), as objects; the Mk on a trim ======
 
 
 def limb(parts, y, z):
@@ -740,9 +740,9 @@ def shell(rings_z, a, seg=8, out=0.0):
 
 
 # --- padded
-r = item("armor_padded_helmet", "ArmorPaddedHelmet", "armor", 4, 0.26)
+r = item("armor_padded_helmet", "ArmorPaddedHelmet", "armor", 4, 0.26, mk=True)
 part(r, "Cap", dome((0, 0, 0.12), 0.105, 0.12, 0.11, 0.0, 14, 4), M_PAD, smooth=True)
-part(r, "Seam", band_z(0.16, 0.17, 0.1015, 14, 1.14), M_PADD)
+part(r, "Seam", band_z(0.16, 0.17, 0.1015, 14, 1.14), M_MK)
 part(r, "Band", band_z(0.105, 0.135, 0.111, 14, 1.13), M_PADD)
 for sx in (-1, 1):
     part(r, f"Flap{sx}", prism([(-0.05, 0.13), (0.05, 0.13), (0.04, 0.02), (0.0, 0.0), (-0.04, 0.02)], sx * 0.1 - 0.0075,
@@ -750,30 +750,30 @@ for sx in (-1, 1):
 part(r, "NeckFlap", prism([(-0.07, 0.13), (0.07, 0.13), (0.06, 0.04), (-0.06, 0.04)], 0.11, 0.125), M_PAD)
 part(r, "ChinStrap", box(-0.1, 0.1, -0.008, 0.008, 0.0, 0.008), M_HIDED)
 
-r = item("armor_padded_torso", "ArmorPaddedTorso", "armor", 4, 0.38)
+r = item("armor_padded_torso", "ArmorPaddedTorso", "armor", 4, 0.38, mk=True)
 TORSO = [(0.0, 0.15, 0.1), (0.1, 0.15, 0.1), (0.25, 0.165, 0.11), (0.38, 0.175, 0.115), (0.45, 0.16, 0.105), (0.5, 0.09, 0.07)]
 part(r, "Body", loft([ering(z, rx, ry, 16) for z, rx, ry in TORSO]), M_PAD, smooth=True)
 part(r, "Collar", band_z(0.48, 0.55, 0.07, 12, 0.86), M_PADD)
 part(r, "Panels", merge([box(x0, x1, -0.124, -0.06, 0.22, 0.42) for x0, x1 in ((-0.13, -0.012), (0.012, 0.13))]),
      M_PADL)
 part(r, "Quilting", merge([box(x0, x1, -0.126, -0.12, z, z + 0.006) for x0, x1 in ((-0.125, -0.017), (0.017, 0.125)) for z in (0.285, 0.355)]
-                          + [box(-0.004, 0.004, -0.122, -0.11, 0.08, 0.45)]), M_PADD)
+                          + [box(-0.004, 0.004, -0.122, -0.11, 0.08, 0.45)]), M_MK)
 part(r, "Belt", band_z(0.03, 0.08, 0.153, 16, 0.69), M_HIDED)
 part(r, "Pouches", merge([box(x - 0.025, x + 0.025, -0.125, -0.06, 0.025, 0.085, (0.004, 0.004, 0.004, 0.0)) for x in (-0.1, -0.045, 0.045, 0.1)]),
      M_PADD)
 part(r, "Buckle", box(-0.015, 0.015, -0.113, -0.104, 0.035, 0.075), M_STEEL)
 part(r, "Shoulders", merge([ball((sx * 0.12, 0.0, 0.45), 0.055, 10, (1.0, 1.15, 0.55)) for sx in (-1, 1)]), M_PAD, smooth=True)
 
-r = item("armor_padded_arms", "ArmorPaddedArms", "armor", 4, 0.42)
+r = item("armor_padded_arms", "ArmorPaddedArms", "armor", 4, 0.42, mk=True)
 for k, y in enumerate((-0.065, 0.065)):
     arm = [(tube_z(0.0, 0.18, 0.038, 0.044, 10, 1.15), M_PAD),                  # bracer, wrist at z 0
            (band_z(0.03, 0.045, 0.0405, 10, 1.15), M_HIDED), (band_z(0.12, 0.135, 0.0435, 10, 1.15), M_HIDED),
            (tube_z(0.22, 0.42, 0.046, 0.054, 10, 1.15), M_PAD),                  # bicep pad
-           (band_z(0.28, 0.288, 0.049, 10, 1.15), M_PADD), (band_z(0.35, 0.358, 0.0515, 10, 1.15), M_PADD)]
+           (band_z(0.28, 0.288, 0.049, 10, 1.15), M_MK), (band_z(0.35, 0.358, 0.0515, 10, 1.15), M_MK)]
     for j, (bm, m) in enumerate(limb(arm, y, 0.055)):
         part(r, f"Arm{k}_{j}", bm, m)
 
-r = item("armor_padded_legs", "ArmorPaddedLegs", "armor", 4, 0.4)
+r = item("armor_padded_legs", "ArmorPaddedLegs", "armor", 4, 0.4, mk=True)
 LEG = [(0.0, 0.05, 0.055), (0.25, 0.055, 0.06), (0.45, 0.06, 0.065), (0.65, 0.075, 0.08), (0.85, 0.085, 0.09)]
 for k, sx in enumerate((-1, 1)):
     x = sx * 0.095
@@ -781,7 +781,7 @@ for k, sx in enumerate((-1, 1)):
     part(r, f"Thigh{k}", xform(shell([(0.5, 0.068, 0.073), (0.64, 0.075, 0.08), (0.78, 0.082, 0.087)], FRONT, 8, 0.008),
                               move=(x, 0, 0)), M_PADL, solid=0.012)
     part(r, f"Knee{k}", ball((x, -0.06, 0.45), 0.05, 10, (1.0, 0.55, 1.15)), M_PAD, smooth=True)
-    part(r, f"Strap{k}", xform(band_z(0.4, 0.415, 0.062, 12, 1.1), move=(x, 0, 0)), M_HIDED)
+    part(r, f"Strap{k}", xform(band_z(0.4, 0.415, 0.062, 12, 1.1), move=(x, 0, 0)), M_MK)
 part(r, "Hips", loft([ering(z, 0.19, 0.105, 16) for z in (0.78, 0.92)]), M_PADD, smooth=True)
 part(r, "Belt", band_z(0.86, 0.9, 0.193, 16, 0.56), M_HIDED)
 
@@ -797,12 +797,12 @@ def glove(r, k, y, side, m_cuff, m_hand, m_fing, plates=None):
         plates(r, k, y)
 
 
-r = item("armor_padded_gloves", "ArmorPaddedGloves", "armor", 4, 0.2)
+r = item("armor_padded_gloves", "ArmorPaddedGloves", "armor", 4, 0.2, mk=True)
 for k, (y, side) in enumerate(((-0.06, -1), (0.06, 1))):
     glove(r, k, y, side, M_PAD, M_PAD, M_PADD)
-    part(r, f"CuffSeam{k}", xform(lie_x(band_z(0.02, 0.028, 0.0345, 10, 1.3), 0.034), move=(-0.035, y, 0)), M_PADD)
+    part(r, f"CuffSeam{k}", xform(lie_x(band_z(0.02, 0.028, 0.0345, 10, 1.3), 0.034), move=(-0.035, y, 0)), M_MK)
 
-r = item("armor_padded_boots", "ArmorPaddedBoots", "armor", 4, 0.24)
+r = item("armor_padded_boots", "ArmorPaddedBoots", "armor", 4, 0.24, mk=True)
 for k, sx in enumerate((-1, 1)):
     x = sx * 0.065
     part(r, f"Sole{k}", box(x - 0.045, x + 0.045, -0.13, 0.1, 0, 0.02), M_DARK)
@@ -810,22 +810,22 @@ for k, sx in enumerate((-1, 1)):
     part(r, f"Shaft{k}", loft([ering(z, rx, ry, 12, x, 0.035) for z, rx, ry in ((0.06, 0.046, 0.056), (0.25, 0.042, 0.05), (0.4, 0.048, 0.055))]),
          M_PAD, smooth=True)
     part(r, f"Straps{k}", merge([xform(band_z(z, z + 0.014, rr, 12, 1.18), move=(x, 0.035, 0)) for z, rr in ((0.11, 0.0465), (0.2, 0.0445), (0.3, 0.0445))]),
-         M_HIDED)
+         M_MK)
     part(r, f"Buckles{k}", merge([box(x + 0.035, x + 0.052, 0.025, 0.045, z - 0.002, z + 0.016) for z in (0.11, 0.2, 0.3)]), M_STEEL)
 
 # --- composite
-r = item("armor_composite_helmet", "ArmorCompositeHelmet", "armor", 5, 0.26)
+r = item("armor_composite_helmet", "ArmorCompositeHelmet", "armor", 5, 0.26, mk=True)
 part(r, "Seal", tube_z(0.0, 0.06, 0.068, 0.072, 12, 1.12), M_SUIT)
 part(r, "Shell", dome((0, 0.005, 0.14), 0.115, 0.13, 0.12, math.radians(-50), 14, 5), M_PLATE, smooth=True)
 part(r, "Visor", shell([(0.125, 0.1155, 0.131), (0.16, 0.1125, 0.1275)], (-math.pi + 0.6, -0.6), 8, 0.003), M_VISOR, solid=0.006)
 part(r, "Jaw", prism([(-0.065, 0.035), (0.065, 0.035), (0.085, 0.118), (-0.085, 0.118)], -0.142, -0.095), M_PLATE)
 part(r, "Vents", merge([box(-0.045, 0.045, -0.145, -0.14, z, z + 0.007) for z in (0.055, 0.072, 0.089)]), M_SUIT)
 crest = [(0, -0.135 * math.cos(math.radians(t)) - 0.0, 0.14 + 0.128 * math.sin(math.radians(t))) for t in (40, 65, 90, 115, 140)]
-part(r, "Crest", tube(crest, [0.006, 0.009, 0.01, 0.009, 0.006], 6), M_GUN)
+part(r, "Crest", tube(crest, [0.006, 0.009, 0.01, 0.009, 0.006], 6), M_MK)
 part(r, "EarPods", merge([hcyl_bm(sx * 0.118, 0.0, 0.14, 0.03, 0.022, (1, 0), 10) for sx in (-1, 1)]), M_GUN)
 part(r, "Antenna", rod((-0.125, 0.012, 0.16), (-0.13, 0.03, 0.27), 0.004, 0.0025, 5), M_DARK)
 
-r = item("armor_composite_torso", "ArmorCompositeTorso", "armor", 5, 0.38)
+r = item("armor_composite_torso", "ArmorCompositeTorso", "armor", 5, 0.38, mk=True)
 part(r, "Suit", loft([ering(z, rx * 0.96, ry * 0.96, 16) for z, rx, ry in TORSO]), M_SUIT, smooth=True)
 PLATES = [(0.24, 0.165, 0.11), (0.34, 0.172, 0.114), (0.43, 0.16, 0.106), (0.485, 0.11, 0.08)]
 part(r, "Breastplate", shell(PLATES, FRONT, 10, 0.012), M_PLATE, solid=0.012)
@@ -834,19 +834,19 @@ part(r, "BellyBand", merge([tinted(band_z(z, z + 0.04, 0.152, 16, 0.69), k % 2) 
      [M_PLATE, M_GUN])
 part(r, "Centre", box(-0.03, 0.03, -0.122, -0.085, 0.06, 0.22), M_PLATE)
 part(r, "Slots", merge([box(-0.022, 0.022, -0.125, -0.12, z, z + 0.008) for z in (0.09, 0.13, 0.17)]), M_SUIT)
-part(r, "Collar", band_z(0.48, 0.535, 0.075, 12, 0.85), M_GUN)
+part(r, "Collar", band_z(0.48, 0.535, 0.075, 12, 0.85), M_MK)
 
-r = item("armor_composite_arms", "ArmorCompositeArms", "armor", 5, 0.44)
+r = item("armor_composite_arms", "ArmorCompositeArms", "armor", 5, 0.44, mk=True)
 for k, y in enumerate((-0.07, 0.07)):
     arm = [(tube_z(0.0, 0.42, 0.036, 0.046, 10, 1.1), M_SUIT),                   # sleeve
            (tube_z(0.03, 0.19, 0.041, 0.047, 10, 1.1), M_PLATE),                 # forearm shell
-           (band_z(0.0, 0.03, 0.04, 10, 1.1), M_GUN),                            # wrist cuff
+           (band_z(0.0, 0.03, 0.04, 10, 1.1), M_MK),                             # wrist cuff
            (tube_z(0.26, 0.34, 0.05, 0.052, 10, 1.1), M_PLATE),                  # bicep band
            (xform(dome((0, 0, 0.0), 0.062, 0.068, 0.055, 0.0, 12, 3), move=(0, 0, 0.375)), M_PLATE)]   # shoulder cap
     for j, (bm, m) in enumerate(limb(arm, y, 0.062)):
         part(r, f"Arm{k}_{j}", bm, m, smooth=(j == 4))
 
-r = item("armor_composite_legs", "ArmorCompositeLegs", "armor", 5, 0.4)
+r = item("armor_composite_legs", "ArmorCompositeLegs", "armor", 5, 0.4, mk=True)
 for k, sx in enumerate((-1, 1)):
     x = sx * 0.095
     part(r, f"Leg{k}", loft([ering(z, rx * 0.95, ry * 0.95, 12, x) for z, rx, ry in LEG]), M_SUIT, smooth=True)
@@ -856,19 +856,19 @@ for k, sx in enumerate((-1, 1)):
                              move=(x, 0, 0)), M_PLATE, solid=0.01)
     part(r, f"Knee{k}", ball((x, -0.055, 0.45), 0.05, 10, (1.0, 0.7, 1.0)), M_PLATE, smooth=True)
 part(r, "Hips", loft([ering(z, 0.185, 0.1, 16) for z in (0.78, 0.92)]), M_SUIT, smooth=True)
-part(r, "Belt", band_z(0.85, 0.9, 0.188, 16, 0.56), M_GUN)
+part(r, "Belt", band_z(0.85, 0.9, 0.188, 16, 0.56), M_MK)
 
 
 def knuckles(r, k, y):
-    part(r, f"Knuckles{k}", box(0.024, 0.046, y - 0.04, y + 0.04, 0.026, 0.036), M_PLATE)
+    part(r, f"Knuckles{k}", box(0.024, 0.046, y - 0.04, y + 0.04, 0.026, 0.036), M_MK)
     part(r, f"BackPlate{k}", box(-0.035, 0.018, y - 0.03, y + 0.03, 0.028, 0.035), M_PLATE)
 
 
-r = item("armor_composite_gloves", "ArmorCompositeGloves", "armor", 5, 0.2)
+r = item("armor_composite_gloves", "ArmorCompositeGloves", "armor", 5, 0.2, mk=True)
 for k, (y, side) in enumerate(((-0.06, -1), (0.06, 1))):
     glove(r, k, y, side, M_PLATE, M_SUIT, M_SUIT, knuckles)
 
-r = item("armor_composite_boots", "ArmorCompositeBoots", "armor", 5, 0.24)
+r = item("armor_composite_boots", "ArmorCompositeBoots", "armor", 5, 0.24, mk=True)
 for k, sx in enumerate((-1, 1)):
     x = sx * 0.065
     part(r, f"Sole{k}", box(x - 0.046, x + 0.046, -0.13, 0.1, 0, 0.022), M_DARK)
@@ -876,7 +876,7 @@ for k, sx in enumerate((-1, 1)):
     part(r, f"Shaft{k}", loft([ering(z, rx, ry, 12, x, 0.035) for z, rx, ry in ((0.07, 0.047, 0.057), (0.28, 0.043, 0.052), (0.4, 0.048, 0.056))]),
          M_PLATE, smooth=True)
     part(r, f"Top{k}", xform(band_z(0.39, 0.415, 0.05, 12, 1.16), move=(x, 0.035, 0)), M_SUIT)
-    part(r, f"Ridge{k}", box(x - 0.008, x + 0.008, -0.03, -0.014, 0.12, 0.38), M_GUN)
+    part(r, f"Ridge{k}", box(x - 0.008, x + 0.008, -0.03, -0.014, 0.12, 0.38), M_MK)
 
 # ======================= 13.7 potions and tonics, 13.10 kits and containers (row 6) =======================
 r = item("potion_stim", "Stim", "potion", 6, 0.08)
