@@ -102,7 +102,10 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
     /// Its client times the landing from the published schedule and fades out on touchdown, so a boarding hashed anywhere into the window
     /// would hold that screen black for up to the whole of it. Hence trickle boarding (the crowd's rule), a 500-tick window, and the ask made a few
     /// ticks after a landing with a single tick allowed: the trickle boards at phase p with probability 1/(500 − p) a tick, so it passes this case
-    /// about one time in two hundred and fifty; the session's rule always. (Three ticks at a uniform phase was 3.7 %, the review found.)
+    /// about one time in two hundred and fifty; the session's rule always. (Three ticks at a uniform phase was 3.7 %, the review found.) The single tick
+    /// counts from the fare (SimBridge.Fares.cs): the Ledger charges it after Shuttle has run, so the tick after is the soonest a paid passenger flies —
+    /// and a wallet not open yet refuses the fare, so the client logs in with its wallet open. Asked before, it failed on PR #1590's CI run, three tries
+    /// out of three.
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
@@ -116,7 +119,7 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        var link = Connect();
+        var (link, _) = LogIn(sim, 0xFA05);
 
         const int Dest = 1;
         var port = sim.Index.Shuttleports[0];
@@ -124,12 +127,10 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         var player = Worlds.Park(sim, link.Session, port.X, port.Z);
 
         // Port 0 has no stagger: it lands on every multiple of the interval. Ask just after one.
-        var interval = (long)(10f * TickRateHz);
-        var phase = sim.Runtime.CurrentTickNumber % interval;
-        Harness.Ticks((int)((interval - phase + 3) % interval));
+        AskJustAfterALanding(sim, 10f);
 
         link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
-        SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 1, "the boarding ask to be queued by a tick");
+        SessionHarness.Until(() => sim.Bridge.FaresPaid >= 1, "the fare to be paid");
         Harness.Ticks(1);
 
         var (x, z) = Where(sim, player);
@@ -137,6 +138,7 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         {
             Assert.That(z, Is.EqualTo(destPort.Z + WorldBuilder.GateOutsideZ + 2f).Within(0.01f), "not just outside the destination's gate");
             Assert.That(System.MathF.Abs(x - destPort.X), Is.LessThanOrEqualTo(2.41f), "not within the gate's width");
+            Assert.That(sim.Bridge.FaresRefused, Is.Zero, "the fare was refused");
         });
     }
 
