@@ -396,6 +396,9 @@ public class DatabaseEngineOptions
     /// </summary>
     public SpatialOptions Spatial { get; set; } = new();
 
+    /// <summary>How an open rebuilds the secondary indexes it cannot trust or load: a sorted bulk build in a fixed memory budget (#1588).</summary>
+    public IndexRebuildOptions IndexRebuild { get; set; } = new();
+
     /// <summary>
     /// The engine's own backups (#1416): store, schedule, retention, requests, archiving. Null: off — no schedule, no status file, and
     /// <see cref="DatabaseEngine.Backup"/> takes points only into a store the caller names.
@@ -861,7 +864,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     /// <remarks>
     /// Replaces <c>ComponentTable.PopulateNewIndexes</c>, which backfilled the shared per-ComponentTable tree that no longer exists (#629). The per-archetype
-    /// equivalent is a full <see cref="ArchetypeClusterState.RebuildIndexesFromData"/> scan: adding an index is rare, the scan is the same one crash recovery
+    /// equivalent is a full <see cref="SortedIndexRebuild.Run"/> scan: adding an index is rare, the scan is the same one crash recovery
     /// already runs, and it cannot disagree with the write path the way a second bespoke backfill could.
     /// </remarks>
     private HashSet<string> _componentsWithNewIndexes;
@@ -935,6 +938,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <see cref="InitializeArchetypes"/> instead of being loaded from the persisted chunk-0 directory. 0 when every index segment reloaded. Lets a test
     /// assert it is exercising the LOAD path (<c>FindInDirectory</c>) and not the create-and-rebuild path, which resolves keys differently (#657).</summary>
     internal int LastOpenClusterIndexRebuildCount;
+
+    /// <summary>Diagnostic + test oracle: what the last open's sorted index rebuilds did, summed over archetypes (#1588); null when none ran.</summary>
+    internal IndexRebuildStats LastOpenIndexRebuild;
 
     /// <summary>True when the previous session did not close cleanly and left WAL segment files: a crash left a recovery window. WAL files alone are not
     /// enough — they survive a clean close, and treating them as a crash ran the whole recovery pipeline on every open (#1143). Captured ONCE in the
@@ -5291,6 +5297,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         LastOpenVersionedHeadRebuildCount = 0;
         LastOpenVersionedHeadRebuildSkips = default;
         LastOpenClusterIndexRebuildCount = 0;
+        LastOpenIndexRebuild = null;
         LastOpenRebuildPlacementMap = null;
         LastOpenMigrationOrphanChainEntities = 0;
         _lastOpenArchetypeSetMigrations = null;
@@ -5791,8 +5798,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // component, and a field indexed for the first time has no entry in the persisted B+Tree directory — FindInDirectory throws rather
                         // than creating it. The deleted ComponentTable.BuildIndexedFieldInfo had per-field granularity (`useLoad = load &&
                         // !newIndexFieldIds.Contains(...)`); this home does not, so every tree is rebuilt from cluster data instead. That is also the only
-                        // correct choice: RebuildIndexesFromData does bare Adds with no clear, so running it over loaded trees would double-insert every
-                        // existing key and overwrite the AllowMultiple element-id tail, orphaning the original entries (#629).
+                        // correct choice: the rebuild (SortedIndexRebuild) fills empty trees with no clear, so running it over loaded trees would double-insert
+                        // every existing key and overwrite the AllowMultiple element-id tail, orphaning the original entries (#629).
                         //
                         // The SEGMENT is a different question, and conflating the two used to leak it: `hasNewIndex` sat in the load condition below, so the
                         // persisted segment was never even registered and a fresh one was allocated beside it — occupancy bits set, no claimant, gone for
@@ -5812,6 +5819,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                 out var loadedIdx, TolerateTornSegmentsAtOpen))
                         {
                             indexSegment = loadedIdx;
+                            // A clean open's rebuild may flush half-built trees through its batch points' cycles (#1588). An open that dies then leaves
+                            // an unclean close with the WAL's segments in place (they survive every close), so the next open is a crash open, which
+                            // rebuilds. The failed-open marker cannot stand in for that: an open that never reached InitializeArchetypes sets it too.
                             loadIndexes = !crashPath && !hasNewIndex;
                         }
                         else
@@ -5880,15 +5890,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         clusterState.InitializeIndexes(slotToTable, indexSegment, string64IndexSegment, transientIndexSegment,
                             transientString64IndexSegment, loadIndexes, changeSet);
 
-                        // Fresh indexes over a reopened database's existing cluster data ⇒ rebuild from scan. NOT on the crash path: there the cluster SoA is
-                        // still pre-apply at this point, so RebuildClusterIndexes (Phase 5) owns the rebuild. Exactly one of the two runs — RunWalV2Recovery
-                        // returns immediately when no WAL window exists.
-                        if (!loadIndexes && !crashPath && !isFreshAllocation && clusterState.ActiveClusterCount > 0)
-                        {
-                            using var idxEpoch = EpochGuard.Enter(EpochManager);
-                            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet));
-                            LastOpenClusterIndexRebuildCount++;
-                        }
+                        // Trees created empty are filled later, once, by RebuildPendingClusterIndexes (RB-02, #1588): not here, where the cluster data is not
+                        // final yet — a crash open has its replay to apply, a clean one its HEAD rebuild and a migration its placement.
+                        clusterState.IndexRebuildPending = !loadIndexes;
                     }
                     finally
                     {
@@ -6076,6 +6080,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Drain the cluster head rebuilds deferred above — the EntityMap they read is now freshly derived, not the untrusted loaded one.
         versionedHeadTicks += DrainDeferredVersionedHeadRebuilds();
+
+        // A clean open's index rebuild (RB-02): the trees the init block created empty, filled now that the migration's placement and every HEAD rebuild are
+        // done. A crash open's waits for Phase 5, after the replay. Nothing between the init block and here reads a cluster tree.
+        if (!CrashRecoveryAtOpen)
+        {
+            RebuildPendingClusterIndexes();
+        }
 
         // Give back the pages of every segment a schema migration replaced. Last legal moment: the rebuild above is the only reader of a pre-migration cluster
         // (review M9). Not while a migration is uncommitted: the persisted catalog still names these segments, and an open that fails before the commit must
@@ -6319,7 +6330,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // satisfied, by the per-archetype rebuild below, which is now the only home there is.
         // they were loaded from disk at open and never rebuilt, which left RB-04's "a derived page was discarded and rebuilt" premise false for this home —
         // a torn cluster-index node page was neither loud-failed nor rebuilt, but silently served.
-        RebuildClusterIndexes();
+        RebuildPendingClusterIndexes();
 
         // Phase 5b — SPATIAL (RB-01, #1054). The cell layer is derived exactly like the indexes, and the only rebuild so far — InitializeArchetypes' — saw
         // the clusters as they were BEFORE this window was applied. Replayed spawns claim cell-agnostic slots (RecoveryApplier), often into clusters that
@@ -6590,25 +6601,37 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         => kind is StorageSegmentKind.Index or StorageSegmentKind.Spatial or StorageSegmentKind.Occupancy;
 
     /// <summary>
-    /// Phase 5, per-archetype half (RB-01 / RB-02, #656). Repopulates every cluster-backed archetype's own B+Trees from the cluster SoA, which the apply and
-    /// scrub phases have just brought to its final state.
+    /// The open's one index rebuild pass (RB-01 / RB-02, #656, #1588): fills, from the cluster SoA, every archetype's B+Trees the init block created empty
+    /// (<see cref="ArchetypeClusterState.IndexRebuildPending"/>), and clears the flag, so no tree is filled twice in one open.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Crash path only — the trees were cleared and left empty by the cluster-index init block, which no longer trusts a persisted index segment after a
-    /// crash. On a clean reopen this method never runs (<see cref="RunWalV2Recovery"/> returns immediately with no WAL window) and the init block does the
-    /// rebuild itself, over data that is already final.
+    /// Runs once per open, where the cluster data is final: in Phase 5 of a crash open, after the replay and the scrub; on a clean open after
+    /// <see cref="DrainDeferredVersionedHeadRebuilds"/>, once a migration has placed its entities and every Versioned HEAD is rebuilt. A crash open that
+    /// also migrated used to fill the migrating archetype's trees in the placement and again here, over trees nothing had cleared: every unique key a
+    /// conflict, every multi-value location twice.
     /// </para>
     /// <para>
     /// Rebuilding from the cluster SoA rather than from chain heads is what makes this correct for a cluster archetype whatever its slots' storage modes: the
     /// cluster slot IS the head for SingleVersion, and holds the published head for Versioned (D1). <c>ActiveClusterCount == 0</c> — an archetype whose
     /// entities were all in the lost window — leaves the empty trees alone, which is the right answer, not a skipped rebuild.
     /// </para>
+    /// <para>
+    /// Batch points on every open, clean ones included (CK-08): the scan holds one epoch scope, and without them every page it touches stays epoch-held, so a
+    /// rebuild over more clusters than the cache stalls on back-pressure (#1183).
+    /// </para>
     /// </remarks>
-    private void RebuildClusterIndexes()
+    private void RebuildPendingClusterIndexes()
     {
         using var guard = EpochGuard.Enter(EpochManager);
         var changeSet = MMF.CreateChangeSet();
+
+        // A directory of this database's own (inside the bundle, or named after it): the bundle lock makes every file in it this database's, and no rebuild
+        // of this open has started, so whatever a previous process left there goes (RB-10).
+        var tempDirectory = SortedIndexRebuild.TempDirectoryOf(_options.IndexRebuild, MMF.BundleDirectory);
+        RebuildTempFile.Sweep(tempDirectory);
+        _indexRebuildNode ??= new ResourceNode("IndexRebuild", ResourceType.Node, this);
+        var succeeded = false;
         try
         {
             foreach (var meta in OwnArchetypes())
@@ -6619,18 +6642,68 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 }
 
                 var clusterState = _archetypeStates[meta.ArchetypeId]?.ClusterState;
-                if (clusterState?.IndexSlots == null || clusterState.ActiveClusterCount == 0)
+                if (clusterState is not { IndexRebuildPending: true })
                 {
                     continue;
                 }
 
-                NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(changeSet, () => RecoveryBatchPoint(changeSet, RecoveryPass.Indexes)));
+                clusterState.IndexRebuildPending = false;
+                if (clusterState.IndexSlots == null || clusterState.ActiveClusterCount == 0)
+                {
+                    continue;
+                }
+
+                var context = new SortedIndexRebuild.Context
+                {
+                    State = clusterState,
+                    Options = _options.IndexRebuild,
+                    Owner = new BufferOwner(MemoryAllocator, _indexRebuildNode),
+                    TempDirectory = tempDirectory,
+                    TempFileName = $"{RebuildTempFile.FilePrefix}{meta.ArchetypeId}{RebuildTempFile.Extension}",
+                    ChangeSet = changeSet,
+                    BatchPoint = () => RecoveryBatchPoint(changeSet, RecoveryPass.Indexes),
+                    Stats = LastOpenIndexRebuild ??= new IndexRebuildStats(),
+                };
+                NoteUniqueIndexRebuildConflicts(meta, SortedIndexRebuild.Run(context));
                 LastOpenClusterIndexRebuildCount++;
             }
+
+            succeeded = true;
         }
         finally
         {
-            changeSet.SaveChanges();
+            // A failed pass gives its marks back rather than saving (CK-08, as the replay does): the open fails and the next one rebuilds, and a save that
+            // throws in turn would hide the failure.
+            if (succeeded)
+            {
+                changeSet.SaveChanges();
+            }
+            else
+            {
+                changeSet.ReleaseDirtyMarks();
+            }
+
+            TryRemoveEmptyDirectory(tempDirectory);
+        }
+    }
+
+    /// <summary>The resource node the index rebuild's native buffers are children of, created at the first rebuild pass (#1588).</summary>
+    private ResourceNode _indexRebuildNode;
+
+    private static void TryRemoveEmptyDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).GetEnumerator().MoveNext())
+            {
+                Directory.Delete(directory);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -7353,8 +7426,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </para>
     /// <para>
     /// Only positions, chain roots, enabled bits and SingleVersion bytes are written here. The HEAD bytes of each Versioned slot are filled by
-    /// <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/>, then the per-archetype B+Trees by
-    /// <see cref="ArchetypeClusterState.RebuildIndexesFromData"/>, then the spatial layer with each new cluster's realm hint — each over the previous one's
+    /// <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/>, then the spatial layer with each new cluster's realm hint, the per-archetype
+    /// B+Trees later, once, by <see cref="RebuildPendingClusterIndexes"/> (#1588) — each over the previous one's
     /// output.
     /// </para>
     /// </remarks>
@@ -7565,14 +7638,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         clusterState.RebuildVersionedHeadFromChain(meta, state, cs, false, out var headSkips, addedSlotMask: set?.Diff.AddedMask ?? 0);
         NoteVersionedHeadRebuildSkips(meta, in headSkips);
 
-        // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
-        // reopen now points at the old geometry. This scan also covers a component that merely GAINED an index: its tree is created empty, and this fills it —
-        // the per-archetype replacement for ComponentTable.PopulateNewIndexes.
-        if (clusterState.IndexSlots != null && clusterState.ActiveClusterCount > 0)
-        {
-            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(cs));
-            LastOpenClusterIndexRebuildCount++;
-        }
+        // No index rebuild here. Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, but this
+        // open allocated the archetype fresh segments, so its trees were created empty and are pending: RebuildPendingClusterIndexes fills them once, after
+        // this HEAD rebuild on a clean open and after the replay on a crash one. Rebuilt here too, a crash open indexed every entity twice (#1588).
+        Debug.Assert(clusterState.IndexSlots == null || clusterState.IndexRebuildPending, "a re-placed archetype's trees are pending a rebuild");
 
         // Spatial state is the third derived structure over cluster data, and its normal rebuild runs inside InitializeArchetypes — before this method has
         // placed anything, so it would have seen an empty cluster. Redo it here or the archetype reopens with entities present and every spatial query empty.
@@ -8613,7 +8682,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// Re-derive a cluster archetype's EntityMap from the cluster segment alone. Walks every live slot of every active cluster (the same occupancy-bit walk
-    /// as <see cref="ArchetypeClusterState.RebuildIndexesFromData"/>) and rebuilds the <c>ClusterEntityRecord</c> from self-describing cluster state: the
+    /// as <see cref="SortedIndexRebuild.Run"/>) and rebuilds the <c>ClusterEntityRecord</c> from self-describing cluster state: the
     /// EntityKey from <c>EntityKeys[slot]</c>, the per-entity enabled mask reconstructed from the per-component <c>EnabledBits[C]</c> bitmaps, and each
     /// Versioned slot's compRevFirstChunkId from the chain-head scan. BornTSN/DiedTSN = 0 (live, committed before checkpoint — same convention as the flat
     /// rebuild). Inserted via the split-aware <c>InsertDuringRebuild</c> into the just-cleared map.
@@ -8785,12 +8854,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, has its marks released — its pages
-    /// stay owed (PS-10), unevictable until written — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once
-    /// the owed pages pass the dirty-page threshold a flush-only cycle writes them. Released, not saved (#1588): saved, every batch of 1,024 entities wrote
-    /// the pages it dirtied, and the index rebuild's random inserts re-dirtied the same B+Tree pages batch after batch — a 7 GB world's crash open at
-    /// 512 MiB wrote more than 91 GB in 5.5 min without finishing; released, it recovered in 95 s writing 15.3 GB. A pass calls it only where it holds no
-    /// page address across the call: the refresh moves the pin of every scope on this thread. Samples the epoch-held pages first.
+    /// Between bounded batches of a crash open's pass, or of the index rebuild on any open (#1183, CK-08): the batch's <paramref name="changeSet"/>, if
+    /// any, has its marks released — its pages stay owed (PS-10), unevictable until written — the pages the batch touched stop being epoch-held (the
+    /// thread's pin moves to a new epoch), and once the owed pages pass the dirty-page threshold a flush-only cycle writes them. Released, not saved
+    /// (#1588): saved, every batch of 1,024 entities wrote the pages it dirtied, and the index rebuild's random inserts re-dirtied the same B+Tree pages
+    /// batch after batch — a 7 GB world's crash open at 512 MiB wrote more than 91 GB in 5.5 min without finishing; released, it recovered in 95 s writing
+    /// 15.3 GB. A pass calls it only where it holds no page address across the call: the refresh moves the pin of every scope on this thread. Samples the
+    /// epoch-held pages first.
     /// </summary>
     internal void RecoveryBatchPoint(ChangeSet changeSet, RecoveryPass pass)
     {
@@ -8800,22 +8870,38 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
-        RecoveryBatchPointProbe?.Invoke(pass, RecoveryBatchPoints);
+        // Serialised, so a test's counting probe stays exact when several threads make batch points (the sorted index rebuild's workers, #1588).
+        var probe = RecoveryBatchPointProbe;
+        if (probe != null)
+        {
+            lock (RecoveryBatchPointProbeLock)
+            {
+                probe(pass, RecoveryBatchPoints);
+            }
+        }
+
         ThrowIfRecoveryCheckpointerFailed();
 
         // Sampled: the census reads every slot, and a large database with a large cache makes tens of thousands of batch points (review).
         if ((RecoveryBatchPoints & (RecoveryEpochHeldSampleEvery - 1)) == 0)
         {
             var held = MMF.CountEpochProtectedPages();
-            if (held > PeakRecoveryEpochHeldPages)
+            var peak = Volatile.Read(ref _peakRecoveryEpochHeldPages);
+            while (held > peak)
             {
-                PeakRecoveryEpochHeldPages = held;
+                var seen = Interlocked.CompareExchange(ref _peakRecoveryEpochHeldPages, held, peak);
+                if (seen == peak)
+                {
+                    break;
+                }
+
+                peak = seen;
             }
         }
 
         changeSet?.ReleaseDirtyMarks();
         EpochManager.RefreshScope();
-        RecoveryBatchPoints++;
+        Interlocked.Increment(ref _recoveryBatchPoints);
         var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;
         var limit = RecoveryFlushThresholdPercentForTest >= 0 ? RecoveryFlushThresholdPercentForTest
             : threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent;
@@ -8838,7 +8924,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         if (fatal != null)
         {
             throw new DurabilityException(TyphonErrorCode.RecoveryCheckpointFailed,
-                $"Crash recovery failed: the checkpointer hit a fatal failure before the recovery was sealed ({fatal.Message})", fatal);
+                $"The open failed: the checkpointer hit a fatal failure before the open's recovery or index rebuild completed ({fatal.Message})", fatal);
         }
     }
 
@@ -8849,11 +8935,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // Every how many batch points the epoch-held census is taken (a power of two).
     private const int RecoveryEpochHeldSampleEvery = 16;
 
-    /// <summary>The most pages an epoch scope held at the last crash open's batch points, sampled every 16th (<see cref="RecoveryBatchPoint"/>). Diagnostic.</summary>
-    internal int PeakRecoveryEpochHeldPages { get; private set; }
+    /// <summary>The most pages an epoch scope held at this engine's open batch points, sampled every 16th (<see cref="RecoveryBatchPoint"/>).
+    /// Diagnostic.</summary>
+    internal int PeakRecoveryEpochHeldPages => Volatile.Read(ref _peakRecoveryEpochHeldPages);
 
-    /// <summary>Batch points the last crash open's passes made. Diagnostic.</summary>
-    internal int RecoveryBatchPoints { get; private set; }
+    private int _peakRecoveryEpochHeldPages;
+
+    /// <summary>Batch points this engine's open passes made, the index rebuild's on a clean open included. Diagnostic.</summary>
+    internal int RecoveryBatchPoints => Volatile.Read(ref _recoveryBatchPoints);
+
+    private int _recoveryBatchPoints;
+
+    private static readonly Lock RecoveryBatchPointProbeLock = new();
 
     /// <summary>Entities, records or chains a recovery pass handles between two batch points. A test lowers it, [NonParallelizable], and restores it.</summary>
     internal static int RecoveryBatchSize { get; set; } = DefaultRecoveryBatchSize;
@@ -8877,7 +8970,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// Called at each batch point with the pass and the batch points made so far, before the batch is saved: a test throws from it to stop a crash open
-    /// in the middle of a pass, as a crash would, and reopens (#1183, AP-12). Test seam.
+    /// in the middle of a pass, as a crash would, and reopens (#1183, AP-12). Test seam. Invoked under one static lock, so a probe must never wait on
+    /// another thread that makes batch points: that thread would block on the lock the probe holds.
     /// </summary>
     internal static Action<RecoveryPass, int> RecoveryBatchPointProbe { get; set; }
 
@@ -10368,7 +10462,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     /// <remarks>
     /// Kept as one call rather than inlined at each rebuild site so that "the rebuild dropped something" cannot be discarded silently by the next site
-    /// somebody adds — the ignorable <c>int</c> return of <see cref="ArchetypeClusterState.RebuildIndexesFromData"/> makes that easy to do by accident.
+    /// somebody adds — the ignorable <c>int</c> return of <see cref="SortedIndexRebuild.Run"/> makes that easy to do by accident.
     /// </remarks>
     private void NoteUniqueIndexRebuildConflicts(ArchetypeMetadata meta, int conflicts)
     {

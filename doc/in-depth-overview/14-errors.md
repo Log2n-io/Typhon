@@ -207,7 +207,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 | 4xxx | Index | `UniqueConstraintViolation = 4001`, `ForeignKeyViolation = 4002` |
 | 5xxx | Query | (reserved) |
 | 6xxx | Resource | `ResourceExhausted = 6001`, `LockTimeout = 6003` |
-| 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004`, `BulkSessionAlreadyActive = 7005`, `BulkSessionClosed = 7006`, `BulkLoadCheckpointTimeout = 7007`, `CommitDurabilityUncertain = 7008`, `CommitPublishIncomplete = 7009`, `CommitPipelineStopped = 7010`, `RecoveryCheckpointFailed = 7011`, `RecoveryArchetypeNotRegistered = 7012`, `RecoveryArchetypeSetChangeRefused = 7013`; backup/restore `71xx`: `BackupStoreLocked = 7101` … `BackupArchiveDiverged = 7112` |
+| 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004`, `BulkSessionAlreadyActive = 7005`, `BulkSessionClosed = 7006`, `BulkLoadCheckpointTimeout = 7007`, `CommitDurabilityUncertain = 7008`, `CommitPublishIncomplete = 7009`, `CommitPipelineStopped = 7010`, `RecoveryCheckpointFailed = 7011`, `RecoveryArchetypeNotRegistered = 7012`, `RecoveryArchetypeSetChangeRefused = 7013`, `IndexRebuildTempCorrupt = 7014`; backup/restore `71xx`: `BackupStoreLocked = 7101` … `BackupArchiveDiverged = 7112` |
 | 8xxx | Runtime / Scheduler | `InvalidSystemAccess = 8001` |
 
 **Notes:**

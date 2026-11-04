@@ -3046,6 +3046,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     public ClusterIndexSlot<PersistentStore>[] IndexSlots;
 
     /// <summary>
+    /// Set by the open's index init block when it created this archetype's persistent trees empty instead of loading them (an index added, a segment that
+    /// would not load, a migration's fresh segments, any crash open); cleared by <see cref="DatabaseEngine"/>'s one rebuild pass, which fills them from the
+    /// cluster data exactly once per open (RB-02, #1588).
+    /// </summary>
+    internal bool IndexRebuildPending;
+
+    /// <summary>
     /// <see cref="Transaction.EnumerateIndex{T,TKey}"/>'s source descriptors, [index slot][field], built on first use (#1514). Dropped by
     /// <see cref="InitializeIndexes"/>, the only place the slots they describe are rebuilt.
     /// </summary>
@@ -11165,127 +11172,6 @@ internal sealed unsafe partial class ArchetypeClusterState
             ShadowBuffers = shadowBuffers,
             Stats = stats,
         };
-    }
-
-
-    /// <summary>
-    /// Rebuild per-archetype B+Tree indexes from cluster data (scan all occupied entities).
-    /// Used on reopen when index segment is not persisted or is corrupted.
-    /// </summary>
-    /// <returns>
-    /// The number of index entries dropped because the recovered data could not satisfy a UNIQUE constraint (#710). Zero on every healthy rebuild.
-    /// </returns>
-    /// <param name="changeSet">The ChangeSet the index writes are tracked in.</param>
-    /// <param name="batchPoint">A crash open's batch point (<see cref="DatabaseEngine.RecoveryBatchPoint"/>), called between clusters; null elsewhere.</param>
-    public int RebuildIndexesFromData(ChangeSet changeSet, Action batchPoint = null)
-    {
-        if (IndexSlots == null || IndexSlots.Length == 0)
-        {
-            return 0;
-        }
-
-        var uniqueConflicts = 0;
-
-        // Index rebuild reads from primary segment (SV/V data — Transient excluded from IndexSlots)
-        var clusterAccessor = ClusterSegment.CreateChunkAccessor();
-        var idxAccessor = IndexSegment.CreateChunkAccessor(changeSet);
-        // A field's nodes live in whichever segment its stride requires, so rebuild needs an accessor per segment, not per archetype (#658).
-        var hasString64 = IndexSegmentString64 != null;
-        var idxAccessorS64 = hasString64 ? IndexSegmentString64.CreateChunkAccessor(changeSet) : default;
-        var sinceBatchPoint = 0;
-        try
-        {
-            for (var c = 0; c < ActiveClusterCount; c++)
-            {
-                // A crash open's batch point, between clusters (#1183, CK-08): the index accessors' writes committed first. Every address is taken again
-                // for the next cluster.
-                if (batchPoint != null && sinceBatchPoint >= DatabaseEngine.RecoveryBatchSize)
-                {
-                    idxAccessor.CommitChanges();
-                    if (hasString64)
-                    {
-                        idxAccessorS64.CommitChanges();
-                    }
-
-                    batchPoint();
-                    sinceBatchPoint = 0;
-                }
-
-                var chunkId = ActiveClusterIds[c];
-                var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
-                var occupancy = *(ulong*)clusterBase;
-                var wroteElementIds = false;
-                sinceBatchPoint += BitOperations.PopCount(occupancy);
-
-                while (occupancy != 0)
-                {
-                    var slotIndex = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-                    var clusterLocation = chunkId * 64 + slotIndex;
-
-                    for (var s = 0; s < IndexSlots.Length; s++)
-                    {
-                        ref var ixSlot = ref IndexSlots[s];
-                        var compBase = clusterBase + Layout.ComponentOffset(ixSlot.Slot);
-                        var compSize = Layout.ComponentSize(ixSlot.Slot);
-                        for (var f = 0; f < ixSlot.Fields.Length; f++)
-                        {
-                            ref var field = ref ixSlot.Fields[f];
-                            var fieldPtr = compBase + slotIndex * compSize + field.FieldOffset;
-
-                            int elementId;
-                            try
-                            {
-                                elementId = hasString64 && ReferenceEquals(field.Index.Segment, IndexSegmentString64)
-                                    ? field.Index.Add(fieldPtr, clusterLocation, ref idxAccessorS64)
-                                    : field.Index.Add(fieldPtr, clusterLocation, ref idxAccessor);
-                            }
-                            catch (UniqueConstraintViolationException)
-                            {
-                                // #710. RB-01 says derived structures are rebuilt from primary data; it has no clause for primary data that CANNOT satisfy
-                                // the constraint. That state is reachable and legitimate: a hard crash under TickFence loses up to one tick of SingleVersion
-                                // VALUES while keeping every lifecycle record, so an archetype can come back with all its entities and all their keys zeroed.
-                                // Rebuilding a unique index over N identical keys then threw out of InitializeArchetypes, uncatchably, and the state is on
-                                // disk — so the next open repeated it. Losing ≤1 tick of values is the documented trade; a database that will not open is not.
-                                //
-                                // Skipping the entry keeps the entity itself alive and reachable by scan, which is the honest outcome: the value the key was
-                                // derived from is gone, so there is no key to index. The caller logs the count — silence here would trade an unopenable
-                                // database for a quietly incomplete index, which is a worse bargain.
-                                //
-                                // The throw-per-conflict cost is accepted: this runs once, at open, only on a database that has already lost data.
-                                uniqueConflicts++;
-                                continue;
-                            }
-
-                            // Rebuild writes a fresh elementId into the cluster tail, overwriting any stale
-                            // value from the previous (torn-down) BTree state. Issue #229 Phase 3.
-                            if (field.AllowMultiple)
-                            {
-                                *(int*)(clusterBase + Layout.IndexElementIdOffset(field.MultiFieldIndex, slotIndex)) = elementId;
-                                wroteElementIds = true;
-                            }
-                        }
-                    }
-                }
-
-                // The element ids went in through a clean mapping: record the page, or an eviction reloads the stale ids (PS-10).
-                if (wroteElementIds)
-                {
-                    NoteClusterPageModified(chunkId);
-                }
-            }
-        }
-        finally
-        {
-            if (hasString64)
-            {
-                idxAccessorS64.Dispose();
-            }
-            idxAccessor.Dispose();
-            clusterAccessor.Dispose();
-        }
-
-        return uniqueConflicts;
     }
 
     /// <summary>

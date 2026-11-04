@@ -407,6 +407,26 @@ internal sealed class DatabaseRepairTests
             "and must contain the data file");
     }
 
+    /// <summary>An index rebuild's scratch directory is never data: the pre-repair copy skips it (RB-10, #1588).</summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("RB-10")]
+    public void BackupFirst_SkipsTheIndexRebuildTempDirectory()
+    {
+        BuildAndClose();
+        var temp = Path.Combine(BundlePath, Internals.SortedIndexRebuild.TempDirectoryName);
+        Directory.CreateDirectory(temp);
+        File.WriteAllBytes(Path.Combine(temp, "ix-1.tmp"), [1, 2, 3]);
+
+        var healthy = Scan();
+        DamagePage(BundlePath, 1 - healthy.Identity.MetaSlot, page => page.AsSpan(300, 128).Fill(0xAB));
+        var outcome = DatabaseRepair.Apply(BundlePath, DatabaseRepair.Plan(Scan()), backupFirst: true);
+
+        Assert.That(File.Exists(Path.Combine(outcome.BackupPath, IntegrityConstants.DataFileName)), Is.True, "premise: the bundle was copied");
+        Assert.That(Directory.Exists(Path.Combine(outcome.BackupPath, Internals.SortedIndexRebuild.TempDirectoryName)), Is.False,
+            "the rebuild's temp directory is not part of the copy");
+    }
+
     /// <summary>
     /// A finding whose data is genuinely gone must be reported as unaddressed with an honest explanation, not quietly
     /// dropped from the plan. Silence here would read as "nothing to do".

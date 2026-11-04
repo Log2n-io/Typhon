@@ -221,10 +221,59 @@ internal sealed class AxisArchetypesTests : TestBase<AxisArchetypesTests>
 
         Assert.That(dbe2.LastOpenUniqueIndexRebuildConflicts, Is.GreaterThan(0),
             $"{cell}: the open must have REPORTED the dropped unique-index entries — a silent zero here means the rebuild was skipped, not tolerated");
+        AssertTheLowestLocationKeptKeyZero(dbe2, cell);
 
         using var read = dbe2.CreateQuickTransaction();
         Assert.That(AxisArchetypes.Dispatch(cell, read, new CountVisitor()), Is.EqualTo(ids.Length),
             $"{cell}: the entities themselves must survive and stay reachable by scan — only their index entries are dropped");
+    }
+
+    /// <summary>
+    /// RB-07's winner: of the entities that all came back holding key 0, the one the tree keeps is at the lowest cluster location — whatever order the
+    /// clusters were listed in, since the rebuild sorts by (key, location).
+    /// </summary>
+    private static unsafe void AssertTheLowestLocationKeptKeyZero(DatabaseEngine dbe, Cell cell)
+    {
+        Internals.ArchetypeClusterState state = null;
+        foreach (var s in dbe._archetypeStates)
+        {
+            if (s?.ClusterState is { IndexSlots: not null, ActiveClusterCount: > 0 } cs)
+            {
+                state = cs;
+            }
+        }
+
+        Assert.That(state, Is.Not.Null, $"{cell}: premise, an indexed archetype with clusters");
+        using var epoch = Internals.EpochGuard.Enter(dbe.EpochManager);
+        var lowest = int.MaxValue;
+        var clusters = state.ClusterSegment.CreateChunkAccessor();
+        var tree = state.IndexSlots[0].Fields[0].Index;
+        var accessor = tree.Segment.CreateChunkAccessor();
+        try
+        {
+            for (var c = 0; c < state.ActiveClusterCount; c++)
+            {
+                var chunkId = state.ActiveClusterIds[c];
+                var occupancy = *(ulong*)clusters.GetChunkAddress(chunkId);
+                if (occupancy != 0)
+                {
+                    lowest = Math.Min(lowest, chunkId * 64 + System.Numerics.BitOperations.TrailingZeroCount(occupancy));
+                }
+            }
+
+            var key = 0;   // AxSvUniq.Key is an int
+            var found = tree.TryGet(&key, ref accessor);
+            Assert.Multiple(() =>
+            {
+                Assert.That(found.IsSuccess, Is.True, $"{cell}: key 0 is indexed once");
+                Assert.That(found.Value, Is.EqualTo(lowest), $"{cell}: the entity at the lowest location keeps the key (RB-07)");
+            });
+        }
+        finally
+        {
+            accessor.Dispose();
+            clusters.Dispose();
+        }
     }
 
     private sealed class CountVisitor : ICellVisitor<Transaction, int>

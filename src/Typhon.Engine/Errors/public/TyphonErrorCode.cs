@@ -149,6 +149,12 @@ public enum TyphonErrorCode
     /// </summary>
     RecoveryArchetypeSetChangeRefused = 7013,
 
+    /// <summary>
+    /// An open's index rebuild read back a temp-file block that failed its checks (see <see cref="IndexRebuildTempCorruptException"/>): the disk or the
+    /// OS returned bytes other than those written. The open fails; the next open rebuilds the indexes from the cluster data again.
+    /// </summary>
+    IndexRebuildTempCorrupt         = 7014,
+
     // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412; 7109: lifecycle, #1415; 7110: ops, #1416;
     // 7111-7112: WAL archiving, #1418)
 

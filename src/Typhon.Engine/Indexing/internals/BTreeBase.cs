@@ -33,6 +33,9 @@ internal abstract class BTreeBase<TStore> : IBTreeIndex where TStore : struct, I
     /// <inheritdoc/>
     public abstract unsafe bool SkipsKey(void* key);
 
+    /// <summary>The typed half of this tree's sorted rebuild (#1588): its staged entries' layout and sort, and its build from merged runs.</summary>
+    internal abstract ITreeRebuild CreateRebuild();
+
     public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor);
     public abstract unsafe int Add(void* keyAddr, int value, ref ChunkAccessor<TStore>accessor, out int bufferRootId);
     public abstract unsafe bool Remove(void* keyAddr, out int value, ref ChunkAccessor<TStore>accessor);

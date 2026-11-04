@@ -53,6 +53,19 @@ internal sealed unsafe class NativeBuffer : MemoryManager<byte>
 
     public int Length { get; }
 
+    /// <summary>Frees the block now: <see cref="IDisposable.Dispose"/>, which <see cref="MemoryManager{T}"/> implements explicitly.</summary>
+    public void Free() => ((IDisposable)this).Dispose();
+
+    /// <summary>The block's first byte, for a caller that addresses it by pointer; valid until <see cref="IDisposable.Dispose"/>.</summary>
+    public byte* Pointer
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_pointer == null, this);
+            return _pointer;
+        }
+    }
+
     public Span<byte> Span => GetSpan();
 
     public override Span<byte> GetSpan()
