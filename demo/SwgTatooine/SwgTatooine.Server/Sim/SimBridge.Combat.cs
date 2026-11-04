@@ -106,12 +106,16 @@ public sealed partial class SimBridge
             // The shooter's level, carried on its blow for the drain's level factor (character-level.md § 6).
             var looks = cluster.GetReadOnlySpan(Player.Look);
 
+            // What a person's player fights with (crafting-build.md C1): its worn weapon's numbers, or the fist's.
+            var gears = cluster.GetReadOnlySpan(Player.Gear);
+
             // READ-ONLY until a player in this cluster actually fires. GetSpan marks its cluster changed on the HANDOUT, so taking these mutably to read a
             // cooldown would claim a change for every player on every tick — and a cluster of parked players in a cantina writes nothing today, which is
             // precisely the property the activity mix exists to produce.
             var vitals = cluster.GetReadOnlySpan(Player.Vitals);
             var sessions = cluster.GetReadOnlySpan(Player.Session);
             Span<PlayerVitals> vitalsRw = default;
+            Span<PlayerGear> gearsRw = default;
             Span<PlayerSession> sessionsRw = default;
 
             // The players whose health this pass gave back, replicated once per cluster (ADR-067).
@@ -151,9 +155,10 @@ public sealed partial class SimBridge
                 // (PlayerState.Stance, the client's action bar 2–4): a target with no stance is a selection, not an attack.
                 var possessed = controls[idx].Kind != ControllerKind.Scripted;
                 var stance = states[idx].Stance;
+                var arms = possessed ? ArmsOf(stance, in gears[idx]) : default;
                 if (possessed
                         ? sessions[idx].Target.IsNull || sessions[idx].TargetKind == CombatTargetKind.Unshootable || stance <= Stances.None
-                            || stance >= Stances.Count
+                            || stance >= Stances.Count || arms.Damage <= 0
                         : states[idx].Activity != PlayerActivity.Combat)
                 {
                     // Out of a fight — no stance, or the crowd not in Combat — a player heals, once a second on its own beat. A person's player holding a stance
@@ -193,7 +198,7 @@ public sealed partial class SimBridge
                 {
                     // A stance reaches between the two bodies' edges; the crowd's weapon reaches between centres, as it always has.
                     var verdict = possessed
-                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, TatooineData.StanceReachM[stance] + places[idx].HalfExtent, crowd: false)
+                        ? CheckTarget(ctx, target, targetKind, x, z, 0f, arms.ReachM + places[idx].HalfExtent, crowd: false)
                         : CheckTarget(ctx, target, targetKind, x, z, rangeSq, -1f, crowd: true);
                     if (verdict == TargetVerdict.Gone)
                     {
@@ -257,16 +262,23 @@ public sealed partial class SimBridge
                 {
                     Target = target,
                     Attacker = cluster.GetEntityId(idx),
-                    Amount = vitals[idx].AttackDamage,
+                    Amount = possessed ? arms.Damage : vitals[idx].AttackDamage,
                     Kind = CombatEventKind.Damage,
                     TargetKind = targetKind,
                     AttackerLevel = possessed ? looks[idx].Level : (byte)TatooineData.CrowdLevel,
+                    DamageType = possessed ? arms.Type : DamageType.Kinetic,
                 });
 
-                // A stance strikes on its own steady beat, which a client plays one attack clip per hit to; the crowd keeps its random weapon delay.
+                // The weapon's use, counted on the body (crafting-catalog.md § 9.1): only a weapon a person fights with, not the fist nor the crowd's.
+                if (possessed && gears[idx].Stance == stance && !gears[idx].IsFist && SimBridge.CountAttack(ref PlayerGearRw(in cluster, ref gearsRw)[idx]))
+                {
+                    WearDue(cluster.GetEntityId(idx));
+                }
+
+                // A weapon strikes on its own steady beat, which a client plays one attack clip per hit to; the crowd keeps its random weapon delay.
                 var key = cluster.GetEntityId(idx).EntityKey;
                 PlayerVitalsRw(in cluster, ref vitalsRw)[idx].AttackCooldown = possessed
-                    ? Math.Max(1, (int)MathF.Round(TatooineData.StanceDelaySec[stance] * _config.TickRateHz))
+                    ? Math.Max(1, (int)MathF.Round(arms.DelayMs * _config.TickRateHz / 1000f))
                     : minDelay + (int)(Hash01(Salt(ctx.TickNumber, key, 0x27220A95u)) * delaySpan);
                 shots++;
             }
@@ -301,6 +313,25 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _shotsAtShieldedLair, shielded);
         }
+    }
+
+    /// <summary>What a person's player strikes with in a stance: its damage, delay, reach and type.</summary>
+    internal readonly record struct Arms(int Damage, int DelayMs, float ReachM, byte Type);
+
+    /// <summary>
+    /// The worn weapon's numbers when the stance is its own; the fist's in the unarmed stance with no knuckler worn (Q2: 40 per 1.2 s, a metre); nothing —
+    /// damage 0, the player does not fight — in a stance whose weapon is not worn.
+    /// </summary>
+    internal static Arms ArmsOf(int stance, in PlayerGear gear)
+    {
+        if (gear.Stance != 0 && gear.Stance == stance)
+        {
+            return new Arms(gear.Damage, gear.DelayMs, gear.RangeDm / 10f, gear.DamageType);
+        }
+
+        return stance == Stances.Unarmed
+            ? new Arms(Equipment.UnarmedDamage, Equipment.UnarmedDelayMs, Equipment.UnarmedRangeDm / 10f, DamageType.Kinetic)
+            : default;
     }
 
     /// <summary>What a stored target is worth this tick.</summary>
@@ -611,6 +642,7 @@ public sealed partial class SimBridge
                     Kind = CombatEventKind.Damage,
                     TargetKind = CombatTargetKind.Player,
                     AttackerLevel = brains[idx].Level,
+                    DamageType = CreatureTemplates.Damage[Math.Clamp((int)brains[idx].Template, 0, CreatureTemplates.Count - 1)],
                 });
 
                 t.AttackCooldown = minDelay + (int)(Hash01(Salt(ctx.TickNumber, cluster.GetEntityId(idx).EntityKey, 0x1E35A7BDu)) * delaySpan);
@@ -708,11 +740,20 @@ public sealed partial class SimBridge
                 continue;
             }
 
-            // The B4 level factor (character-level.md § 6), here where the target is open: the blow, the health removed and the Attack a client draws all
-            // carry the scaled amount.
+            // The B4 level factor (character-level.md § 6), then the rolls and the armour (crafting-catalog.md § 9.3), here where the target is open: the
+            // blow, the health removed and the Attack a client draws all carry the final amount.
+            var crit = false;
+            var hitDamage = 0;
             if (ev.Kind == CombatEventKind.Damage)
             {
-                events[i].Amount = ScaleByLevel(ev.Amount, ev.AttackerLevel, LevelOf(ref target, ev.TargetKind));
+                var scaled = ScaleByLevel(ev.Amount, ev.AttackerLevel, LevelOf(ref target, ev.TargetKind));
+                hitDamage = scaled;
+                events[i].Amount = RollBlow(scaled, ev.Attacker, ev.Target, ctx.TickNumber, ev.TargetKind == CombatTargetKind.Player ? MitigationOf(ref target, ev.DamageType) : 0,
+                    out crit);
+                if (crit)
+                {
+                    _pendingCrits++;
+                }
             }
 
             var landed = false;
@@ -743,6 +784,7 @@ public sealed partial class SimBridge
                     if (landed)
                     {
                         damageApplied++;
+                        WearHit(ref target, in ev, hitDamage);
                     }
                     else
                     {
@@ -763,6 +805,7 @@ public sealed partial class SimBridge
                         Attacker = ev.Attacker,
                         Target = ev.Target,
                         Amount = (ushort)Math.Clamp(ev.Amount, 0, ushort.MaxValue),
+                        Crit = crit ? (byte)1 : (byte)0,
                     });
             }
         }
@@ -811,6 +854,49 @@ public sealed partial class SimBridge
         if (stale != 0)
         {
             Interlocked.Add(ref _eventsStale, stale);
+        }
+
+        if (_pendingCrits != 0)
+        {
+            Interlocked.Add(ref _crits, _pendingCrits);
+            _pendingCrits = 0;
+        }
+    }
+
+    // Criticals rolled since start (crafting-catalog.md § 15.6: the crit rate), and the drain's own count.
+    private long _crits;
+    private long _pendingCrits;
+
+    /// <summary>Blows that rolled a critical since start: with <see cref="DamageApplied"/>, the crit rate.</summary>
+    public long Crits => Interlocked.Read(ref _crits);
+
+    /// <summary>
+    /// A blow that landed on a person's body wears its armour by its damage before mitigation (crafting-catalog.md § 9.1); its fall wears everything it
+    /// wears. The crowd, whose gear the Workshop never wrote, wears nothing.
+    /// </summary>
+    private void WearHit(ref EntityRefMut target, in CombatEvent ev, int damage)
+    {
+        var gear = target.Read(Player.Gear);
+        if (gear.Stance == 0)
+        {
+            return;
+        }
+
+        var due = false;
+        if (damage > 0)
+        {
+            due = CountHit(ref gear, damage);
+            target.Set(Player.Gear, gear);
+        }
+
+        var down = target.Read(Player.Vitals).Down;
+        if (down != Downed.Up)
+        {
+            FallDue(ev.Target, down == Downed.Dead);
+        }
+        else if (due)
+        {
+            WearDue(ev.Target);
         }
     }
 
@@ -864,6 +950,8 @@ public sealed partial class SimBridge
             // and no attacker, so it pursued nothing (gap G7).
             if (ai.Mode is AiMode.Wander or AiMode.Idle)
             {
+                // The first blow of a player's attack: the creatures round it join in (CallPack).
+                CallPack(tx, ref target, in ev);
                 ai.Mode = AiMode.Pursue;
                 ai.Target = ev.Attacker;
                 target.Set(Creature.Ai, ai);
@@ -883,6 +971,9 @@ public sealed partial class SimBridge
 
         v.Health = 0;
         target.Set(Creature.Vitals, v);
+
+        // Killed: those round it turn on the killer, whether or not they had seen the fight (a one-shot weapon has no first blow that it survives).
+        CallPack(tx, ref target, in ev);
         ai.Mode = AiMode.Dead;
         ai.Target = EntityId.Null;
         target.Set(Creature.Ai, ai);
@@ -925,6 +1016,40 @@ public sealed partial class SimBridge
             Species = ai.Template,
         });
         return true;
+    }
+
+    /// <summary>
+    /// The § 9.3 rolls on a blow already scaled by level: variance U(0.9, 1.1), a critical at 5 % for ×1.5, then the target's mitigation and the floor of 1.
+    /// Seeded <c>hash(attacker, target, tick)</c>, so a fight replays to the same numbers.
+    /// </summary>
+    internal int RollBlow(int damage, EntityId attacker, EntityId target, long tick, int mitigationPerMille, out bool crit)
+        => RollBlow(damage, attacker, target, tick, mitigationPerMille, _seedSalt, out crit);
+
+    /// <summary>The roll with the run's seed salt given: what the checks call without a served world.</summary>
+    internal static int RollBlow(int damage, EntityId attacker, EntityId target, long tick, int mitigationPerMille, uint seedSalt, out bool crit)
+    {
+        if (damage <= 0)
+        {
+            crit = false;
+            return damage;
+        }
+
+        var pair = unchecked((long)((ulong)attacker.EntityKey ^ ((ulong)target.EntityKey * 0x9E3779B97F4A7C15UL)));
+        var u = Hash01(SaltOf(tick, pair, 0x2545F491u, seedSalt));
+        var c = Hash01(SaltOf(tick, pair, 0x6C8E9CF5u, seedSalt));
+        return Equipment.Mitigate(Equipment.Roll(damage, u, c, out crit), mitigationPerMille);
+    }
+
+    /// <summary>A player target's mitigation of a blow's type, from its gear (§ 5.3); none for a type it has no armour against, or for the crowd.</summary>
+    private static int MitigationOf(ref EntityRefMut target, byte type)
+    {
+        var gear = target.Read(Player.Gear);
+        return type switch
+        {
+            DamageType.Kinetic => gear.MitKinetic,
+            DamageType.Energy => gear.MitEnergy,
+            _ => 0,
+        };
     }
 
     /// <summary>
@@ -1036,7 +1161,7 @@ public sealed partial class SimBridge
         {
             v.Health = health;
             target.Set(Player.Vitals, v);
-            ReactToAttack(ctx, tx, ref target, in ev, in v, fresh);
+            ReactToAttack(ctx, tx, ref target, in ev, in v, fresh, killed: false);
             TatooineReplication.Replicate(in target);
             return true;
         }
@@ -1072,6 +1197,7 @@ public sealed partial class SimBridge
         }
 
         incapacitated++;
+        ReactToAttack(ctx, tx, ref target, in ev, in v, fresh, killed: true);
         TatooineReplication.Replicate(in target);
         return true;
     }
@@ -1162,7 +1288,11 @@ public sealed partial class SimBridge
     /// bodies it moves.
     /// </para>
     /// </remarks>
-    private void ReactToAttack(TickContext ctx, Transaction tx, ref EntityRefMut target, in CombatEvent ev, in PlayerVitals v, bool fresh)
+    /// <param name="killed">
+    /// The blow downed it: it answers nothing, but its fall is an incident whatever came before, and the crowd round it answers (Loïc, 2026-11-03: a blaster
+    /// that downs at the first shot left everyone standing — the crowd was only ever called by a body that lived through the blow).
+    /// </param>
+    private void ReactToAttack(TickContext ctx, Transaction tx, ref EntityRefMut target, in CombatEvent ev, in PlayerVitals v, bool fresh, bool killed)
     {
         _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
         if (ev.Attacker.ArchetypeId != _playerArchetype.Value || target.Read(Player.Control).Kind != ControllerKind.Scripted
@@ -1174,7 +1304,7 @@ public sealed partial class SimBridge
         var from = attacker.Read(Player.Bounds);
         var realm = target.Read(Player.Realm).Value;
         var victim = target.Id;
-        if (!Answer(ctx, ref target, ev.Attacker, from.X, from.Z, realm, in v, decide: fresh, shout: fresh, ally: false) || !fresh)
+        if (!killed && (!Answer(ctx, ref target, ev.Attacker, from.X, from.Z, realm, in v, decide: fresh, shout: fresh, ally: false) || !fresh))
         {
             return;
         }
@@ -1218,6 +1348,67 @@ public sealed partial class SimBridge
         if (joined != 0)
         {
             Interlocked.Add(ref _crowdJoined, joined);
+        }
+    }
+
+    /// <summary>
+    /// The creatures round one a player attacks join the fight (Loïc, 2026-11-03: "they should attack you all the time"): every living one within
+    /// <see cref="TatooineData.PackRadiusM"/> that is wandering or idle turns on the attacker — passive templates too — at most
+    /// <see cref="TatooineData.PackMax"/> of them.
+    /// </summary>
+    /// <remarks>
+    /// <b>A player's blow only, and once an incident</b> — the blow that wakes the creature hit, and the one that kills it — so one radius query per fight
+    /// rather than per shot. The scripted crowd's fights at the lairs are the lairs' own business (<see cref="TatooineData.CrowdBraveShare"/>): calling packs
+    /// on those would change the crowd's balance, which nothing asked for. One already pursuing or fighting keeps its target.
+    /// </remarks>
+    private void CallPack(Transaction tx, ref EntityRefMut target, in CombatEvent ev)
+    {
+        _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
+        if (ev.Attacker.ArchetypeId != _playerArchetype.Value || !tx.TryOpen(ev.Attacker, out var attacker)
+            || attacker.Read(Player.Control).Kind == ControllerKind.Scripted)
+        {
+            return;
+        }
+
+        var at = target.Read(Creature.Bounds);
+        var realm = target.Read(Creature.Realm).Value;
+        var sphere = new BSphere2F { CenterX = at.X, CenterY = at.Z, Radius = TatooineData.PackRadiusM };
+        var joined = 0;
+        var e = Dbe.ClusterSpatialQuery<Creature>(new RealmId(realm)).Radius(in sphere);
+        try
+        {
+            while (e.MoveNext() && joined < TatooineData.PackMax)
+            {
+                var id = e.Current.Entity;
+                if (id == target.Id || !tx.TryOpenMut(id, out var mate))
+                {
+                    continue;
+                }
+
+                var ai = mate.Read(Creature.Ai);
+                if (ai.Mode is not (AiMode.Wander or AiMode.Idle) || mate.Read(Creature.Vitals).Health <= 0)
+                {
+                    continue;
+                }
+
+                ai.Mode = AiMode.Pursue;
+                ai.Target = ev.Attacker;
+                mate.Set(Creature.Ai, ai);
+                var timers = mate.Read(Creature.Timers);
+                timers.ThinkCooldown = 0;
+                mate.Set(Creature.Timers, timers);
+                TatooineReplication.Replicate(in mate);
+                joined++;
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        if (joined != 0)
+        {
+            Interlocked.Add(ref _packJoined, joined);
         }
     }
 
@@ -1364,6 +1555,7 @@ public sealed partial class SimBridge
     private long _crowdFoughtBack;
     private long _crowdFled;
     private long _crowdJoined;
+    private long _packJoined;
     private long _crowdShouts;
 
     /// <summary>Bodies of the crowd that answered a player's attack by fighting back — the one hit, or one near it.</summary>
@@ -1374,6 +1566,9 @@ public sealed partial class SimBridge
 
     /// <summary>Bodies of the crowd that joined in an attack on somebody near them.</summary>
     public long CrowdJoined => Interlocked.Read(ref _crowdJoined);
+
+    /// <summary>Creatures that joined a fight a player started on one of them (<see cref="CallPack"/>).</summary>
+    public long PackJoined => Interlocked.Read(ref _packJoined);
 
     /// <summary>What the crowd said when it was attacked or joined in.</summary>
     public long CrowdShouts => Interlocked.Read(ref _crowdShouts);
@@ -1444,6 +1639,17 @@ public sealed partial class SimBridge
         if (rw.IsEmpty)
         {
             rw = cluster.GetSpan(Creature.Ai);
+        }
+
+        return rw;
+    }
+
+    /// <summary>The cluster's mutable player gear (its wear counters), handed out on the first write of this cluster's walk and not before.</summary>
+    private static Span<PlayerGear> PlayerGearRw(in ClusterRef<Player> cluster, ref Span<PlayerGear> rw)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Player.Gear);
         }
 
         return rw;

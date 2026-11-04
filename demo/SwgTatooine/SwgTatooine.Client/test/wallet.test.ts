@@ -5,7 +5,6 @@ import {
   parseBalance,
   readBalanceOf,
   MAX_TIP,
-  parseChatCommand,
   parseWallet,
   playerMenuItems,
   tipRefusal,
@@ -13,6 +12,7 @@ import {
   WalletReader,
   type WalletSnapshot,
 } from '../src/data/wallet';
+import { parseChatCommand } from '../src/data/chat-commands';
 import { runChatCommand } from '../src/state/chat-commands';
 import { useChat } from '../src/state/chat-store';
 import { useUi } from '../src/state/ui-store';
@@ -257,12 +257,17 @@ describe('the panel keys', () => {
       ...extra,
     }) as KeyboardEvent;
 
-  it('J is the journal and I the inventory, either case', () => {
+  it('J is the journal and I the inventory, either case; K the craft panel, O the options', () => {
     expect(panelKey(key('j'))).toBe('journal');
     expect(panelKey(key('J'))).toBe('journal');
     expect(panelKey(key('i'))).toBe('inventory');
     expect(panelKey(key('I'))).toBe('inventory');
-    expect(panelKey(key('k'))).toBeNull();
+    expect(panelKey(key('k'))).toBe('craft');
+    expect(panelKey(key('o'))).toBe('options');
+    // C is the character window's (client.md C39), L its Structures tab.
+    expect(panelKey(key('c'))).toBe('character');
+    expect(panelKey(key('l'))).toBe('installations');
+    expect(panelKey(key('x'))).toBeNull();
   });
 
   it('are not panel keys with a modifier, held down, or typed into a field', () => {

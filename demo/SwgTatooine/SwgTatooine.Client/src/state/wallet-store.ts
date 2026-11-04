@@ -64,4 +64,9 @@ export function announceNotices(batch: readonly PlayerNotice[]): void {
   for (const line of noticeLines(batch, (amount, ref) => market.saleItem(amount, ref))) {
     chat.notice(line);
   }
+
+  // A vendor buy landed (Loïc, 2026-11-02): its row's Buy is back at once, not after the in-flight guard's 5 s.
+  if (batch.some((n) => n.items && n.incoming && n.kind === 'standard')) {
+    market.settle('issue');
+  }
 }

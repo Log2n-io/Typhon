@@ -303,6 +303,7 @@ public sealed partial class TatooineSim : IDisposable
 
         // The static neighbourhood's disc: where a body last asked what was near it, and how far it may walk from there.
         Dbe.RegisterComponentFromAccessor<PlayerProximity>();
+        Dbe.RegisterComponentFromAccessor<PlayerGear>();
         Dbe.RegisterComponentFromAccessor<ShipPlacement>();
         Dbe.RegisterComponentFromAccessor<ShipMotion>();
         Dbe.RegisterComponentFromAccessor<ShipRealm>();
@@ -330,6 +331,17 @@ public sealed partial class TatooineSim : IDisposable
 
         // Items (inventory-loot.md): stacks, the item ledger and its head — Versioned and non-spatial like the wallets, written by ItemTransfer alone.
         Dbe.RegisterComponentFromAccessor<ItemStack>();
+        Dbe.RegisterComponentFromAccessor<ItemInstance>();
+
+        // Installations (crafting-build.md § 10): the truth, Versioned and non-spatial like an item; the marker, static and replicated like a structure.
+        Dbe.RegisterComponentFromAccessor<InstallationCore>();
+        Dbe.RegisterComponentFromAccessor<InstallationPlacement>();
+        Dbe.RegisterComponentFromAccessor<InstallationView>();
+        Dbe.RegisterComponentFromAccessor<InstallationRealm>();
+
+        // Waypoints (client.md C38): a character's own, Versioned and non-spatial like an installation.
+        Dbe.RegisterComponentFromAccessor<WaypointCore>();
+        Dbe.RegisterComponentFromAccessor<CraftState>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerEntry>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerHead>();
 

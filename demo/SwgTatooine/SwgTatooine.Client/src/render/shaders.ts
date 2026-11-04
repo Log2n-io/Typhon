@@ -208,6 +208,8 @@ attribute vec3 position;
 attribute vec4 dmgAnchor;
 /** x: the glyph's column in the atlas. y: its index in the number. z: the number's length. w: the rise, CSS pixels. */
 attribute vec4 dmgGlyph;
+/** How large the number is drawn: 1, or a critical's CRIT_SCALE. */
+attribute float dmgScale;
 uniform mat4 viewProjection;
 uniform vec2 uViewport;
 uniform float uGlyphPx;
@@ -225,8 +227,9 @@ void main(void) {
     return;
   }
 
-  float w = uGlyphPx * uAspect;
-  vec2 px = vec2((dmgGlyph.y - dmgGlyph.z * 0.5 + position.x) * w, position.y * uGlyphPx + dmgGlyph.w);
+  float h = uGlyphPx * dmgScale;
+  float w = h * uAspect;
+  vec2 px = vec2((dmgGlyph.y - dmgGlyph.z * 0.5 + position.x) * w, position.y * h + dmgGlyph.w);
   c.xy += px * 2.0 / uViewport * c.w;
   gl_Position = c;
   vUv = vec2((dmgGlyph.x + position.x) / uColumns, position.y);

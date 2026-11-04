@@ -60,6 +60,9 @@ internal struct CombatEvent
     /// </summary>
     /// <remarks>Carried, so the drain opens no extra entity: it has the target open already and reads its level there. In the padding: still 24 bytes.</remarks>
     public byte AttackerLevel;
+
+    /// <summary>What the blow is made of (<see cref="Server.DamageType"/>): the armour of a player it lands on mitigates by it (crafting-catalog.md § 5.3).</summary>
+    public byte DamageType;
 }
 
 /// <summary>What a <see cref="CombatEvent"/> is.</summary>
@@ -163,6 +166,11 @@ internal struct ProgressRefresh
 
     /// <summary>Its character's progress, as the desk committed it.</summary>
     public CharacterProgress Progress;
+
+    /// <summary>
+    /// 1 when an operator set it (SimBridge.Admin.cs): the body takes its level exactly, down as well as up; 0 for a grant, which only raises.
+    /// </summary>
+    public byte Exact;
 }
 
 /// <summary>What a <see cref="KillEvent"/> killed.</summary>

@@ -69,6 +69,9 @@ public sealed class WorldIndex
     /// </summary>
     public List<MissionTerminalRef> Bazaars { get; } = [];
 
+    /// <summary>Every crafting station on the planet, as <see cref="Bazaars"/>: where the workshop crafts (crafting-build.md C2).</summary>
+    public List<MissionTerminalRef> Stations { get; } = [];
+
     /// <summary>
     /// Sine and cosine of a placement quarter turn, in the sense the RENDERER turns the building.
     /// </summary>

@@ -112,7 +112,7 @@ public sealed partial class SimBridge
             var m = ProgressQueue.Drain(bodies);
             for (var i = 0; i < m; i++)
             {
-                RefreshBody(ctx.Transaction, bodies[i].Body, in bodies[i].Progress);
+                RefreshBody(ctx.Transaction, bodies[i].Body, in bodies[i].Progress, bodies[i].Exact != 0);
             }
         }
 
@@ -356,7 +356,8 @@ public sealed partial class SimBridge
     /// A body brought up to its character's progress, through the tick's transaction: its level and XP byte, and when the level rose its max health — healing
     /// the increase if it is up, never lowering anything. A body gone (logged out) is skipped: its next spawn reads the character.
     /// </summary>
-    internal static void RefreshBody(Transaction tick0, EntityId body, in CharacterProgress p)
+    /// <param name="exact">An operator's level (SimBridge.Admin.cs): a lower one is taken too, its max health with it and the health capped to it.</param>
+    internal static void RefreshBody(Transaction tick0, EntityId body, in CharacterProgress p, bool exact = false)
     {
         if (body.IsNull || !tick0.TryOpenMut(body, out var player))
         {
@@ -385,6 +386,14 @@ public sealed partial class SimBridge
                 player.Set(Player.Vitals, v);
             }
 
+            look.Level = p.Level;
+        }
+        else if (exact && p.Level < look.Level)
+        {
+            var v = player.Read(Player.Vitals);
+            v.MaxHealth = Progression.HealthFor(p.Level);
+            v.Health = Math.Min(v.Health, v.MaxHealth);
+            player.Set(Player.Vitals, v);
             look.Level = p.Level;
         }
 

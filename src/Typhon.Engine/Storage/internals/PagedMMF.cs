@@ -4240,6 +4240,74 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>Cumulative checkpoint page-skip counts by cause (#817). Diagnostic only.</summary>
     internal long CheckpointSkipAcw;
+
+    /// <summary>Old tails a checkpoint left owed because the directory of their grow was not durable yet (CK-18). Diagnostic.</summary>
+    internal long CheckpointSkipAwaitingDirectory;
+
+    // CK-18: a grow's old tail, by file page, with the directory pages the grow wrote and the generation each had once it wrote them. Empty but for the
+    // moments after a segment grows, so a checkpoint's test is one read.
+    private readonly ConcurrentDictionary<int, DirectoryDependency[]> _directoryHolds = new();
+    private int _directoryHoldCount;
+
+    private readonly record struct DirectoryDependency(int FilePage, int MemPage, long Generation);
+
+    /// <summary>
+    /// Holds a grow's old tail back from every checkpoint write until each of <paramref name="directoryMemPageIndices"/> is durable at the generation it
+    /// has now, the grow's (CK-18). The caller holds the tail's and the directory pages' latches, so no copy of the tail with its new link is in flight.
+    /// </summary>
+    internal void HoldForDirectory(int filePageIndex, ReadOnlySpan<int> directoryMemPageIndices)
+    {
+        var dependencies = new DirectoryDependency[directoryMemPageIndices.Length];
+        for (var i = 0; i < dependencies.Length; i++)
+        {
+            var directory = Slot(directoryMemPageIndices[i]);
+            dependencies[i] = new DirectoryDependency(directory.FilePageIndex, directoryMemPageIndices[i], Volatile.Read(ref directory.WritebackGen));
+        }
+
+        if (_directoryHolds.TryAdd(filePageIndex, dependencies))
+        {
+            Interlocked.Increment(ref _directoryHoldCount);
+        }
+        else
+        {
+            _directoryHolds[filePageIndex] = dependencies;
+        }
+    }
+
+    /// <summary>Old tails held back for their grow's directory now (CK-18). Test seam.</summary>
+    internal int DirectoryHoldCount => Volatile.Read(ref _directoryHoldCount);
+
+    /// <summary>Whether a checkpoint would leave <paramref name="filePageIndex"/> owed for its grow's directory (CK-18). Test seam.</summary>
+    internal bool IsHeldForDirectoryForTests(int filePageIndex) => HeldForDirectory(filePageIndex);
+
+    /// <summary>
+    /// Whether a checkpoint must leave <paramref name="filePageIndex"/> owed for now: a grow's old tail whose directory pages are not all durable as the
+    /// grow left them (CK-18). The hold ends once each one's captured generation reaches the grow's — or the page left its slot, which only a page without
+    /// writeback debt does, its debt discharged by a durable write.
+    /// </summary>
+    private bool HeldForDirectory(int filePageIndex)
+    {
+        if (Volatile.Read(ref _directoryHoldCount) == 0 || !_directoryHolds.TryGetValue(filePageIndex, out var dependencies))
+        {
+            return false;
+        }
+
+        foreach (var dependency in dependencies)
+        {
+            var directory = Slot(dependency.MemPage);
+            if (directory.ReadFilePageIndexVolatile() == dependency.FilePage && Volatile.Read(ref directory.CapturedGen) < dependency.Generation)
+            {
+                return true;
+            }
+        }
+
+        if (_directoryHolds.TryRemove(new KeyValuePair<int, DirectoryDependency[]>(filePageIndex, dependencies)))
+        {
+            Interlocked.Decrement(ref _directoryHoldCount);
+        }
+
+        return false;
+    }
     internal long CheckpointSkipWriterHeld;
     internal long CheckpointSkipStaleCounter;
 
@@ -4430,6 +4498,15 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                         skipped[skippedCount++] = memPageIndex;
                         continue;
                     }
+                }
+
+                // A grow's old tail whose directory is not durable yet (CK-18): written now, its link would put the chain ahead of the directory on the
+                // file. It stays owed; the pass that follows the directory's settle writes it.
+                if (filter != CheckpointWriteFilter.ProtectedOnly && HeldForDirectory(pi.FilePageIndex))
+                {
+                    Interlocked.Increment(ref CheckpointSkipAwaitingDirectory);
+                    skipped[skippedCount++] = memPageIndex;
+                    continue;
                 }
 
                 // Wait for any pending I/O read to complete

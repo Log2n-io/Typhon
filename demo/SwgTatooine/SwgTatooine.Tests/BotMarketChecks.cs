@@ -477,19 +477,22 @@ internal sealed class BotMarketDeskChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         Worlds.Park(sim, link.Session, at.X, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return new Trader(link, character);
     }
 
-    /// <summary>Two cores, then materials (Mk I-IV, five units each) until the inventory's 30 slots are full: a bot back from a day's hunting.</summary>
+    /// <summary>Two cores, then materials (Mk I-IV, five units each, ore first) until the inventory's 40 slots are full: a bot back from a day's hunting.</summary>
     private static void Fill(TatooineSim sim, Trader t)
     {
         sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
         sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
         var n = 2;
-        for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < ItemLedger.Slots; template++)
+        for (ushort template = 1; template <= ItemCatalog.Venom && n < ItemLedger.Slots; template++)
         {
             for (byte mk = 1; mk <= 4 && n < ItemLedger.Slots; mk++, n++)
             {
@@ -632,8 +635,15 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     /// <remarks>
     /// Live, before this tuning (2026-10-27): ~4 800 units lost a minute with the market against ~5 400 without — 11 % fewer — two thirds of the bots
     /// questing at any time, at a trigger of 24 stacks and a floor of 18.
+    /// <para>
+    /// <b>Nightly, not the gate</b> (2026-11-02): a tuning measure, not a correctness check, and 93 s of the suite's 11 min — 8 quests of 3 bots' plans sent
+    /// at the commands' rate, which the engine counts in wall-clock seconds, so no tick rate shortens it. The desk's correctness under the bots' plans is
+    /// the gate's <see cref="BotsWithFullInventories_ListVendorAndBuy_AgainstTheRealDesk_AndTheAuditsStayOk"/>.
+    /// </para>
     /// </remarks>
     [Test]
+    [Explicit("A tuning measure (BZ-16), 93 s at the commands' wall-clock rate; the gate runs the desk's correctness check")]
+    [Category("Nightly")]
     [CancelAfter(300_000)]
     public void TheMarket_CutsTheDropsLostToAFullInventory()
     {
@@ -665,6 +675,18 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     private const int Quests = 8;
     private const int KillsPerQuest = 16;
 
+    // Slots each bot holds parts in, which no plan sells and no drop adds to: the grid grew to 40 (crafting-build.md O-9), and this keeps the 30 this
+    // measure was tuned on — and BotBrain.MarketStacks' ten slots left.
+    private const int PartSlots = ItemLedger.Slots - 30;
+
+    // The parts and kits that stay stacks, worth nothing to the vendor: the extractor's modules (36, 38, 39) became instances with a grade in C5a, and a
+    // stack grant of one lands nowhere — the bots never held their ten. Nine such templates, none with a Mk: the first is granted one unit past a full
+    // stack, which takes two slots.
+    private static readonly (ushort Template, int Count)[] Parts =
+    [
+        (37, ItemLedger.StackMax + 1), (40, 1), (41, 1), (42, 1), (43, 1), (ItemCatalog.KitWeaponRepair, 1), (ItemCatalog.KitArmorRepair, 1), (64, 1), (65, 1),
+    ];
+
     private long LostOverQuests(bool market, string dir, out (bool Ok, string Why) audits)
     {
         var config = Worlds.Served(dir);
@@ -679,7 +701,14 @@ internal sealed class BotMarketDeskChecks : ServedChecks
             var at = (home.X + 2.5f, home.Z + (i * 0.6f));
             var t = LogIn(sim, 0x9200UL + (ulong)i, at, i + 1);
             bots.Add((t, TatooineReplication.ControlledBy(sim.Dbe, t.Link.Session), at));
+            foreach (var (template, count) in Parts)
+            {
+                // Stacks no plan sells (no value) and nothing drops.
+                sim.Bridge.StageTransfer(ItemLedger.World, t.Key, template, 0, count, ItemMoveKind.Kill, 1);
+            }
         }
+
+        SessionHarness.Until(() => bots.All(b => Items.Stacks(sim, b.T.Character).Count == PartSlots), "the parts");
 
         var victim = 0xB0000UL;
         var rng = 11u;

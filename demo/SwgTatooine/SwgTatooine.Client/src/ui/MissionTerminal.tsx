@@ -10,6 +10,7 @@ import {
 } from '../data/missions';
 import { useMissions } from '../state/mission-store';
 import { useStats } from '../state/stats-store';
+import { WindowFrame } from './WindowFrame';
 
 /**
  * A mission terminal's list (missions.md § 5): opened from the terminal's context menu, closed by walking away from it.
@@ -60,16 +61,22 @@ export function MissionTerminal() {
   );
 
   return (
-    <div className="panel missions" role="dialog" aria-label="Mission terminal">
-      <div className="missions-head">
-        <span className="hud-title">Mission terminal</span>
-        <span className="missions-held">
-          {held}/{MAX_MISSIONS} held
-        </span>
-        <button type="button" className="missions-close" onClick={close} aria-label="Close">
-          ✕
-        </button>
-      </div>
+    <WindowFrame
+      id="missions"
+      title="Mission terminal"
+      extra={
+        <>
+          <span className="missions-held">
+            {held}/{MAX_MISSIONS} held
+          </span>
+        </>
+      }
+      onClose={close}
+      ariaLabel="Mission terminal"
+      className="missions"
+      minW={360}
+      initial={(vw) => ({ x: Math.round((vw - 622) / 2), y: 70, w: 622, h: 0 })}
+    >
       {notice !== null ? <div className="missions-notice">{notice}</div> : null}
       {full ? (
         <div className="hint">You hold {MAX_MISSIONS} missions — cancel one in the journal to take another.</div>
@@ -123,6 +130,6 @@ export function MissionTerminal() {
           </span>
         </div>
       ) : null}
-    </div>
+    </WindowFrame>
   );
 }

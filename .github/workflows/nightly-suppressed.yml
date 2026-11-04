@@ -73,7 +73,9 @@ jobs:
           fi
 
       - name: Build (Release)
-        run: dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+        run: |
+          dotnet build test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj -c Release
+          dotnet build demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release
 
       # `Category=Nightly` is a ONE-term filter, and that is load-bearing: NUnit runs an [Explicit] test when it
       # reads the filter as naming it. The gate's 305-term class filter does not qualify, which is precisely why
@@ -85,6 +87,9 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p ci-out
+          # Both tiers run whatever the first one does: the step's shell is `bash -e`, so a red engine tier used to end it before the demo's ran
+          # (PR #1590's run). `rc` keeps the step red if either is.
+          rc=0
           # --blame-hang is load-bearing, not belt-and-braces. NUnit's DefaultTimeout cannot stop a CPU-bound
           # spin (.NET has no Thread.Abort) — measured against the #695 livelock on 2026-08-07, the run had to be
           # killed from outside. Without this, one hung stress test eats the 60-minute job timeout and the log
@@ -97,7 +102,17 @@ jobs:
             --blame-hang --blame-hang-timeout 300s \
             --logger "trx;LogFileName=nightly.trx" \
             --results-directory ci-out \
-            2>&1 | tee ci-out/nightly.log
+            2>&1 | tee ci-out/nightly.log || rc=1
+          # The SWG demo's own Nightly tier (its tuning measures): the same one-term filter, its own trx. The guard and the verdict below read every
+          # trx in ci-out.
+          dotnet test demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            -c Release --no-build \
+            --filter "Category=Nightly&Category!=Quarantine" \
+            --blame-hang --blame-hang-timeout 300s \
+            --logger "trx;LogFileName=nightly-swg.trx" \
+            --results-directory ci-out \
+            2>&1 | tee ci-out/nightly-swg.log || rc=1
+          exit $rc
 
       # ── The load-bearing guard ────────────────────────────────────────────────────────────────────────────
       # A tier that selects ZERO tests and reports green is the exact defect this whole issue is about, one level

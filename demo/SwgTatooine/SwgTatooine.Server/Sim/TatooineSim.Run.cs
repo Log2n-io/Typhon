@@ -761,6 +761,7 @@ public sealed partial class TatooineSim
         dag.Add(new LedgerSystem(_bridge));
         dag.Add(new LootSystem(_bridge));
         dag.Add(new MarketSystem(_bridge));
+        dag.Add(new WorkshopSystem(_bridge));
         dag.Add(new NoticesSystem(_bridge));
         dag.Add(new ProgressionSystem(_bridge));
 
@@ -768,6 +769,7 @@ public sealed partial class TatooineSim
         // after the whole Economy phase: the lair director reads PlayerLook there, before the desk, so a writer of it in that phase would have to run first.
         dag.Consumes("Progression", _bridge.KillXpQueue)
             .Produces("Missions", _bridge.ProgressQueue)
+            .Produces("Workshop", _bridge.ProgressQueue)
             .Consumes("Progression", _bridge.ProgressQueue);
         // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
         // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
@@ -780,6 +782,7 @@ public sealed partial class TatooineSim
         if (replicating)
         {
             dag.Add(new PlayerSessionSystem());
+            dag.Add(new PlayerIntentSystem());
             dag.Add(new StagedWriteSystem(Staged));
             _drainsStagedWrites = true;
             dag.Add(new ReplicationReportSystem());

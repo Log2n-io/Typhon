@@ -984,6 +984,13 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
                     _store.MarkPageModified(oldTailMemIdx);
                 }
                 _store.UnlatchPageExclusive(oldTailMemIdx);
+
+                // CK-18: the old tail reaches the file only once the directory pages this grow wrote have. The new pages may go first — owed and
+                // unlatched from their initialization, a cycle can write them before the directory exists — and alone they are pages no directory
+                // names. With the tail's link too they put the chain ahead of the directory onto pages written as this segment's, which the crash open
+                // must take for an old lost directory append and refuse: a component segment failed the open, a cluster was replaced and its entities
+                // lost (#1562). Taken still latched, so no copy with the link is in flight and the generations are the directory pass's.
+                _store.HoldForDirectory(oldTailFilePage, pinned[..(mapPageCount - firstWrittenMap)]);
             }
             else
             {

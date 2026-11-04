@@ -5,7 +5,7 @@ The contract between the asset pipeline (`scripts/th_export.py`, `scripts/th_cha
 and everything that reads `build/assets/`: SwgTatooine.Server (`AssetOrigin`, `AssetColliders`), SwgTatooine.Client and
 the asset testbench.
 
-**Format revision 12** (2026-10-26). Every change to what is published gets a revision and an entry in the
+**Format revision 13** (2026-11-03). Every change to what is published gets a revision and an entry in the
 [changelog](#changelog) **before** it is published. A consumer that knows revision N reads the entries after N and
 nothing else.
 
@@ -295,8 +295,9 @@ footprint, `y` 0 = the ground it rests on, lying or standing as when dropped; fr
 ```
 
 - `category`: `material`, `core`, `addon`, `part`, `armor`, `potion`, `kit`, `container` (enum, rule 3).
-- `mk` (materials, cores and add-ons, which drop at Mk I to V): `levels` has 5 entries, Mk I first. The GLB material
-  named `<asset_id>:<material>` (a band, a tag, the seams, the crystals or the glow) is published at `levels[0]`. To
+- `mk` (materials, cores, add-ons and armour pieces, which come at Mk I to V): `levels` has 5 entries, Mk I first.
+  The GLB material named `<asset_id>:<material>` (a band, a tag, the seams, the crystals, the glow, an armour trim) is
+  published at `levels[0]`. To
   show Mk n, set that material's base colour factor to `levels[n-1].base_color`, its emissive factor to `emissive`
   and its `KHR_materials_emissive_strength` to `emissive_strength`. Colours are linear. The levels are the same on
   every item today: plain metal, then green, blue, violet and gold, glowing more at each step.
@@ -337,6 +338,12 @@ footprint, `y` 0 = the ground it rests on, lying or standing as when dropped; fr
 
 Newest first. *Additive*: readers may ignore it. *Semantic*: a value's meaning or a rule changed, same fields.
 *Breaking*: `schema` changes. Each entry names the first catalogue carrying it and what a reader has to do.
+
+### Revision 13: 2026-11-03, catalogue `16`, icons in `15` and `17` (additive)
+- `item.mk` (5.11) on the 12 armour pieces (`armor_padded_*`, `armor_composite_*`, rev 2, icons rev 2): a trim (seams,
+  bands, straps, crest, collar, cuffs, belt, knuckles, ridges) uses the Mk material. Nothing else changed in them.
+- Not a format change, also new: an icon for `resource_extractor` (the extractor kit in the inventory), catalogue 15.
+- Reader: to show an armour piece's Mk, recolour `item.mk.material` as for the other items. Otherwise nothing.
 
 ### Revision 12: 2026-10-26, catalogue `14` (additive)
 - `interactions[].reach_m` (5.5): usable from any side within that distance of the asset origin, in plan. On

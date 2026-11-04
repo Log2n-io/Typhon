@@ -129,7 +129,10 @@ internal sealed class CheckpointProtectedPageOrderingTests : TestBase<Checkpoint
             "a plain wave did not leave every protected page for the next pass");
         for (var i = written; i < dirty.Length; i++)
         {
-            Assert.That(mmf.IsProtectedFilePageForTests(mmf.GetFilePageIndex(dirty[i])), Is.True, "a plain page was left unwritten by the plain wave");
+            // A grow's old tail stays owed until its directory is durable (CK-18): the spawns grew the segments, and no cycle has written a directory.
+            var filePage = mmf.GetFilePageIndex(dirty[i]);
+            Assert.That(mmf.IsProtectedFilePageForTests(filePage) || mmf.IsHeldForDirectoryForTests(filePage), Is.True,
+                "a plain page was left unwritten by the plain wave");
         }
     }
 

@@ -40,13 +40,14 @@ internal static class Market
         return n;
     }
 
-    public static void List(FakeLink link, ushort template, byte mk, int quantity, uint unitPrice)
+    public static void List(FakeLink link, ushort template, byte mk, int quantity, uint unitPrice, ulong item = 0)
         => link.SendCommand(nameof(MarketList), new RecordValues
         {
             ["template"] = FieldValue.Of(template),
             ["mk"] = FieldValue.Of(mk),
             ["quantity"] = FieldValue.Of(quantity),
             ["unitPrice"] = FieldValue.Of(unitPrice),
+            ["item"] = FieldValue.OfUInt64(item),
         });
 
     public static void Cancel(FakeLink link, long listing)
@@ -62,12 +63,13 @@ internal static class Market
     public static void Collect(FakeLink link, long listing)
         => link.SendCommand(nameof(MarketCollect), new RecordValues { ["listing"] = FieldValue.OfUInt64(unchecked((ulong)listing)) });
 
-    public static void Vendor(FakeLink link, ushort template, byte mk, int quantity)
+    public static void Vendor(FakeLink link, ushort template, byte mk, int quantity, ulong item = 0)
         => link.SendCommand(nameof(SellToVendor), new RecordValues
         {
             ["template"] = FieldValue.Of(template),
             ["mk"] = FieldValue.Of(mk),
             ["quantity"] = FieldValue.Of(quantity),
+            ["item"] = FieldValue.OfUInt64(item),
         });
 
     /// <summary>The three audits, clean or not, with their violations for the failure message.</summary>

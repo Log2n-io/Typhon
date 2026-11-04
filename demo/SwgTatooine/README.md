@@ -3,6 +3,8 @@
 A real-time 3D planet, Star Wars Galaxies' Tatooine, simulated by Typhon and played in a browser. It is the engine's
 proving ground: a game server's workload run against the real engine.
 
+*Why this planet, and why this game? See [Why SWG Tatooine](#why-swg-tatooine).*
+
 - **The world**: terrain, seven towns of real buildings with interiors, NPCs, creatures, lairs, shuttles between
   cities; about 17 700 entities on a full planet, ticked by a Typhon system DAG and stored in a Typhon database.
 - **The server** streams that world to every connected browser over a WebSocket: each session receives what is around
@@ -82,3 +84,27 @@ project in Release first. The checks build their own worlds and need neither the
 
 `scripts/publish-swg.ps1` builds one self-contained payload: the server, the built client and the asset set, with the
 `run.sh` a systemd unit starts. `.github/workflows/tatooine-deploy.yml` builds it and puts it on an AWS stack.
+
+<a id="why-swg-tatooine"></a>
+
+## Why SWG Tatooine
+
+This demo is named after *Star Wars Galaxies*, the MMORPG Sony Online Entertainment built and LucasArts published. It
+launched in June 2003, and its servers went dark on December 15, 2011 (fan-run servers such as
+[SWG Restoration](https://swgr.org/home/) still keep it alive).
+
+I was a huge fan. I played it for almost two years, and to me it is still the best MMORPG of all time. It was more than
+a game: a living galaxy where players crafted, traded, built and simply *lived*. There was the war against the Rebels,
+the player duels, and countless other things to do. Some worlds stay with you long after they're gone. This small demo
+is my tribute to that one.
+
+It is also where Typhon comes from. My vision for it is simple: thousands of players, at the same time, in the same
+world. No shards, no invisible walls, no "server full". I built Typhon mainly with that in mind, because I want another
+MMO to be released someday that scales the way I wished SWG could have. What its team achieved in 2003, with the
+hardware and technology of the time, was already huge. In 2026 we can do a lot more, and this small demo is my way of
+proving it, one tick at a time.
+
+> *Star Wars*, *Star Wars Galaxies* and all related names, characters, places and marks are the property of Lucasfilm
+> Ltd. and their respective owners. *Star Wars Galaxies* was developed by Sony Online Entertainment (now Daybreak Game
+> Company) and published by LucasArts. I own none of it. This is a non-commercial fan tribute, not affiliated with,
+> endorsed or sponsored by Lucasfilm, Disney, LucasArts, Daybreak or Sony.

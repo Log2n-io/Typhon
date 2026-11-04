@@ -269,7 +269,19 @@ public static class WorldBuilder
     public const float GateFacilityZ = GateOutsideZ + 2.3f;
 
     /// <summary>
-    /// The bazaar and the mission terminal at a shuttleport's gate, and the corridor between them kept clear of buildings.
+    /// The crafting station beside the gate's bazaar (Loïc, 2026-11-02), west of it on the same line, 8 m centre to centre: a few steps from the bazaar's
+    /// stand point, and clear of its west approach.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not nearer, measured.</b> At 4.5 m — the bazaar's stand point inside the station's 6 m reach, crafting without a step — the station stood on the
+    /// way a body comes round the town hall's approach to the bazaar: a possessed body's <c>MoveTo</c> is steered straight, without the crowd's route, and
+    /// it slid along the station's north side and round the bazaar until the bot gave up (BotMarketLiveChecks' one-bot case, 2026-11-02).
+    /// </remarks>
+    public const float GateStationX = GateFacilityX + 8f;
+
+    /// <summary>
+    /// The bazaar and the mission terminal at a shuttleport's gate, a crafting station beside the bazaar, and the corridor between them kept clear of
+    /// buildings.
     /// </summary>
     /// <remarks>
     /// Both face north (yaw 0), so the point a user stands at is on the far side from the gate and the passengers walking out between them. Beyond them
@@ -288,11 +300,15 @@ public static class WorldBuilder
         plan.PlaceAt(mx, z, StructureFootprint.HalfExtentM(StructureKind.MissionTerminal));
         SpawnStructure(tx, mx, z, terrain.GroundAt(mx, z), StructureFootprint.HalfExtentM(StructureKind.MissionTerminal), StructureKind.MissionTerminal,
             ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
+        var sx = portX - GateStationX;
+        plan.PlaceAt(sx, z, StructureFootprint.HalfExtentM(StructureKind.CraftingStation));
+        SpawnStructure(tx, sx, z, terrain.GroundAt(sx, z), StructureFootprint.HalfExtentM(StructureKind.CraftingStation), StructureKind.CraftingStation,
+            ownerRegion: cityIndex + 1, tickPeriod: 0, ref none, faceNorth: true);
         // The corridor passengers land in (SimBridge.Shuttles: GateOutsideZ + 2, ±2.4 m), reserved: the margins of the pair and the dome leave a crafting
         // station's width of room in it, and one was free to be planted exactly where a session's passenger is set down (review). Reserved rather than
         // placed, because it stands inside those margins by design.
         plan.Reserve(portX, portZ + GateOutsideZ + 2f, 2.5f);
-        census.StaticObjects += 2;
+        census.StaticObjects += 3;
     }
 
     /// <summary>What a city's structure <paramref name="i"/> is: the shuttleport first, its town hall second, then a crafting station every ninth.</summary>
@@ -465,8 +481,10 @@ public static class WorldBuilder
     /// <summary>A city's building <paramref name="i"/> has an interior: every one but the shuttleport (0) and the mission terminals (multiples of 9).</summary>
     public static bool IsEnterable(int i) => i != 0 && i % 9 != 0;
 
-    /// <summary>Enterable buildings on one planet — the same on every planet, which share the map. Counted from the map, so realms are registered before
-    /// the world is built.</summary>
+    /// <summary>
+    /// Enterable buildings on one planet — the same on every planet, which share the map. Counted from the map, so realms are registered before the world
+    /// is built.
+    /// </summary>
     public static int CountEnterable(TatooineMap map)
     {
         var n = 0;
@@ -1589,6 +1607,12 @@ public static class WorldBuilder
         if (kind == StructureKind.Bazaar)
         {
             _index?.Bazaars.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
+        }
+
+        // The workshop's stations (crafting-build.md C2), the same way.
+        if (kind == StructureKind.CraftingStation)
+        {
+            _index?.Stations.Add(new MissionTerminalRef(id, x, z, ownerRegion, _realm));
         }
     }
 

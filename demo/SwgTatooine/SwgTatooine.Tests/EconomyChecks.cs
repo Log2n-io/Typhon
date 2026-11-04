@@ -25,6 +25,7 @@ internal sealed class EconomyChecks : ServedChecks
     private TatooineSim Start(bool persist = false)
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.Persist = persist;
         var sim = new TatooineSim(config);
@@ -46,7 +47,10 @@ internal sealed class EconomyChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, x, z, out var parked);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         return (link, body, character, parked);
     }
 
@@ -222,7 +226,7 @@ internal sealed class EconomyChecks : ServedChecks
             SessionHarness.Until(() => Ledgers.Refusals(p.A).Length > before, $"the tip of {what} to be refused");
 
             // The command's rate is two a second, burst four: spaced, so the engine's limiter never answers for the economy.
-            Harness.Ticks(Worlds.ServedHz / 2 + 1);
+            Harness.Ticks(Worlds.FastCommandGapTicks);
             Assert.That(Ledgers.Refusals(p.A)[before..], Is.EqualTo(new[] { reason }), what);
         }
 

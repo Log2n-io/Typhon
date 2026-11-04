@@ -168,13 +168,17 @@ internal sealed class LootTableChecks
         }
     }
 
-    /// <summary>Every template's asset is an <c>item</c> of its category in the built catalogue, with 32 and 48 px icons; the ids are pinned.</summary>
+    /// <summary>
+    /// Every template's asset is in the built catalogue with 32 and 48 px icons: an <c>item</c> of its category, or a <c>weapon</c> (the model held in hand,
+    /// crafting-build.md C1). The ids are pinned. A Mk tint is checked wherever the item has a Mk, armour included (catalogue 16).
+    /// </summary>
     [Test]
     public void TheTemplates_AreTheCataloguesItems()
     {
         Assert.Multiple(() =>
         {
-            Assert.That(ItemCatalog.Templates.Length, Is.EqualTo(66));
+            Assert.That(ItemCatalog.Templates.Length, Is.EqualTo(70));
+            Assert.That(ItemCatalog.IdOf("resource_extractor"), Is.EqualTo(ItemCatalog.Extractor));
             Assert.That(ItemCatalog.IdOf("mat_ore"), Is.EqualTo(1));
             Assert.That(ItemCatalog.IdOf("mat_hide"), Is.EqualTo(8));
             Assert.That(ItemCatalog.IdOf("core_ranged"), Is.EqualTo(12));
@@ -185,6 +189,9 @@ internal sealed class LootTableChecks
             Assert.That(ItemCatalog.IdOf("potion_stim"), Is.EqualTo(56));
             Assert.That(ItemCatalog.IdOf("kit_weapon_repair"), Is.EqualTo(62));
             Assert.That(ItemCatalog.IdOf("crate"), Is.EqualTo(66));
+            Assert.That(ItemCatalog.IdOf("vibroknuckler"), Is.EqualTo(ItemCatalog.Knuckler));
+            Assert.That(ItemCatalog.IdOf("sword_vibroblade"), Is.EqualTo(ItemCatalog.Sword));
+            Assert.That(ItemCatalog.IdOf("blaster_dl44"), Is.EqualTo(ItemCatalog.Blaster));
             Assert.That(ItemCatalog.IdOf("nothing"), Is.Zero);
         });
 
@@ -208,10 +215,23 @@ internal sealed class LootTableChecks
             Assert.That(assets.TryGetProperty(t.Asset, out var asset), Is.True, $"{t.Asset} is not in the catalogue");
             using var descriptor = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, asset.GetProperty("descriptor").GetString())));
             var d = descriptor.RootElement;
-            Assert.That(d.GetProperty("kind").GetString(), Is.EqualTo("item"), t.Asset);
-            var item = d.GetProperty("item");
-            Assert.That(item.GetProperty("category").GetString(), Is.EqualTo(ItemCategory.NameOf(t.Category)), t.Asset);
-            Assert.That(item.TryGetProperty("mk", out _), Is.EqualTo(t.HasMk), $"{t.Asset}: its Mk rule");
+            if (t.Category == ItemCategory.Weapon)
+            {
+                Assert.That(d.GetProperty("kind").GetString(), Is.EqualTo("weapon"), t.Asset);
+            }
+            else if (t.Category == ItemCategory.Structure)
+            {
+                // An installation kit is the building it places (crafting-build.md § 10), its icon rendered from that building.
+                Assert.That(d.GetProperty("kind").GetString(), Is.EqualTo("building"), t.Asset);
+            }
+            else
+            {
+                Assert.That(d.GetProperty("kind").GetString(), Is.EqualTo("item"), t.Asset);
+                var item = d.GetProperty("item");
+                Assert.That(item.GetProperty("category").GetString(), Is.EqualTo(ItemCategory.NameOf(t.Category)), t.Asset);
+                Assert.That(item.TryGetProperty("mk", out _), Is.EqualTo(t.HasMk), $"{t.Asset}: its Mk rule");
+            }
+
             Assert.That(icons.TryGetProperty(t.Asset, out var icon), Is.True, $"{t.Asset} has no icon");
             Assert.That(icon.GetProperty("png").TryGetProperty("32", out _) && icon.GetProperty("png").TryGetProperty("48", out _), Is.True, t.Asset);
         }

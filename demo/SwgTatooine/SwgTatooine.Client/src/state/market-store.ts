@@ -1,16 +1,19 @@
 import { create } from 'zustand';
+import { useChat } from './chat-store';
 import type { InventoryItem } from '../data/items';
 import {
   browseUrl,
   commandRow,
   DEFAULT_QUERY,
   itemWhat,
+  newReservationNotices,
   MARKET_ANSWER_MS,
   marketRefusal,
   MAX_LISTING_QTY,
   MAX_UNIT_PRICE,
   parseBrowse,
   parsePrices,
+  parseStandard,
   priceOf,
   type BazaarTab,
   type BrowsePage,
@@ -20,6 +23,7 @@ import {
   type MarketPrice,
   type MarketQuery,
   type Reservation,
+  type StandardOffer,
 } from '../data/market';
 import type { RevisionFetch } from '../data/revision-reader';
 
@@ -77,6 +81,8 @@ export interface MarketState {
   readonly browseError: string | null;
   readonly mine: MarketMine | null;
   readonly prices: readonly MarketPrice[];
+  /** What the vendor sells (crafting-catalog.md § 15.3), read when the standard-issue tab opens. */
+  readonly standard: readonly StandardOffer[];
   /** The character's stacks, as the inventory was last read: what can be sold. */
   readonly stacks: readonly InventoryItem[];
   readonly sell: SellForm;
@@ -97,6 +103,7 @@ export interface MarketState {
   /** Re-reads the page now. */
   readonly refreshBrowse: () => Promise<void>;
   readonly refreshPrices: () => Promise<void>;
+  readonly refreshStandard: () => Promise<void>;
   /** Called every frame: re-reads what is due while the panel is open. */
   readonly tick: (nowMs: number) => void;
   readonly setMine: (mine: MarketMine) => void;
@@ -113,6 +120,26 @@ export interface MarketState {
   readonly list: () => void;
   /** Sells the stack picked to the vendor, the form's quantity. */
   readonly vendor: () => void;
+  /** Buys standard issue from the vendor at the price shown (crafting-catalog.md § 15.3): one item, or a quantity of a material. */
+  readonly buyStandard: (template: number, price: number, quantity?: number) => void;
+  /** Wears an item with stats (crafting-build.md § 2.2); its refusal shows on the `'gear'` row. */
+  readonly equip: (itemId: string) => void;
+  /** Sends a command as the panels' buttons do: held while one of its row is in flight, its refusal shown on its row. False when not sent. */
+  readonly sendCommand: (command: MarketCommand) => boolean;
+  /**
+   * A row's command was seen to land — an accepted command is never acked, so the caller that saw its effect says so: its buttons are back at once
+   * rather than after {@link MARKET_ANSWER_MS}.
+   */
+  readonly settle: (row: string) => void;
+  /** Who hears that the workshop's row was refused: the crafting store, which forgets the step it waited for. */
+  readonly onCraftRefused: (handler: (() => void) | null) => void;
+  /** Who hears a waypoint command refused (client.md C38): the waypoints store, which says why in chat — the commands are typed there. */
+  readonly onWaypointRefused: (handler: ((text: string) => void) | null) => void;
+  /** Takes off what is worn in an equip slot, 101-107. */
+  readonly unequip: (slot: number) => void;
+  /** Packs an item or a crate into an identical one; takes items out of a crate (crafting-catalog.md § 11.2). Refusals show on the `'gear'` row. */
+  readonly pack: (item: string, into: string) => void;
+  readonly unpack: (item: string, count: number) => void;
   /** The server refused `command` with `reason`. */
   readonly refused: (reason: number, command: MarketCommand) => void;
   /**
@@ -154,11 +181,23 @@ export const useMarket = create<MarketState>((set, get) => {
     }
 
     set({ pending: [...get().pending, row], rowNotices: omit(get().rowNotices, row) });
+    // This send's own: a row settled early and sent again is not cleared by the first send's timer (review, 2026-11-03).
+    const seq = (sendSeqOf.get(row) ?? 0) + 1;
+    sendSeqOf.set(row, seq);
     setTimeout(() => {
-      clearPending(row);
+      if (sendSeqOf.get(row) === seq) {
+        clearPending(row);
+      }
     }, MARKET_ANSWER_MS);
     return true;
   };
+
+  /** Told when the workshop's row is refused — the crafting store's `forget`, set by it (the two stores import one way only). */
+  let refusedCraft: (() => void) | null = null;
+  let refusedWaypoint: ((text: string) => void) | null = null;
+
+  /** The last send of each row, by sequence. */
+  const sendSeqOf = new Map<string, number>();
 
   const clearPending = (row: string): void => {
     if (get().pending.includes(row)) {
@@ -195,6 +234,7 @@ export const useMarket = create<MarketState>((set, get) => {
     browseError: null,
     mine: null,
     prices: [],
+    standard: [],
     stacks: [],
     sell: EMPTY_SELL,
     pending: [],
@@ -233,6 +273,10 @@ export const useMarket = create<MarketState>((set, get) => {
     setHere: (here, hereRealm = -1) => {
       if (get().here !== here || get().hereRealm !== hereRealm) {
         set({ here, hereRealm });
+        // The bazaar is used at its terminal only (client.md C40): walked away from it, the panel closes, as the crafting panel does.
+        if (here === 0 && get().open) {
+          get().close();
+        }
       }
     },
     setQuery: (change) => {
@@ -261,6 +305,12 @@ export const useMarket = create<MarketState>((set, get) => {
       const gone = new Set(before.filter((l) => !listed.has(l.id)).map((l) => l.id));
       set({ page: answer, kept, browseError: null, pending: get().pending.filter((r) => !gone.has(r)) });
     },
+    refreshStandard: async () => {
+      const standard = parseStandard(await fetchJson('swg/market/standard'));
+      if (standard !== null) {
+        set({ standard });
+      }
+    },
     refreshPrices: async () => {
       pricesAtMs = lastNowMs;
       const prices = parsePrices(await fetchJson('swg/market/prices'));
@@ -286,6 +336,11 @@ export const useMarket = create<MarketState>((set, get) => {
     setMine: (mine) => {
       for (const l of mine.listed) {
         sold.set(l.id, { what: itemWhat(l.name, l.mk, l.qty), total: l.total });
+      }
+
+      // Goods newly waiting at a bazaar are said in chat: no toolbar button counts them (client.md C40).
+      for (const text of newReservationNotices(get().mine, mine)) {
+        useChat.getState().notice(text);
       }
 
       // Every change the server makes moves this read: whatever was in flight has landed, or been refused.
@@ -327,7 +382,9 @@ export const useMarket = create<MarketState>((set, get) => {
     setSellQuantity: (quantity) => {
       const stack = get().stacks.find((s) => s.id === get().sell.stack);
       const max = Math.min(MAX_LISTING_QTY, stack?.count ?? MAX_LISTING_QTY);
-      set({ sell: { ...get().sell, quantity: clampInt(quantity, 1, max) } });
+      // An item with stats, or a crate of them, goes whole.
+      const min = stack?.stats === undefined ? 1 : max;
+      set({ sell: { ...get().sell, quantity: clampInt(quantity, min, max) } });
     },
     setSellPrice: (unitPrice) => {
       set({ sell: { ...get().sell, unitPrice: clampInt(unitPrice, 1, MAX_UNIT_PRICE) } });
@@ -356,12 +413,14 @@ export const useMarket = create<MarketState>((set, get) => {
         return;
       }
 
+      // An item with stats is listed by its id, one at a time (crafting-build.md § 2.1) — a crate whole, its count the quantity.
       send({
         kind: 'list',
         template: stack.template,
         mk: stack.mk,
-        quantity: sell.quantity,
+        quantity: stack.stats === undefined ? sell.quantity : stack.count,
         unitPrice: sell.unitPrice,
+        ...(stack.stats === undefined ? {} : { item: stack.id }),
       });
     },
     vendor: () => {
@@ -376,7 +435,40 @@ export const useMarket = create<MarketState>((set, get) => {
         return;
       }
 
-      send({ kind: 'vendor', template: stack.template, mk: stack.mk, quantity: sell.quantity });
+      send(
+        stack.stats === undefined
+          ? { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: sell.quantity }
+          : { kind: 'vendor', template: stack.template, mk: stack.mk, quantity: stack.count, item: stack.id },
+      );
+    },
+    buyStandard: (template, price, quantity) => {
+      send(
+        quantity === undefined
+          ? { kind: 'standard', template, price }
+          : { kind: 'standard', template, price, quantity },
+      );
+    },
+    sendCommand: (command) => send(command),
+    settle: (row) => {
+      clearPending(row);
+    },
+    onWaypointRefused: (handler) => {
+      refusedWaypoint = handler;
+    },
+    onCraftRefused: (handler) => {
+      refusedCraft = handler;
+    },
+    equip: (itemId) => {
+      send({ kind: 'equip', item: itemId });
+    },
+    unequip: (slot) => {
+      send({ kind: 'unequip', slot });
+    },
+    pack: (item, into) => {
+      send({ kind: 'pack', item, into });
+    },
+    unpack: (item, count) => {
+      send({ kind: 'unpack', item, count });
     },
     refused: (reason, command) => {
       const row = commandRow(command);
@@ -396,6 +488,15 @@ export const useMarket = create<MarketState>((set, get) => {
       }
 
       const text = marketRefusal(reason, city);
+      // The workshop's step refused is not waited for: a later inventory read must not report it done (review, 2026-11-03).
+      if (row === 'craft') {
+        refusedCraft?.();
+      }
+
+      if (row === 'waypoint') {
+        refusedWaypoint?.(text);
+      }
+
       set({
         pending: get().pending.filter((r) => r !== row),
         rowNotices: { ...get().rowNotices, [row]: text },

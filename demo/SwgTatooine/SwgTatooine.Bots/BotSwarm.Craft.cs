@@ -1,0 +1,443 @@
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using SwgTatooine.Bots.Brain;
+using Typhon.Client;
+using Typhon.Protocol;
+
+namespace SwgTatooine.Bots;
+
+/// <summary>A crafting command as the crafting panel sends it (crafting-build.md C2): its catalog name and its fields.</summary>
+public readonly record struct CraftCommand(string Name, RecordValues Values);
+
+/// <summary>
+/// The crafters (crafting-build.md § 6, profiles): a share of the thinking bots that, holding a craft's inputs, walk to their city's nearest crafting
+/// station and craft — start, a point at a time, the add-on, the finish — exactly the commands the crafting panel sends. What to craft is
+/// <see cref="CraftPlan"/>'s; this decides when, and sends.
+/// </summary>
+public sealed partial class BotSwarm
+{
+    private const string CraftStartCommand = "CraftStart";
+    private const string CraftExperimentCommand = "CraftExperiment";
+    private const string CraftEnhanceCommand = "CraftEnhance";
+    private const string CraftFinishCommand = "CraftFinish";
+    private const string RepairCommand = "RepairItem";
+
+    /// <summary>The workshop's refusals, <c>CraftNotAtStation</c> … <c>RepairNotWorn</c>: the first application reason + 41 … + 54.</summary>
+    public const byte CraftFirstReason = AckReasons.FirstApplicationReason + 41;
+
+    public const int CraftReasons = 19;
+
+    /// <summary>The refusals' names, by offset from <see cref="CraftFirstReason"/>.</summary>
+    public static readonly string[] CraftReasonNames =
+        ["notAtStation", "busy", "none", "badInputs", "noPoints", "noRoom", "notEnough", "failed", "noAddon", "repairBadItem", "repairNoKit", "repairSpent",
+            "salvageBadItem", "repairNotWorn", "(shuttle)", "refineBad", "packBad", "unpackBad", "itemCrated"];
+
+    /// <summary>The offset of the shuttle's fare refusal (+55), inside the workshop's range but not the workshop's: never counted here.</summary>
+    private const int ShuttleOffset = 14;
+
+    /// <summary>A craft's commands, in order: the start, a point per line listed, the add-on when it has one, the finish.</summary>
+    public static List<CraftCommand> Encode(CraftJob job)
+    {
+        var start = new RecordValues { ["schematic"] = FieldValue.Of((double)job.Schematic) };
+        for (var i = 0; i < 6; i++)
+        {
+            start[$"mk{i}"] = FieldValue.Of(i < job.Mks.Length ? job.Mks[i] : 0d);
+            start[$"part{i}"] = FieldValue.OfUInt64(i < job.Parts.Length ? job.Parts[i] : 0UL);
+        }
+
+        var commands = new List<CraftCommand> { new(CraftStartCommand, start) };
+        commands.AddRange(Rest(job.Schematic, job.Points, job.AddonMk));
+        return commands;
+    }
+
+    /// <summary>What finishes a craft under way: its points left, its add-on, its finish.</summary>
+    public static List<CraftCommand> Rest(ushort schematic, IReadOnlyList<byte> points, byte addonMk)
+    {
+        var commands = new List<CraftCommand>();
+        foreach (var line in points)
+        {
+            commands.Add(new CraftCommand(CraftExperimentCommand, new RecordValues { ["line"] = FieldValue.Of((double)line) }));
+        }
+
+        if (addonMk != 0)
+        {
+            commands.Add(new CraftCommand(CraftEnhanceCommand, new RecordValues { ["mk"] = FieldValue.Of((double)addonMk) }));
+        }
+
+        commands.Add(new CraftCommand(CraftFinishCommand, new RecordValues { ["schematic"] = FieldValue.Of((double)schematic) }));
+        return commands;
+    }
+
+    /// <summary>The fleet's crafting, summed: crafts asked, commands sent by kind, refusals by reason.</summary>
+    public CraftTotals Crafting()
+    {
+        var t = new CraftTotals { Refused = new long[CraftReasons] };
+        foreach (var bot in Bots)
+        {
+            if (bot == null)
+            {
+                continue;
+            }
+
+            t.Crafters += bot.Crafts ? 1 : 0;
+            t.Started += Volatile.Read(ref bot.CraftsStarted);
+            t.Resumed += Volatile.Read(ref bot.CraftsResumed);
+            t.Points += Volatile.Read(ref bot.CraftPointsSent);
+            t.Enhanced += Volatile.Read(ref bot.CraftsEnhanced);
+            t.Finished += Volatile.Read(ref bot.CraftsFinishSent);
+            t.InputsBought += Volatile.Read(ref bot.CraftInputsBought);
+            t.Repairs += Volatile.Read(ref bot.RepairsSent);
+            t.Refines += Volatile.Read(ref bot.RefinesSent);
+            t.Packs += Volatile.Read(ref bot.PacksSent);
+            t.GearBought += Volatile.Read(ref bot.GearBought);
+            t.ItemsListed += Volatile.Read(ref bot.ItemsListed);
+            for (var i = 0; i < CraftReasons; i++)
+            {
+                t.Refused[i] += Volatile.Read(ref bot.CraftRefused[i]);
+            }
+        }
+
+        return t;
+    }
+
+    private sealed partial class Bot
+    {
+        /// <summary>Crafting (crafting-build.md C2): starts sent, crafts found under way and finished, points, add-ons, finishes, refusals by reason.</summary>
+        public long CraftsStarted;
+
+        public long CraftsResumed;
+        public long CraftPointsSent;
+        public long CraftsEnhanced;
+        public long CraftsFinishSent;
+
+        /// <summary>Bazaar buys of an input its next craft lacks (§ 6, Inputs).</summary>
+        public long CraftInputsBought;
+
+        /// <summary>Repairs sent (§ 6, Repair): any trading bot's, not only the crafters'.</summary>
+        public long RepairsSent;
+
+        /// <summary>Refines sent (crafting-catalog.md § 11.1): any trader's, at a station.</summary>
+        public long RefinesSent;
+
+        /// <summary>Packs sent (crafting-catalog.md § 11.2): identical spare gear put into crates.</summary>
+        public long PacksSent;
+        public readonly long[] CraftRefused = new long[CraftReasons];
+
+        private CraftBook _book;
+        private ushort[] _craftTargets = [];
+        private HashSet<ushort> _craftKeeps = [];
+
+        // Which of its targets it tries first: moved on by each craft started, so a crafter with the inputs for several makes them in turn.
+        private int _craftTurn;
+
+        /// <summary>The craft its last inventory read makes possible, or null.</summary>
+        private volatile CraftJob _craftJob;
+
+        private Uri _craftUri;
+
+        // The sequence of the last start sent: a refusal naming it drops the rest of its craft.
+        private int _craftStartSeq;
+        private int _craftBusy;
+        private readonly PlanSender<CraftCommand> _craftSender = new();
+
+        /// <summary>Whether this bot crafts.</summary>
+        public bool Crafts { get; private set; }
+
+        /// <summary>
+        /// Wires the crafter: one bot in <see cref="BotSwarmOptions.CraftPercent"/> by index of those that trade — it buys its inputs and sells what it makes
+        /// at the bazaar — the three lines in turn. Not in the rush, which does nothing but trade.
+        /// </summary>
+        private void SetUpCraft(int index, BotSwarmOptions options, CraftBook book)
+        {
+            if (_trades && _missionsUri != null)
+            {
+                _craftUri = new Uri(_missionsUri, "/swg/craft");   // every trader may stand at a station to repair
+            }
+
+            if (!_trades || _rush || book == null || book.Count == 0 || index % 100 >= options.CraftPercent)
+            {
+                return;
+            }
+
+            Crafts = true;
+            _book = book;
+            _craftTargets = CraftPlan.Targets(CraftPlan.Lines[index % CraftPlan.Lines.Length]);
+            _craftKeeps = CraftPlan.Keeps(book, _craftTargets);
+            _craftUri = new Uri(_missionsUri, "/swg/craft");
+            _brain.Crafts = true;
+        }
+
+        /// <summary>The crafting half of an inventory read: the craft it can make now, from the stacks and the parts held in the grid.</summary>
+        private void SawCraftInputs(List<HeldStack> held, List<GearItem> gear)
+        {
+            if (_trades)
+            {
+                _repairsDue = MarketPlan.RepairsDue(gear, held);
+            }
+
+            CraftJob job = null;
+            if (Crafts)
+            {
+                var parts = CraftPlan.PartsOf(gear);
+                job = CraftPlan.Next(_book, _craftTargets, _craftTurn, held, parts);
+                _craftJob = job;
+
+                // Only an input it can buy — one the vendor sells; Hide and Bone it hunts — and not again soon after a visit that bought none.
+                var wanted = false;
+                if (_craftJob == null)
+                {
+                    foreach (var (template, _) in CraftPlan.Deficits(_book, _craftTargets[_craftTurn % _craftTargets.Length], held, parts))
+                    {
+                        wanted |= MarketPlan.VendorSells(template);
+                    }
+                }
+
+                _inputWanted = wanted;
+            }
+
+            // The craft planned just now, not the field, which a station visit may have taken meanwhile; and what it will wear as the wear rule says it,
+            // its weapon and its stacks included — or it packs the piece it was about to put on (review, 2026-11-03).
+            if (_trades)
+            {
+                var band = MarketPlan.Band(_brain.CombatLevel);
+                _refinesDue = RefinePlan.Due(held, band, job != null ? CraftPlan.Uses(_book, job) : null);
+                _packsDue = CratePlan.Packs(gear, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster, held));
+            }
+        }
+
+        // Nothing due: one list each, never written (a station visit swaps them in).
+        private static readonly List<ulong> NoRepairs = [];
+        private static readonly List<(ushort Template, int Mk, int Count)> NoRefines = [];
+        private static readonly List<(ulong Item, ulong Into)> NoPacks = [];
+
+        /// <summary>The packs its last inventory read says are due (<see cref="CratePlan"/>), sent at its next station with the refines.</summary>
+        private volatile List<(ulong Item, ulong Into)> _packsDue = [];
+
+        /// <summary>The refines its last inventory read says are due (<see cref="RefinePlan"/>), sent at its next station.</summary>
+        private volatile List<(ushort Template, int Mk, int Count)> _refinesDue = [];
+
+        /// <summary>Its next target lacks an input the vendor sells and it can make nothing: an errand to the bazaar to buy it (§ 6, Inputs).</summary>
+        private volatile bool _inputWanted;
+
+        /// <summary>A trade that bought none of its inputs (no money, nothing to buy): the input errand waits this long, ms, before it is asked again.
+        /// </summary>
+        private const long InputBackoffMs = 10 * 60_000;
+
+        private long _inputBackoffUntil;
+
+        /// <summary>The worn items its last inventory read says to repair (crafting-build.md § 6, Repair).</summary>
+        private volatile List<ulong> _repairsDue = [];
+
+        /// <summary>What the brain is told of the station: a craft it can make, repairs due, and whether its commands are still going out.</summary>
+        private Perceived WithCraft(Perceived world) =>
+            _trades
+                ? world with
+                {
+                    CraftReady = Crafts && _craftJob != null,
+                    InputWanted = Crafts && _inputWanted && Environment.TickCount64 >= Volatile.Read(ref _inputBackoffUntil),
+                    RepairDue = _repairsDue.Count > 0,
+                    Crafting = Volatile.Read(ref _craftBusy) != 0 || _craftSender.Busy,
+                }
+                : world;
+
+        /// <summary>
+        /// The bot stands at a station: the craft under way, if the server holds one — a finish refused for room, a run stopped mid-craft — is finished
+        /// first; else the planned one starts.
+        /// </summary>
+        private void BeginCraft()
+        {
+            if (!_trades || Interlocked.CompareExchange(ref _craftBusy, 1, 0) != 0)
+            {
+                return;
+            }
+
+            // Each taken whole and replaced in one step: an inventory read landing between a read and a clear would be lost, or sent twice.
+            var job = Crafts ? Interlocked.Exchange(ref _craftJob, null) : null;
+            var repairs = Interlocked.Exchange(ref _repairsDue, NoRepairs);
+            var refines = Interlocked.Exchange(ref _refinesDue, NoRefines);
+            var packs = Interlocked.Exchange(ref _packsDue, NoPacks);
+            _ = CraftAsync(job, repairs, refines, packs, _brain.VisitSerial);
+        }
+
+        private async Task CraftAsync(CraftJob job, List<ulong> repairs, List<(ushort Template, int Mk, int Count)> refines,
+            List<(ulong Item, ulong Into)> packs, long visit)
+        {
+            try
+            {
+                // Repairs first (crafting-build.md § 6, Repair), each a command of its own; then the refines; then the craft.
+                var plan = new List<CraftCommand>();
+                foreach (var item in repairs)
+                {
+                    plan.Add(new CraftCommand(RepairCommand, new RecordValues { ["item"] = FieldValue.OfUInt64(item) }));
+                }
+
+                foreach (var (template, mk, count) in refines)
+                {
+                    plan.Add(new CraftCommand(
+                        RefinePlan.Command,
+                        new RecordValues
+                        {
+                            ["template"] = FieldValue.Of((double)template), ["mk"] = FieldValue.Of((double)mk), ["count"] = FieldValue.Of((double)count),
+                        }));
+                }
+
+                foreach (var (item, into) in packs)
+                {
+                    plan.Add(new CraftCommand(
+                        CratePlan.Command,
+                        new RecordValues { ["item"] = FieldValue.OfUInt64(item), ["into"] = FieldValue.OfUInt64(into) }));
+                }
+
+                if (!Crafts)
+                {
+                    if (plan.Count > 0)
+                    {
+                        _craftSender.Offer(visit, plan);
+                    }
+
+                    return;
+                }
+
+                using var doc = JsonDocument.Parse(await GetAsync(_craftUri).ConfigureAwait(false));
+                if (doc.RootElement.GetProperty("craft") is { ValueKind: JsonValueKind.Object } c)
+                {
+                    var schematic = (ushort)c.GetProperty("schematic").GetInt32();
+                    var left = c.GetProperty("pointsLeft").GetInt32();
+                    var rolled = _book.Of(schematic)?.Rolled ?? [];
+                    var points = new byte[rolled.Length == 0 ? 0 : left];
+                    for (var p = 0; p < points.Length; p++)
+                    {
+                        points[p] = (byte)rolled[p % rolled.Length];
+                    }
+
+                    Interlocked.Increment(ref CraftsResumed);
+                    plan.AddRange(Rest(schematic, points, 0));
+                    _craftSender.Offer(visit, plan);
+                    return;
+                }
+
+                if (job != null)
+                {
+                    _craftTurn++;
+                    plan.AddRange(Encode(job));
+                }
+
+                if (plan.Count > 0)
+                {
+                    _craftSender.Offer(visit, plan);
+                }
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException or OverflowException)
+            {
+                // Nothing sent: the next visit plans again.
+            }
+            finally
+            {
+                Volatile.Write(ref _craftBusy, 0);
+            }
+        }
+
+        /// <summary>Sends the craft's next command, at the commands' rate, while the bot stands at the station of the visit it was planned for.</summary>
+        private async Task SendCraftAsync(long tick, CancellationToken ct)
+        {
+            if (!_trades || _craftSender.Next(_brain.AtStation, _brain.VisitSerial, tick, Math.Max(1L, _ticksPerSecond / 2)) is not { } c)
+            {
+                return;
+            }
+
+            if (Client.Plan.CommandByName(c.Name) == null)
+            {
+                return;   // a server without crafting
+            }
+
+            var seq = await Client.SendCommandAsync(c.Name, c.Values, ct).ConfigureAwait(false);
+            switch (c.Name)
+            {
+                case CraftStartCommand:
+                    Volatile.Write(ref _craftStartSeq, seq);
+                    Interlocked.Increment(ref CraftsStarted);
+                    break;
+                case CraftExperimentCommand:
+                    Interlocked.Increment(ref CraftPointsSent);
+                    break;
+                case CraftEnhanceCommand:
+                    Interlocked.Increment(ref CraftsEnhanced);
+                    break;
+                case RepairCommand:
+                    Interlocked.Increment(ref RepairsSent);
+                    break;
+                case RefinePlan.Command:
+                    Interlocked.Increment(ref RefinesSent);
+                    break;
+                case CratePlan.Command:
+                    Interlocked.Increment(ref PacksSent);
+                    break;
+                default:
+                    Interlocked.Increment(ref CraftsFinishSent);
+                    break;
+            }
+
+            IntentsSent++;
+        }
+
+        /// <summary>Counts the workshop's refusals of this session's commands, from each applied frame's <c>ACKS</c>: any trader's — repairs too.</summary>
+        private void CountCraftRefusals(WorldStore store)
+        {
+            var acks = store.Acks;
+            var start = Volatile.Read(ref _craftStartSeq);
+            for (var i = 0; i < acks.Count; i++)
+            {
+                var offset = acks[i].Reason - CraftFirstReason;
+                if (offset is >= 0 and < CraftReasons && offset != ShuttleOffset)
+                {
+                    Interlocked.Increment(ref CraftRefused[offset]);
+                }
+
+                // Its start refused: the rest of that craft would be refused too, one command at a time — dropped instead.
+                if (start != 0 && acks[i].Seq == start && acks[i].Reason != 0)
+                {
+                    _craftSender.Abort();
+                }
+            }
+        }
+
+        /// <summary>
+        /// A crafter's stacks as the bazaar plan sees them (§ 6, Surplus): its recipes' inputs are kept — neither listed nor sold to the vendor — so what
+        /// it loots and buys is crafted with (<see cref="CraftPlan.Tradeable"/>).
+        /// </summary>
+        private List<HeldStack> Tradeable(List<HeldStack> held) =>
+            Crafts ? CraftPlan.Tradeable(held, _craftKeeps, CraftPlan.Uses(_book, _craftJob)) : held;
+
+        /// <summary>The input its next target lacks first, to buy at this visit's bazaar; null for a bot that does not craft or lacks nothing.</summary>
+        private BookSlot? CraftWant() =>
+            Crafts && _craftTargets.Length > 0
+                ? CraftPlan.Wants(_book, _craftTargets[_craftTurn % _craftTargets.Length], _held, CraftPlan.PartsOf(_gear))
+                : null;
+    }
+}
+
+/// <summary>The fleet's crafting, summed (crafting-build.md C2).</summary>
+public struct CraftTotals
+{
+    public int Crafters;
+    public long Started;
+    public long Resumed;
+    public long Points;
+    public long Enhanced;
+    public long Finished;
+    public long InputsBought;
+    public long Repairs;
+    public long Refines;
+    public long Packs;
+
+    /// <summary>Every trading bot's, not only the crafters': gear of its band bought off the board, items with stats listed.</summary>
+    public long GearBought;
+
+    public long ItemsListed;
+    public long[] Refused;
+}

@@ -24,6 +24,15 @@ describe('ticketMenuItems', () => {
       { kind: 'board', city: 0 },
       { kind: 'board', city: 2 },
     ]);
+    expect(items[0].hint).toBe('Queue for the next shuttle to Port Sable');
+  });
+
+  it('names the fare when the server publishes one', () => {
+    const items = ticketMenuItems(0, ['Port Sable', 'Whitestone'], 150);
+    expect(items.map((i) => i.label)).toEqual(['Whitestone · 150 cr']);
+    expect(items.map((i) => i.hint)).toEqual([
+      'Queue for the next shuttle to Whitestone — a ticket is 150 cr, kept until you fly',
+    ]);
   });
 });
 

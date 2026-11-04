@@ -1,3 +1,4 @@
+import type { ItemStats } from './items';
 import { CITIES } from './world-data';
 
 /**
@@ -221,6 +222,25 @@ export function vendorPayout(count: number, vendorMilli: number): number {
   return Math.floor((Math.max(0, count) * Math.max(0, vendorMilli)) / 1000);
 }
 
+/**
+ * What the vendor pays for one item with stats (Loïc, 2026-11-03): its payout by the condition it has left, ⌊payout × condition / max⌋ — the server's
+ * `VendorFromCommand`. 0 means it is scrapped: taken for nothing, broken or worn too far to be worth a credit. An item without a condition (a part) is paid
+ * whole.
+ */
+export function itemVendorPayout(
+  vendorMilli: number,
+  stats: { readonly condition: number; readonly maxCondition: number; readonly broken?: boolean },
+  count = 1,
+): number {
+  // A crate (crafting-catalog.md § 11.2) is sold whole: its count's payout, its items all pristine.
+  const full = vendorPayout(count, vendorMilli);
+  if (stats.maxCondition <= 0) {
+    return full;
+  }
+
+  return stats.broken === true ? 0 : Math.floor((full * Math.max(0, stats.condition)) / stats.maxCondition);
+}
+
 /** The fee preview the Sell tab shows: "fee 9 cr now · tax 72 cr at sale · you get 819". */
 export function feeLine(total: number): string {
   const f = fees(total);
@@ -228,6 +248,21 @@ export function feeLine(total: number): string {
 }
 
 /** A listing's goods as a line says them: `Hide Mk II ×20`, `Armor Core Mk III`. */
+/**
+ * What chat says of goods newly waiting for the player at a bazaar (client.md C40): each reservation of `after` that `before` did not hold — bought
+ * there, or a listing come back — with where to collect it. The bazaar has no toolbar button to count them on any more. `before` null: the first read
+ * of a session, which says what has been waiting since.
+ */
+export function newReservationNotices(before: MarketMine | null, after: MarketMine): string[] {
+  const known = new Set((before?.reserved ?? []).map((r) => r.id));
+  return after.reserved
+    .filter((r) => !known.has(r.id))
+    .map(
+      (r) =>
+        `${itemWhat(r.name, r.mk, r.qty)} ${r.state === 'sold' ? 'bought' : 'back from its listing'}, waiting at the ${r.cityName} bazaar: collect it at a terminal there`,
+    );
+}
+
 export function itemWhat(name: string, mk: number, qty: number): string {
   const numeral = ['', 'I', 'II', 'III', 'IV', 'V'][mk] ?? '';
   return `${name}${numeral === '' ? '' : ` Mk ${numeral}`}${qty > 1 ? ` ×${String(qty)}` : ''}`;
@@ -291,6 +326,38 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   161: 'You cannot buy your own listing',
   162: 'The server could not apply it — nothing changed, try again',
   163: 'The vendor will not buy that',
+  164: 'That cannot be worn, or is not yours',
+  165: 'Your combat level is too low for that Mk',
+  166: 'No room in your inventory to take it off',
+  167: 'The server could not apply it — nothing changed, try again',
+  168: 'Equip a weapon for that stance first',
+  169: 'Stand at a crafting station to start a craft',
+  170: 'Finish the craft under way first',
+  171: 'No craft under way',
+  172: 'Those inputs are not in your inventory',
+  173: 'No point left, or no such line',
+  174: 'No room in your inventory for the result',
+  175: 'Not enough credits for the fee',
+  176: 'The server could not apply it — nothing changed, try again',
+  177: 'This craft already has its add-on, or takes none',
+  178: 'That item cannot be repaired',
+  179: 'You need a repair kit of its kind',
+  180: 'It has had its two repairs',
+  181: 'Only a crafted item in your inventory can be salvaged',
+  182: 'Not worn down enough to repair: it would lower its condition',
+  184: 'That does not refine, or not that many at once',
+  185: 'Those cannot be packed together: identical, unused, ten to a crate',
+  186: 'Nothing to unpack, or no room for it',
+  187: 'Unpack it first',
+  188: 'That is not yours, not an extractor kit, or not an amount it can take',
+  189: 'Not here: out of town on a planet, or within 30 m of it',
+  190: 'Someone has built on this lot already',
+  191: 'All 10 of your lots are used: pick something up first',
+  192: 'Its hopper is empty',
+  193: 'Collect its hopper first',
+  194: 'A waypoint needs a name (32 characters at most), a colour, and a place on the planet — or an installation of yours not pinned yet',
+  195: 'You keep 100 waypoints already: delete one first',
+  196: 'No such waypoint of yours',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -309,6 +376,11 @@ export const MarketReason = {
   OwnListing: 161,
   Failed: 162,
   Worthless: 163,
+  EquipNotYours: 164,
+  EquipLevel: 165,
+  EquipNoRoom: 166,
+  EquipFailed: 167,
+  StanceNoWeapon: 168,
 } as const;
 
 /**
@@ -331,17 +403,70 @@ export type MarketCommand =
       readonly mk: number;
       readonly quantity: number;
       readonly unitPrice: number;
+      /** An item with stats, listed by its id (`InventoryItem.id`), quantity 1; absent for units. */
+      readonly item?: string;
     }
   | { readonly kind: 'cancel'; readonly listing: string }
   | { readonly kind: 'buy'; readonly listing: string; readonly unitPrice: number }
   /** `listing` `'0'` collects everything of this character's that this city holds, oldest first. */
   | { readonly kind: 'collect'; readonly listing: string }
-  | { readonly kind: 'vendor'; readonly template: number; readonly mk: number; readonly quantity: number };
+  | {
+      readonly kind: 'vendor';
+      readonly template: number;
+      readonly mk: number;
+      readonly quantity: number;
+      readonly item?: string;
+    }
+  /** Standard issue from the vendor (crafting-catalog.md § 15.3), at the price it was shown; a material by the quantity (1-99), one otherwise. */
+  | { readonly kind: 'standard'; readonly template: number; readonly price: number; readonly quantity?: number }
+  /** Wear an item with stats (crafting-build.md § 2.2), by its id. */
+  | { readonly kind: 'equip'; readonly item: string }
+  /** Take off what is worn in an equip slot, 101-107. */
+  | { readonly kind: 'unequip'; readonly slot: number }
+  /** Start a craft (crafting-build.md C2): the Mk of each material or core slot in order (0 = the lowest that covers a bulk slot), the parts' ids. */
+  | {
+      readonly kind: 'craftStart';
+      readonly schematic: number;
+      readonly mks: readonly number[];
+      readonly parts: readonly string[];
+    }
+  /** One experimentation point on a line. */
+  | { readonly kind: 'craftPoint'; readonly line: number }
+  /** The add-on, at a Mk. */
+  | { readonly kind: 'craftEnhance'; readonly mk: number }
+  /** Finish the craft of this schematic. */
+  | { readonly kind: 'craftFinish'; readonly schematic: number }
+  /** Repair an item at a station with a kit of its class (crafting-build.md C3). */
+  | { readonly kind: 'repair'; readonly item: string }
+  /** Salvage a crafted item at a station for a quarter of its quality materials. */
+  | { readonly kind: 'salvage'; readonly item: string }
+  /** Refine at a station (crafting-catalog.md § 11.1): N units of `template` at `mk` into one of the next, `count` times. */
+  | { readonly kind: 'refine'; readonly template: number; readonly mk: number; readonly count: number }
+  /** Pack an item or a crate into an identical one (crafting-catalog.md § 11.2), anywhere. */
+  | { readonly kind: 'pack'; readonly item: string; readonly into: string }
+  /** Take `count` items out of a crate, each into a free slot. */
+  | { readonly kind: 'unpack'; readonly item: string; readonly count: number }
+  /** Installations (crafting-build.md § 10): a kit placed on the lot the body stands in, drawing `family`; a hopper collected; upkeep paid; one picked up. */
+  | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
+  | { readonly kind: 'installCollect'; readonly installation: string }
+  | { readonly kind: 'installPay'; readonly installation: string; readonly credits: number }
+  | { readonly kind: 'installPickUp'; readonly installation: string }
+  /** Waypoints (client.md C38): one of the player's own made — at a point, or pinning an installation — deleted, or made the active one ('0': none). */
+  | {
+      readonly kind: 'waypointCreate';
+      readonly name: string;
+      readonly x: number;
+      readonly z: number;
+      readonly color: number;
+      readonly installation: string;
+    }
+  | { readonly kind: 'waypointDelete'; readonly waypoint: string }
+  | { readonly kind: 'waypointActivate'; readonly waypoint: string };
 
 /** The command's name in the server's catalog, and its fields as the codec names them. `null` for a malformed one. */
 export function marketWire(
   command: MarketCommand,
-): { readonly name: string; readonly values: Readonly<Record<string, number | bigint>> } | null {
+): { readonly name: string; readonly values: Readonly<Record<string, number | bigint | string>> } | null {
   switch (command.kind) {
     case 'list':
       return {
@@ -351,12 +476,13 @@ export function marketWire(
           mk: command.mk,
           quantity: command.quantity,
           unitPrice: command.unitPrice,
+          item: itemOf(command.item),
         },
       };
     case 'vendor':
       return {
         name: 'SellToVendor',
-        values: { template: command.template, mk: command.mk, quantity: command.quantity },
+        values: { template: command.template, mk: command.mk, quantity: command.quantity, item: itemOf(command.item) },
       };
     case 'cancel':
     case 'collect': {
@@ -370,15 +496,105 @@ export function marketWire(
       const listing = idOf(command.listing);
       return listing === null ? null : { name: 'MarketBuy', values: { listing, unitPrice: command.unitPrice } };
     }
+
+    case 'standard':
+      return {
+        name: 'BuyStandard',
+        values: { template: command.template, price: command.price, quantity: command.quantity ?? 1 },
+      };
+    case 'equip': {
+      const item = idOf(command.item);
+      return item === null ? null : { name: 'Equip', values: { item } };
+    }
+
+    case 'unequip':
+      return { name: 'Unequip', values: { slot: command.slot } };
+    case 'craftStart': {
+      const values: Record<string, number | bigint> = { schematic: command.schematic };
+      for (let i = 0; i < 6; i++) {
+        values[`mk${String(i)}`] = command.mks[i] ?? 0;
+        values[`part${String(i)}`] = itemOf(command.parts[i]);
+      }
+
+      return { name: 'CraftStart', values };
+    }
+
+    case 'craftPoint':
+      return { name: 'CraftExperiment', values: { line: command.line } };
+    case 'craftEnhance':
+      return { name: 'CraftEnhance', values: { mk: command.mk } };
+    case 'craftFinish':
+      return { name: 'CraftFinish', values: { schematic: command.schematic } };
+    case 'repair':
+      return { name: 'RepairItem', values: { item: itemOf(command.item) } };
+    case 'salvage':
+      return { name: 'SalvageItem', values: { item: itemOf(command.item) } };
+    case 'refine':
+      return { name: 'RefineItems', values: { template: command.template, mk: command.mk, count: command.count } };
+    case 'pack':
+      return { name: 'PackItem', values: { item: itemOf(command.item), into: itemOf(command.into) } };
+    case 'unpack':
+      return { name: 'UnpackItem', values: { item: itemOf(command.item), count: command.count } };
+    case 'installPlace':
+      return { name: 'PlaceInstallation', values: { item: itemOf(command.item), family: command.family } };
+    case 'installCollect':
+      return { name: 'CollectInstallation', values: { installation: itemOf(command.installation) } };
+    case 'installPay':
+      return { name: 'PayUpkeep', values: { installation: itemOf(command.installation), credits: command.credits } };
+    case 'installPickUp':
+      return { name: 'PickUpInstallation', values: { installation: itemOf(command.installation) } };
+    case 'waypointCreate':
+      return {
+        name: 'CreateWaypoint',
+        values: {
+          name: command.name,
+          x: command.x,
+          z: command.z,
+          color: command.color,
+          installation: itemOf(command.installation),
+        },
+      };
+    case 'waypointDelete':
+      return { name: 'DeleteWaypoint', values: { waypoint: itemOf(command.waypoint) } };
+    case 'waypointActivate':
+      return { name: 'SetActiveWaypoint', values: { waypoint: itemOf(command.waypoint) } };
   }
 }
 
-/** The row a command is about — where its refusal is shown: the listing, `'all'` for a collect-all, `'sell'` for the Sell tab. */
+/**
+ * The row a command is about — where its refusal is shown: the listing, `'all'` for a collect-all, `'sell'` for the Sell tab, `'issue'` for standard
+ * issue, `'gear'` for an equip or unequip.
+ */
 export function commandRow(command: MarketCommand): string {
   switch (command.kind) {
     case 'list':
     case 'vendor':
       return 'sell';
+    case 'standard':
+      return 'issue';
+    case 'equip':
+    case 'unequip':
+    case 'pack':
+    case 'unpack':
+      return 'gear';
+    case 'installPlace':
+    case 'installCollect':
+    case 'installPay':
+    case 'installPickUp':
+      return 'install';
+    case 'waypointCreate':
+    case 'waypointDelete':
+    case 'waypointActivate':
+      return 'waypoint';
+    case 'craftStart':
+    case 'craftPoint':
+    case 'craftEnhance':
+    case 'craftFinish':
+    case 'repair':
+    case 'salvage':
+    case 'refine':
+      // One row for the workshop: its refusals show on the panel, and a command in flight holds the next — a double click spends one point.
+      return 'craft';
     case 'collect':
       return command.listing === '0' ? 'all' : command.listing;
     default:
@@ -391,8 +607,55 @@ function idOf(text: string): bigint | null {
   return /^\d+$/.test(text) ? BigInt(text) : null;
 }
 
-/** The bazaar panel's four tabs (§ 6). */
-export type BazaarTab = 'browse' | 'sell' | 'mine' | 'reserved';
+/** An item's id for a command's `item` field: 0 for units (no id). */
+function itemOf(text: string | undefined): bigint {
+  return text === undefined ? 0n : (idOf(text) ?? 0n);
+}
+
+/** The bazaar panel's tabs (§ 6), and the vendor's standard issue (crafting-catalog.md § 15.3). */
+export type BazaarTab = 'browse' | 'sell' | 'mine' | 'reserved' | 'issue';
+
+/**
+ * One thing the vendor sells, as `GET /swg/market/standard` answers it, Mk I at twice its value: an item with stats, one at a time; or a bulk material by
+ * the unit (Loïc, 2026-11-02), `priceMilli` a unit — what no low-level creature drops, so a new crafter can start.
+ */
+export interface StandardOffer {
+  readonly template: number;
+  readonly item: string;
+  readonly name: string;
+  readonly category: string;
+  readonly mk: number;
+  readonly price: number;
+  readonly stats?: ItemStats;
+  readonly priceMilli?: number;
+}
+
+/** What `quantity` units of a vendor material cost, whole credits: the total rounded down, as the server prices it. */
+export function standardMaterialPrice(offer: StandardOffer, quantity: number): number {
+  return Math.floor(((offer.priceMilli ?? 0) * quantity) / 1000);
+}
+
+/** `GET /swg/market/standard` checked; `null` for anything else. A malformed row is dropped, not the answer. */
+export function parseStandard(answer: unknown): readonly StandardOffer[] | null {
+  if (typeof answer !== 'object' || answer === null || !Array.isArray((answer as Record<string, unknown>).items)) {
+    return null;
+  }
+
+  return ((answer as Record<string, unknown>).items as unknown[]).filter((v): v is StandardOffer => {
+    if (typeof v !== 'object' || v === null) {
+      return false;
+    }
+
+    const o = v as Record<string, unknown>;
+    return (
+      typeof o.template === 'number' &&
+      typeof o.item === 'string' &&
+      typeof o.name === 'string' &&
+      typeof o.price === 'number' &&
+      ((typeof o.stats === 'object' && o.stats !== null) || typeof o.priceMilli === 'number')
+    );
+  });
+}
 
 /** `GET /swg/market` checked; `null` for anything else. A malformed row is dropped, not the answer. */
 export function parseBrowse(answer: unknown): BrowsePage | null {

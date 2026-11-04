@@ -128,6 +128,9 @@ export class MockMarket {
         return this.collect(command.listing);
       case 'vendor':
         return this.vendor(command.template, command.mk, command.quantity);
+      default:
+        // Standard issue and the workshop are the live server's only: the mock's desk has no items with stats.
+        return MarketReason.BadListing;
     }
   }
 

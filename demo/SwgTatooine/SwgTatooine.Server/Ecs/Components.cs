@@ -749,6 +749,70 @@ public struct PlayerVitals
     public readonly bool IsAlive => Health > 0;
 }
 
+/// <summary>
+/// What a player's equipment makes of its blows and of the blows it takes (crafting-build.md § 2.3): the body's cache of its character's equipped items,
+/// written by <c>Workshop</c> on bind, equip and unequip, read on every hit.
+/// </summary>
+/// <remarks>
+/// <para><b>A component of its own</b>: <see cref="PlayerVitals"/> is written on every hit and partly replicated; these change on equip and are read on every
+/// hit. Not replicated: the client's equipment panel reads <c>/swg/inventory</c>, and a crit arrives with its blow.</para>
+/// <para><b>Not in <see cref="PlayerVitals"/></b>, not even the damage: the systems of the economy phase read vitals (is the body down?), and a writer of
+/// them there would have to order against every one. <see cref="PlayerVitals.AttackDamage"/> stays the crowd's.</para>
+/// <para><b>16 bytes, because every byte on a body costs players per cluster</b> (see <see cref="PlayerLook"/>): with seven 16-bit wear counters, 28
+/// took a Player cluster from 24 bodies to 23. The wear (crafting-catalog.md § 9.1) is counted here by the combat path — the weapon's uses, the armour's
+/// damage in one sum — and written into the worn items by the Workshop every <c>SimBridge.WearFlushUses</c> uses, on a change of gear, a fall and a
+/// logout, so the combat path never writes an item. The sum is shared among the pieces worn by their shares when written: over the 50 hits between two
+/// writes that is the draw's own expectation. Added through the field migration: the C2 world opens under it.</para>
+/// <para>All zero on a body <c>Workshop</c> has not seen yet, and on the scripted crowd, which fights with its own numbers.</para>
+/// </remarks>
+[Component("Swg.PlayerGear", 2, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 2)]
+public struct PlayerGear
+{
+    /// <summary>The weapon's damage per hit, before the rolls (crafting-catalog.md § 9.3); unarmed 40. A perfect Mk V sword's is 460.</summary>
+    [Field] public short Damage;
+
+    /// <summary>The weapon's delay between blows, ms; unarmed 1 200.</summary>
+    [Field] public short DelayMs;
+
+    /// <summary>The weapon's reach, decimetres, edge to edge; unarmed 10.</summary>
+    [Field] public short RangeDm;
+
+    /// <summary>Kinetic mitigation, ‰ (§ 5.3: Σ share × protection, capped 750).</summary>
+    [Field] public short MitKinetic;
+
+    /// <summary>Energy mitigation, ‰.</summary>
+    [Field] public short MitEnergy;
+
+    /// <summary>The blows' <see cref="DamageType"/>.</summary>
+    [Field] public byte DamageType;
+
+    /// <summary>The stance the weapon fights in (<see cref="Stances"/>); <see cref="Stances.Unarmed"/> with none. 0: not set by <c>Workshop</c> yet.</summary>
+    [Field] public byte Stance;
+
+    /// <summary>The armour's damage points since the wear was last written: the hits' damage, before mitigation (§ 9.1).</summary>
+    [Field] public ushort ArmorWear;
+
+    /// <summary>The weapon's uses since then: each costs its delay in condition.</summary>
+    [Field] public byte WeaponUses;
+
+    /// <summary>Attacks and hits since then: at <c>SimBridge.WearFlushUses</c> the body is due.</summary>
+    [Field] public byte Uses;
+
+    /// <summary>Whether it fights with the fist — no weapon worn, or a broken one — which wears nothing (crafting-catalog.md § 9.1).</summary>
+    public readonly bool IsFist => Stance == Stances.Unarmed && Damage == Equipment.UnarmedDamage && DelayMs == Equipment.UnarmedDelayMs;
+
+    /// <summary>A body with nothing equipped: the fist (Q2), kinetic, no armour.</summary>
+    public static PlayerGear Unarmed => new()
+    {
+        Damage = (short)Equipment.UnarmedDamage,
+        DelayMs = (short)Equipment.UnarmedDelayMs,
+        RangeDm = (short)Equipment.UnarmedRangeDm,
+        DamageType = Server.DamageType.Kinetic,
+        Stance = Stances.Unarmed,
+    };
+}
+
 /// <summary>A lair's structural integrity — what a destroy mission is sent to reduce to zero.</summary>
 [Component("Swg.LairVitals", 2, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
@@ -1006,8 +1070,10 @@ public struct PlayerState
     /// <summary>Which city this player calls home. Travel legs start and end at cities far more often than at random points.</summary>
     [Field] public int HomeCity;
 
-    /// <summary>The city whose shuttleport this player is walking to or queued at (#910) — or, while <see cref="PlayerActivity.LeavingRoom"/>, the
-    /// waypoint of the room's route it is walking to.</summary>
+    /// <summary>
+    /// The city whose shuttleport this player is walking to or queued at (#910) — or, while <see cref="PlayerActivity.LeavingRoom"/>, the waypoint of the
+    /// room's route it is walking to.
+    /// </summary>
     [Field] public int ShuttleFrom;
 
     /// <summary>The city the shuttle takes this player to — or, while walking to, through or out of a door, the realm of the ROOM that door belongs to

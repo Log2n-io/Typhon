@@ -2,9 +2,11 @@
   <!-- SwgTatooine.Dashboard — what a person watching the demo wants on one page: the economy and its rates, the missions, who is playing where,
        the crowd's lair fights, the server's health (Loïc, 2026-10-26).
 
-       Blazor Server, like the bot console, and READ-ONLY, unlike it: it polls the game server's own JSON (/swg/stats, /typhon/stats.json, the
-       economy's audit and ledger) and controls nothing. That is why it may bind the LAN, where the console must not: there is nothing here to
-       start or stop. It references no other project: everything it shows, the game server already publishes. -->
+       Blazor Server, like the bot console. Its pages are READ-ONLY: they poll the game server's own JSON (/swg/stats, /typhon/stats.json, the
+       economy's audit and ledger) and control nothing, which is why it may bind the LAN, where the console must not. The one exception is the
+       accounts page (Loïc, 2026-11-02; accounts.md § 2): it writes through the game server's /admin back office, which exists only with
+       SWG_ADMIN_KEY set on both processes, and it asks its operator for that key before it shows anything. It references no other project:
+       everything it shows, the game server already publishes. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>SwgTatooine.Dashboard</AssemblyName>

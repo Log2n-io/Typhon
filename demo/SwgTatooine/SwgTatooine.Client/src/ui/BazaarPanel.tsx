@@ -1,4 +1,6 @@
-import { ITEM_ICON_PX, itemInitials, mkNumeral } from '../data/items';
+import { useEffect, useState } from 'react';
+
+import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral } from '../data/items';
 import {
   cityName,
   feeLine,
@@ -6,17 +8,21 @@ import {
   formatAge,
   MAX_UNIT_PRICE,
   priceOf,
+  standardMaterialPrice,
+  itemVendorPayout,
   vendorPayout,
   type BazaarTab,
   type MarketCategory,
   type MarketListing,
   type MarketSort,
+  type StandardOffer,
 } from '../data/market';
 import { formatCredits } from '../data/wallet';
 import { CITIES } from '../data/world-data';
 import { useItems } from '../state/items-store';
 import { collectableHere, useMarket } from '../state/market-store';
 import { useWallet } from '../state/wallet-store';
+import { WindowFrame } from './WindowFrame';
 
 /**
  * The bazaar (bazaar.md § 6): the board of a city or of all, the stack being sold, this character's listings and the goods
@@ -56,30 +62,38 @@ export function BazaarPanel() {
   );
 
   return (
-    <div className="panel bazaar" role="dialog" aria-label="Bazaar">
-      <div className="missions-head">
-        <span className="hud-title">Bazaar</span>
-        <span className="bazaar-here" data-testid="bazaar-here">
-          {here > 0 ? cityName(here) : 'not at a terminal'}
-        </span>
-        <span className="inventory-credits" data-testid="bazaar-credits">
-          {credits === null ? '…' : formatCredits(credits)}
-        </span>
-        <button type="button" className="missions-close" onClick={close} aria-label="Close">
-          ✕
-        </button>
-      </div>
+    <WindowFrame
+      id="bazaar"
+      title="Bazaar"
+      extra={
+        <>
+          <span className="bazaar-here" data-testid="bazaar-here">
+            {here > 0 ? cityName(here) : 'not at a terminal'}
+          </span>
+          <span className="inventory-credits" data-testid="bazaar-credits">
+            {credits === null ? '…' : formatCredits(credits)}
+          </span>
+        </>
+      }
+      onClose={close}
+      ariaLabel="Bazaar"
+      className="bazaar"
+      minW={420}
+      initial={() => ({ x: 20, y: 70, w: 662, h: 0 })}
+    >
       <div className="bazaar-tabs" role="tablist">
         {tabButton('browse', 'Browse')}
         {tabButton('sell', 'Sell')}
         {tabButton('mine', `My listings${mine === null ? '' : ` (${String(mine.listed.length)})`}`)}
         {tabButton('reserved', `Reserved${mine === null ? '' : ` (${String(mine.reserved.length)})`}`)}
+        {tabButton('issue', 'Standard issue')}
       </div>
       {tab === 'browse' ? <BrowseTab /> : null}
       {tab === 'sell' ? <SellTab /> : null}
       {tab === 'mine' ? <MineTab /> : null}
       {tab === 'reserved' ? <ReservedTab /> : null}
-    </div>
+      {tab === 'issue' ? <IssueTab /> : null}
+    </WindowFrame>
   );
 }
 
@@ -300,6 +314,155 @@ function BrowseTab() {
   );
 }
 
+/**
+ * The vendor's standard issue (crafting-catalog.md § 15.3): Mk I weapons and armour, a typical craft, at twice their value — the ceiling the board's
+ * prices sit under. Bought one at a time at a terminal; the item goes into the inventory, the credits to nobody.
+ */
+function IssueTab() {
+  const standard = useMarket((s) => s.standard);
+  const refresh = useMarket((s) => s.refreshStandard);
+  const buyStandard = useMarket((s) => s.buyStandard);
+  const here = useMarket((s) => s.here);
+  const pending = useMarket((s) => s.pending.includes('issue'));
+  const notice = useMarket((s) => s.rowNotices.issue);
+  const icons = useItems((s) => s.icons);
+  const credits = useWallet((s) => s.wallet?.credits ?? null);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return (
+    <div className="bazaar-issue" data-testid="bazaar-issue">
+      {notice === undefined ? null : (
+        <div className="hint" role="alert">
+          {notice}
+        </div>
+      )}
+      {standard.length === 0 ? <div className="hint">Nothing for sale.</div> : null}
+      {standard.map((o) => {
+        if (o.priceMilli !== undefined) {
+          return (
+            <MaterialRow
+              key={o.template}
+              offer={o}
+              icon={icons[o.item]}
+              disabled={here === 0 || pending}
+              credits={credits}
+              buy={buyStandard}
+            />
+          );
+        }
+
+        const icon = icons[o.item] as string | undefined;
+        const tip = itemTooltip({
+          id: '',
+          slot: 0,
+          item: o.item,
+          name: o.name,
+          category: o.category,
+          template: o.template,
+          mk: o.mk,
+          count: 1,
+          ...(o.stats === undefined ? {} : { stats: o.stats }),
+        });
+        return (
+          <div key={o.template} className="bazaar-row" title={tip} data-testid={`issue-${o.item}`}>
+            {icon === undefined ? (
+              <span className="inventory-initials">{itemInitials(o.name)}</span>
+            ) : (
+              <img
+                className="inventory-icon"
+                src={icon}
+                width={ITEM_ICON_PX}
+                height={ITEM_ICON_PX}
+                alt=""
+                draggable={false}
+              />
+            )}
+            <span className="bazaar-what">
+              {o.name} · Mk {mkNumeral(o.mk)}
+            </span>
+            <span className="bazaar-price">{formatCredits(o.price)}</span>
+            <button
+              type="button"
+              disabled={here === 0 || pending || (credits !== null && credits < o.price)}
+              title={here === 0 ? NOT_HERE : undefined}
+              onClick={() => {
+                buyStandard(o.template, o.price);
+              }}
+            >
+              Buy
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A vendor material (Loïc, 2026-11-02): Mk I by the unit, a quantity of 1-99, the total rounded down as the server prices it. */
+function MaterialRow({
+  offer,
+  icon,
+  disabled,
+  credits,
+  buy,
+}: {
+  readonly offer: StandardOffer;
+  readonly icon: string | undefined;
+  readonly disabled: boolean;
+  readonly credits: number | null;
+  readonly buy: (template: number, price: number, quantity?: number) => void;
+}) {
+  // The field's text as typed — clamped to 1-99 only for the price and the buy, so clearing it or typing "25" never jumps (review, 2026-11-02).
+  const [typed, setTyped] = useState('10');
+  const quantity = Math.min(99, Math.max(1, Math.floor(Number(typed)) || 1));
+  const price = standardMaterialPrice(offer, quantity);
+  return (
+    <div className="bazaar-row" data-testid={`issue-${offer.item}`}>
+      {icon === undefined ? (
+        <span className="inventory-initials">{itemInitials(offer.name)}</span>
+      ) : (
+        <img
+          className="inventory-icon"
+          src={icon}
+          width={ITEM_ICON_PX}
+          height={ITEM_ICON_PX}
+          alt=""
+          draggable={false}
+        />
+      )}
+      <span className="bazaar-what">
+        {offer.name} · Mk {mkNumeral(offer.mk)} ×
+        <input
+          type="number"
+          min={1}
+          max={99}
+          value={typed}
+          aria-label={`${offer.name} quantity`}
+          onChange={(e) => {
+            setTyped(e.target.value);
+          }}
+          onBlur={() => {
+            setTyped(String(quantity));
+          }}
+        />
+      </span>
+      <span className="bazaar-price">{formatCredits(price)}</span>
+      <button
+        type="button"
+        disabled={disabled || price <= 0 || (credits !== null && credits < price)}
+        title={disabled ? NOT_HERE : undefined}
+        onClick={() => {
+          buy(offer.template, price, quantity);
+        }}
+      >
+        Buy
+      </button>
+    </div>
+  );
+}
+
 function SellTab() {
   const stacks = useMarket((s) => s.stacks);
   const sell = useMarket((s) => s.sell);
@@ -320,7 +483,14 @@ function SellTab() {
   const price = stack === undefined ? undefined : priceOf(prices, stack.item, stack.mk);
   const total = sell.quantity * sell.unitPrice;
   const fee = fees(total).listFee;
-  const payout = price === undefined ? 0 : vendorPayout(sell.quantity, price.vendor);
+  const payout =
+    price === undefined
+      ? 0
+      : stack?.stats === undefined
+        ? vendorPayout(sell.quantity, price.vendor)
+        : itemVendorPayout(price.vendor, stack.stats, stack.count);
+  // An item with stats worth nothing is still taken — scrapped, its end a decay row — where units worth nothing are refused.
+  const scrap = stack?.stats !== undefined && price !== undefined && payout === 0;
   const full = mine !== null && mine.listed.length >= mine.caps.listings;
   return (
     <>
@@ -362,6 +532,7 @@ function SellTab() {
                 aria-label="Quantity"
                 min={1}
                 max={stack.count}
+                disabled={stack.stats !== undefined}
                 value={sell.quantity}
                 onChange={(e) => {
                   setQuantity(Number(e.target.value));
@@ -403,11 +574,25 @@ function SellTab() {
             </button>
             <button
               type="button"
-              disabled={here === 0 || pending || payout === 0}
-              title={here === 0 ? NOT_HERE : payout === 0 ? 'The vendor will not buy that' : 'The units are destroyed'}
+              disabled={here === 0 || pending || (payout === 0 && !scrap)}
+              title={
+                here === 0
+                  ? NOT_HERE
+                  : scrap
+                    ? 'Broken or worn out: the vendor takes it for nothing'
+                    : payout === 0
+                      ? 'The vendor will not buy that'
+                      : stack.stats === undefined
+                        ? 'The units are destroyed'
+                        : 'Paid by the condition it has left'
+              }
               onClick={vendor}
             >
-              {payout === 0 ? 'The vendor will not buy this' : `Sell to vendor for ${formatCredits(payout)}`}
+              {scrap
+                ? 'Scrap at the vendor (pays nothing)'
+                : payout === 0
+                  ? 'The vendor will not buy this'
+                  : `Sell to vendor for ${formatCredits(payout)}`}
             </button>
           </div>
         </>

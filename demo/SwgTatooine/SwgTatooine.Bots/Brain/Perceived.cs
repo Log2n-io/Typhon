@@ -118,6 +118,36 @@ public readonly struct Perceived
     /// <summary>Whether its trade at the bazaar is still being read or sent (bazaar.md § 8): the bot stands at the terminal until it is done.</summary>
     public bool Trading { get; init; }
 
+    /// <summary>Whether it holds the inputs of a craft it would make (crafting-build.md § 6): a crafter's errand to a station.</summary>
+    public bool CraftReady { get; init; }
+
+    /// <summary>Whether its craft or its repairs are still going out: the bot stands at the station until the last is sent.</summary>
+    public bool Crafting { get; init; }
+
+    /// <summary>Whether a crafter can make nothing and its next target lacks an input (crafting-build.md § 6, Inputs): an errand to the bazaar.</summary>
+    public bool InputWanted { get; init; }
+
+    /// <summary>
+    /// Whether an installation owner has nothing placed and no kit to place (crafting-build.md § 10): an errand to the bazaar, for the vendor's kit.
+    /// </summary>
+    public bool KitWanted { get; init; }
+
+    /// <summary>Whether something it wears is worn down with a repair left and a kit held (crafting-build.md § 6, Repair): an errand to a station.</summary>
+    public bool RepairDue { get; init; }
+
+    /// <summary>
+    /// Whether an installation owner has one to tend — a hopper to collect, upkeep to pay — or a kit to place (crafting-build.md § 10), and where: its
+    /// installation, or the wild lot it will place on.
+    /// </summary>
+    public bool TendDue { get; init; }
+
+    public float TendX { get; init; }
+
+    public float TendZ { get; init; }
+
+    /// <summary>Whether its installation commands are still going out: the bot stands there until they are.</summary>
+    public bool Tending { get; init; }
+
     /// <summary>The structures it holds, read when a goal plans a walk; null in a test that needs none.</summary>
     public IStructureView Structures { get; init; }
 }

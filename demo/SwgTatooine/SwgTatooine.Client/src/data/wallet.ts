@@ -46,45 +46,23 @@ export const MAX_TIP = 1_000_000;
 /** How long a tip waits for a refusal, milliseconds: an accepted one is never answered — the wallet moves instead. */
 export const TIP_ANSWER_MS = 5000;
 
-/** A chat line that is a command: what it asks for, or why it cannot be done. */
-export type ChatCommand =
-  { readonly kind: 'tip'; readonly amount: number } | { readonly kind: 'error'; readonly message: string };
-
-/**
- * Reads a chat line as a command: `null` for a line that is speech. A line is a command when it starts with `/`.
- *
- * `/tip <amount>` gives the selected player that many credits — a whole number from 1 to {@link MAX_TIP}; thousands may be
- * grouped (`/tip 1,000`, `/tip 1 000`).
- */
-export function parseChatCommand(line: string): ChatCommand | null {
-  const text = line.trim();
-  if (!text.startsWith('/')) {
-    return null;
+/** `/tip`'s arguments read (data/chat-commands.ts): the credits to give, or why they cannot be given. */
+export function parseTipAmount(args: readonly string[]): { readonly amount: number } | { readonly error: string } {
+  const raw = args.join('').replace(/[,_]/g, '');
+  if (raw.length === 0) {
+    return { error: 'Usage: /tip <amount>, with a player selected' };
   }
 
-  const [name = '', ...rest] = text.slice(1).split(/\s+/);
-  switch (name.toLowerCase()) {
-    case 'tip': {
-      const raw = rest.join('').replace(/[,_]/g, '');
-      if (raw.length === 0) {
-        return { kind: 'error', message: 'Usage: /tip <amount>, with a player selected' };
-      }
-
-      if (!/^\d+$/.test(raw)) {
-        return { kind: 'error', message: `/tip: "${rest.join(' ')}" is not a whole number of credits` };
-      }
-
-      const amount = Number(raw);
-      if (amount < 1 || amount > MAX_TIP) {
-        return { kind: 'error', message: `/tip: from 1 to ${MAX_TIP.toLocaleString('en-US')} credits` };
-      }
-
-      return { kind: 'tip', amount };
-    }
-
-    default:
-      return { kind: 'error', message: `Unknown command /${name} — try /tip <amount>` };
+  if (!/^\d+$/.test(raw)) {
+    return { error: `/tip: "${args.join(' ')}" is not a whole number of credits` };
   }
+
+  const amount = Number(raw);
+  if (amount < 1 || amount > MAX_TIP) {
+    return { error: `/tip: from 1 to ${MAX_TIP.toLocaleString('en-US')} credits` };
+  }
+
+  return { amount };
 }
 
 /** Credits as the panels write them: grouped, with the unit. */

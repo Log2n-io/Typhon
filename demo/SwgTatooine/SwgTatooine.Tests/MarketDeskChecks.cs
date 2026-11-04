@@ -28,6 +28,7 @@ internal sealed class MarketDeskChecks : ServedChecks
     private TatooineSim Start(bool persist = false)
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         config.Persist = persist;
         var sim = new TatooineSim(config);
@@ -48,7 +49,10 @@ internal sealed class MarketDeskChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, at.X, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True, "the account has no character");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return new Trader(link, body, character);
@@ -91,11 +95,15 @@ internal sealed class MarketDeskChecks : ServedChecks
         Harness.Ticks(1);
     }
 
-    /// <summary>Fills a character's free slots with one unit each of keys no case trades (crystal, gas, chemical, fiber, gland, venom; Mk I-IV), but <paramref name="leave"/>.</summary>
+    /// <summary>Fills a character's free slots with one unit each of keys no case trades (materials but hide and bone, two cores, an add-on; Mk I-IV), but <paramref name="leave"/>.</summary>
     private void Fill(TatooineSim sim, Trader t, int leave = 0)
     {
         var free = ItemLedger.Slots - Items.Stacks(sim, t.Character).Count - leave;
-        ushort[] templates = [ItemCatalog.Crystal, ItemCatalog.Gas, ItemCatalog.Chemical, ItemCatalog.Fiber, ItemCatalog.Gland, ItemCatalog.Venom, ItemCatalog.Metal, ItemCatalog.CoreRanged];
+        ushort[] templates =
+        [
+            ItemCatalog.Crystal, ItemCatalog.Gas, ItemCatalog.Chemical, ItemCatalog.Fiber, ItemCatalog.Gland, ItemCatalog.Venom, ItemCatalog.Metal,
+            ItemCatalog.CoreRanged, ItemCatalog.CoreMelee, ItemCatalog.AddonTuning,
+        ];
         var n = 0;
         foreach (var template in templates)
         {
@@ -139,7 +147,7 @@ internal sealed class MarketDeskChecks : ServedChecks
     }
 
     /// <summary>A rate bucket's worth of patience: two commands a second, a burst of four.</summary>
-    private void Breathe() => Harness.Ticks(Worlds.ServedHz / 2 + 1);
+    private void Breathe() => Harness.Ticks(Worlds.FastCommandGapTicks);
 
     private static void AuditsOk(TatooineSim sim, string when)
     {
@@ -207,7 +215,10 @@ internal sealed class MarketDeskChecks : ServedChecks
 
     private string State(TatooineSim sim, params Trader[] traders)
     {
-        var parts = new List<string> { $"credits {Ledgers.Rows(sim).Count}", $"items {Items.Rows(sim).Count}" };
+        // A newcomer's own opening grant is not the traders' state: a first login answered a tick late has its wallet opened by then.
+        var keys = traders.Select(t => t.Key).ToHashSet();
+        var credits = Ledgers.Rows(sim).Count(r => r.Kind != TransferKind.Grant || keys.Contains(r.To));
+        var parts = new List<string> { $"credits {credits}", $"items {Items.Rows(sim).Count}" };
         foreach (var (id, l) in Market.Listings(sim).OrderBy(kv => kv.Key))
         {
             parts.Add($"{id}:{l.State}/{l.Collector}/{l.Quantity}/{l.LastSeq}");
@@ -830,6 +841,7 @@ internal sealed class MarketDeskChecks : ServedChecks
     /// <summary>
     /// BZ-10: the market audit is clean after real trading, and names each rule a corruption breaks — a quantity (MA-1), a second sale row (MA-2), a missing
     /// fee (MA-3), a list row into a character (MA-4), a vendor row naming the wrong credit row (MA-5), a seller over the cap (MA-6), a stale board (MA-7).
+    /// Two vendor sales, since MA-5 pairs the two ledgers as it walks them: a broken pair must leave the next one paired.
     /// </summary>
     [Test]
     [CancelAfter(180_000)]
@@ -845,6 +857,8 @@ internal sealed class MarketDeskChecks : ServedChecks
         Market.Buy(b.Link, sold, 20);
         Market.Vendor(a.Link, Hide, 2, 10);
         SessionHarness.Until(() => !Market.Listings(sim).ContainsKey(sold) && sim.Bridge.MarketVendorSales == 1, "the buy and the vendor sale");
+        Market.Vendor(a.Link, Hide, 2, 4);
+        SessionHarness.Until(() => sim.Bridge.MarketVendorSales == 2, "the second vendor sale");
         sim.Bridge.PublishMarketNowForChecks();
         Harness.Ticks(3);
         var clean = MarketEndpoints.Audit(sim.Dbe, sim.Bridge.MarketBoard);
@@ -896,6 +910,19 @@ internal sealed class MarketDeskChecks : ServedChecks
         var (vendorId, vendor) = FindCredit(sim, r => r.Kind == TransferKind.Vendor);
         Breaks("MA-5", tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor with { Ref = vendor.Ref + 1 }), tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor));
         Breaks("MA-5", tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor with { Amount = vendor.Amount + 1 }), tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor));
+
+        // The first sale's rows naming a credit row past every vendor row: its rows and its credit are named, and the second sale is still paired.
+        var (vendorRowId, vendorRow) = FindItem(sim, r => r.Kind == ItemMoveKind.Vendor && r.Ref == vendor.Seq);
+        Corrupt(sim, tx => tx.OpenMut(vendorRowId).Set(ItemLedgerArch.Entry, vendorRow with { Ref = vendor.Seq + 1_000_000 }));
+        var unpaired = MarketEndpoints.Audit(sim.Dbe, board);
+        Corrupt(sim, tx => tx.OpenMut(vendorRowId).Set(ItemLedgerArch.Entry, vendorRow));
+        var ma5 = unpaired.Violations.Where(v => v.Contains("MA-5")).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(ma5, Has.Count.EqualTo(2), string.Join("; ", ma5));
+            Assert.That(ma5, Has.Some.Contains("which is not a vendor row"));
+            Assert.That(ma5, Has.Some.Contains($"vendor credit seq {vendor.Seq} paid"));
+        });
 
         var many = new List<EntityId>();
         Breaks("MA-6",

@@ -148,7 +148,7 @@ public sealed partial class BotSwarm
 
             fleet.AddMarketRefusals(refusedBy);
 
-            fleet.Add(slot, brain.Goal, brain.Counters, stats);
+            fleet.Add(slot, brain.Activity, brain.Counters, stats);
             if (bot.Tracer != null)
             {
                 traced.Add(bot.Tracer);

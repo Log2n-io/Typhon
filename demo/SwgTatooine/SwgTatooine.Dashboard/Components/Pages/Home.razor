@@ -15,7 +15,7 @@
     <span class="dot @(s.Up ? "up" : "down")"></span>
     <span class="muted">@(s.Up ? "live" : $"server not answering: {s.Error}")</span>
     <span class="muted">· @Feed.Server · read @Age(s.At) ago</span>
-    <nav class="links"><a href="bots">Bots →</a></nav>
+    <nav class="links"><a href="accounts">Accounts →</a> · <a href="bots">Bots →</a></nav>
 </header>
 
 <main class="grid">
@@ -170,6 +170,151 @@
     </section>
 
     <section class="card">
+        <h2>Crafting</h2>
+        @if (st?["craft"] is null)
+        {
+            <p class="muted">this server publishes no crafting</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("finished / min", Rate(st, "craft", "finishedPerMin"))
+                @Kpi("started / min", Rate(st, "craft", "startedPerMin"))
+                @Kpi("under way now", F(N(st, "craft", "underWay"), 0))
+                @Kpi("finished since start", F(N(st, "craft", "finished"), 0))
+                @Kpi("started since start", F(N(st, "craft", "started"), 0))
+                @Kpi("points spent", F(N(st, "craft", "points"), 0))
+                @Kpi("add-ons applied", F(N(st, "craft", "enhanced"), 0))
+                @Kpi("bench fees", $"{F(N(st, "craft", "fees"), 0)} cr")
+                @Kpi("refines", F(N(st, "craft", "refines"), 0))
+                @Kpi("refine fees", $"{F(N(st, "craft", "refineFees"), 0)} cr")
+                @Kpi("refined into Mk II / III / IV / V", RefinedInto(st))
+                @Kpi("packs into crates", F(N(st, "craft", "packs"), 0))
+                @Kpi("items unpacked", F(N(st, "craft", "unpacked"), 0))
+            </div>
+            @Spark("crafts/min", "/min")
+            <h3>Made since start, by Mk</h3>
+            @if (st["craft"]?["made"] is not JsonObject made || made.Count == 0)
+            {
+                <p class="muted">nothing crafted yet</p>
+            }
+            else
+            {
+                var names = CraftNames(st);
+                <table class="ledger">
+                    <tr>
+                        <th>item</th><th class="num">I</th><th class="num">II</th><th class="num">III</th><th class="num">IV</th><th class="num">V</th>
+                        <th class="num" title="an item without Mk">no Mk</th>
+                    </tr>
+                    @foreach (var (id, node) in made.OrderByDescending(m => Sum(m.Value)))
+                    {
+                        var counts = Counts(node);
+                        <tr>
+                            <td title="@id">@(names.TryGetValue(id, out var name) ? name : id)</td>
+                            @for (var mk = 0; mk < 5; mk++)
+                            {
+                                <td class="num">@(counts.Length == 1 ? "—" : F(At(counts, mk), 0))</td>
+                            }
+                            <td class="num">@(counts.Length == 1 ? F(counts[0], 0) : "—")</td>
+                        </tr>
+                    }
+                </table>
+            }
+            <h3>Latest crafts</h3>
+            @if (st["craft"]?["recent"] is not JsonArray recent || recent.Count == 0)
+            {
+                <p class="muted">none since this server started</p>
+            }
+            else
+            {
+                <table class="ledger">
+                    <tr><th>when</th><th>crafter</th><th>item</th><th class="num">Mk</th><th>stats</th></tr>
+                    @foreach (var r in recent.Where(r => r != null))
+                    {
+                        <tr>
+                            <td>@AgoMs(N(r, "at"))</td>
+                            <td>@((string)r["crafter"])</td>
+                            <td>@((string)r["name"])</td>
+                            <td class="num">@(N(r, "mk") > 0 ? F(N(r, "mk"), 0) : "—")</td>
+                            <td class="muted small">@CraftStats(r["stats"])</td>
+                        </tr>
+                    }
+                </table>
+            }
+        }
+    </section>
+
+    <section class="card">
+        <h2>Installations</h2>
+        @if (st?["installations"] is null)
+        {
+            <p class="muted">this server publishes no installations</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("standing now", F(N(st, "installations", "standing"), 0))
+                @Kpi("placed since start", F(N(st, "installations", "placed"), 0))
+                @Kpi("picked up since start", F(N(st, "installations", "pickedUp"), 0))
+                @Kpi("collects since start", F(N(st, "installations", "collects"), 0))
+                @Kpi("units extracted", F(N(st, "installations", "extracted"), 0))
+                @Kpi("upkeep paid", $"{F(N(st, "installations", "upkeepPaid"), 0)} cr")
+                @Kpi("lots a character", F(N(st, "installations", "lotsPerCharacter"), 0))
+            </div>
+        }
+    </section>
+
+    <section class="card">
+        <h2>Decay and repair</h2>
+        @if (st?["decay"] is null)
+        {
+            <p class="muted">this server publishes no decay</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("broken since start", F(N(st, "decay", "broken"), 0))
+                @Kpi("worn out (destroyed)", F(N(st, "decay", "destroyed"), 0))
+                @Kpi("scrapped broken", F(N(st, "decay", "ends", "scrapped", "count"), 0))
+                @Kpi("repairs", F(N(st, "decay", "repairs"), 0))
+                @Kpi("repair fees", $"{F(N(st, "decay", "repairFees"), 0)} cr")
+                @Kpi("salvages", F(N(st, "decay", "salvages"), 0))
+                @Kpi("standard issue bought", F(N(st, "gear", "standardSold"), 0))
+                @Kpi("standard issue paid", $"{F(N(st, "gear", "standardPaid"), 0)} cr")
+                @Kpi("wear writes", F(N(st, "decay", "wearWrites"), 0))
+            </div>
+            <h3>How gear ended</h3>
+            <table class="ledger">
+                <tr>
+                    <th>end</th><th class="num">count</th><th class="num">I</th><th class="num">II</th><th class="num">III</th><th class="num">IV</th>
+                    <th class="num">V</th><th class="num" title="the median of the condition it had left, by tenths">left, median</th>
+                    <th class="num">left, mean</th><th class="num">repairs used</th>
+                </tr>
+                @foreach (var (key, label) in GearEnds)
+                {
+                    var e = st["decay"]?["ends"]?[key];
+                    var mks = e?["byMk"] as JsonArray;
+                    <tr>
+                        <td>@label</td>
+                        <td class="num">@F(N(e, "count"), 0)</td>
+                        @for (var mk = 0; mk < 5; mk++)
+                        {
+                            <td class="num">@(mks is null || mk >= mks.Count ? "—" : F(N(mks[mk]), 0))</td>
+                        }
+                        <td class="num">@Pc(N(e, "conditionLeftMedianPct"))</td>
+                        <td class="num">@Pc(N(e, "conditionLeftMeanPct"))</td>
+                        <td class="num">@(double.IsNaN(N(e, "repairsMean")) ? "—" : F(N(e, "repairsMean"), 2))</td>
+                    </tr>
+                }
+            </table>
+            <p class="muted small">
+                Decay finishes its job when gear is worn out or scrapped broken, its repairs used; gear sold with most of its condition left was replaced
+                early.
+            </p>
+        }
+    </section>
+
+    <section class="card">
         <h2>Market</h2>
         @if (st?["market"] is null)
         {
@@ -290,6 +435,27 @@
             @Kpi("retargeted", F(N(st, "missions", "retargeted"), 0))
         </div>
         @Spark("missions done/min", "/min")
+    </section>
+
+    <section class="card">
+        <h2>Travel</h2>
+        @if (st?["travel"] is null)
+        {
+            <p class="muted">this server publishes no travel</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("flights / min", Rate(st, "travel", "flightsPerMin"))
+                @Kpi("tickets bought / min", Rate(st, "travel", "faresPerMin"))
+                @Kpi("fare", $"{F(N(st, "travel", "fare"), 0)} cr")
+                @Kpi("tickets bought since start", F(N(st, "travel", "faresPaid"), 0))
+                @Kpi("flights since start", F(N(st, "travel", "ticketFlights"), 0))
+                @Kpi("tickets held, unflown", F(N(st, "travel", "ticketsHeld"), 0))
+                @Kpi("refused for the fare", F(N(st, "travel", "faresRefused"), 0))
+            </div>
+            <p class="muted small">Player passengers only: the scripted crowd has no wallet and flies free.</p>
+        }
     </section>
 
     <section class="card">
@@ -455,6 +621,67 @@
         => stats?["items"]?["held"]?[id] is JsonArray a
             ? a.Select(n => n is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d).ToArray()
             : [];
+
+    /// <summary>How an item with stats leaves the world (the server's GearEnd), as the decay card lists them.</summary>
+    private static readonly (string Key, string Label)[] GearEnds =
+    [
+        ("wornOut", "worn out on its owner"), ("scrapped", "scrapped broken at the vendor"), ("sold", "sold to the vendor"), ("salvaged", "salvaged"),
+    ];
+
+    private static string Pc(double v) => double.IsNaN(v) ? "—" : $"{F(v, 0)} %";
+
+    /// <summary>The units refined into Mk II-V since start, as one figure: "12 / 3 / 0 / 0".</summary>
+    private static string RefinedInto(JsonNode st)
+        => st?["craft"]?["refinedInto"] is JsonArray a && a.Count == 4 ? string.Join(" / ", a.Select(n => F(N(n), 0))) : "—";
+
+    /// <summary>The names of the items the latest crafts made, by asset: the server's, since this page holds no item table.</summary>
+    private static Dictionary<string, string> CraftNames(JsonNode stats)
+    {
+        var names = new Dictionary<string, string>();
+        foreach (var r in stats?["craft"]?["recent"] as JsonArray ?? [])
+        {
+            if (r?["item"] is JsonValue item && r["name"] is JsonValue name)
+            {
+                names.TryAdd((string)item, (string)name);
+            }
+        }
+
+        return names;
+    }
+
+    private static double[] Counts(JsonNode node)
+        => node is JsonArray a ? a.Select(n => n is JsonValue v && v.TryGetValue<double>(out var d) ? d : 0d).ToArray() : [];
+
+    private static double Sum(JsonNode node) => Counts(node).Sum();
+
+    /// <summary>A crafted item's stats as one line: its named lines and its condition, without the bookkeeping.</summary>
+    private static string CraftStats(JsonNode stats)
+    {
+        if (stats is not JsonObject o)
+        {
+            return "";
+        }
+
+        var parts = new List<string>();
+        foreach (var (name, value) in o)
+        {
+            if (name is not ("wears" or "crafter" or "lifeMilli" or "repairs" or "broken" or "condition" or "maxCondition"))
+            {
+                parts.Add($"{name} {value}");
+            }
+        }
+
+        if (N(o, "maxCondition") > 0)
+        {
+            parts.Add($"condition {F(N(o, "maxCondition"), 0)} · life {F(N(o, "lifeMilli"), 0)} ‰");
+        }
+
+        return string.Join(" · ", parts);
+    }
+
+    /// <summary>How long ago a Unix time in milliseconds was, as "12 s ago".</summary>
+    private static string AgoMs(double unixMs)
+        => unixMs <= 0 ? "—" : Dur((DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - unixMs) / 1000d) + " ago";
 
     /// <summary>One Mk's units (0-based) of an item with Mk; 0 where the array stops.</summary>
     private static double At(double[] held, int mk) => mk < held.Length ? held[mk] : 0d;

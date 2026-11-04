@@ -1,6 +1,7 @@
 using SwgTatooine.Server.Accounts;
 using SwgTatooine.Server.Terrain;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 
@@ -38,6 +39,9 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        AdminEndpoints.Desk = request => _bridge != null
+            ? _bridge.Admin(request)
+            : System.Threading.Tasks.Task.FromResult(new AdminOutcome(false, "the simulation is not started"));
         // Before the runtime starts: the facilities never move, and a spatial archetype is read off the tick only while nothing ticks.
         FacilityEndpoints.Json = FacilityEndpoints.Build(Dbe);
         TatooineHost.DashboardPort = _config.DashboardPort;
@@ -164,11 +168,20 @@ public sealed partial class TatooineSim
             AssetShapes = shapes,
         };
 
+        // The installations' clock for their endpoint (crafting-build.md § 10), as soon as there is a bridge: what it computes a hopper at.
+        var bridge = _bridge;
+        InstallationEndpoints.Clock = () => (bridge.WorldTickNow, bridge.TicksPerHour);
+
         // The cities' buildings, as the crowd's walks round them read them (SimBridge.Routes.cs): once, now the world is built or reopened.
         _bridge.PlanCityWalks();
 
         // Before the runtime and before Declare: the seeded rows are stamped before its first tick and queue no notice (Hardening/HistorySeed.cs).
         SeedHistoryIfAsked();
+
+        // Every item stack, before the first tick rather than inside it: on a reopened world with a long history that read is seconds of page misses.
+        var warmed = Stopwatch.GetTimestamp();
+        var stacks = _bridge.WarmItems();
+        Console.WriteLine($"  items: {stacks:N0} stacks read in {Stopwatch.GetElapsedTime(warmed).TotalSeconds:F1} s");
 
         _runtime = TyphonRuntime.Create(Dbe, BuildServeSchedule, new RuntimeOptions
         {
@@ -258,7 +271,7 @@ public sealed partial class TatooineSim
 
         // States the obligation rather than leaving it to the first login to discover. See ThrowIfAvatarsNotConfigured.
         TatooineReplication.ThrowIfAvatarsNotConfigured();
-        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
+        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic, _config.CommandRateScale);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
         // What a BoardShuttle ask is validated against. Handed over rather than reached for: the ports live in the world index, which the bridge owns.
@@ -330,8 +343,7 @@ public sealed partial class TatooineSim
     /// <remarks>
     /// <b>They join the simulation's DAG rather than a DAG of their own, which they had until SWG-01.</b> Two DAGs on one track have no barrier between them
     /// and cannot carry an edge to each other, so a session system in its own DAG could run concurrently with <c>PlayerThink</c> — which matters the moment it
-    /// applies an intent, because both write <c>PlayerMotion</c> — and concurrently with a second session system, which matters because session requests share
-    /// one unsynchronized segment. See <see cref="TatooineReplication.SessionTick"/>.
+    /// applies an intent, because both write <c>PlayerMotion</c>. See <see cref="TatooineReplication.SessionTick"/>.
     /// </remarks>
     private void BuildServeSchedule(RuntimeSchedule schedule)
         => BuildSchedule(schedule, replicating: true);

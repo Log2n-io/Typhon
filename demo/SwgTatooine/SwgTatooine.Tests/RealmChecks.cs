@@ -4,6 +4,7 @@ using System.IO;
 using NUnit.Framework;
 using SwgTatooine.Server;
 using Typhon.Engine;
+using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
 namespace SwgTatooine.Tests;
@@ -19,6 +20,9 @@ internal static class Worlds
         WorkerCount = 4,
         TickRateHz = 10,
         Unpaced = true,
+
+        // The checks count inventories from empty; the pack has its own (InstanceChecks).
+        WelcomePack = false,
     };
 
     /// <summary>
@@ -31,6 +35,18 @@ internal static class Worlds
     /// cooldown, is slower at a faster rate and keeps its own (AttackEventChecks).
     /// </remarks>
     public const int ServedHz = 50;
+
+    /// <summary>
+    /// The command rate scale (<see cref="SimConfig.CommandRateScale"/>) of a check that only needs its commands through: 2 a second becomes 50, one a
+    /// tick at <see cref="ServedHz"/>, burst 100. The rates are counted in wall-clock seconds, so at 1 a check waited half a second after each command —
+    /// nearly half the suite's time (2026-11-02). A check whose subject is the rate (the bots trading at it) keeps 1.
+    /// </summary>
+    public const int FastCommands = 25;
+
+    /// <summary>
+    /// Ticks after a command at <see cref="FastCommands"/>: one for the command's tick, one for its effect or its refusal to be read, one spare.
+    /// </summary>
+    public const int FastCommandGapTicks = 3;
 
     /// <summary>A small world paced at <see cref="ServedHz"/>, for a fixture that serves it to fake clients.</summary>
     /// <param name="dir">Its database directory.</param>
@@ -117,6 +133,51 @@ internal static class Worlds
     /// deciding would walk out of whatever the case placed it in — out of earshot, or out of a city whose group set the case is asserting on.
     /// </remarks>
     public static EntityId Park(TatooineSim sim, SessionId session, float x, float z, ushort realm = 0) => Park(sim, session, x, z, out _, realm);
+
+    /// <summary>
+    /// Arms a session's player with a standard-issue weapon (crafting-build.md C1): its body's gear set to what <c>Workshop</c> writes for that weapon
+    /// worn — its damage, delay, reach, type and stance — and held until it stays. A stance other than the fist fights only with its weapon worn.
+    /// </summary>
+    /// <remarks>
+    /// <b>The gear, not an item</b>: these cases are about fighting, and a weapon minted into the inventory would add item rows the loot cases count.
+    /// Equipping itself is <c>EquipChecks</c>'. Rewritten until it holds, because the bind's own gear write (the fist) may land after the first.
+    /// </remarks>
+    /// <param name="weapon">The weapon's template: the blaster (pistol stance) unless the case fights with something else.</param>
+    public static void Arm(TatooineSim sim, FakeLink link, ushort weapon = ItemCatalog.Blaster)
+    {
+        EntityId body = default;
+        SessionHarness.Until(() => TatooineReplication.TryBodyOfSession(link.Session, out body, out _), "the session's body");
+        Equipment.TryStandard(weapon, out var issue);
+        Equipment.TryWeapon(weapon, out var traits);
+        var held = 0;
+        SessionHarness.Until(
+            () =>
+            {
+                var stance = 0;
+                sim.WriteInTick(tx =>
+                {
+                    if (!tx.TryOpenMut(body, out var p))
+                    {
+                        return;
+                    }
+
+                    var gear = p.Read(Player.Gear);
+                    stance = gear.Stance;
+                    if (stance != traits.Stance)
+                    {
+                        gear.Damage = (short)issue.Stat0;
+                        gear.DelayMs = (short)issue.Stat1;
+                        gear.RangeDm = (short)issue.Stat2;
+                        gear.DamageType = traits.DamageType;
+                        gear.Stance = traits.Stance;
+                        p.Set(Player.Gear, gear);
+                    }
+                });
+                held = stance == traits.Stance ? held + 1 : 0;
+                return held >= 3;
+            },
+            "the weapon worn");
+    }
 
     /// <inheritdoc cref="Park(TatooineSim, SessionId, float, float, ushort)"/>
     /// <param name="tick">The tick that applied the placement: what a wait for the session's new view counts from (<c>SessionHarness.UntilNamed</c>).</param>

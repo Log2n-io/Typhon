@@ -158,7 +158,7 @@ public sealed partial class SimBridge
         _deskWalletsMoved.Clear();
     }
 
-    /// <summary>The <c>Ledger</c> system: the wallets asked for by a bind, then this tick's tips, in that order.</summary>
+    /// <summary>The <c>Ledger</c> system: the wallets asked for by a bind, then this tick's tips, then its shuttle fares, in that order.</summary>
     public void LedgerTick(TickContext ctx)
     {
         if (Halted(ctx.TickNumber))
@@ -174,10 +174,13 @@ public sealed partial class SimBridge
         {
             _walletsAsked.Add((character, body, tick));
             _boundThisTick.Add(character);
+            GearDueOnBind(character, body);
         }
 
+        SettleTickets(tick);
         var tips = subs == null ? default : subs.Commands<GiveCredits>();
-        if (_economyLoaded && _walletsAsked.Count == 0 && tips.Count == 0)
+        var boards = subs == null ? default : subs.Commands<BoardShuttle>();
+        if (_economyLoaded && _walletsAsked.Count == 0 && tips.Count == 0 && boards.Count == 0 && !FaresDue)
         {
             _boundThisTick.Clear();
             return;
@@ -199,20 +202,32 @@ public sealed partial class SimBridge
 
         if (tips.Count > 0)
         {
-            TatooineReplication.FillCharacterBodies(_econBodies);
-            _econCharacterOf.Clear();
-            foreach (var (character, body) in _econBodies)
-            {
-                _econCharacterOf[body] = character;
-            }
-
+            FillEconCharacters();
             foreach (var command in tips)
             {
                 TipFromCommand(tx, tick0, subs, in command, worldTick);
             }
         }
 
-        var committed = EndEconomy(tx.Commit());
+        foreach (var command in boards)
+        {
+            FareFromCommand(tx, tick0, subs, in command, worldTick);
+        }
+
+        if (FaresDue)
+        {
+            if (tips.Count == 0)
+            {
+                FillEconCharacters();
+            }
+
+            ChargeFaresDue(tx, tick0, worldTick);
+        }
+
+        FlushItemHead(tx);
+        var committed = !Volatile.Read(ref _failNextLedger) ? EndEconomy(tx.Commit()) : FailLedgerOnce();
+        var packs = EndItems(committed);
+        EndFares(tick0, subs, committed);
         _boundThisTick.Clear();
         if (!committed)
         {
@@ -230,7 +245,33 @@ public sealed partial class SimBridge
         foreach (var body in _walletsMoved)
         {
             BumpWallet(tick0, body);
+            if (packs)
+            {
+                BumpItems(tick0, body);
+            }
         }
+    }
+
+    /// <summary>Every body online to its character, for this tick's tips and fares.</summary>
+    private void FillEconCharacters()
+    {
+        TatooineReplication.FillCharacterBodies(_econBodies);
+        _econCharacterOf.Clear();
+        foreach (var (character, body) in _econBodies)
+        {
+            _econCharacterOf[body] = character;
+        }
+    }
+
+    private bool _failNextLedger;
+
+    /// <summary>The checks' failure injection: the Ledger's next transaction is not committed, as if the commit had failed.</summary>
+    internal void FailNextLedgerWriteForChecks() => Volatile.Write(ref _failNextLedger, true);
+
+    private bool FailLedgerOnce()
+    {
+        Volatile.Write(ref _failNextLedger, false);
+        return EndEconomy(false);
     }
 
     /// <summary>Reads the wallets and the head on the first use after a start or a failed commit.</summary>
@@ -250,6 +291,7 @@ public sealed partial class SimBridge
     /// <returns>Whether it committed.</returns>
     private bool EndEconomy(bool committed)
     {
+        SettleNotices(committed);
         if (_economyDirty)
         {
             if (committed)
@@ -330,7 +372,30 @@ public sealed partial class SimBridge
         _economyDirty = true;
         Transfer(tx, EconomyLedger.World, key, EconomyLedger.StartingCredits, TransferKind.Grant, 0, worldTick);
         _pendingGrants++;
+        GrantPack(tx, key, worldTick);
         return true;
+    }
+
+    /// <summary>
+    /// The welcome pack (crafting-build.md O-1), minted with the wallet in its transaction: a standard-issue blaster, as <see cref="ItemMoveKind.Grant"/>
+    /// rows, <b>worn</b> — a new character can fight at once — so the body's gear is due; and a weapon repair kit (C3). The three stims wait for potions
+    /// to have a use (C2-6, #1394).
+    /// </summary>
+    private void GrantPack(Transaction tx, long character, long worldTick)
+    {
+        if (!_config.WelcomePack || !Equipment.TryStandard(ItemCatalog.Blaster, out var blaster))
+        {
+            return;
+        }
+
+        var stats = StandardStats(in blaster);
+        var id = MintInstance(tx, character, ItemCatalog.Blaster, 1, in stats, ItemMoveKind.Grant, 0, worldTick);
+        if (!id.IsNull)
+        {
+            WearOnGrant(tx, character, id);
+        }
+
+        ItemTransfer(tx, ItemLedger.World, character, ItemCatalog.KitWeaponRepair, 0, 1, ItemMoveKind.Grant, 0, worldTick);
     }
 
     /// <summary>

@@ -125,6 +125,8 @@ public readonly unsafe struct PersistentStore : IPageStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int GetOrAllocateDirectoryTwin(int primaryPageIndex, ChangeSet changeSet) => _mmf.GetOrAllocateDirectoryTwin(primaryPageIndex, changeSet);
 
+    public void HoldForDirectory(int filePageIndex, ReadOnlySpan<int> directoryMemPageIndices) => _mmf.HoldForDirectory(filePageIndex, directoryMemPageIndices);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => _mmf.CreateChangeSet(drainedByCheckpoint);
 

@@ -20,6 +20,8 @@ export interface ShuttleSchedule {
   readonly ports: number;
   /** How close to a port's centre a player must stand to board there, metres. */
   readonly boardM: number;
+  /** What a ticket costs, credits (`TatooineData.ShuttleFare`); 0 from a server that publishes none. */
+  readonly fare: number;
 }
 
 /** Seconds of the approach, the curved descent to the hover. */

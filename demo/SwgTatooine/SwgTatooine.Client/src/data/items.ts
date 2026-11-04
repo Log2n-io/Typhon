@@ -26,6 +26,106 @@ export interface InventoryItem {
   /** 1..5; 0 for an item without Mk. */
   readonly mk: number;
   readonly count: number;
+  /** An item with stats (crafting-build.md § 2.1): its lines by category, its condition. Absent for units. */
+  readonly stats?: ItemStats;
+  /** What it packs with into a crate (crafting-catalog.md § 11.2): equal for identical pristine items; absent for one that does not pack. */
+  readonly packKey?: string;
+}
+
+/** What `/swg/inventory` says of an item with stats: a weapon's or an armour piece's lines, and its wear. */
+export interface ItemStats {
+  /** A weapon's damage per hit, delay (ms) and reach (dm). */
+  readonly damage?: number;
+  readonly delayMs?: number;
+  readonly rangeDm?: number;
+  /** An armour piece's protections, per mille. */
+  readonly kinetic?: number;
+  readonly energy?: number;
+  /** A crafted part's grade, per mille. */
+  readonly grade?: number;
+  /** A potion's potency and duration (ms). */
+  readonly potency?: number;
+  /** A structure's kit (crafting-build.md § 10): units a running hour, and its hopper. */
+  readonly rate?: number;
+  readonly hopper?: number;
+  readonly durationMs?: number;
+  /** The equip slot it is worn in, 101-107; 0 for a part or a potion. */
+  readonly wears?: number;
+  readonly condition: number;
+  readonly maxCondition: number;
+  readonly lifeMilli: number;
+  readonly repairs: number;
+  /** At 0 condition with a repair left (crafting-catalog.md § 9.2): worn, but it does nothing until repaired. Absent from older servers. */
+  readonly broken?: boolean;
+  /** The crafter's raw id, `'0'` for standard issue and loot. */
+  readonly crafter: string;
+}
+
+/** Repairs an item takes at most (§ 9.2), each to a max × 0.75. */
+export const MAX_REPAIRS = 2;
+
+/** The kit a worn item is repaired with: a weapon's (62) or an armour piece's (63); `undefined` for anything that does not wear. */
+export function repairKitOf(item: InventoryItem): number | undefined {
+  const wears = item.stats?.wears;
+  return wears === undefined || wears === 0 ? undefined : wears === 101 ? 62 : 63;
+}
+
+/** The equip slots (crafting-build.md § 2.2): 101 the weapon, then the six armour pieces; what each is called on the equipment strip. */
+export const EQUIP_SLOTS: readonly { readonly slot: number; readonly label: string }[] = [
+  { slot: 101, label: 'Weapon' },
+  { slot: 102, label: 'Head' },
+  { slot: 103, label: 'Torso' },
+  { slot: 104, label: 'Arms' },
+  { slot: 105, label: 'Legs' },
+  { slot: 106, label: 'Hands' },
+  { slot: 107, label: 'Feet' },
+];
+
+/** Each armour slot's share of the set, per mille, Head to Feet (102-107): the server's `EquipSlot.SharePerMille`. */
+export const ARMOR_SHARE_PER_MILLE: readonly number[] = [130, 330, 220, 200, 60, 60];
+
+/** The most armour mitigates, per mille: the server's `Equipment.MitigationCapPerMille`. */
+export const MITIGATION_CAP_PER_MILLE = 750;
+
+/**
+ * What the worn armour mitigates, per mille, as the server computes it (`SimBridge.ComputeGear`): each unbroken piece's protection by its slot's share,
+ * summed, capped.
+ */
+export function mitigation(worn: ReadonlyMap<number, InventoryItem>): {
+  readonly kinetic: number;
+  readonly energy: number;
+} {
+  let kinetic = 0;
+  let energy = 0;
+  for (let i = 0; i < ARMOR_SHARE_PER_MILLE.length; i++) {
+    const stats = worn.get(102 + i)?.stats;
+    if (stats !== undefined && stats.broken !== true) {
+      kinetic += ARMOR_SHARE_PER_MILLE[i] * (stats.kinetic ?? 0);
+      energy += ARMOR_SHARE_PER_MILLE[i] * (stats.energy ?? 0);
+    }
+  }
+
+  return {
+    kinetic: Math.min(MITIGATION_CAP_PER_MILLE, Math.floor(kinetic / 1000)),
+    energy: Math.min(MITIGATION_CAP_PER_MILLE, Math.floor(energy / 1000)),
+  };
+}
+
+/** Whether a slot is one of the equip slots, out of the grid. */
+export function isEquipSlot(slot: number): boolean {
+  return slot >= 101 && slot <= 107;
+}
+
+/** What is worn, by equip slot. */
+export function equipped(items: readonly InventoryItem[]): ReadonlyMap<number, InventoryItem> {
+  const worn = new Map<number, InventoryItem>();
+  for (const item of items) {
+    if (isEquipSlot(item.slot)) {
+      worn.set(item.slot, item);
+    }
+  }
+
+  return worn;
 }
 
 /** A drop, or part of one, that did not fit and was never minted; numbered per character so it is announced once. */
@@ -64,7 +164,12 @@ export function parseInventory(answer: unknown): InventorySnapshot | null {
   return {
     open: a.open === true,
     slots: a.slots,
-    items: a.items.filter(isItem).map((i) => ({ ...i, template: typeof i.template === 'number' ? i.template : 0 })),
+    items: a.items.filter(isItem).map((i) => {
+      const { stats, packKey, ...rest } = i;
+      const base = { ...rest, template: typeof i.template === 'number' ? i.template : 0 };
+      const item = typeof packKey === 'string' ? { ...base, packKey } : base;
+      return isStats(stats) ? { ...item, stats } : item;
+    }),
     lost: a.lost.filter(isLost),
   };
 }
@@ -88,10 +193,34 @@ export function mkNumeral(mk: number): string {
   return NUMERALS[mk] ?? '';
 }
 
-/** What hovering a stack says: `Hide · Mk II · ×7`. */
+/**
+ * What hovering a stack says: `Hide · Mk II · ×7`. An item with stats says them instead of a count: `DL-44 Blaster · Mk I · 81 dmg · 1.02 s · 30 m ·
+ * condition 100 %`, or an armour piece's protections.
+ */
 export function itemTooltip(item: InventoryItem): string {
   const mk = mkNumeral(item.mk);
-  return mk === '' ? `${item.name} · ×${String(item.count)}` : `${item.name} · Mk ${mk} · ×${String(item.count)}`;
+  const head = mk === '' ? item.name : `${item.name} · Mk ${mk}`;
+  const s = item.stats;
+  if (s === undefined) {
+    return `${head} · ×${String(item.count)}`;
+  }
+
+  const parts = [head];
+  if (s.damage !== undefined && s.delayMs !== undefined && s.rangeDm !== undefined) {
+    parts.push(`${String(s.damage)} dmg`, `${(s.delayMs / 1000).toFixed(2)} s`, `${String(s.rangeDm / 10)} m`);
+  }
+
+  if (s.kinetic !== undefined && s.energy !== undefined) {
+    parts.push(`kinetic ${(s.kinetic / 10).toFixed(0)} %`, `energy ${(s.energy / 10).toFixed(0)} %`);
+  }
+
+  const condition = s.maxCondition > 0 ? Math.round((100 * s.condition) / s.maxCondition) : 0;
+  parts.push(s.broken === true ? 'broken' : `condition ${String(condition)} %`);
+  if (s.repairs > 0) {
+    parts.push(`repaired ${String(s.repairs)}/${String(MAX_REPAIRS)}`);
+  }
+
+  return parts.join(' · ');
 }
 
 /** What a cell shows when the catalogue has no icon for the item (no `--assets`): the initials of its name. */
@@ -196,6 +325,21 @@ function isItem(value: unknown): value is InventoryItem {
     typeof i.category === 'string' &&
     typeof i.mk === 'number' &&
     typeof i.count === 'number'
+  );
+}
+
+function isStats(value: unknown): value is ItemStats {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const s = value as Record<string, unknown>;
+  return (
+    typeof s.condition === 'number' &&
+    typeof s.maxCondition === 'number' &&
+    typeof s.lifeMilli === 'number' &&
+    typeof s.repairs === 'number' &&
+    typeof s.crafter === 'string'
   );
 }
 

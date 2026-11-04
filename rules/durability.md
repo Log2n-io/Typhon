@@ -1247,6 +1247,30 @@ CK-08 (flush-only cycles) are later increments.
             taken again and written before its header is no root after the next crash (ACraftsSweptOldRoot_TakenAgain_IsNoRootAfterTheNextCrash:
             without the clear the item reads zeros)
 
+### CK-18: A grow's old tail is written only once the directory the grow wrote is durable `[fatal]` `[silent]`
+  invariant a checkpoint writes the page a segment grow linked to its first new page — the old tail — only after every directory page the grow wrote
+            is durable as the grow left it: its captured generation at least the one the grow's directory write gave it, or the page gone from its
+            slot (only a page whose debt a durable write discharged leaves one). A held tail is skipped and stays owed; the pass after the directory's
+            batch settles writes it, so a cycle that writes the directory writes the tail too
+  invariant the hold is taken in the publish, the tail and the directory pages still latched, so no copy of the tail with its new link is in flight
+            and the generations are the directory pass's. The new pages are not held: a grow larger than the cache's free room has its first pages
+            written and evicted while it initializes the rest (PS-21), and alone on the file they are pages no directory names. A Create holds
+            nothing: no published segment names its pages until it returns
+  rationale: a grow writes no WAL record, and it initializes its new pages, owed and unlatched, before it writes the directory; a cycle copies a page
+             when it writes it, not when it collects it. A cycle that collected the new pages and not the directory — or skipped the directory,
+             latched by another grow — wrote them as the segment's, and the old tail, copied after the publish, with its link to them: on the file,
+             the chain ahead of the directory onto a page written as the segment's, the shape CS-08 refuses as an old lost directory append. A crash
+             before the next cycle then failed the open of a component or revision segment, or replaced a cluster segment with a fresh one and lost
+             every entity the log window did not hold (#1562: 3 to 6 of 40 seeds of the hard-crash sweep, every run). Holding the new pages instead
+             starved a grow larger than the cache. With the tail held, the file's chain never runs ahead of its directory; the directory ahead of the
+             chain is the torn grow CS-08 completes
+  scope: PagedMMF.HoldForDirectory, PagedMMF.HeldForDirectory, PagedMMF.WritePagesForCheckpoint, LogicalSegment.CreateOrGrow
+  on_violation: a crash after a cycle that wrote a grow's old tail and its pages and not its directory leaves a segment the crash open refuses: an
+                unopenable database, or a cluster refilled from the log window alone, its older entities gone with the open reporting DataLoss
+  verified: TornCaptureRecoveryTests.AGrowsOldTail_IsWrittenOnlyOnceTheGrowsDirectoryIs [VerifiesRule] — a plain wave reaching the old tail before
+            the directory leaves it owed, and the next cycle writes both and leaves no hold (red with the hold disabled);
+            BackupCaptureRoundTripTests.AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery (Nightly, 40 seeds)
+
 ---
 
 ---
@@ -3004,7 +3028,7 @@ of the LSN value).
             ended where the directory ends when the page it links to was never written as the segment's (past the file's end, another
             incarnation or none): a cycle that took the old tail before a grow and not the directory wrote it, and the grow's pages, never
             checkpointed (CK-16), hold only what the log window holds (#1299). Onto a page written as the segment's — an old lost directory
-            append — it is refused. A Versioned head naming a content chunk past its segment's end (a revision on such a page) is skipped by the
+            append — it is refused: CK-18 keeps a grow's page off the file until its directory is on it, so only a lost write leaves that shape. A Versioned head naming a content chunk past its segment's end (a revision on such a page) is skipped by the
             open's HEAD rebuild (VersionedHeadRebuildSkips.HeadPastSegment) and brought back by the replay
   invariant open-time verification at Quick depth and deeper still refuses such a segment of a kind the crash path does not replace: the
             finding does not say which way the chain disagrees, and the refusal is the conservative reading

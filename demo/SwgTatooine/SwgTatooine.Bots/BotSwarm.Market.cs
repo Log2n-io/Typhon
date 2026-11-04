@@ -21,6 +21,7 @@ public sealed partial class BotSwarm
     private const string MarketListCommand = "MarketList";
 
     private const string MarketBuyCommand = "MarketBuy";
+    private const string BuyStandardCommand = "BuyStandard";
     private const string MarketCollectCommand = "MarketCollect";
     private const string SellToVendorCommand = "SellToVendor";
 
@@ -97,12 +98,20 @@ public sealed partial class BotSwarm
             ["mk"] = FieldValue.Of((double)c.Mk),
             ["quantity"] = FieldValue.Of((double)c.Quantity),
             ["unitPrice"] = FieldValue.Of((double)c.UnitPrice),
+            ["item"] = FieldValue.OfUInt64(c.Item),
         }),
         MarketStep.Vendor => (SellToVendorCommand, new RecordValues
         {
             ["template"] = FieldValue.Of((double)c.Template),
             ["mk"] = FieldValue.Of((double)c.Mk),
             ["quantity"] = FieldValue.Of((double)c.Quantity),
+            ["item"] = FieldValue.OfUInt64(c.Item),
+        }),
+        MarketStep.Standard => (BuyStandardCommand, new RecordValues
+        {
+            ["template"] = FieldValue.Of((double)c.Template),
+            ["price"] = FieldValue.Of((double)c.UnitPrice),
+            ["quantity"] = FieldValue.Of((double)Math.Max(1, c.Quantity)),
         }),
         _ => (MarketBuyCommand, new RecordValues { ["listing"] = FieldValue.OfUInt64(c.Listing), ["unitPrice"] = FieldValue.Of((double)c.UnitPrice) }),
     };
@@ -116,6 +125,14 @@ public sealed partial class BotSwarm
         public long MarketVendored;
         public long MarketVendorCredits;
         public long MarketBought;
+
+        /// <summary>Standard-issue items bought (crafting-build.md § 6).</summary>
+        public long StandardBought;
+
+        /// <summary>Gear of its band bought off the board (§ 6, Gear), and items with stats it will not use listed (§ 6, Surplus).</summary>
+        public long GearBought;
+
+        public long ItemsListed;
         public long MarketBuyLost;
         public long MarketWon;
         public long MarketCollected;
@@ -139,6 +156,8 @@ public sealed partial class BotSwarm
         private Uri _pricesUri;
         private Uri _browseUri;
         private Uri _walletUri;
+        private Uri _standardUri;
+        private List<StandardOffer> _standard;
 
         /// <summary>The market as last read: its listings and reservations, the prices and when, the stacks held.</summary>
         private volatile MarketMine _mine = MarketMine.None;
@@ -146,6 +165,9 @@ public sealed partial class BotSwarm
         private volatile MarketPrices _prices = MarketPrices.None;
         private DateTime _pricesAt = DateTime.MinValue;
         private volatile List<HeldStack> _held = [];
+
+        // The items with stats it holds, worn or not, as the last inventory read said (crafting-build.md § 2.1).
+        private volatile List<GearItem> _gear = [];
 
         // `/mine` re-read on each `items` revision while the last answer named something — the browser's rule (bazaar.md § 5, "Told").
         private readonly OwnerFieldPoll _minePoll;
@@ -176,6 +198,7 @@ public sealed partial class BotSwarm
             _pricesUri = new Uri(server, "market/prices");
             _browseUri = new Uri(server, "market");
             _walletUri = new Uri(server, "wallet");
+            _standardUri = new Uri(server, "market/standard");
             _marketRng = (uint)((index * 2654435769u) ^ 0x5bd1e995u) | 1u;
             _onWin = options.OnMarketWin;
             _brain.Trades = true;
@@ -198,6 +221,11 @@ public sealed partial class BotSwarm
             if (_trades)
             {
                 Client.FrameApplied += CountRefusals;
+            }
+
+            if (_trades)
+            {
+                Client.FrameApplied += CountCraftRefusals;
             }
         }
 
@@ -271,23 +299,101 @@ public sealed partial class BotSwarm
             }
         }
 
-        /// <summary>A visit's plan (<see cref="MarketPlan.Plan"/>): its market read, a full material stack listed one visit in five, a buy one in four.</summary>
+        /// <summary>
+        /// A visit's plan (<see cref="MarketPlan.Plan"/>, crafting-build.md § 6): its market read; one buy — gear of its band, else what its next craft
+        /// lacks, else one visit in four the cheapest of its band; a full material stack listed one visit in five; the items with stats it will not use
+        /// listed; standard issue for an armour slot it has nothing for.
+        /// </summary>
         private async Task<List<MarketCommand>> PlanTradeAsync(int region, int level)
         {
             var mine = await ReadMineAsync().ConfigureAwait(false);
             var prices = await PricesAsync().ConfigureAwait(false);
             var listMaterial = MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.ListMaterialPercent;
             BrowseRow? buy = null;
-            if (MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.BuyPercent && region != 0)
+            List<MarketCommand> inputsFromVendor = [];
+            var band = MarketPlan.Band(level);
+            var gear = _gear;
+            long? wallet = null;
+            async Task<long> Wallet() => wallet ??= MarketJson.Credits(await GetAsync(_walletUri).ConfigureAwait(false));
+            async Task<List<BrowseRow>> Page(string query) =>
+                MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&{query}&sort=price&page=1")).ConfigureAwait(false));
+
+            // Not while goods wait for it: the piece or the input it bought last time is among them, and its gear and stacks are read before the collect.
+            if (region != 0 && mine.Reserved == 0)
             {
-                // The cheapest of its band in this city: the browser's first page, filtered by Mk.
-                var band = MarketPlan.Band(level);
-                var page = MarketJson.Browse(await GetAsync(new Uri(_browseUri, $"?city={region}&mk={band}&sort=price&page=1")).ConfigureAwait(false));
-                var wallet = MarketJson.Credits(await GetAsync(_walletUri).ConfigureAwait(false));
-                buy = MarketPlan.ChooseBuy(page, prices, band, wallet, mine.ListedIds);
+                // Gear of its band first (crafting-build.md § 6, Gear): the best-value listing above what it has, the vendor's standard issue failing it.
+                _standard ??= await Optional(async () => MarketJson.Standard(await GetAsync(_standardUri).ConfigureAwait(false))).ConfigureAwait(false);
+                if (MarketPlan.GearWanted(gear, _standard, band, _held, CraftPlan.Blaster) is { } piece
+                    && await Optional(async () => await Page($"item={piece.Item}").ConfigureAwait(false)).ConfigureAwait(false) is { } page)
+                {
+                    if (piece.Item.StartsWith("armor_padded_", StringComparison.Ordinal))
+                    {
+                        // A piece it has nothing for: padded or composite, whichever the crafters made.
+                        var composite = piece.Item.Replace("_padded_", "_composite_", StringComparison.Ordinal);
+                        page.AddRange(await Optional(async () => await Page($"item={composite}").ConfigureAwait(false)).ConfigureAwait(false) ?? []);
+                    }
+
+                    buy = MarketPlan.ChooseGear(page, prices, piece.HaveMk, band, await Wallet().ConfigureAwait(false), mine.ListedIds);
+                    GearBought += buy != null ? 1 : 0;
+                }
+
+                // Then what its next craft lacks (§ 6, Inputs): demand from the recipe, not a roll.
+                if (buy == null && CraftWant() is { } want
+                    && await Optional(async () => await Page($"item={want.Item}").ConfigureAwait(false)).ConfigureAwait(false) is { } inputs)
+                {
+                    buy = CraftPlan.ChooseInput(inputs, prices, want, await Wallet().ConfigureAwait(false), mine.ListedIds);
+                    CraftInputsBought += buy != null ? 1 : 0;
+
+                    // None on the board: the vendor's Mk I, every material its next target lacks that the vendor sells (Loïc, 2026-11-02).
+                    if (buy == null)
+                    {
+                        inputsFromVendor = CraftPlan.FromVendorAll(_book, _craftTargets[_craftTurn % _craftTargets.Length], _held, CraftPlan.PartsOf(_gear),
+                            _standard, await Wallet().ConfigureAwait(false));
+                        CraftInputsBought += inputsFromVendor.Count;
+                    }
+
+                    if (buy == null && inputsFromVendor.Count == 0)
+                    {
+                        Volatile.Write(ref _inputBackoffUntil, Environment.TickCount64 + InputBackoffMs);
+                    }
+                }
             }
 
-            return MarketPlan.Plan(_held, mine, prices, ref _marketRng, listMaterial, buy);
+            if (buy == null && inputsFromVendor.Count == 0 && region != 0 && MarketPlan.Next(ref _marketRng) % 100u < MarketPlan.BuyPercent)
+            {
+                // The cheapest of its band in this city: the browser's first page, filtered by Mk.
+                buy = MarketPlan.ChooseBuy(await Page($"mk={band}").ConfigureAwait(false), prices, band, await Wallet().ConfigureAwait(false), mine.ListedIds);
+            }
+
+            var grid = _inventory.Stacks;
+            var plan = MarketPlan.Plan(Tradeable(_held), mine, prices, ref _marketRng, listMaterial, buy, grid);
+
+            // The items it will not use go on the board where the plan left room, and to the vendor past it while the grid is over its floor (§ 6,
+            // Surplus): before the buy, which comes last.
+            var gone = plan.FindAll(c => c.Step is MarketStep.List or MarketStep.Vendor).Count;
+            var surplus = MarketPlan.Surplus(gear, prices, mine.Listed + plan.FindAll(c => c.Step == MarketStep.List).Count, band, ref _marketRng,
+                CraftPlan.Blaster, grid - gone > MarketPlan.KeepStacks, _held);
+            ItemsListed += surplus.Count;
+            plan.InsertRange(buy != null ? plan.Count - 1 : plan.Count, surplus);
+
+            plan.AddRange(inputsFromVendor);
+
+            // Standard issue for an armour slot it has nothing for, when nothing else is bought — not while goods wait for it, which may be the piece the
+            // board sold it.
+            if (region != 0 && buy == null && inputsFromVendor.Count == 0 && mine.Reserved == 0
+                && MarketPlan.ChooseStandard(_standard, gear, await Wallet().ConfigureAwait(false), _held, CraftPlan.Blaster) is { } issue)
+            {
+                plan.Add(issue);
+            }
+
+            // An installation owner with nothing to place and nothing placed buys the vendor's extractor kit (crafting-build.md § 10).
+            if (region != 0 && InstallPlan.BuysKit(Installs, _installs.Count, KitHeld() != 0, await Wallet().ConfigureAwait(false)))
+            {
+                plan.Add(MarketCommand.Standard(InstallPlan.Kit, InstallPlan.KitPrice));
+                Interlocked.Increment(ref KitsBought);
+            }
+
+            return plan;
         }
 
         /// <summary>
@@ -361,6 +467,9 @@ public sealed partial class BotSwarm
                     break;
                 case MarketStep.Buy:
                     MarketBought++;
+                    break;
+                case MarketStep.Standard:
+                    StandardBought++;
                     break;
             }
 
@@ -474,6 +583,20 @@ public sealed partial class BotSwarm
             return prices;
         }
 
+        /// <summary>An optional read of a trade: its failure costs that part of the plan, not the visit's collect and vendoring.</summary>
+        private static async Task<T> Optional<T>(Func<Task<T>> read) where T : class
+        {
+            try
+            {
+                return await read().ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException or KeyNotFoundException or InvalidOperationException
+                                          or FormatException)
+            {
+                return null;
+            }
+        }
+
         /// <summary>A GET with the bot's own token, as the browser's; a refusal throws, and the trade is planned again next visit.</summary>
         private async Task<string> GetAsync(Uri uri)
         {
@@ -517,16 +640,25 @@ public struct MarketTotals
     }
 }
 
-/// <summary>
-/// A trade's plan on its way out (bazaar.md § 8): one command at a time, at the commands' rate, and only while the bot stands at the bazaar of the visit the
-/// plan was read for. Anything else is dropped, counted: a market command from a body farther than 6 m from a terminal is refused
-/// <c>MarketNotAtBazaar</c>, and live that was 48 refusals a second — plans landing after the bot had left, and queues drained on the walk to the next errand.
-/// </summary>
-public sealed class MarketSender
-{
-    private sealed record Offered(long Visit, List<MarketCommand> Plan);
+/// <summary>A trade's plan on its way out (bazaar.md § 8): see <see cref="PlanSender{T}"/>.</summary>
+public sealed class MarketSender : PlanSender<MarketCommand>;
 
-    private readonly Queue<MarketCommand> _queue = new();
+/// <summary>
+/// A plan on its way out — a trade's (bazaar.md § 8), a craft's (crafting-build.md C2): one command at a time, at the commands' rate, and only while the bot
+/// stands at the terminal of the visit the plan was read for. Anything else is dropped, counted: a market command from a body farther than 6 m from a
+/// terminal is refused <c>MarketNotAtBazaar</c>, and live that was 48 refusals a second — plans landing after the bot had left, and queues drained on the
+/// walk to the next errand.
+/// </summary>
+public class PlanSender<T> where T : struct
+{
+    private sealed record Offered(long Visit, List<T> Plan);
+
+    private int _abort;
+
+    /// <summary>Drops what is still queued, at the next <see cref="Next"/>; any thread — a refusal read off the driver.</summary>
+    public void Abort() => Volatile.Write(ref _abort, 1);
+
+    private readonly Queue<T> _queue = new();
     private Offered _offered;
     private long _visit;
     private long _nextAt = long.MinValue;
@@ -538,14 +670,14 @@ public sealed class MarketSender
     public bool Busy => _queue.Count > 0 || Volatile.Read(ref _offered) != null;
 
     /// <summary>Hands over the plan read for <paramref name="visit"/>; any thread.</summary>
-    public void Offer(long visit, List<MarketCommand> plan) => Volatile.Write(ref _offered, new Offered(visit, plan));
+    public void Offer(long visit, List<T> plan) => Volatile.Write(ref _offered, new Offered(visit, plan));
 
     /// <summary>The command to send now, or null; on the driver's thread.</summary>
-    /// <param name="atBazaar">Whether the bot stands at a bazaar's terminal using it.</param>
+    /// <param name="atBazaar">Whether the bot stands at the plan's terminal using it.</param>
     /// <param name="visit">Its errand now: a plan read for another is dropped.</param>
     /// <param name="tick">The driver's tick.</param>
     /// <param name="spacing">Ticks between two commands: the rate.</param>
-    public MarketCommand? Next(bool atBazaar, long visit, long tick, long spacing)
+    public T? Next(bool atBazaar, long visit, long tick, long spacing)
     {
         if (Interlocked.Exchange(ref _offered, null) is { } offered)
         {
@@ -556,6 +688,12 @@ public sealed class MarketSender
             {
                 _queue.Enqueue(c);
             }
+        }
+
+        if (Interlocked.Exchange(ref _abort, 0) != 0)
+        {
+            Dropped += _queue.Count;
+            _queue.Clear();
         }
 
         if (_queue.Count == 0)

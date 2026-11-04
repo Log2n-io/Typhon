@@ -940,7 +940,6 @@ public sealed partial class SimBridge
 
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
-        var dormancy = _config.DormancyTicks > 0;
         Span<CreaturePlacement> next = stackalloc CreaturePlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -1009,14 +1008,8 @@ public sealed partial class SimBridge
                 cluster.WriteSpatial(Creature.Bounds, moved, next);
             }
 
-            // WriteSpatial raises no dirty bit by design, so under dormancy a cluster whose creatures only MOVE looks clean to the fence's sweep, is put
-            // to sleep, stops being dispatched, and freezes in place. Marking the column is the documented contract for combining the two. Once per
-            // CLUSTER, and only for a cluster that actually moved something — marking unconditionally would keep every cluster awake forever, which is
-            // the same as not having dormancy at all.
-            if (dormancy && moved != 0)
-            {
-                cluster.MarkDirty(Creature.Bounds);
-            }
+            // Nothing to mark for dormancy: WriteSpatial notes the cluster for the fence's sleep sweep and wakes a sleeping one (rules DM-01, DM-05; #896),
+            // so a cluster whose creatures only move stays awake without a dirty bit.
         }
     }
 

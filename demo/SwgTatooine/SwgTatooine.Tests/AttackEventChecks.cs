@@ -279,7 +279,7 @@ public sealed class AttackEventChecks
             names.Add(field.Name);
         }
 
-        Assert.That(names, Is.EquivalentTo(new[] { "attacker", "target", "amount" }));
+        Assert.That(names, Is.EquivalentTo(new[] { "attacker", "target", "amount", "crit" }));
     }
 
     [Test]

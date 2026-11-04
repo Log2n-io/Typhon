@@ -130,6 +130,31 @@ public sealed class FacilityChecks
         }
     }
 
+    /// <summary>
+    /// A crafting station stands beside every gate's bazaar (Loïc, 2026-11-02): a few steps from it, and clear of its approach (see
+    /// <see cref="WorldBuilder.GateStationX"/>).
+    /// </summary>
+    [Test]
+    public void ACraftingStation_StandsBesideEveryGatesBazaar()
+    {
+        foreach (var (region, list) in _byCity)
+        {
+            var port = list.Find(s => s.Kind == StructureKind.Shuttleport);
+            var bazaar = list.Find(s => s.Kind == StructureKind.Bazaar && MathF.Abs(s.X - (port.X - WorldBuilder.GateFacilityX)) < 0.01f);
+            var nearest = float.MaxValue;
+            foreach (var s in list)
+            {
+                if (s.Kind == StructureKind.CraftingStation)
+                {
+                    nearest = MathF.Min(nearest, MathF.Sqrt(((s.X - bazaar.X) * (s.X - bazaar.X)) + ((s.Z - bazaar.Z) * (s.Z - bazaar.Z))));
+                }
+            }
+
+            Assert.That(nearest, Is.InRange(WorldBuilder.GateStationX - WorldBuilder.GateFacilityX - 0.01f, 10f),
+                $"region {region}: the nearest station is {nearest:F1} m from the gate's bazaar");
+        }
+    }
+
     [Test]
     public void TheSpreadOnes_AreSpread_NotClumped()
     {
@@ -179,8 +204,8 @@ public sealed class FacilityChecks
     }
 
     /// <summary>
-    /// BM-1: <c>GET /swg/facilities</c> lists every shuttleport, bazaar and mission terminal the world holds — each where it stands, under its region and
-    /// asset — and a bot reads the list into a map whose nearest terminal is the nearest in the world. Unpublished, it answers 404.
+    /// BM-1: <c>GET /swg/facilities</c> lists every shuttleport, bazaar, mission terminal and crafting station the world holds — each where it stands,
+    /// under its region and asset — and a bot reads the list into a map whose nearest terminal is the nearest in the world. Unpublished, it answers 404.
     /// </summary>
     [Test]
     public void TheFacilityList_IsEveryFacility_AndABotsNearestIsTheWorldsNearest()
@@ -197,7 +222,7 @@ public sealed class FacilityChecks
                 {
                     var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
                     var kind = structs[slot].Kind;
-                    if (kind is StructureKind.Shuttleport or StructureKind.Bazaar or StructureKind.MissionTerminal)
+                    if (kind is StructureKind.Shuttleport or StructureKind.Bazaar or StructureKind.MissionTerminal or StructureKind.CraftingStation)
                     {
                         world.Add((kind, regions[slot].Value, cluster.Realm.Value, places[slot].X, places[slot].Z, structs[slot].Asset, structs[slot].Yaw));
                     }
@@ -247,11 +272,15 @@ public sealed class FacilityChecks
         var listedTerminals = listed.FindAll(f => f.Kind == StructureKind.MissionTerminal && f.Realm == 0).ConvertAll(f => (f.X, f.Z));
         var listedPorts = listed.FindAll(f => f.Kind == StructureKind.Shuttleport && f.Realm == 0).ConvertAll(f => (f.X, f.Z));
         var indexTerminals = index.Terminals.FindAll(t => t.Realm == 0).ConvertAll(t => (t.X, t.Z));
+        var listedStations = listed.FindAll(f => f.Kind == StructureKind.CraftingStation && f.Realm == 0).ConvertAll(f => (f.X, f.Z));
+        var indexStations = index.Stations.FindAll(s => s.Realm == 0).ConvertAll(s => (s.X, s.Z));
         Assert.Multiple(() =>
         {
             Assert.That(indexTerminals, Is.Not.Empty, "the premise: the desk's terminals");
             Assert.That(listedTerminals, Is.EquivalentTo(indexTerminals).Using<(float X, float Z)>(Near), "not the mission desk's terminals");
             Assert.That(listedPorts, Is.EquivalentTo(index.Shuttleports).Using<(float X, float Z)>(Near), "not the cities' shuttleports");
+            Assert.That(indexStations, Is.Not.Empty, "the premise: the workshop's stations");
+            Assert.That(listedStations, Is.EquivalentTo(indexStations).Using<(float X, float Z)>(Near), "not the stations the workshop crafts at");
             for (var c = 0; c < _sim.Map.Cities.Count; c++)
             {
                 var city = _sim.Map.Cities[c];

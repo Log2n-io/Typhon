@@ -142,6 +142,23 @@ public partial class ItemStackArch : Archetype<ItemStackArch>
     public static readonly Comp<ItemStack> Stack = Register<ItemStack>();
 }
 
+/// <summary>
+/// An item with stats (crafting-build.md § 2.1): a stack of one that never merges, carrying an <see cref="ItemInstance"/>. Derived from
+/// <see cref="ItemStackArch"/>, so an index walk or a query of the stacks finds the instances too, and the item code path moves both.
+/// </summary>
+[Archetype(1, "Item instances")]
+public partial class ItemInstanceArch : Archetype<ItemInstanceArch, ItemStackArch>
+{
+    public static readonly Comp<ItemInstance> Stats = Register<ItemInstance>();
+}
+
+/// <summary>A craft under way (crafting-build.md C2): non-spatial and Versioned, written by <c>Workshop</c> alone. See <see cref="CraftState"/>.</summary>
+[Archetype(1, "Crafts")]
+public partial class CraftArch : Archetype<CraftArch>
+{
+    public static readonly Comp<CraftState> State = Register<CraftState>();
+}
+
 /// <summary>The item ledger: one entity per movement of items, appended and never changed (inventory-loot.md § 2).</summary>
 [Archetype(1, "Item ledger")]
 public partial class ItemLedgerArch : Archetype<ItemLedgerArch>
@@ -161,6 +178,40 @@ public partial class ItemLedgerHeadArch : Archetype<ItemLedgerHeadArch>
 public partial class ListingArch : Archetype<ListingArch>
 {
     public static readonly Comp<Listing> Entry = Register<Listing>();
+}
+
+/// <summary>
+/// A player installation (crafting-build.md § 10): its truth — owner, lot, rate, hopper, the time it last settled, the time its upkeep runs out. Not
+/// positioned and Versioned, as the wallet: value, written only by <c>Workshop</c>, read off the tick by the endpoints and the audits.
+/// </summary>
+[Archetype(1, "Installations")]
+public partial class InstallationArch : Archetype<InstallationArch>
+{
+    public static readonly Comp<InstallationCore> Core = Register<InstallationCore>();
+}
+
+/// <summary>
+/// A character's own waypoint (client.md C38): not positioned, not replicated, Versioned like an installation — written only by <c>Workshop</c> on its
+/// owner's commands, read off the tick by <c>GET /swg/waypoints</c>.
+/// </summary>
+[Archetype(1, "Waypoints")]
+public partial class WaypointArch : Archetype<WaypointArch>
+{
+    public static readonly Comp<WaypointCore> Core = Register<WaypointCore>();
+}
+
+/// <summary>
+/// What the world sees of an installation: where it stands, what it is and what it is doing. Static and replicated, as a structure, and a view only — rebuilt
+/// from <see cref="InstallationArch"/> when a world opens, so a lost one costs nothing.
+/// </summary>
+[Archetype(1, "Installation markers", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
+public partial class InstallationMarker : Archetype<InstallationMarker>
+{
+    [Position]
+    public static readonly Comp<InstallationPlacement> Bounds = Register<InstallationPlacement>();
+    public static readonly Comp<InstallationView> View = Register<InstallationView>();
+    public static readonly Comp<InstallationRealm> Realm = Register<InstallationRealm>();
 }
 
 /// <summary>
@@ -232,7 +283,8 @@ public partial class Starship : Archetype<Starship>
 /// the revision branch is unreachable for an added component and the refusal names the count. Pre-alpha, so the answer is to
 /// recreate the world; <c>--persist</c> is opt-in and the benchmark's default deletes the file.
 /// </remarks>
-[Archetype(3, "Players", ClusterDurability = ClusterDurability.Checkpoint)]
+// Revision 4: PlayerGear joined the component set (crafting-build.md § 2.3), and the world is recreated with it (§ 7).
+[Archetype(4, "Players", ClusterDurability = ClusterDurability.Checkpoint)]
 [Replicated]
 public partial class Player : Archetype<Player>
 {
@@ -256,6 +308,9 @@ public partial class Player : Archetype<Player>
 
     /// <summary>The outfit everyone draws this player in and the id of the name they read on it, from its character; 0 for the scripted crowd. See <see cref="PlayerLook"/>.</summary>
     public static readonly Comp<PlayerLook> Look = Register<PlayerLook>();
+
+    /// <summary>What its equipment makes of its blows and of those it takes: written by <c>Workshop</c>, read by combat. See <see cref="PlayerGear"/>.</summary>
+    public static readonly Comp<PlayerGear> Gear = Register<PlayerGear>();
 }
 
 /// <summary>

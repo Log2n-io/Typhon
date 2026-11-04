@@ -85,6 +85,68 @@ describe('the notice lines', () => {
   });
 });
 
+describe('the vendor, the bench and salvage (Loïc, 2026-11-02: a vendor buy said nothing)', () => {
+  it('say a standard-issue buy with the price it paid on its tick, one line per buy', () => {
+    const batch = [
+      drop('standard', 'Metal', 1, 10, '901', 20),
+      credits('standard', 68, false, null, '3', 20),
+      drop('standard', 'DL-44 Blaster', 1, 1, '905', 21),
+      credits('standard', 1240, false, null, '60', 21),
+    ];
+    expect(noticeLines(batch)).toEqual([
+      'Bought from the vendor: Metal Mk I ×10 for 68 cr',
+      'Bought from the vendor: DL-44 Blaster Mk I for 1,240 cr',
+    ]);
+  });
+
+  it('say a buy without its price when the credit row is not in the batch, and the credit row alone not at all', () => {
+    expect(noticeLines([drop('standard', 'Gas', 1, 5, '9', 30)])).toEqual(['Bought from the vendor: Gas Mk I ×5']);
+    expect(noticeLines([credits('standard', 68, false, null, '3', 20)])).toEqual([]);
+  });
+
+  it('say what a craft made and what a salvage gave back, and nothing of the inputs a craft spent', () => {
+    const batch = [
+      drop('craft', 'Metal', 2, 10, '7', 40, false),
+      drop('make', 'Ranged Core', 2, 1, '7', 40),
+      drop('salvage', 'Metal', 2, 3, '8', 41),
+    ];
+    expect(noticeLines(batch)).toEqual(['Crafted: Ranged Core Mk II', 'Salvaged: Metal Mk II ×3']);
+  });
+});
+
+describe("an operator (the dashboard's accounts page)", () => {
+  it('say the credits it gave or took, and the items it gave, not those it took', () => {
+    const batch = [
+      credits('admingrant', 5000, true, null, '0', 40),
+      credits('admintake', 120, false, null, '0', 41),
+      drop('admingrant', 'DL-44 Blaster', 3, 1, '0', 42),
+      drop('admintake', 'Hide', 1, 4, '0', 43, false),
+    ];
+    expect(noticeLines(batch)).toEqual([
+      'An operator gave you 5,000 cr',
+      'An operator took 120 cr',
+      'Given by an operator: DL-44 Blaster Mk III',
+    ]);
+  });
+});
+
+describe('a refine', () => {
+  it('says what it made and its fee, not the units it took', () => {
+    const batch = [
+      drop('refine', 'Ranged Core', 1, 6, '9', 40, false),
+      drop('refine', 'Ranged Core', 2, 2, '9', 40),
+      credits('refine', 154, false, null, '9', 40),
+    ];
+    expect(noticeLines(batch)).toEqual(['Refined: Ranged Core Mk II ×2 for 154 cr']);
+  });
+});
+
+describe('a shuttle ticket', () => {
+  it('says the fare it paid', () => {
+    expect(noticeLines([credits('fare', 150, false, null, '1', 40)])).toEqual(['Bought a shuttle ticket for 150 cr']);
+  });
+});
+
 describe('the announced notices', () => {
   afterEach(() => {
     useChat.getState().clear();

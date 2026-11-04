@@ -59,6 +59,21 @@ public enum GoalWhy : byte
 
     /// <summary>Off to trade with <see cref="BotBrain.MarketFullStacks"/> stacks or more: already losing drops — how often is the measure of too little headroom.</summary>
     MarketFull,
+
+    /// <summary>A crafter holding the inputs of a craft: off to its city's nearest crafting station (crafting-build.md § 6).</summary>
+    CraftChosen,
+
+    /// <summary>The craft sent: back to the day's loop.</summary>
+    CraftDone,
+
+    /// <summary>An installation to tend, or a kit to place (crafting-build.md § 10): out to it.</summary>
+    TendChosen,
+
+    /// <summary>Its installation commands sent: back to the day's loop.</summary>
+    TendDone,
+
+    /// <summary>No way to its installation's point.</summary>
+    TendFailed,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>
@@ -96,6 +111,35 @@ public enum LegWhy : byte
 }
 
 /// <summary>
+/// What a bot is doing, as the fleet's statistics and the traced bots show it (Loïc, 2026-11-03: crafting was nowhere on the dashboard): its
+/// <see cref="Goal"/>, with <see cref="Goal.Visiting"/> told apart by what it visits — a mission terminal, a bazaar, a crafting station. The values up to
+/// <see cref="Questing"/> are the goal's own, so a goal that is not a visit is its activity by value.
+/// </summary>
+/// <remarks>The brain decides by <see cref="Goal"/>; this is only what it reports, so no decision changes with it.</remarks>
+public enum Activity
+{
+    Choosing = Goal.Choosing,
+    Travelling = Goal.Travelling,
+    Hunting = Goal.Hunting,
+    Idling = Goal.Idling,
+    Waiting = Goal.Waiting,
+
+    /// <summary>Going to a mission terminal and using it.</summary>
+    Visiting = Goal.Visiting,
+    Indoors = Goal.Indoors,
+    Questing = Goal.Questing,
+
+    /// <summary>Going to a bazaar terminal and trading at it: a visit of <see cref="Routing.BazaarKind"/>.</summary>
+    Trading,
+
+    /// <summary>Going to a crafting station and crafting, or repairing, at it: a visit of <see cref="Routing.CraftingStationKind"/>.</summary>
+    Crafting,
+
+    /// <summary>Out at its installations (crafting-build.md § 10).</summary>
+    Tending,
+}
+
+/// <summary>
 /// An observer of one brain's decisions, attached to the few bots a run traces and null on every other (bot-telemetry.md): what it chose and why, and
 /// what its walks did. Called on the bot's own driving thread, inside <see cref="BotBrain.Decide"/>.
 /// </summary>
@@ -103,13 +147,13 @@ public interface IBrainTrace
 {
     /// <summary>A goal ended and another began. A pass through <see cref="Goal.Choosing"/> is folded into one call carrying both reasons.</summary>
     /// <param name="tick">The fleet's tick.</param>
-    /// <param name="from">The goal left.</param>
-    /// <param name="to">The goal taken.</param>
+    /// <param name="from">What it was doing: the goal left, a visit told by what it visited (<see cref="Activity"/>).</param>
+    /// <param name="to">What it does now.</param>
     /// <param name="exit">Why <paramref name="from"/> ended; <see cref="GoalWhy.None"/> for a direct change, which <paramref name="enter"/> explains.</param>
     /// <param name="enter">Why <paramref name="to"/> began.</param>
     /// <param name="subject">What it is about: a creature's netId, a facility kind, a region; 0 for nothing.</param>
     /// <param name="metres">How far that subject was, or 0.</param>
-    void OnGoal(long tick, Goal from, Goal to, GoalWhy exit, GoalWhy enter, uint subject, float metres);
+    void OnGoal(long tick, Activity from, Activity to, GoalWhy exit, GoalWhy enter, uint subject, float metres);
 
     /// <summary>A walk's event.</summary>
     /// <param name="tick">The fleet's tick.</param>
@@ -140,6 +184,23 @@ public sealed partial class BotBrain
     /// <summary>The goal before the choice under way, and why it ended: the first half of the transition <see cref="Become"/> reports.</summary>
     private Goal _choosingFrom = Goal.Choosing;
 
+    // What it was doing before the choice under way, and what it does now, as reported: a visit's kind is set before the goal that starts it.
+    private Activity _choosingFromActivity = Activity.Choosing;
+    private Activity _activity = Activity.Choosing;
+
+    /// <summary>What it is doing, as the fleet's statistics and its trace show it.</summary>
+    public Activity Activity => _activity;
+
+    /// <summary>A goal's activity: a visit by what it visits, any other goal by its value.</summary>
+    public static Activity ActivityOf(Goal goal, int visitKind) => goal == Goal.Tending ? Activity.Tending : goal != Goal.Visiting
+        ? (Activity)goal
+        : visitKind switch
+        {
+            Routing.CraftingStationKind => Activity.Crafting,
+            Routing.BazaarKind => Activity.Trading,
+            _ => Activity.Visiting,
+        };
+
     private GoalWhy _exitWhy = GoalWhy.Spawned;
 
     /// <summary>The observer of this brain's decisions, or null — every bot but the few a run traces, at the cost of a null check per transition.</summary>
@@ -159,27 +220,32 @@ public sealed partial class BotBrain
             if (Goal != Goal.Choosing)
             {
                 _choosingFrom = Goal;
+                _choosingFromActivity = _activity;
                 _exitWhy = why;
             }
 
             Goal = to;
+            _activity = Activity.Choosing;
             return;
         }
 
         Goal from;
+        Activity fromActivity;
         GoalWhy exit;
         if (Goal == Goal.Choosing)
         {
-            (from, exit) = (_choosingFrom, _exitWhy);
+            (from, fromActivity, exit) = (_choosingFrom, _choosingFromActivity, _exitWhy);
             _choosingFrom = Goal.Choosing;
+            _choosingFromActivity = Activity.Choosing;
             _exitWhy = GoalWhy.None;
         }
         else
         {
-            (from, exit) = (Goal, GoalWhy.None);
+            (from, fromActivity, exit) = (Goal, _activity, GoalWhy.None);
         }
 
         Goal = to;
+        _activity = ActivityOf(to, _visitKind);
         var counters = Counters;
         counters.Why[(int)exit]++;
         counters.Why[(int)why]++;
@@ -188,7 +254,7 @@ public sealed partial class BotBrain
             counters.GoalChanges++;
         }
 
-        Trace?.OnGoal(tick, from, to, exit, why, subject, metres);
+        Trace?.OnGoal(tick, fromActivity, _activity, exit, why, subject, metres);
     }
 
     /// <summary>A choice made straight from a goal that ran out, without passing through <see cref="Goal.Choosing"/>: an idle's end.</summary>
@@ -197,8 +263,10 @@ public sealed partial class BotBrain
         if (Goal != Goal.Choosing)
         {
             _choosingFrom = Goal;
+            _choosingFromActivity = _activity;
             _exitWhy = Goal == Goal.Idling ? GoalWhy.IdleOver : GoalWhy.None;
             Goal = Goal.Choosing;
+            _activity = Activity.Choosing;
         }
     }
 

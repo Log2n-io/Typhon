@@ -564,10 +564,16 @@ public static class TatooineHost
         app.MapMissionJournal(runtime.Engine);
         app.MapEconomy(runtime.Engine);
         app.MapItems(runtime.Engine);
+        app.MapCrafting(runtime.Engine);
+        app.MapInstallations(runtime.Engine);
+        app.MapWaypoints(runtime.Engine);
         // The bazaar's board is the simulation's, published by its desk: asked at each request. Required — MapMarket refuses to start without it.
         app.MapMarket(runtime.Engine, marketBoard);
         app.MapProgress(runtime.Engine);
         app.MapFacilities();
+
+        // The back office (accounts.md § 2), for the dashboard's accounts page: only with SWG_ADMIN_KEY set, and every call must carry it.
+        app.MapAdmin(runtime.Engine, Environment.GetEnvironmentVariable(AdminEndpoints.KeyVariable));
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
@@ -641,7 +647,8 @@ public static class TatooineHost
                 ? string.Empty
                 : FormattableString.Invariant(
                     $",\"shuttle\":{{\"intervalTicks\":{boarding.IntervalTicks},\"windowTicks\":{boarding.WindowTicks},")
-                  + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)}}}");
+                  + FormattableString.Invariant($"\"ports\":{boarding.PortCount},\"boardM\":{Json(TatooineReplication.ShuttleBoardM)},")
+                  + FormattableString.Invariant($"\"fare\":{TatooineData.ShuttleFare}}}");
             // The demo's dashboard, on this host: the client links to it. Absent when there is none.
             var dashboard = DashboardPort > 0 ? FormattableString.Invariant($",\"dashboardPort\":{DashboardPort}") : string.Empty;
             return Results.Text(

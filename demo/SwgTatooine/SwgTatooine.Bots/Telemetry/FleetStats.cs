@@ -45,7 +45,7 @@ public sealed class FleetStats
     public static readonly TimeSpan Window = TimeSpan.FromSeconds(60);
 
     private static readonly int StatCount = Enum.GetValues<FleetStat>().Length;
-    private static readonly int GoalCount = Enum.GetValues<Goal>().Length;
+    private static readonly int GoalCount = Enum.GetValues<Activity>().Length;
     private static readonly int WhyCount = Enum.GetValues<GoalWhy>().Length;
     private static readonly int LegCount = Enum.GetValues<LegWhy>().Length;
 
@@ -73,7 +73,7 @@ public sealed class FleetStats
     /// <summary>Bots summed in the last sample.</summary>
     public int Bots { get; private set; }
 
-    /// <summary>Bots per goal now, by <see cref="Goal"/>.</summary>
+    /// <summary>Bots per activity now, by <see cref="Activity"/>: a goal, a visit told by what it visits.</summary>
     public long[] Goals { get; } = new long[GoalCount];
 
     /// <summary>Totals since the start, by <see cref="FleetStat"/>.</summary>
@@ -126,7 +126,7 @@ public sealed class FleetStats
     }
 
     /// <summary>Adds one bot, at fleet slot <paramref name="slot"/>.</summary>
-    public void Add(int slot, Goal goal, BrainCounters brain, ReadOnlySpan<long> stats)
+    public void Add(int slot, Activity goal, BrainCounters brain, ReadOnlySpan<long> stats)
     {
         Bots++;
         Goals[(int)goal]++;

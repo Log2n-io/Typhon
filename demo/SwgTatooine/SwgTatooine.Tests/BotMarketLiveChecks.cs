@@ -93,7 +93,10 @@ internal sealed class BotMarketLiveChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         Worlds.Park(sim, link.Session, at.X, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, TestAccounts.For(sim.Dbe, account), out var character, out _), Is.True);
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         var store = new WorldStore(link.Plan);
         return new LiveBot
@@ -192,21 +195,23 @@ internal sealed class BotMarketLiveChecks : ServedChecks
             bots[^1].Brain.Facilities.Seed(facilities);
         }
 
+        // Six stacks past the brain's trigger, as a bot back from a day's hunting.
+        const int Full = BotBrain.MarketStacks + 6;
         foreach (var b in bots)
         {
             sim.Bridge.StageTransfer(ItemLedger.World, b.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
             sim.Bridge.StageTransfer(ItemLedger.World, b.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
             var n = 2;
-            for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < 26; template++)
+            for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < Full; template++)
             {
-                for (byte mk = 1; mk <= 4 && n < 26; mk++, n++)
+                for (byte mk = 1; mk <= 4 && n < Full; mk++, n++)
                 {
                     sim.Bridge.StageTransfer(ItemLedger.World, b.Key, template, mk, 5, ItemMoveKind.Kill, 1);
                 }
             }
         }
 
-        SessionHarness.Until(() => bots.All(b => Items.Stacks(sim, b.Character).Count == 26), "the inventories to be filled");
+        SessionHarness.Until(() => bots.All(b => Items.Stacks(sim, b.Character).Count == Full), "the inventories to be filled");
         var listingsBefore = Market.Listings(sim).Count;
 
         // A minute of the driver's 4 Hz: long enough to walk there, trade, and stand while the plan goes out.

@@ -146,6 +146,57 @@ internal sealed class MissionDeskChecks : ServedChecks
         return best;
     }
 
+    /// <summary>
+    /// Every lair, by where it stands — an offer's anchor is its lair's position — with its spawner and health, read in one tick. For a check over many
+    /// offers: <see cref="LairAt"/> and <see cref="LairOf"/> each wait a tick, and the offer check made two such calls per offer — 20 s of a served world's
+    /// ticks for what one pass reads (2026-11-02).
+    /// </summary>
+    private static Dictionary<(ushort Realm, float X, float Z), (EntityId Id, Lair Spawner, int Health)> Lairs(TatooineSim sim)
+    {
+        var lairs = new Dictionary<(ushort, float, float), (EntityId, Lair, int)>();
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<CreatureLair>().GetClusterEnumerator())
+            {
+                var spawners = cluster.GetReadOnlySpan(CreatureLair.Spawner);
+                var vitals = cluster.GetReadOnlySpan(CreatureLair.Vitals);
+                var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    lairs[(cluster.Realm.Value, places[slot].X, places[slot].Z)] = (cluster.GetEntityId(slot), spawners[slot], vitals[slot].Health);
+                }
+            }
+        });
+
+        return lairs;
+    }
+
+    /// <summary>Every live offer, by its terminal, read in one tick.</summary>
+    private static Dictionary<EntityId, List<MissionOfferInfo>> OffersByTerminal(TatooineSim sim)
+    {
+        var offers = new Dictionary<EntityId, List<MissionOfferInfo>>();
+        sim.WriteInTick(tx =>
+        {
+            foreach (var cluster in tx.For<MissionOffer>().GetClusterEnumerator())
+            {
+                var infos = cluster.GetReadOnlySpan(MissionOffer.Info);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var info = infos[System.Numerics.BitOperations.TrailingZeroCount(bits)];
+                    if (!offers.TryGetValue(info.Terminal, out var list))
+                    {
+                        offers[info.Terminal] = list = [];
+                    }
+
+                    list.Add(info);
+                }
+            }
+        });
+
+        return offers;
+    }
+
     /// <summary>The lair standing exactly at a point on a planet — an offer's anchor is its lair's position — or <c>EntityId.Null</c>.</summary>
     private static EntityId LairAt(TatooineSim sim, ushort realm, float x, float z)
     {
@@ -372,7 +423,10 @@ internal sealed class MissionDeskChecks : ServedChecks
 
     private static EntityId CharacterOf(TatooineSim sim, EntityId account)
     {
-        Assert.That(CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True, "the account has no character");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = account;
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         return character;
     }
 
@@ -452,19 +506,27 @@ internal sealed class MissionDeskChecks : ServedChecks
         Harness.Ticks(3);
         var named = new HashSet<EntityId>();
         var offers = 0;
+        // Read once each: the offers and the lairs are written by the desk's pass, twice a second, and the checks below hold at any one tick.
+        var byTerminal = OffersByTerminal(sim);
+        var lairs = Lairs(sim);
         Assert.Multiple(() =>
         {
             foreach (var terminal in sim.Index.Terminals)
             {
-                var listed = Offers(sim, terminal);
+                var listed = byTerminal.TryGetValue(terminal.Id, out var l) ? l : [];
                 Assert.That(listed, Has.Count.EqualTo(TatooineData.MissionOffersPerTerminal), $"terminal at {terminal.X:F0},{terminal.Z:F0}");
-                foreach (var (_, info) in listed)
+                foreach (var info in listed)
                 {
                     offers++;
-                    var lair = LairAt(sim, terminal.Realm, info.AnchorX, info.AnchorZ);
-                    Assert.That(lair.IsNull, Is.False, $"offer {info.Serial} names no lair");
+                    var found = lairs.TryGetValue((terminal.Realm, info.AnchorX, info.AnchorZ), out var at);
+                    Assert.That(found, Is.True, $"offer {info.Serial} names no lair");
+                    if (!found)
+                    {
+                        continue;
+                    }
+
+                    var (lair, spawner, health) = at;
                     Assert.That(named.Add(lair), Is.True, $"offer {info.Serial} names a lair another offer names");
-                    var (spawner, health) = LairOf(sim, lair);
                     Assert.That(health, Is.GreaterThan(0), "an offer names a broken lair");
                     Assert.That(spawner.Mission.IsNull, Is.True, "an offer names a reserved lair");
                     Assert.That(spawner.Site, Is.Not.Zero, "an offer names a lair of no site");
@@ -877,6 +939,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
         var before = BodyOf(sim, link.Session);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
 
@@ -969,6 +1032,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         // Its own stance, read rather than remembered: a swoop, a door, a flight or a clone puts the weapon away, and a bot that remembered drawing it
         // named targets for minutes without a shot (2026-10-26).
         var unarmed = eyes.Read(store, new SwgTatooine.Bots.Brain.FacilityMap()).Stance;
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         Harness.Ticks(4);
         Replay(link, store);
@@ -1606,6 +1670,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         Worlds.Park(sim, link.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the holder's view", parked);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => OwnerHit(sim, lair) != 0, "the holder's blow to be marked");
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.None));
@@ -1616,6 +1681,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         Worlds.Park(sim, partner.Session, held.Mission.LairX - 10f, held.Mission.LairZ, out var parkedB);
         SessionHarness.UntilNamed(partner.Session, lair, "the lair to reach the partner's view", parkedB);
         partner.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(partner.Session, lair)));
+        Worlds.Arm(sim, partner);
         partner.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, holder).Count == 0, "the mission to be completed");
         Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 4);
@@ -1670,6 +1736,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         Worlds.Park(sim, stranger.Session, held.Mission.LairX + 10f, held.Mission.LairZ, out var parked);
         SessionHarness.UntilNamed(stranger.Session, lair, "the lair to reach the stranger's view", parked);
         stranger.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(stranger.Session, lair)));
+        Worlds.Arm(sim, stranger);
         stranger.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => ProgressOf(sim, breaker).Xp > 0, "the stranger to be paid the lair");
         SessionHarness.Until(() => Held(sim, holder).Count != 1 || Held(sim, holder)[0].Mission.Lair != lair, "the mission to move");
@@ -2390,6 +2457,7 @@ internal sealed class MissionDeskChecks : ServedChecks
         SessionHarness.UntilNamed(link.Session, lair, "the lair to reach the client's view", parked);
         var before = BodyOf(sim, link.Session);
         link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(SessionHarness.NetIdOf(link.Session, lair)));
+        Worlds.Arm(sim, link);
         link.SendCommand(nameof(SetStance), ClientSays.SetStance(Stances.Pistol));
         SessionHarness.Until(() => Held(sim, character).Count == 0, "the mission to end");
         Harness.Ticks((Worlds.ServedHz / SimBridge.MissionPassHz) + 2);

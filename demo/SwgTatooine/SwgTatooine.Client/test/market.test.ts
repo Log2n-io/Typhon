@@ -28,6 +28,7 @@ import {
   parseBrowse,
   parseMine,
   parsePrices,
+  itemVendorPayout,
   vendorPayout,
   type MarketCommand,
   type MarketListing,
@@ -101,14 +102,25 @@ describe('the fees', () => {
     // A Hide Mk I is 1.7 cr: the vendor pays 0.34 cr a unit.
     expect(vendorPayout(20, 340)).toBe(6);
     expect(vendorPayout(2, 340)).toBe(0);
+    // An item with stats by the condition it has left (2026-11-03); broken, nothing; a part, which has no condition, whole.
+    expect(itemVendorPayout(181_200, { condition: 1_800_000, maxCondition: 3_600_000 })).toBe(90);
+    expect(itemVendorPayout(181_200, { condition: 0, maxCondition: 3_600_000, broken: true })).toBe(0);
+    expect(itemVendorPayout(181_200, { condition: 0, maxCondition: 0 })).toBe(181);
     expect(vendorPayout(1, 145_200)).toBe(145);
     expect(vendorPayout(5, 0)).toBe(0);
   });
 });
 
 describe('a refusal', () => {
-  it('reads every reason of § 3.1, 151-163 in order, and NotInWorld reused', () => {
-    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([142, ...Array.from({ length: 13 }, (_, i) => 151 + i)]);
+  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, the installations' 188-193, the waypoints' 194-196, and NotInWorld reused", () => {
+    expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([
+      142,
+      ...Array.from({ length: 32 }, (_, i) => 151 + i),
+      ...Array.from({ length: 13 }, (_, i) => 184 + i),
+    ]);
+    expect(marketRefusal(184)).toContain('refine');
+    expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
+    expect(marketRefusal(MarketReason.StanceNoWeapon)).toContain('weapon');
     expect(marketRefusal(MarketReason.Sold)).toBe('Sold to someone else first');
     expect(marketRefusal(MarketReason.NotEnough)).toBe('Not enough credits');
     expect(marketRefusal(MarketReason.NotAtBazaar)).toContain('bazaar terminal');
@@ -126,8 +138,24 @@ describe('a command', () => {
   it('goes on the wire by its catalog name and codec fields, a 64-bit id as a bigint', () => {
     expect(marketWire({ kind: 'list', template: 8, mk: 2, quantity: 20, unitPrice: 3 })).toEqual({
       name: 'MarketList',
-      values: { template: 8, mk: 2, quantity: 20, unitPrice: 3 },
+      values: { template: 8, mk: 2, quantity: 20, unitPrice: 3, item: 0n },
     });
+    expect(marketWire({ kind: 'list', template: 69, mk: 1, quantity: 1, unitPrice: 900, item: '65544' })).toEqual({
+      name: 'MarketList',
+      values: { template: 69, mk: 1, quantity: 1, unitPrice: 900, item: 65544n },
+    });
+    expect(marketWire({ kind: 'standard', template: 69, price: 1812 })).toEqual({
+      name: 'BuyStandard',
+      values: { template: 69, price: 1812, quantity: 1 },
+    });
+    expect(marketWire({ kind: 'standard', template: 3, price: 85, quantity: 25 })).toEqual({
+      name: 'BuyStandard',
+      values: { template: 3, price: 85, quantity: 25 },
+    });
+    expect(marketWire({ kind: 'equip', item: '65544' })).toEqual({ name: 'Equip', values: { item: 65544n } });
+    expect(marketWire({ kind: 'unequip', slot: 101 })).toEqual({ name: 'Unequip', values: { slot: 101 } });
+    expect(marketWire({ kind: 'repair', item: '65544' })).toEqual({ name: 'RepairItem', values: { item: 65544n } });
+    expect(marketWire({ kind: 'salvage', item: '65544' })).toEqual({ name: 'SalvageItem', values: { item: 65544n } });
     expect(marketWire({ kind: 'buy', listing: '18446744073709551615', unitPrice: 3 })).toEqual({
       name: 'MarketBuy',
       values: { listing: 18446744073709551615n, unitPrice: 3 },
@@ -142,6 +170,11 @@ describe('a command', () => {
     expect(commandRow({ kind: 'buy', listing: '7', unitPrice: 1 })).toBe('7');
     expect(commandRow({ kind: 'collect', listing: '0' })).toBe('all');
     expect(commandRow({ kind: 'vendor', template: 8, mk: 1, quantity: 1 })).toBe('sell');
+    expect(commandRow({ kind: 'standard', template: 69, price: 1812 })).toBe('issue');
+    expect(commandRow({ kind: 'unequip', slot: 101 })).toBe('gear');
+    expect(commandRow({ kind: 'craftPoint', line: 2 })).toBe('craft');
+    expect(commandRow({ kind: 'craftFinish', schematic: 69 })).toBe('craft');
+    expect(commandRow({ kind: 'repair', item: '1' })).toBe('craft');
   });
 });
 
@@ -351,7 +384,7 @@ describe('a bazaar terminal', () => {
     expect(collectableHere({ city: 1, realm: 0 }, here, 0)).toBe(false);
   });
 
-  it('is toggled by B', () => {
+  it('has no key: it is opened from its terminal only (client.md C40)', () => {
     const key = {
       key: 'b',
       repeat: false,
@@ -361,7 +394,7 @@ describe('a bazaar terminal', () => {
       metaKey: false,
       target: null,
     };
-    expect(panelKey(key as unknown as KeyboardEvent)).toBe('bazaar');
+    expect(panelKey(key as unknown as KeyboardEvent)).toBeNull();
   });
 });
 
@@ -429,6 +462,17 @@ describe('the market store', () => {
     expect(useMarket.getState().page?.listings.map((l) => l.id)).toEqual(['1', '2']);
     useMarket.getState().openPanel('browse', 'all');
     expect(useMarket.getState().query.city).toBe(0);
+  });
+
+  it('closes when the body walks away from its terminal (client.md C40)', () => {
+    harness();
+    useMarket.getState().setHere(3);
+    useMarket.getState().openPanel('browse', 'here');
+    expect(useMarket.getState().open).toBe(true);
+    useMarket.getState().setHere(4);
+    expect(useMarket.getState().open).toBe(true);
+    useMarket.getState().setHere(0);
+    expect(useMarket.getState().open).toBe(false);
   });
 
   it('sends a buy at the price shown, its row waiting, a second click sending nothing', () => {
@@ -821,5 +865,41 @@ describe("the server's answers", () => {
     expect(parseWallet(goldenWalletBuyer)).toEqual({ open: true, credits: 940 });
     announceNotices([credits('sale', 60, false, 'player_8f01')]);
     expect(useChat.getState().lines.map((l) => l.text)).toEqual(['Bought Hide Mk III ×3 from player_8f01 for 60 cr']);
+  });
+});
+
+describe('goods waiting at a bazaar (client.md C40)', () => {
+  it('are said in chat once each, a first read saying what has been waiting', async () => {
+    const { newReservationNotices } = await import('../src/data/market');
+    const goods = (id: string, state: 'sold' | 'returned') => ({
+      id,
+      city: 3,
+      cityName: 'Tallow',
+      realm: 0,
+      item: 'mat_hide',
+      name: 'Hide',
+      category: 'material',
+      template: 8,
+      mk: 2,
+      qty: 4,
+      unit: 10,
+      total: 40,
+      seller: 'x',
+      sellerName: 'x',
+      buyer: 'y',
+      ageS: 0,
+      state,
+      closedTick: 1,
+    });
+    const caps = { listings: 20, reserved: 20 };
+    const first = { listed: [], reserved: [goods('1', 'sold')], caps };
+    expect(newReservationNotices(null, first as never)).toEqual([
+      'Hide Mk II ×4 bought, waiting at the Tallow bazaar: collect it at a terminal there',
+    ]);
+    const second = { listed: [], reserved: [goods('1', 'sold'), goods('2', 'returned')], caps };
+    const said = newReservationNotices(first, second);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain('back from its listing');
+    expect(newReservationNotices(second as never, second as never)).toEqual([]);
   });
 });

@@ -40,6 +40,9 @@ public static class ContentLevels
     private const double FoeHp = 1.5;            // foe_hp
     private const double FoeDmg = 1.3;           // foe_dmg
 
+    // What the § 9.3 rolls add to a blow on average: 1 + c (m − 1).
+    private const double CritGain = 1 + (Equipment.CritChance * (Equipment.CritMultiplier - 1));
+
     // Indexed by level, 0 unused; [beast, foe].
     private static readonly int[] BeastHealth = new int[MaxLevel + 1];
     private static readonly int[] FoeHealth = new int[MaxLevel + 1];
@@ -56,8 +59,9 @@ public static class ContentLevels
             var effHp = (HpBase + (HpPerCl * l)) / (1 - (MitCl5 + (MitPerCl * (l - 5))));
             BeastHealth[l] = (int)Math.Round(dps * TtkKillS);
             FoeHealth[l] = (int)Math.Round(dps * TtkKillS * FoeHp);
-            BeastHit[l] = (int)Math.Round(effHp / TtkDieS * avgDelay);
-            FoeHit[l] = (int)Math.Round(effHp / TtkDieS * FoeDmg * avgDelay);
+            // Divided once by the crits' mean gain (crafting-catalog.md § 9.3): the model's targets are means, and every blow now rolls.
+            BeastHit[l] = (int)Math.Round(effHp / TtkDieS * avgDelay / CritGain);
+            FoeHit[l] = (int)Math.Round(effHp / TtkDieS * FoeDmg * avgDelay / CritGain);
         }
     }
 

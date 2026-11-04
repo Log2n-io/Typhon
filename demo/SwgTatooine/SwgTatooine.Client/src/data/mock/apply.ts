@@ -91,7 +91,7 @@ export function applyTick(world: WorldStore, grid: AggregateGrid, message: TickM
   const events = message.events;
   for (let e = 0; e < message.eventCount; e++) {
     const o = e * EVENT_RECORD;
-    sink.onAttack(message.tick, events[o + 1], events[o + 2], events[o + 3], events[o + 4]);
+    sink.onAttack(message.tick, events[o + 1], events[o + 2], events[o + 3], events[o + 4], false);
   }
 
   for (const block of message.blocks) {

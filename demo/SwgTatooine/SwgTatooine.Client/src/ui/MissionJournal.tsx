@@ -2,6 +2,7 @@ import { conClass, viewerClOf } from '../data/content-level';
 import { formatMissionDistance, MAX_MISSIONS, missionTitle, OCTANT_NAMES } from '../data/missions';
 import { useMissions } from '../state/mission-store';
 import { useStats } from '../state/stats-store';
+import { WindowFrame } from './WindowFrame';
 
 /**
  * The mission journal (missions.md § 5): the missions this character holds, each cancellable. Opened from the bottom-right
@@ -24,16 +25,22 @@ export function MissionJournalPanel() {
   }
 
   return (
-    <div className="panel journal" role="dialog" aria-label="Mission journal">
-      <div className="missions-head">
-        <span className="hud-title">Mission journal</span>
-        <span className="missions-held">
-          {journal.length}/{MAX_MISSIONS}
-        </span>
-        <button type="button" className="missions-close" onClick={close} aria-label="Close">
-          ✕
-        </button>
-      </div>
+    <WindowFrame
+      id="journal"
+      title="Mission journal"
+      extra={
+        <>
+          <span className="missions-held">
+            {journal.length}/{MAX_MISSIONS}
+          </span>
+        </>
+      }
+      onClose={close}
+      ariaLabel="Mission journal"
+      className="journal"
+      minW={280}
+      initial={(vw, vh) => ({ x: vw - 1026, y: Math.round(vh * 0.4), w: 382, h: 0 })}
+    >
       {notice !== null ? <div className="missions-notice">{notice}</div> : null}
       {journal.length === 0 ? (
         <div className="hint">No missions held. Take one at a mission terminal.</div>
@@ -61,6 +68,6 @@ export function MissionJournalPanel() {
           </div>
         ))
       )}
-    </div>
+    </WindowFrame>
   );
 }

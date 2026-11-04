@@ -27,7 +27,7 @@ public sealed class BotTracer : IBrainTrace
     private readonly Lock _gate = new();
     private readonly TraceEvent[] _events = new TraceEvent[EventCapacity];
     private readonly TrailPoint[] _trail = new TrailPoint[TrailCapacity];
-    private readonly long[] _goalTicks = new long[Enum.GetValues<Goal>().Length];
+    private readonly long[] _goalTicks = new long[Enum.GetValues<Activity>().Length];
     private readonly long[] _intents = new long[Enum.GetValues<IntentKind>().Length];
     private readonly long _sampleTicks;
     private long _seq;
@@ -52,7 +52,7 @@ public sealed class BotTracer : IBrainTrace
     public double TicksPerSecond { get; }
 
     // What the bot is now, as of its last decision.
-    private Goal _goal = Goal.Choosing;
+    private Activity _goal = Activity.Choosing;
     private long _tick;
     private float _x;
     private float _z;
@@ -71,7 +71,7 @@ public sealed class BotTracer : IBrainTrace
     public long SentTrail;
 
     /// <inheritdoc />
-    public void OnGoal(long tick, Goal from, Goal to, GoalWhy exit, GoalWhy enter, uint subject, float metres)
+    public void OnGoal(long tick, Activity from, Activity to, GoalWhy exit, GoalWhy enter, uint subject, float metres)
     {
         lock (_gate)
         {
@@ -179,7 +179,7 @@ public sealed class BotTracer : IBrainTrace
             w.WriteNumber("legs", _legs);
 
             w.WriteStartObject("goalS");
-            foreach (var goal in Enum.GetValues<Goal>())
+            foreach (var goal in Enum.GetValues<Activity>())
             {
                 var ticks = _goalTicks[(int)goal] + (goal == _goal ? Math.Max(0L, _tick - _goalSince) : 0L);
                 if (ticks > 0)
@@ -280,8 +280,8 @@ public sealed class BotTracer : IBrainTrace
         public long Seq;
         public long Tick;
         public TraceKind Kind;
-        public Goal From;
-        public Goal To;
+        public Activity From;
+        public Activity To;
         public GoalWhy Exit;
         public GoalWhy Enter;
         public LegWhy Leg;
@@ -294,7 +294,7 @@ public sealed class BotTracer : IBrainTrace
         public int Points;
     }
 
-    private readonly record struct TrailPoint(long Seq, long Tick, float X, float Z, Goal Goal, int Realm, bool Mounted);
+    private readonly record struct TrailPoint(long Seq, long Tick, float X, float Z, Activity Goal, int Realm, bool Mounted);
 }
 
 /// <summary>

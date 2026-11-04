@@ -123,7 +123,11 @@ public sealed partial class SimBridge
     private const int SeriesMarketFees = 18;
     private const int SeriesFaucets = 19;
     private const int SeriesSinks = 20;
-    private const int SeriesCount = 21;
+    private const int SeriesCraftsStarted = 21;
+    private const int SeriesCraftsFinished = 22;
+    private const int SeriesFares = 23;
+    private const int SeriesTicketFlights = 24;
+    private const int SeriesCount = 25;
 
     /// <summary>The cities as a person sees them named, index for index with the server's map (world-data.ts: Port Sable is Mos Eisley, …).</summary>
     private static readonly string[] CityDisplayNames = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
@@ -163,6 +167,10 @@ public sealed partial class SimBridge
         values[SeriesItemDrops] = ItemDrops;
         values[SeriesItemUnits] = ItemUnits;
         values[SeriesItemsLost] = ItemsLost;
+        values[SeriesCraftsStarted] = CraftsStarted;
+        values[SeriesCraftsFinished] = CraftsFinished;
+        values[SeriesFares] = FaresPaid;
+        values[SeriesTicketFlights] = TicketFlights;
         SampleMarket(values);
         _rates.Sample(System.Diagnostics.Stopwatch.GetElapsedTime(_statsStarted).TotalSeconds, values);
 
@@ -256,6 +264,49 @@ public sealed partial class SimBridge
         Rate(j, "walletsOpenedPerMin", r10[SeriesGrants], r60[SeriesGrants], 60d).Append(',');
         Rate(j, "tipsRefusedPerMin", r10[SeriesTipsRefused], r60[SeriesTipsRefused], 60d);
         AppendCreditsByKind(j, r10, r60);
+
+        // Installations (SimBridge.Installations.cs, crafting-build.md § 10): how many stand, placed and picked up, what they made and what they cost.
+        j.Append("},\"installations\":{");
+        Num(j, "standing", InstallationCount).Append(',');
+        Num(j, "placed", InstallationsPlaced).Append(',');
+        Num(j, "pickedUp", InstallationsPickedUp).Append(',');
+        Num(j, "collects", InstallationCollects).Append(',');
+        Num(j, "extracted", UnitsExtracted).Append(',');
+        Num(j, "upkeepPaid", UpkeepPaid).Append(',');
+        Num(j, "lotsPerCharacter", Installations.LotsPerCharacter).Append(',');
+        // Why a place, a collect, a payment or a pick-up was refused: the Workshop's counts of the installations' own reasons (§ 10, C5a-1).
+        j.Append("\"refusedBy\":{");
+        Num(j, "bad", WorkshopRefused(TatooineReplication.InstallationBad)).Append(',');
+        Num(j, "notHere", WorkshopRefused(TatooineReplication.InstallationNotHere)).Append(',');
+        Num(j, "lotTaken", WorkshopRefused(TatooineReplication.LotTaken)).Append(',');
+        Num(j, "noLotsLeft", WorkshopRefused(TatooineReplication.NoLotsLeft)).Append(',');
+        Num(j, "empty", WorkshopRefused(TatooineReplication.InstallationEmpty)).Append(',');
+        Num(j, "notEmpty", WorkshopRefused(TatooineReplication.InstallationNotEmpty));
+        j.Append('}');
+
+        // Waypoints (SimBridge.Waypoints.cs, client.md C38): made and deleted since start.
+        j.Append("},\"waypoints\":{");
+        Num(j, "created", WaypointsCreated).Append(',');
+        Num(j, "deleted", WaypointsDeleted);
+
+        // Who answers a player's attack (SimBridge.Combat.cs, V33 and 2026-11-03): the crowd's bodies that fought back, fled and joined, the creatures
+        // that joined a fight started on one of them.
+        j.Append("},\"reactions\":{");
+        Num(j, "crowdFoughtBack", CrowdFoughtBack).Append(',');
+        Num(j, "crowdFled", CrowdFled).Append(',');
+        Num(j, "crowdJoined", CrowdJoined).Append(',');
+        Num(j, "crowdShouts", CrowdShouts).Append(',');
+        Num(j, "packJoined", PackJoined);
+
+        // The shuttle fare (SimBridge.Fares.cs): what a ticket costs, how many were bought and flown, and how often — whether anybody travels.
+        j.Append("},\"travel\":{");
+        Num(j, "fare", TatooineData.ShuttleFare).Append(',');
+        Num(j, "faresPaid", FaresPaid).Append(',');
+        Num(j, "faresRefused", FaresRefused).Append(',');
+        Num(j, "ticketFlights", TicketFlights).Append(',');
+        Num(j, "ticketsHeld", TicketsHeld).Append(',');
+        Rate(j, "faresPerMin", r10[SeriesFares], r60[SeriesFares], 60d).Append(',');
+        Rate(j, "flightsPerMin", r10[SeriesTicketFlights], r60[SeriesTicketFlights], 60d);
         j.Append("},\"missions\":{");
         Num(j, "held", MissionsHeld).Append(',');
         Num(j, "offers", MissionOffersStanding).Append(',');
@@ -316,6 +367,48 @@ public sealed partial class SimBridge
         // The market (bazaar.md § 9): the board by city, its flows and their rates, the price index, the unsold's age.
         j.Append(",\"market\":");
         AppendMarketJson(j, r10, r60);
+
+        // Gear (crafting-build.md § 8, C1): what was put on and taken off, the bodies' gear written, the crits rolled, the standard issue sold.
+        j.Append(",\"gear\":{");
+        Num(j, "equips", Equips).Append(',');
+        Num(j, "unequips", Unequips).Append(',');
+        Num(j, "gearWrites", GearWrites).Append(',');
+        Num(j, "crits", Crits).Append(',');
+        Num(j, "standardSold", StandardSold).Append(',');
+        Num(j, "standardPaid", StandardPaid);
+        j.Append('}');
+
+        // Decay and repair (crafting-build.md § 8, C3): wear written, items broken and destroyed — by band, C3-4's measure — repairs, their fees, salvage.
+        j.Append(",\"decay\":{");
+        Num(j, "wearWrites", WearWrites).Append(',');
+        Num(j, "broken", ItemsBroken).Append(',');
+        Num(j, "destroyed", ItemsDecayed).Append(',');
+        j.Append("\"destroyedByBand\":[");
+        for (var mk = 1; mk <= 5; mk++)
+        {
+            j.Append(mk == 1 ? "" : ",").Append(ItemsDecayedOfBand(mk).ToString(CultureInfo.InvariantCulture));
+        }
+
+        j.Append("],");
+        Num(j, "repairs", Repairs).Append(',');
+        Num(j, "repairFees", RepairFees).Append(',');
+        Num(j, "salvages", Salvages);
+        AppendGearEndsJson(j);
+        j.Append('}');
+
+        // Crafting (crafting-build.md § 8, C2): the steps counted, their rates, what was made by template and Mk, the latest crafts and who made them.
+        j.Append(",\"craft\":{");
+        Num(j, "started", CraftsStarted).Append(',');
+        Num(j, "finished", CraftsFinished).Append(',');
+        Num(j, "underWay", CraftsUnderWay).Append(',');
+        Num(j, "points", CraftPoints).Append(',');
+        Num(j, "enhanced", CraftsEnhanced).Append(',');
+        Num(j, "fees", CraftFees).Append(',');
+        Rate(j, "startedPerMin", r10[SeriesCraftsStarted], r60[SeriesCraftsStarted], 60d).Append(',');
+        Rate(j, "finishedPerMin", r10[SeriesCraftsFinished], r60[SeriesCraftsFinished], 60d).Append(',');
+        AppendRefineJson(j);
+        AppendMadeJson(j);
+        j.Append('}');
         return j.Append('}').ToString();
 
         static StringBuilder Bands(StringBuilder b, string name, int[] values)

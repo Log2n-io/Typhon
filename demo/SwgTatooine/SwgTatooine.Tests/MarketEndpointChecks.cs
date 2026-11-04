@@ -268,7 +268,10 @@ internal sealed class MarketEndpointChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= bindings, "the avatar to be spawned");
         Harness.Ticks(2);
         var body = Worlds.Park(sim, link.Session, at.X + 2.5f, at.Z);
-        Assert.That(CharacterStore.TryFind(sim.Dbe, account, out var character, out _), Is.True);
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = account;
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
         SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
         Harness.Ticks(2);
         return (link, body, character);

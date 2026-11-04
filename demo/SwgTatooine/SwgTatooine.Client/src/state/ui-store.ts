@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { useChat } from './chat-store';
 import { useMissions } from './mission-store';
+import { useCraft } from './craft-store';
 import { useMarket } from './market-store';
 
 /** One row of the navigation pane. */
@@ -13,6 +14,14 @@ export interface NavRow {
   /** Where it is (a click walks there), planet metres. */
   readonly x: number;
   readonly z: number;
+  /** What it is, for its colour and the pane's filter (client.md C38): a city's structure, a mission, or one of the player's own waypoints. */
+  readonly group: 'city' | 'mission' | 'structure' | 'custom';
+  /** Its colour, CSS. */
+  readonly color: string;
+  /** The player's own waypoint it is, or `null` for a derived one. */
+  readonly waypointId: string | null;
+  /** Whether it is the player's active waypoint. */
+  readonly active: boolean;
 }
 
 /**
@@ -94,7 +103,7 @@ export interface ShuttleportPrompt {
  */
 export interface PartRef {
   readonly owner: number;
-  readonly kind: 'ticket' | 'mission' | 'bazaar';
+  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft';
 }
 
 /** What a context menu entry does: plain data, carried out by the store. */
@@ -105,7 +114,9 @@ export type ContextAction =
   /** The bazaar panel on a tab (bazaar.md § 6); Browse of this terminal's city or of every city. */
   | { readonly kind: 'bazaar'; readonly tab: BazaarTab; readonly scope?: 'here' | 'all' }
   /** Tip another player: the chat opens on `/tip `, the player selected. */
-  | { readonly kind: 'tip'; readonly target: number };
+  | { readonly kind: 'tip'; readonly target: number }
+  /** The crafting panel, at a station (crafting-build.md C2-C3). */
+  | { readonly kind: 'craft' };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -124,7 +135,7 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket' | 'mission' | 'bazaar' | 'player';
+  readonly source: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'player';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -654,6 +665,9 @@ export const useUi = create<UiState>()((set, get) => ({
         }
 
         useChat.getState().compose('/tip ');
+        break;
+      case 'craft':
+        useCraft.getState().openPanel();
         break;
     }
   },

@@ -375,7 +375,7 @@ public sealed class Perception
             // props carry a region too, and theirs are numbered above the cities' (WorldBuilder starts poiIndex at
             // Cities.Count), so they are never confused with a city's facilities.
             var kind = (int)kinds[slot];
-            if (kind != Routing.ShuttleportKind && kind != Routing.BazaarKind && kind != Routing.MissionTerminalKind)
+            if (kind != Routing.ShuttleportKind && kind != Routing.BazaarKind && kind != Routing.MissionTerminalKind && kind != Routing.CraftingStationKind)
             {
                 continue;
             }
@@ -406,9 +406,14 @@ public sealed class Perception
     /// <summary><c>ACKS</c> reason: the destination city does not exist, or is the one it stands in.</summary>
     public const byte ShuttleBadDestination = AckReasons.FirstApplicationReason + 4;
 
+    /// <summary>
+    /// <c>ACKS</c> reason: the fare was not paid — <c>TatooineReplication.ShuttleFareUnpaid</c>. The bot rides instead, as for the other two.
+    /// </summary>
+    public const byte ShuttleFareUnpaid = AckReasons.FirstApplicationReason + 55;
+
     /// <summary>Whether the frame just applied refused a boarding.</summary>
     /// <param name="store">The store, whose ACK list holds this frame's answers only.</param>
-    /// <returns>Whether one of the two shuttle refusals arrived.</returns>
+    /// <returns>Whether one of the three shuttle refusals arrived.</returns>
     /// <remarks>
     /// <b>By reason and not by sequence number.</b> Matching the ACK to the command that earned it would need the
     /// swarm's sequence numbers in the brain; a bot has exactly one boarding in flight at a time, so "a boarding was
@@ -420,7 +425,7 @@ public sealed class Perception
         for (var i = 0; i < acks.Count; i++)
         {
             var reason = acks[i].Reason;
-            if (reason == ShuttleNotAtPort || reason == ShuttleBadDestination)
+            if (reason == ShuttleNotAtPort || reason == ShuttleBadDestination || reason == ShuttleFareUnpaid)
             {
                 return true;
             }

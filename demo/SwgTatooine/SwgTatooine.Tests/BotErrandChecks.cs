@@ -1507,6 +1507,35 @@ public sealed class BotErrandChecks
         });
     }
 
+    /// <summary>§ 6, Inputs: a crafter with room and nothing reserved still goes to the bazaar when its next craft lacks an input — to buy it.</summary>
+    [Test]
+    public void ACrafterLackingAnInput_GoesToTheBazaar_BeforeTheDesk()
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.Decide(sim.View() with { InputWanted = true }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not the bazaar");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// crafting-build.md § 10: an installation owner with room, nothing reserved and no craft still goes to the bazaar when it has nothing placed and no
+    /// kit — the only place it buys one. Without it no owner ever went (live, 2026-11-03: 50 owners, 0 kits in ten minutes).
+    /// </summary>
+    [Test]
+    public void AnOwnerWithNoKit_GoesToTheBazaar_BeforeTheDesk()
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.Decide(sim.View() with { KitWanted = true }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not the bazaar");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1));
+        });
+    }
+
     /// <summary>A bot full enough to be losing drops says so: <see cref="GoalWhy.MarketFull"/>, the telemetry's measure of too little headroom.</summary>
     [TestCase(BotBrain.MarketFullStacks, GoalWhy.MarketFull)]
     [TestCase(BotBrain.MarketFullStacks - 1, GoalWhy.MarketChosen)]
@@ -1554,7 +1583,7 @@ public sealed class BotErrandChecks
     [Test]
     public void AFullInventory_Trades_ThenGoesBackToTheDesk()
     {
-        var (brain, sim) = Trader(26, 0);
+        var (brain, sim) = Trader(BotBrain.MarketStacks + 6, 0);
         var trades = new List<(long Tick, Intent Intent)>();
         var targets = new List<(float X, float Z)>();
         var doneAt = -1L;
@@ -1613,7 +1642,7 @@ public sealed class BotErrandChecks
     [Test]
     public void AFullInventoryTheBazaarCannotEmpty_IsNotTakenThereAgainBeforeItsRetry()
     {
-        var (brain, sim) = Trader(30, 0);
+        var (brain, sim) = Trader(BotBrain.MarketStacks + 10, 0);
         var chosenAt = new List<long>();
         var chosen = 0L;
         for (var tick = 1L; tick < 1400; tick++)
@@ -1692,7 +1721,7 @@ public sealed class BotErrandChecks
     public void ABazaarErrand_SendsEveryMarketCommandFromWithinTheTerminalsReach(int lateTicks, int commands, int dropped)
     {
         const double BazaarReachM = 6d;
-        var (brain, sim) = Trader(26, 0);
+        var (brain, sim) = Trader(BotBrain.MarketStacks + 6, 0);
         var sender = new MarketSender();
         var plan = Enumerable.Range(0, commands).Select(_ => MarketCommand.Vendor(8, 1, 5)).ToList();
         var offerAt = long.MaxValue;
@@ -1730,6 +1759,110 @@ public sealed class BotErrandChecks
             Assert.That(sent.Count == 0 ? 0d : sent.Max(), Is.LessThanOrEqualTo(BazaarReachM), "a command was sent from beyond the terminal's reach");
             Assert.That(sender.Dropped, Is.EqualTo(dropped));
             Assert.That(brain.Counters.Why[(int)GoalWhy.MarketDone], Is.EqualTo(1), "the bot never left the bazaar");
+        });
+    }
+
+    /// <summary>A home crafter in Port Sable: a crafting station 30 m north, its bazaar 40 m east, a mission terminal 60 m west.</summary>
+    private static (BotBrain Brain, Sim Sim) Crafter()
+    {
+        var (brain, sim) = Trader(0, 0);
+        brain.Crafts = true;
+        brain.Facilities.Observe(1, Routing.CraftingStationKind, Here.X, Here.Z + 30f, TerminalAsset + 1, 0);
+        sim.Planet = [.. sim.Planet, new SeenStructure(Here.X, Here.Z + 30f, Routing.CraftingStationKind, TerminalAsset, 0, 1)];
+        return (brain, sim);
+    }
+
+    /// <summary>
+    /// crafting-build.md § 6: a crafter holding a craft's inputs goes to its city's nearest station before the desk; one with nothing to make, or a bot
+    /// that does not craft, goes to the desk.
+    /// </summary>
+    [TestCase(true, true, true)]
+    [TestCase(true, false, false)]
+    [TestCase(false, true, false)]
+    public void ACrafterWithInputs_GoesToAStation_BeforeTheDesk(bool crafts, bool ready, bool toStation)
+    {
+        var (brain, sim) = Crafter();
+        brain.Crafts = crafts;
+        brain.Decide(sim.View() with { CraftReady = ready }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: an errand first");
+            Assert.That(brain.VisitTarget, Is.EqualTo(toStation ? (Here.X, Here.Z + 30f) : (Here.X - 60f, Here.Z)), "not the station, or not the desk");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CraftChosen], Is.EqualTo(toStation ? 1 : 0));
+        });
+    }
+
+    /// <summary>§ 6, Repair: any bot, not only a crafter, with a repair due goes to its city's station and asks the swarm there (a Craft intent).</summary>
+    [Test]
+    public void ABotWithARepairDue_GoesToAStation_EvenIfItDoesNotCraft()
+    {
+        var (brain, sim) = Crafter();
+        brain.Crafts = false;
+        Intent asked = default;
+        for (var tick = 1L; tick < 400 && asked.Kind != IntentKind.Craft; tick++)
+        {
+            var intent = brain.Decide(sim.View() with { RepairDue = true }, tick);
+            sim.Apply(intent);
+            asked = intent.Kind == IntentKind.Craft ? intent : asked;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CraftChosen], Is.EqualTo(1), "not the station first");
+            Assert.That(asked.Kind, Is.EqualTo(IntentKind.Craft), "nothing asked at the station");
+        });
+    }
+
+    /// <summary>
+    /// The craft errand end to end: walked to, one <see cref="IntentKind.Craft"/>, every command of the craft sent from within the station's reach while
+    /// it is still going out, <see cref="GoalWhy.CraftDone"/>, then the desk — and not the station again before its retry.
+    /// </summary>
+    [Test]
+    public void ACrafter_CraftsAtTheStation_StaysWhileItsCraftGoesOut_ThenTheDesk()
+    {
+        const double StationReachM = 6d;
+        var (brain, sim) = Crafter();
+        var sender = new PlanSender<int>();
+        var ready = true;
+        var crafts = new List<long>();
+        var sent = new List<double>();
+        var targets = new List<(float X, float Z)>();
+        var was = brain.Goal;
+        for (var tick = 1L; tick < 900 && targets.Count < 2; tick++)
+        {
+            var intent = brain.Decide(sim.View() with { CraftReady = ready, Crafting = sender.Busy }, tick);
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.Craft)
+            {
+                crafts.Add(tick);
+                ready = false;
+
+                // A whole item's craft: start, six points, an add-on, the finish — at one command a tick and a half.
+                sender.Offer(brain.VisitSerial, [.. Enumerable.Range(0, 9)]);
+            }
+
+            if (sender.Next(brain.AtStation, brain.VisitSerial, tick, 6) is { })
+            {
+                sent.Add(Routing.Distance(sim.X, sim.Z, Here.X, Here.Z + 30f));
+            }
+
+            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            {
+                targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
+            }
+
+            was = brain.Goal;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(targets, Is.EqualTo(new[] { (0f, 30f), (-60f, 0f) }), "not the station, then the desk");
+            Assert.That(crafts, Has.Count.EqualTo(1));
+            Assert.That(brain.CraftsAsked, Is.EqualTo(1));
+            Assert.That(sent, Has.Count.EqualTo(9), "the craft was not all sent before the bot left");
+            Assert.That(sent.Count == 0 ? 0d : sent.Max(), Is.LessThanOrEqualTo(StationReachM), "a command was sent from beyond the station's reach");
+            Assert.That(sender.Dropped, Is.Zero);
+            Assert.That(brain.Counters.Why[(int)GoalWhy.CraftDone], Is.EqualTo(1));
         });
     }
 

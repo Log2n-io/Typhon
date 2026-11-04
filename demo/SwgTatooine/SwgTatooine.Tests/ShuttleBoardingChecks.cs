@@ -1,5 +1,7 @@
-﻿using NUnit.Framework;
+﻿using System.Linq;
+using NUnit.Framework;
 using SwgTatooine.Server;
+using SwgTatooine.Server.Accounts;
 using Typhon.Engine;
 using Typhon.Protocol;
 
@@ -100,7 +102,10 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
     /// Its client times the landing from the published schedule and fades out on touchdown, so a boarding hashed anywhere into the window
     /// would hold that screen black for up to the whole of it. Hence trickle boarding (the crowd's rule), a 500-tick window, and the ask made a few
     /// ticks after a landing with a single tick allowed: the trickle boards at phase p with probability 1/(500 − p) a tick, so it passes this case
-    /// about one time in two hundred and fifty; the session's rule always. (Three ticks at a uniform phase was 3.7 %, the review found.)
+    /// about one time in two hundred and fifty; the session's rule always. (Three ticks at a uniform phase was 3.7 %, the review found.) The single tick
+    /// counts from the fare (SimBridge.Fares.cs): the Ledger charges it after Shuttle has run, so the tick after is the soonest a paid passenger flies —
+    /// and a wallet not open yet refuses the fare, so the client logs in with its wallet open. The count is seen as the Ledger writes it, inside the
+    /// charging tick, so the flight is two tick boundaries away: one, and the next tick had only started (PR #1590's CI, three tries out of three).
     /// </remarks>
     [Test]
     [CancelAfter(90_000)]
@@ -114,7 +119,7 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
         Harness = new SessionHarness(sim);
-        var link = Connect();
+        var (link, _) = LogIn(sim, 0xFA05);
 
         const int Dest = 1;
         var port = sim.Index.Shuttleports[0];
@@ -122,19 +127,18 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         var player = Worlds.Park(sim, link.Session, port.X, port.Z);
 
         // Port 0 has no stagger: it lands on every multiple of the interval. Ask just after one.
-        var interval = (long)(10f * TickRateHz);
-        var phase = sim.Runtime.CurrentTickNumber % interval;
-        Harness.Ticks((int)((interval - phase + 3) % interval));
+        AskJustAfterALanding(sim, 10f);
 
         link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
-        SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 1, "the boarding ask to be queued by a tick");
-        Harness.Ticks(1);
+        SessionHarness.Until(() => sim.Bridge.FaresPaid >= 1, "the fare to be paid");
+        Harness.Ticks(2);
 
         var (x, z) = Where(sim, player);
         Assert.Multiple(() =>
         {
             Assert.That(z, Is.EqualTo(destPort.Z + WorldBuilder.GateOutsideZ + 2f).Within(0.01f), "not just outside the destination's gate");
             Assert.That(System.MathF.Abs(x - destPort.X), Is.LessThanOrEqualTo(2.41f), "not within the gate's width");
+            Assert.That(sim.Bridge.FaresRefused, Is.Zero, "the fare was refused");
         });
     }
 
@@ -327,6 +331,171 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
             "a player who walked away from the port was still flown to the city it had asked for");
     }
 
+    /// <summary>
+    /// A flight costs the fare once (crafting-catalog.md § 15.4): charged when the boarding is accepted, a <c>fare</c> row from the wallet to World naming
+    /// the departure city; a passenger that walks off keeps its ticket, and its next boarding rides on it. The audits clean.
+    /// </summary>
+    /// <remarks>Four seconds between landings, the ask made just after one: room to walk off and come back before the shuttle that flies it.</remarks>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void AFlightCostsTheFareOnce_AndAWalkedOffTicketRidesTheNextBoarding()
+    {
+        var config = Config();
+        config.ShuttleIntervalS = 4f;
+        using var sim = new TatooineSim(config);
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var (link, character) = LogIn(sim, 0xFA01);
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+        var before = Ledgers.Balance(sim, character);
+        AskJustAfterALanding(sim, 4f);
+
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => sim.Bridge.FaresPaid >= 1, "the fare to be paid");
+        link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Boardings.Cancelled >= 1, "the boarding to be cancelled by the walk");
+        link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        Harness.Ticks(2);
+        Worlds.Park(sim, link.Session, port.X, port.Z);
+
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => TatooineReplication.Boardings.Queued >= 2, "the second boarding to be queued");
+        SessionHarness.Until(() => Near(sim, player, destPort.X, destPort.Z, 64f), $"the player to arrive at city {Dest}'s port");
+        Harness.Ticks(2);
+
+        var key = unchecked((long)character.RawValue);
+        var fares = Ledgers.Rows(sim).Where(r => r.Kind == TransferKind.Fare).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(Ledgers.Balance(sim, character), Is.EqualTo(before - TatooineData.ShuttleFare), "one fare, for two boardings and one flight");
+            Assert.That(fares, Has.Count.EqualTo(1));
+            Assert.That(
+                (fares[0].From, fares[0].To, fares[0].Amount, fares[0].Ref),
+                Is.EqualTo((key, EconomyLedger.World, (long)TatooineData.ShuttleFare, 1L)));
+            Assert.That(sim.Bridge.TicketFlights, Is.EqualTo(1));
+            Assert.That(sim.Bridge.FaresRefused, Is.Zero);
+        });
+        Harness.Ticks(2);
+        Assert.That(sim.Bridge.TicketsHeld, Is.Zero, "the ticket flown is struck off");
+        var (ok, why) = Market.Audits(sim);
+        Assert.That(ok, Is.True, why);
+    }
+
+    /// <summary>A passenger whose wallet is short of the fare is refused with its reason, taken out of the queue, and not flown.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APassengerShortOfTheFare_IsRefusedAndStaysWhereItIs()
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var (link, character) = LogIn(sim, 0xFA02);
+        var take = new AdminRequest
+        {
+            Action = AdminAction.Credits,
+            Character = unchecked((long)character.RawValue),
+            Delta = -(Ledgers.Balance(sim, character) - (TatooineData.ShuttleFare - 1)),
+        };
+        var done = sim.Bridge.Admin(take);
+        SessionHarness.Until(() => done.IsCompleted, "the credits taken");
+        Assert.That(done.Result.Ok, Is.True, done.Result.Message);
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => sim.Bridge.FaresRefused >= 1, "the boarding to be refused for its fare");
+
+        // Two intervals and a little: a passenger left in the queue would have been flown by now.
+        Harness.Ticks((int)(2 * ShuttleIntervalS * TickRateHz) + 5);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Contains.Item(TatooineReplication.ShuttleFareUnpaid), "the client was not told why");
+            Assert.That(Near(sim, player, destPort.X, destPort.Z, 128f), Is.False, "flown without paying");
+            Assert.That(ActivityOf(sim, player), Is.EqualTo(PlayerActivity.Idle), "left in the queue");
+            Assert.That(Ledgers.Balance(sim, character), Is.EqualTo(TatooineData.ShuttleFare - 1));
+            Assert.That(Ledgers.Rows(sim).Any(r => r.Kind == TransferKind.Fare), Is.False, "a fare row for a refusal");
+            Assert.That(sim.Bridge.TicketFlights, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A session's passenger queued without its fare paid — asked while the world was paused, or its ticket lost — is charged by the Ledger when its shuttle
+    /// is down, and flown on the next tick (review, 2026-11-03): it used to wait for a shuttle that never took it.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void APassengerQueuedUnpaid_IsChargedWhenItsShuttleIsDown_AndFlown()
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var (link, character) = LogIn(sim, 0xFA03);
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+        var before = Ledgers.Balance(sim, character);
+        sim.WriteInTick(tx =>
+        {
+            var p = tx.OpenMut(player);
+            var state = p.Read(Player.State);
+            state.Activity = PlayerActivity.AwaitingShuttle;
+            state.ActivityTicks = 0;
+            state.ShuttleFrom = 0;
+            state.ShuttleDest = Dest;
+            p.Set(Player.State, state);
+        });
+
+        SessionHarness.Until(() => Near(sim, player, destPort.X, destPort.Z, 64f), $"the player to arrive at city {Dest}'s port");
+        Assert.Multiple(() =>
+        {
+            Assert.That(Ledgers.Balance(sim, character), Is.EqualTo(before - TatooineData.ShuttleFare));
+            Assert.That(Ledgers.Rows(sim).Count(r => r.Kind == TransferKind.Fare), Is.EqualTo(1));
+            Assert.That(sim.Bridge.TicketFlights, Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>A fare paid in a Ledger transaction that does not commit is refused with its reason, the ticket taken back, the passenger not flown.</summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void AFareLostWithTheLedgersCommit_IsRefusedAndNotFlown()
+    {
+        using var sim = new TatooineSim(Config());
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var (link, character) = LogIn(sim, 0xFA04);
+
+        const int Dest = 1;
+        var port = sim.Index.Shuttleports[0];
+        var destPort = sim.Index.Shuttleports[Dest];
+        var player = Worlds.Park(sim, link.Session, port.X, port.Z);
+        var before = Ledgers.Balance(sim, character);
+        sim.Bridge.FailNextLedgerWriteForChecks();
+        link.SendCommand(nameof(BoardShuttle), new RecordValues { ["destCity"] = FieldValue.Of(Dest) });
+        SessionHarness.Until(() => sim.Bridge.FaresRefused >= 1, "the fare lost with the commit");
+        Harness.Ticks((int)(2 * ShuttleIntervalS * TickRateHz) + 5);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Refusals(link), Contains.Item(TatooineReplication.ShuttleFareUnpaid));
+            Assert.That(Near(sim, player, destPort.X, destPort.Z, 128f), Is.False, "flown on a fare that was never paid");
+            Assert.That(Ledgers.Balance(sim, character), Is.EqualTo(before));
+            Assert.That(Ledgers.Rows(sim).Any(r => r.Kind == TransferKind.Fare), Is.False);
+            Assert.That(sim.Bridge.TicketsHeld, Is.Zero, "the ticket taken back");
+        });
+    }
+
     /// <summary>A client's boarding stays on its own planet, however the scripted crowd's inter-planet traffic is set.</summary>
     /// <remarks>
     /// <b>The share is forced to 1, so this is a certainty rather than a coin.</b> At the default 0.2 a broken build
@@ -375,6 +544,37 @@ internal sealed class ShuttleBoardingChecks : ServedChecks
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
         Harness.Ticks(2);
         return link;
+    }
+
+    /// <summary>A client logged in on its own account, with the character it plays and its wallet open.</summary>
+    private (FakeLink Link, EntityId Character) LogIn(TatooineSim sim, ulong account)
+    {
+        var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
+        SessionHarness.Until(() => link.Received(MessageTypes.Welcome), "WELCOME");
+        SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the avatar to be spawned");
+        // Waited for, not asserted: on CI's runner the character was not found yet, two ticks after the possession, in five fixtures (PR #1590).
+        var characterAccount = TestAccounts.For(sim.Dbe, account);
+        var character = EntityId.Null;
+        SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
+        SessionHarness.Until(() => Ledgers.TryWallet(sim, character, out _), "the wallet to be opened");
+        Harness.Ticks(2);
+        return (link, character);
+    }
+
+    /// <summary>Waits for port 0's landing and three ticks past it, so the next is a whole interval of <paramref name="intervalS"/> away.</summary>
+    private void AskJustAfterALanding(TatooineSim sim, float intervalS)
+    {
+        var interval = (long)(intervalS * TickRateHz);
+        var phase = sim.Runtime.CurrentTickNumber % interval;
+        Harness.Ticks((int)((interval - phase + 3) % interval));
+    }
+
+    /// <summary>What a player is doing now.</summary>
+    private static int ActivityOf(TatooineSim sim, EntityId entity)
+    {
+        using var tx = sim.Dbe.CreateQuickTransaction();
+        Assert.That(tx.TryOpen(entity, out var player), Is.True, "the player is gone");
+        return player.Read(Player.State).Activity;
     }
 
     /// <summary>Who drives a player: the crowd's script, or a session.</summary>

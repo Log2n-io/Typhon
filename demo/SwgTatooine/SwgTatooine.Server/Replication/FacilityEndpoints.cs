@@ -10,7 +10,8 @@ using Typhon.Engine;
 namespace SwgTatooine.Server;
 
 /// <summary>
-/// <c>GET /swg/facilities</c>: every shuttleport, bazaar and mission terminal in the world — where it stands, which city it serves, which asset it is.
+/// <c>GET /swg/facilities</c>: every shuttleport, bazaar, mission terminal and crafting station in the world — where it stands, which city it serves,
+/// which asset it is.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -86,5 +87,6 @@ public static class FacilityEndpoints
     }
 
     /// <summary>The kinds listed: the ones a player walks to use.</summary>
-    public static bool IsFacility(int kind) => kind is StructureKind.Shuttleport or StructureKind.Bazaar or StructureKind.MissionTerminal;
+    public static bool IsFacility(int kind)
+        => kind is StructureKind.Shuttleport or StructureKind.Bazaar or StructureKind.MissionTerminal or StructureKind.CraftingStation;
 }

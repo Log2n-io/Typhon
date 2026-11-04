@@ -20,7 +20,7 @@ namespace SwgTatooine.Server;
 /// what acceptance criterion A-8 measures.
 /// </para>
 /// <para>
-/// <b>In the serial session system and nowhere else</b> (see <c>SessionTick</c>'s remarks for why that system is serial). Every
+/// <b>In the session system and nowhere else</b> (see <c>SessionTick</c>'s remarks). Every
 /// spawn, destroy, character read and character write below runs on the tick's own transaction: no side transaction, so there is
 /// nothing for <c>EW-01</c> to catch, and the whole login is one atomic unit — the character is read or created, the avatar is
 /// spawned and the session is given control in one commit, or none of it happens.
@@ -962,6 +962,7 @@ public static partial class TatooineReplication
             if (CharacterOfSession.TryGetValue(sessionValue, out var character))
             {
                 SaveAvatarLocation(players, characters, avatar, character);
+                RetireWear(players, avatar, character);
             }
 
             // The avatar exists for the session and nothing else, so it goes with it. This is the demo's first in-tick Destroy on a
@@ -1001,6 +1002,7 @@ public static partial class TatooineReplication
         if (CharacterOfSession.TryGetValue(sessionValue, out var character))
         {
             SaveAvatarLocation(players, tx.For<CharacterArch>(), hold.Avatar, character);
+            RetireWear(players, hold.Avatar, character);
         }
 
         tx.Destroy(hold.Avatar);
@@ -1035,6 +1037,39 @@ public static partial class TatooineReplication
 
     /// <summary>Scratch: the account holds to drop, collected before the dictionary is written.</summary>
     private static readonly List<ulong> AccountsToDrop = [];
+
+    // The wear a body counted and had not written into its items (crafting-catalog.md § 9.1: "at logout"), taken with it: the Workshop writes it on
+    // its next pass. Written here (Input phase), drained there (Economy phase); a failed pass puts it back.
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<(EntityId Character, PlayerGear Gear)> WearRetired = new();
+
+    private static void RetireWear(ArchetypeAccessor<Player> players, EntityId avatar, EntityId character)
+    {
+        if (players.TryOpen(avatar, out var body) && body.Read(Player.Gear) is { Uses: > 0 } gear)
+        {
+            WearRetired.Enqueue((character, gear));
+        }
+    }
+
+    /// <summary>Whether a body that logged out left wear to write.</summary>
+    internal static bool WearRetiredPending => !WearRetired.IsEmpty;
+
+    /// <summary>Moves the wear left by bodies that logged out into <paramref name="into"/>.</summary>
+    internal static void DrainWearRetired(List<(EntityId Character, PlayerGear Gear)> into)
+    {
+        while (WearRetired.TryDequeue(out var w))
+        {
+            into.Add(w);
+        }
+    }
+
+    /// <summary>Puts back what a failed Workshop pass did not write.</summary>
+    internal static void RequeueWearRetired(List<(EntityId Character, PlayerGear Gear)> from)
+    {
+        foreach (var w in from)
+        {
+            WearRetired.Enqueue(w);
+        }
+    }
 
     /// <summary>
     /// Copies an avatar's position and realm onto its character.
@@ -1161,7 +1196,6 @@ public static partial class TatooineReplication
         {
             Health = health,
             MaxHealth = health,
-            AttackDamage = AvatarAttackDamage,
             AttackCooldown = 0,
         };
 
@@ -1190,6 +1224,7 @@ public static partial class TatooineReplication
             Player.Control.Set(in control),
             Player.Session.Set(in owner),
             Player.Look.Set(in look),
+            Player.Gear.Set(PlayerGear.Unarmed),
             Player.Realm.Set(new PlayerRealm(profile.LastRealm)));
     }
 
@@ -1210,9 +1245,6 @@ public static partial class TatooineReplication
 
         return CharacterProgress.Start;
     }
-
-    /// <summary>An avatar's attack damage, matching the pooled crowd's.</summary>
-    private const int AvatarAttackDamage = 95;
 
     /// <summary>The account's identity — its name and the outfit chosen at sign-up — or a default one for an account gone since its token was minted.</summary>
     /// <param name="tx">The tick's transaction.</param>
@@ -1385,6 +1417,7 @@ public static partial class TatooineReplication
     private static void ResetAvatarAccounting()
     {
         BodiesBound.Clear();
+        WearRetired.Clear();
         AccountOfSession.Clear();
         CharacterOfSession.Clear();
         SessionOfAccount.Clear();

@@ -52,14 +52,21 @@ import { PlayerNameDirectory } from '../data/player-names';
 import { entityTag, viewerClOf, type EntityTag } from '../data/content-level';
 import { MissionJournal, missionTitle, type MissionOffer } from '../data/missions';
 import { playerMenuItems, WalletReader } from '../data/wallet';
-import { itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
+import { isEquipSlot, itemIcons, parseInventory, type InventorySnapshot } from '../data/items';
 import { MockSource } from '../data/mock/mock-source';
 import type { MockInventory } from '../data/mock/inventory';
 import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
 import { parseMine, type MarketMine } from '../data/market';
+import { useCraft } from '../state/craft-store';
+import { useInstallations } from '../state/installations-store';
+import { useWaypoints } from '../state/waypoints-store';
+import { useCharacter } from '../state/character-store';
+import { edgeArrow, WaypointPillar } from '../render/waypoint-marker';
+import { colorOf, GROUP_COLORS, groupOf } from '../data/waypoints';
 import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
+import { useMap } from '../state/map-store';
 import { useMissions } from '../state/mission-store';
 import { announceNotices, useWallet } from '../state/wallet-store';
 import { useSessionStore } from '../state/session-store';
@@ -130,6 +137,9 @@ import {
   bazaarMenuItems,
   bazaarRegionAt,
   bazaarTerminalOf,
+  craftingStationAt,
+  craftingStationOf,
+  craftMenuItems,
   crowdsTerminal,
   missionTerminalAction,
   missionTerminalOf,
@@ -217,6 +227,9 @@ const MOUNT_ANSWER_MS = 1500;
 
 /** How often the navigation pane rescans for the nearest facilities: five times a second is a walk of a metre or two. */
 const NAV_INTERVAL_MS = 200;
+
+/** How often the planet map's player marker moves while the map is open: ten times a second follows a run without a store write a frame. */
+const MAP_INTERVAL_MS = 100;
 const REGION_INTERVAL_MS = 200;
 const PICK_RADIUS_PX = 8;
 const FRAME_SAMPLES = 128;
@@ -407,6 +420,9 @@ const SHUTTLE_SEARCH_FRAMES = 8;
  */
 const STRUCTURE_ARCHETYPE = 'WorldObject';
 
+/** The archetypes drawn as placed assets: the world's structures, and the players' installations (crafting-build.md § 10). */
+const STATIC_ARCHETYPES = [STRUCTURE_ARCHETYPE, 'InstallationMarker'] as const;
+
 /** How far behind a structure's surface a body still counts as picked, metres: one standing against a wall, or at a terminal. */
 const PICK_SURFACE_SLACK_M = 0.6;
 
@@ -433,6 +449,13 @@ const BAZAAR_TERMINAL_ASSET = 'bazaar_terminal';
 const BAZAAR_TERMINAL_LABEL = 'Bazaar';
 const BAZAAR_TERMINAL_TAG: EntityTag = entityTag(BAZAAR_TERMINAL_LABEL, 0, null);
 
+/** The crafting station's asset: its `crafting` interaction is where crafting, repair and salvage are done from (crafting-build.md C2-C3). */
+const CRAFTING_STATION_ASSET = 'crafting_station';
+
+/** What a selected crafting station is tagged. */
+const CRAFTING_STATION_LABEL = 'Crafting station';
+const CRAFTING_STATION_TAG: EntityTag = entityTag(CRAFTING_STATION_LABEL, 0, null);
+
 /** A tag before anything was tagged. */
 const NO_TAG: EntityTag = entityTag('', 0, null);
 
@@ -445,10 +468,13 @@ const OFFER_AT_TERMINAL_M = 1.5;
 /** The navigation pane's kinds for held missions, past every `StructureKind`: one per held mission, in the journal's order. */
 const MISSION_NAV_KIND = 1000;
 
+/** The first of the player's own waypoints' rows in the pane, after the missions'. */
+const WAYPOINT_NAV_KIND = 2000;
+
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
-  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5) or a bazaar terminal (bazaar.md § 6). */
-  readonly kind: 'ticket' | 'mission' | 'bazaar';
+  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5), a bazaar terminal (bazaar.md § 6) or a crafting station. */
+  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft';
   /** The shuttleport's netId, or the mission or bazaar terminal's own. */
   readonly owner: number;
   readonly use: TicketTerminal;
@@ -544,6 +570,10 @@ export class ClientApp {
   private readonly attacks: AttackLines;
   /** The fights as they look: swings, bolts, hit reactions and damage numbers, played at render time. */
   private readonly fx: CombatFx;
+  /** The active waypoint's pillar, and the arrow at the screen's edge when it is out of view (client.md C38, U5). */
+  private readonly waypointPillar: WaypointPillar;
+  private waypointEdge: HTMLElement | null = null;
+  private readonly waypointScreen = { x: 0, y: 0, w: 0 };
   /** The damage of every blow, over the body it landed on, in the scene. */
   private readonly damage: DamageText;
   /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
@@ -827,6 +857,7 @@ export class ClientApp {
     // Every blow the server streams, played at render time: the attacker's swing — the crowd's, or this session's avatar's —
     // a bolt for a shot, and on impact the target's hit reaction and its damage over its head.
     this.fx = new CombatFx(this.scene);
+    this.waypointPillar = new WaypointPillar(this.scene);
     this.damage = new DamageText(this.scene);
     this.fx.hooks = {
       strike: (netId) => {
@@ -835,23 +866,23 @@ export class ClientApp {
           this.selfStrikes++;
         }
       },
-      impact: (netId, amount) => {
+      impact: (netId, amount, crit) => {
         this.crowdRouter?.hit(netId);
         if (netId === this.source?.selfNetId) {
           this.selfHits++;
         }
 
-        this.damage.spawn(netId, amount, performance.now());
+        this.damage.spawn(netId, amount, performance.now(), crit);
       },
       ranged: (netId) => this.archetypeName(netId) === 'Player' && this.fieldOf(netId, 'stance') === PISTOL_STANCE,
       aim: (netId) => this.heightOf(netId) * 0.6,
     };
     // The debug lines see every blow; the effects play them. One sink for the source, the two behind it.
     this.events = {
-      onAttack: (tick, attacker, target, damage) => {
+      onAttack: (tick, attacker, target, damage, _hpAfter, crit) => {
         this.attacks.onAttack(tick, attacker, target);
         this.fight.note(attacker, target, this.source?.selfNetId ?? 0, performance.now());
-        this.fx.push(tick, attacker, target, damage);
+        this.fx.push(tick, attacker, target, damage, crit);
       },
       onChat: (tick, speaker, text) => {
         const own = speaker !== 0 && speaker === (this.source?.selfNetId ?? 0);
@@ -1148,6 +1179,7 @@ export class ClientApp {
       void mount.library.describe(TICKET_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(MISSION_TERMINAL_ASSET).catch(() => undefined);
       void mount.library.describe(BAZAAR_TERMINAL_ASSET).catch(() => undefined);
+      void mount.library.describe(CRAFTING_STATION_ASSET).catch(() => undefined);
 
       // <b>Nothing above waited for anything but the catalogue</b> (Loïc, 2026-10-26: what is lazy loads asynchronously,
       // and what waits on it is not drawn). The buildings ask for their own GLBs from the next frame, and the crowds build
@@ -1373,6 +1405,7 @@ export class ClientApp {
     this.pressRing.dispose();
     this.attacks.dispose();
     this.fx.dispose();
+    this.waypointPillar.dispose();
     this.damage.dispose();
     for (const layer of this.layers) {
       layer.dispose();
@@ -1462,6 +1495,10 @@ export class ClientApp {
     this.items.clear();
     this.itemsVersion = -1;
     useItems.getState().reset();
+    useCraft.getState().reset();
+    useInstallations.getState().reset();
+    useWaypoints.getState().reset();
+    useCharacter.getState().reset();
     this.mine.clear();
     this.mineVersion = -1;
     useMarket.getState().reset();
@@ -1897,11 +1934,31 @@ export class ClientApp {
       });
     });
 
+    // The player's own waypoints (client.md C38), after the missions, the active one first: read once a session can, then after each own command.
+    const waypoints = useWaypoints.getState();
+    waypoints.ensure();
+    useInstallations.getState().watch();
+    const own = [...(waypoints.list ?? [])].sort((a, b) => Number(b.active) - Number(a.active));
+    own.forEach((w, i) => {
+      this.navTargets.push({
+        kind: WAYPOINT_NAV_KIND + i,
+        x: w.x,
+        z: w.z,
+        distance: Math.hypot(w.x - this.navFromX, w.z - this.navFromZ),
+        held: true,
+      });
+    });
+
     // Republished only when what it shows changed: a metre of distance or a different target. Five store writes a second
     // would re-render the pane five times a second for nothing.
     let key = '';
     for (const t of this.navTargets) {
       key += `${t.kind}:${Number.isFinite(t.distance) ? Math.round(t.distance) : -1}:${Math.round(t.x)},${Math.round(t.z)};`;
+    }
+
+    // A rename, a colour or the active one changed with nothing moved: the pane shows those too.
+    for (const w of own) {
+      key += `${w.id}:${w.name}:${String(w.color)}:${w.active ? 1 : 0};`;
     }
 
     if (key !== this.navKey) {
@@ -1910,22 +1967,126 @@ export class ClientApp {
       const rows: NavRow[] = this.navTargets.map((t) => {
         // A click walks to where the thing is used from: a shuttleport's ticket terminal, not its pad.
         const at = t.kind === StructureKind.Shuttleport ? this.ticketStandPoint(t.x, t.z) : null;
-        const mission = t.kind >= MISSION_NAV_KIND ? held.journal[t.kind - MISSION_NAV_KIND] : undefined;
+        const waypoint = t.kind >= WAYPOINT_NAV_KIND ? own[t.kind - WAYPOINT_NAV_KIND] : undefined;
+        const mission =
+          t.kind >= MISSION_NAV_KIND && t.kind < WAYPOINT_NAV_KIND
+            ? held.journal[t.kind - MISSION_NAV_KIND]
+            : undefined;
         const name = mission === undefined ? '' : missionTitle(mission.name);
+        const distanceM = Number.isFinite(t.distance) ? Math.round(t.distance) : Infinity;
+        if (waypoint !== undefined) {
+          return {
+            kind: t.kind,
+            label: waypoint.name,
+            distanceM,
+            x: t.x,
+            z: t.z,
+            group: groupOf(waypoint),
+            color: colorOf(waypoint),
+            waypointId: waypoint.id,
+            active: waypoint.active,
+          };
+        }
+
         return {
           kind: t.kind,
           label: mission === undefined ? navLabel(t) : mission.lair === null ? `${name} (lair moving)` : name,
-          distanceM: Number.isFinite(t.distance) ? Math.round(t.distance) : Infinity,
+          distanceM,
           x: at?.x ?? t.x,
           z: at?.z ?? t.z,
+          group: mission === undefined ? 'city' : 'mission',
+          color: mission === undefined ? GROUP_COLORS.city : GROUP_COLORS.mission,
+          waypointId: null,
+          active: false,
         };
       });
       ui.setNav(rows, scanMs, this.structureCount);
     }
   }
 
+  private mapAtMs = Number.NEGATIVE_INFINITY;
+
+  /**
+   * The planet map's player marker (`map-store`), only while the map is open: where the body stands — the predicted position, as the
+   * waypoint pane's — and the camera's yaw. None for a session with no avatar on the planet: a god camera, a room, a dungeon.
+   */
+  private updateMapPlayer(nowMs: number, yaw: number): void {
+    const map = useMap.getState();
+    // Kept while the map is closed too: `/way` with no place puts a waypoint where the character stands (client.md C38).
+    if (nowMs - this.mapAtMs < MAP_INTERVAL_MS) {
+      return;
+    }
+
+    this.mapAtMs = nowMs;
+    const source = this.source;
+    const onPlanet = source !== null && source.canPlay && source.selfNetId !== 0 && this.profile.kind === 'planet';
+    map.setPlayer(
+      onPlanet
+        ? {
+            x: this.predictor.active ? this.predictor.x : this.eyeX,
+            z: this.predictor.active ? this.predictor.z : this.eyeZ,
+            yaw,
+          }
+        : null,
+    );
+  }
+
+  /**
+   * The active waypoint in the world, every frame (client.md C38, U5): its pillar on the ground at it, and — out of view — the arrow at the screen's
+   * edge the way to turn. Only for a player on the planet, where the waypoints are.
+   */
+  private paintWaypoint(matrix: ArrayLike<number>): void {
+    const source = this.source;
+    const onPlanet = source !== null && source.canPlay && source.selfNetId !== 0 && this.profile.kind === 'planet';
+    const active = onPlanet ? (useWaypoints.getState().list?.find((w) => w.active) ?? null) : null;
+    if (this.waypointEdge === null || !this.waypointEdge.isConnected) {
+      this.waypointEdge = document.querySelector<HTMLElement>('.waypoint-edge');
+    }
+
+    if (active === null) {
+      this.waypointPillar.update(null, this.origin.x, this.origin.z);
+      if (this.waypointEdge !== null) {
+        this.waypointEdge.style.display = 'none';
+      }
+
+      return;
+    }
+
+    const colour = colorOf(active);
+    const groundY = this.profile.ground.heightAt(active.x, active.z);
+    this.waypointPillar.update({ x: active.x, z: active.z, groundY, colour }, this.origin.x, this.origin.z);
+    const edge = this.waypointEdge;
+    if (edge === null) {
+      return;
+    }
+
+    const s = projectToScreen(
+      matrix,
+      active.x - this.origin.x,
+      groundY + 2,
+      active.z - this.origin.z,
+      this.cssSize.width,
+      this.cssSize.height,
+      this.waypointScreen,
+    );
+    const turn = relativeBearing(this.navFromX, this.navFromZ, active.x, active.z, this.lastYaw);
+    const at = edgeArrow(s.x, s.y, s.w, this.cssSize.width, this.cssSize.height, turn);
+    if (at === null) {
+      edge.style.display = 'none';
+      return;
+    }
+
+    edge.style.display = 'block';
+    edge.style.color = colour;
+    edge.style.transform = `translate(${at.x.toFixed(0)}px, ${at.y.toFixed(0)}px) translate(-50%, -50%) rotate(${at.angle.toFixed(3)}rad)`;
+    edge.title = active.name;
+  }
+
   /** Turns the pane's arrows to the camera, every frame: up is straight ahead (see `relativeBearing`). */
+  private lastYaw = 0;
+
   private paintNav(yaw: number): void {
+    this.lastYaw = yaw;
     if (!this.navShown) {
       return;
     }
@@ -3424,8 +3585,10 @@ export class ClientApp {
     this.activeAltitude = cam.altitude;
     this.updateMissions(now);
     this.updateMarket(now);
+    this.updateCraft();
     this.updateNav(now);
     this.paintNav(cam.yaw);
+    this.updateMapPlayer(now, cam.yaw);
     this.origin.follow(cam.targetX, cam.targetZ);
     // The placements are held in planet coordinates, so they follow the origin the frame it snaps. One node, every frame:
     // cheaper than asking whether it moved.
@@ -3648,6 +3811,7 @@ export class ClientApp {
     // Speech over its speakers, labels shown or not: what is said is the game's, not a debugging overlay.
     this.bubbleMatrix = matrix;
     this.bubbles.update(this.cssSize.width, this.cssSize.height, now, this.speakerAnchor);
+    this.paintWaypoint(matrix);
 
     this.frameJs[this.frameJsNext] = performance.now() - now;
     this.frameJsNext = (this.frameJsNext + 1) % FRAME_SAMPLES;
@@ -3887,13 +4051,15 @@ export class ClientApp {
     const ticket = library?.described(TICKET_TERMINAL_ASSET) ?? null;
     const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
     const bazaar = library?.described(BAZAAR_TERMINAL_ASSET) ?? null;
+    const station = library?.described(CRAFTING_STATION_ASSET) ?? null;
     if (
       this.partsEpoch === this.structureEpoch &&
       this.partsSet === this.assetSet &&
       this.partsFrom[0] === port &&
       this.partsFrom[1] === ticket &&
       this.partsFrom[2] === mission &&
-      this.partsFrom[3] === bazaar
+      this.partsFrom[3] === bazaar &&
+      this.partsFrom[4] === station
     ) {
       return this.terminalParts;
     }
@@ -3901,7 +4067,7 @@ export class ClientApp {
     this.terminalParts = [];
     this.partsEpoch = this.structureEpoch;
     this.partsSet = this.assetSet;
-    this.partsFrom = [port, ticket, mission, bazaar];
+    this.partsFrom = [port, ticket, mission, bazaar, station];
 
     const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
@@ -3913,7 +4079,9 @@ export class ClientApp {
             ? missionTerminalOf(mission, s.x, s.y, s.z, s.yaw)
             : s.kind === StructureKind.Bazaar && bazaar !== null
               ? bazaarTerminalOf(bazaar, s.x, s.y, s.z, s.yaw)
-              : null;
+              : s.kind === StructureKind.CraftingStation && station !== null
+                ? craftingStationOf(station, s.x, s.y, s.z, s.yaw)
+                : null;
       if (use === null || use.corners === null) {
         continue;
       }
@@ -3928,7 +4096,13 @@ export class ClientApp {
       }
 
       const kind =
-        s.kind === StructureKind.Shuttleport ? 'ticket' : s.kind === StructureKind.Bazaar ? 'bazaar' : 'mission';
+        s.kind === StructureKind.Shuttleport
+          ? 'ticket'
+          : s.kind === StructureKind.Bazaar
+            ? 'bazaar'
+            : s.kind === StructureKind.CraftingStation
+              ? 'craft'
+              : 'mission';
       this.terminalParts.push({ kind, owner: s.netId, use, min, max });
     }
 
@@ -3999,6 +4173,33 @@ export class ClientApp {
   private mineVersion = -1;
   /** The bazaar terminal whose context menu is open, for closing it when the body walks away. */
   private bazaarMenuOwner = 0;
+  /** The crafting station whose context menu is open, likewise. */
+  private craftMenuOwner = 0;
+
+  /**
+   * The crafting station, every frame: whether the body stands within one's reach — the only place the crafting panel opens, and it closes when
+   * the body walks away, as a mission terminal's list does — and the station's menu closed likewise.
+   */
+  private updateCraft(): void {
+    const source = this.source;
+    const at =
+      source !== null &&
+      source.canPlay &&
+      source.selfNetId !== 0 &&
+      craftingStationAt(
+        this.terminalsInView(),
+        this.predictor.active ? this.predictor.x : this.eyeX,
+        this.predictor.active ? this.predictor.z : this.eyeZ,
+      );
+    useCraft.getState().setAtStation(at);
+    const ui = useUi.getState();
+    if (ui.contextMenu?.source === 'craft') {
+      const menuPart = this.terminalPart(this.craftMenuOwner);
+      if (menuPart === null || !this.canUse(menuPart)) {
+        ui.closeContextMenu();
+      }
+    }
+  }
 
   /**
    * The bazaar, every frame: where the body stands (the region of a bazaar terminal in reach, which is where list, buy,
@@ -4099,7 +4300,13 @@ export class ClientApp {
       const items = this.items.value;
       if (items !== null) {
         useItems.getState().setSnapshot(items);
-        useMarket.getState().setStacks(items.items);
+        // What is worn is not for sale until it is taken off (crafting-build.md § 2.2).
+        useMarket.getState().setStacks(items.items.filter((i) => !isEquipSlot(i.slot)));
+        // A craft's steps move the items revision: its state is read again with them while the panel shows it (crafting-build.md C2) — opening it
+        // reads it too.
+        if (useCraft.getState().open) {
+          void useCraft.getState().refresh();
+        }
       }
     }
 
@@ -4308,6 +4515,18 @@ export class ClientApp {
 
     ui.selectPart({ owner: part.owner, kind: part.kind });
     this.bazaarMenuOwner = part.kind === 'bazaar' ? part.owner : 0;
+    this.craftMenuOwner = part.kind === 'craft' ? part.owner : 0;
+    if (part.kind === 'craft') {
+      ui.openContextMenu({
+        x: press.x,
+        y: press.y,
+        title: CRAFTING_STATION_LABEL,
+        source: 'craft',
+        items: craftMenuItems(),
+      });
+      return false;
+    }
+
     if (part.kind === 'bazaar') {
       ui.openContextMenu({
         x: press.x,
@@ -4332,6 +4551,7 @@ export class ClientApp {
       items: ticketMenuItems(
         ui.shuttleport?.city ?? -1,
         CITIES.map((c) => c.name),
+        this.shuttleSchedule?.fare ?? 0,
       ),
     });
     return false;
@@ -4343,7 +4563,9 @@ export class ClientApp {
       ? MISSION_TERMINAL_TAG
       : part.kind === 'bazaar'
         ? BAZAAR_TERMINAL_TAG
-        : TICKET_TERMINAL_TAG;
+        : part.kind === 'craft'
+          ? CRAFTING_STATION_TAG
+          : TICKET_TERMINAL_TAG;
   }
 
   /** Evaluates the selection's position into {@link selectedX}/{@link selectedZ}; false when it has none. */
@@ -5580,17 +5802,27 @@ export class ClientApp {
     // BY NAME, never by the schema's index. The live catalog decides the order its archetypes arrive in, and it is not
     // this schema's: `Archetype.WorldObject` is 0 here while the server's catalog put `CityNpc` there. Reading the
     // store at a constant index drew every city NPC as a building and asked a creature store for a `kind` field it does
-    // not have — C10's lesson, which the layers already follow and this did not.
-    const archetype = this.archetypes.indexOf('WorldObject');
+    // not have — C10's lesson, which the layers already follow and this did not. The players' installations
+    // (crafting-build.md § 10) carry the same fields and are drawn the same way, from their own store.
+    const samples = this.structureSamples;
+    let taken = 0;
+    for (const name of STATIC_ARCHETYPES) {
+      taken = this.sampleStatic(name, eyeX, eyeZ, taken);
+    }
+
+    this.structureCount = taken;
+    return layer.update(samples, taken, this.assetView);
+  }
+
+  /** One store's structures within range, into {@link structureSamples} from `taken`; how many are taken after it. */
+  private sampleStatic(name: string, eyeX: number, eyeZ: number, taken: number): number {
+    const archetype = this.archetypes.indexOf(name);
     if (archetype < 0) {
-      // Still told, with nothing: a frame that skipped the call would leave the placed instances standing AND stop
-      // reporting them as hidden, so every one of them would be drawn twice.
-      return layer.update(this.structureSamples, 0, this.assetView);
+      return taken;
     }
 
     const store = this.world.archetypeStore(archetype);
     const samples = this.structureSamples;
-    let taken = 0;
     const kindField = store.fieldIndex('kind');
     const yawField = store.fieldIndex('yaw');
     const assetField = store.fieldIndex('asset');
@@ -5630,8 +5862,7 @@ export class ClientApp {
       }
     }
 
-    this.structureCount = taken;
-    return layer.update(samples, taken, this.assetView);
+    return taken;
   }
 
   /** Reused each frame: the structures in range, which is tens of entries and must not allocate. */

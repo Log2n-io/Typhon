@@ -44,6 +44,7 @@ internal sealed class DemoStatsChecks : ServedChecks
     public void TheDemoStats_AreJson_AndCountWhoPlays()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         using var sim = new TatooineSim(config);
         sim.Initialize();
@@ -104,6 +105,7 @@ internal sealed class DemoStatsChecks : ServedChecks
     public void TheStats_CarryTheProgressionSection()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         using var sim = new TatooineSim(config);
         sim.Initialize();
@@ -141,6 +143,7 @@ internal sealed class DemoStatsChecks : ServedChecks
     public void TheItemsSection_CountsUnitsByTemplateAndMk()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         using var sim = new TatooineSim(config);
         sim.Initialize();
@@ -273,7 +276,13 @@ internal sealed class DemoStatsChecks : ServedChecks
         {
             Assert.That(faucets, Is.EqualTo(1000 + 500 + 145));
             Assert.That(sinks, Is.EqualTo(24 + 3));
-            Assert.That(byName.EnumerateObject().Select(p => p.Name), Is.EqualTo(new[] { "grant", "mission", "tip", "sale", "tax", "listfee", "vendor" }));
+            Assert.That(
+                byName.EnumerateObject().Select(p => p.Name),
+                Is.EqualTo(new[]
+                {
+                    "grant", "mission", "tip", "sale", "tax", "listfee", "vendor", "standard", "fare", "bench", "repair", "refine", "upkeep",
+                    "admingrant", "admintake",
+                }));
             Assert.That(byName.GetProperty("vendor").GetInt64(), Is.EqualTo(145));
             Assert.That(byName.GetProperty("listfee").GetInt64(), Is.EqualTo(3));
             Assert.That(MarketStats.CreditKinds, Has.Length.EqualTo(TransferKind.Count - 1), "every credit kind has a flow");
@@ -290,6 +299,7 @@ internal sealed class DemoStatsChecks : ServedChecks
     public void TheMarketSection_ShowsARealListBuyAndVendorSale()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         using var sim = new TatooineSim(config);
         sim.Initialize();
@@ -402,7 +412,7 @@ internal sealed class DemoStatsChecks : ServedChecks
     }
 
     /// <summary>A rate bucket's worth of patience: the market's commands are two a second, a burst of four.</summary>
-    private void Breathe() => Harness.Ticks((Worlds.ServedHz / 2) + 1);
+    private void Breathe() => Harness.Ticks(Worlds.FastCommandGapTicks);
 
     /// <summary>BZ-19: <c>/swg/stats</c> carries <c>market</c> with every key of bazaar.md § 9, a row per city, and <c>economy.byKind</c>.</summary>
     [Test]
@@ -410,6 +420,7 @@ internal sealed class DemoStatsChecks : ServedChecks
     public void TheMarketSection_IsInTheDemoStats_WithEveryKey()
     {
         var config = Worlds.Served(Dir);
+        config.CommandRateScale = Worlds.FastCommands;
         config.WorkerCount = 1;
         using var sim = new TatooineSim(config);
         sim.Initialize();

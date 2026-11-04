@@ -24,6 +24,8 @@ double regionM, wanderSeconds;
 bool brain;
 bool noMissions;
 bool noMarket;
+int crafters;
+int installers;
 string marketRush;
 int marketRushListings;
 string marketLog;
@@ -78,6 +80,11 @@ try
     noMissions = r.Switch("--no-missions", "thinking bots take no missions at the terminals they visit");
     // --brain only: the bazaar (bazaar.md § 8) is on by default; --no-market is the A/B arm, whose full inventories lose their drops as before.
     noMarket = r.Switch("--no-market", "thinking bots do not trade at the bazaar");
+    // --brain only: the crafters (crafting-build.md § 6, O-7), a share of the trading bots by index; 0 is the A/B arm.
+    crafters = r.Int("--crafters", defaults.CraftPercent, "percent of the trading bots that craft (weapons, armour, potions in thirds); 0 for none",
+        min: 0);
+    // --brain only: the installation owners (crafting-build.md § 10, O-7), the next share by index after the crafters; 0 is the A/B arm.
+    installers = r.Int("--installers", defaults.InstallPercent, "percent of the trading bots that keep an extractor; 0 for none", min: 0);
     // --brain only: the bazaar's load test (bazaar.md § 8, M5-1): every bot to one city's bazaars, one in ten keeping 1 cr listings, the rest racing
     // to buy them. Two flags where the design wrote one with two values: the strict reader takes one value a flag.
     marketRush = r.Str("--market-rush", null, "the bazaar load test in this city: sellers keep 1 cr listings, the rest race to buy them", "<city>");
@@ -268,6 +275,8 @@ var options = new BotSwarmOptions
     TraceBots = traceBots,
     Missions = !noMissions,
     Market = !noMarket,
+    CraftPercent = Math.Min(100, crafters),
+    InstallPercent = Math.Min(100 - Math.Min(100, crafters), installers),
     MarketRush = marketRush,
     MarketRushListings = marketRushListings,
     OnMarketWin = winLog == null
@@ -400,7 +409,13 @@ string Trade()
     }
 
     var m = swarm.Market();
-    return m.Trades == 0 ? string.Empty : $"  market {m.Trades} trades {m.Listed} listed {m.Vendored} vendored {m.Bought} bought {m.Won} won {m.BuyLost} lost";
+    var c = swarm.Crafting();
+    var i = swarm.Installing();
+    return (m.Trades == 0 ? string.Empty : $"  market {m.Trades} trades {m.Listed} listed {m.Vendored} vendored {m.Bought} bought {m.Won} won {m.BuyLost} lost")
+        + (c.Started + c.Resumed == 0 ? string.Empty : $"  craft {c.Started} started {c.Finished} finished")
+        + (i.Owners == 0
+            ? string.Empty
+            : $"  install {i.Owners} owners {i.Kits} kits {i.Tends} tends {i.Placed} placed {i.Collects} collects {i.Payments} paid");
 }
 
 // TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
@@ -598,6 +613,29 @@ if (brain)
             + $"{m.Collected} collect(s), {m.Listed} listing(s), {m.Vendored} vendor sale(s) (~{m.VendorCredits} cr), {m.Bought} buy(s) sent, "
             + $"{m.Won} buy(s) seen collected, {m.BuyLost} race(s) lost (Sold); {m.RefusedTotal} refusal(s)"
             + (refused.Count == 0 ? string.Empty : $": {string.Join(", ", refused)}"));
+
+        var c = swarm.Crafting();
+        var craftRefused = new System.Collections.Generic.List<string>();
+        for (var i = 0; i < c.Refused.Length; i++)
+        {
+            if (c.Refused[i] > 0)
+            {
+                craftRefused.Add($"{BotSwarm.CraftReasonNames[i]} {c.Refused[i]}");
+            }
+        }
+
+        Console.WriteLine(
+            $"crafting: {c.Crafters} crafter(s); {c.Started} start(s), {c.Resumed} craft(s) found under way, {c.Points} point(s), {c.Enhanced} add-on(s), "
+            + $"{c.Finished} finish(es) sent; {c.Repairs} repair(s) sent; {c.Refines} refine(s) sent; {c.Packs} pack(s) sent; "
+            + $"{c.InputsBought} input buy(s) chosen; "
+            + $"{c.GearBought} gear buy(s) chosen off the board, "
+            + $"{c.ItemsListed} item(s) listed"
+            + (craftRefused.Count == 0 ? string.Empty : $"; refused: {string.Join(", ", craftRefused)}"));
+
+        var inst = swarm.Installing();
+        Console.WriteLine(
+            $"installations: {inst.Owners} owner(s); {inst.Kits} kit buy(s) chosen, {inst.Tends} errand(s), {inst.Placed} place(s), "
+            + $"{inst.Collects} collect(s), {inst.Payments} upkeep payment(s) sent");
     }
 
     var tips = swarm.Tips();
