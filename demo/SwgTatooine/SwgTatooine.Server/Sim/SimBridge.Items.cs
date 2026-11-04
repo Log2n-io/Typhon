@@ -16,9 +16,10 @@ namespace SwgTatooine.Server;
 /// ends it; the <c>Loot</c> system mints kill drops and wild caches in its own.
 /// </para>
 /// <para>
-/// <b>In memory: every character's 30 slots, the head and the units held</b>, read whole on the first use, so a reopened world carries on. Never re-queried
-/// inside a transaction (a query does not see its own updates). A transaction holding item writes that fails to commit forgets all of it, and the next use
-/// reads it again; its counts are dropped with it.
+/// <b>In memory: every character's 30 slots, the head and the units held</b>, read whole before the runtime's first tick (<see cref="WarmItems"/>), so a
+/// reopened world carries on. Never re-queried inside a transaction (a query does not see its own updates). A transaction that fails to commit forgets the
+/// owners and listings it touched, and the head, and the next use reads those again; its counts are dropped with it. Neither read is ever the whole world
+/// inside a tick: on a 1.4 M-stack world that read stalled the first tick after a reopen for 43 s at a 128 MiB cache (index-scan, 2026-11-04).
 /// </para>
 /// <para>
 /// <b>An inventory exists only for a character with a wallet</b> (<c>_walletOf</c>): the wallet opens the tick after the bind, once the character is durable,
@@ -58,6 +59,21 @@ public sealed partial class SimBridge
     private IndexRef _stackByOwner;
     private IndexRef _itemHeadByKey;
     private readonly Dictionary<long, OwnerItems> _itemsOf = [];
+
+    // The owners and listings the transaction under way reached through this cache, and those a failed commit left to read again; the head likewise.
+    private readonly HashSet<long> _itemsTouched = [];
+    private readonly HashSet<long> _escrowTouched = [];
+    private readonly HashSet<long> _itemsStale = [];
+    private readonly HashSet<long> _escrowStale = [];
+    private bool _itemHeadStale;
+    private int _itemLoads;
+    private long _itemOwnersReread;
+
+    /// <summary>Whole reads of the stacks since start: one, before the first tick.</summary>
+    internal int ItemLoadsForChecks => Volatile.Read(ref _itemLoads);
+
+    /// <summary>Owners and listings read again after a failed commit since start.</summary>
+    internal long ItemOwnersRereadForChecks => Interlocked.Read(ref _itemOwnersReread);
 
     // Units held by (template, Mk) across the world — loaded with the stacks, then moved by each commit — and since start: minted, destroyed, lost.
     private readonly long[] _itemsHeld = new long[ItemKeys];
@@ -200,7 +216,20 @@ public sealed partial class SimBridge
         _deskItemsMoved.Clear();
     }
 
-    /// <summary>Reads every stack and the head on the first use after a start or a failed commit.</summary>
+    /// <summary>
+    /// Every stack and the head read before the runtime's first tick, in a transaction of their own (<see cref="TatooineSim"/>'s serve path): what would
+    /// otherwise be the first tick's.
+    /// </summary>
+    /// <returns>The stacks read.</returns>
+    public long WarmItems()
+    {
+        using var tx = Dbe.CreateQuickTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit);
+        EnsureItems(tx);
+        EndItems(tx.Commit());   // it writes only on a world's first use, its head
+        return ItemStacks;
+    }
+
+    /// <summary>Reads every stack and the head on the first use after a start; after a failed commit, the owners, listings and head it left stale.</summary>
     private void EnsureItems(Transaction tx)
     {
         if (!_itemsLoaded)
@@ -208,9 +237,16 @@ public sealed partial class SimBridge
             LoadItems(tx);
             _itemsLoaded = true;
         }
+        else if (_itemHeadStale || _itemsStale.Count + _escrowStale.Count > 0)
+        {
+            ReloadItems(tx);
+        }
     }
 
-    /// <summary>Every stack by its owner, and the head — created on a world's first use; the units held recounted from the stacks.</summary>
+    /// <summary>
+    /// Every stack, by an archetype scan — every page once, in order, where the Owner index's walk read a page per stack — and the head, created on a
+    /// world's first use; the units held recounted from the stacks.
+    /// </summary>
     private void LoadItems(Transaction tx)
     {
         // The losses remembered for the clients are this process's: forgotten on the first load only, as the journal's completions are.
@@ -224,39 +260,17 @@ public sealed partial class SimBridge
         _itemHeadByKey = Dbe.GetIndexRef<ItemLedgerHead, int>(h => h.Key);
         _itemsOf.Clear();
         _escrowItemOf.Clear();
+        _itemsStale.Clear();
+        _escrowStale.Clear();
         var held = new long[ItemKeys];
         var stacks = 0L;
 
-        // The walk fans out over every archetype holding ItemStack (Transaction.EnumerateIndex): the item instances come with the stacks.
-        using (var found = tx.EnumerateIndex<ItemStack, long>(_stackByOwner, long.MinValue, long.MaxValue))
+        // The scan covers every archetype holding the stack (ItemStackArch and the item instances under it).
+        foreach (var found in tx.Query<ItemStackArch>())
         {
-            while (found.MoveNext())
+            var s = found.Read(ItemStackArch.Stack);
+            if (Cache(found.Id, in s))
             {
-                var s = found.CurrentComponent;
-                var id = EntityId.FromRawValue((ulong)found.CurrentEntityPK);
-                var instance = IsInstance(id);
-                if (instance && IsListing(s.Owner))
-                {
-                    // In a listing's escrow: the listing's, not held.
-                    _escrowItemOf[s.Owner] = id;
-                    continue;
-                }
-
-                var slot = new ItemSlot { Stack = id, Template = s.Template, Mk = s.Mk, Count = s.Count, Instance = instance };
-                if (instance && EquipSlot.IsEquip(s.Slot))
-                {
-                    ItemsOf(s.Owner).Equipped[s.Slot - EquipSlot.First] = slot;
-                }
-                else if (s.Slot is >= 1 and <= ItemLedger.Slots)
-                {
-                    ItemsOf(s.Owner).Slots[s.Slot] = slot;
-                }
-                else
-                {
-                    // Nowhere this code puts anything: the audit names it; nothing here moves it.
-                    continue;
-                }
-
                 held[KeyOf(s.Template, s.Mk)] += s.Count;
                 stacks++;
             }
@@ -268,6 +282,80 @@ public sealed partial class SimBridge
         }
 
         Interlocked.Exchange(ref _itemStacks, stacks);
+        Interlocked.Increment(ref _itemLoads);
+        LoadItemHead(tx);
+    }
+
+    /// <summary>
+    /// The owners, listings and head a failed commit left stale, read again by the Owner index: what that transaction touched, not the world. The units held
+    /// need nothing: a transaction's counts are published only when it commits.
+    /// </summary>
+    private void ReloadItems(Transaction tx)
+    {
+        foreach (var owner in _itemsStale)
+        {
+            CacheStacksOf(tx, owner);
+        }
+
+        foreach (var listing in _escrowStale)
+        {
+            if (!_itemsStale.Contains(listing))
+            {
+                CacheStacksOf(tx, listing);
+            }
+        }
+
+        _itemsStale.Clear();
+        _escrowStale.Clear();
+        if (_itemHeadStale)
+        {
+            LoadItemHead(tx);
+        }
+    }
+
+    private void CacheStacksOf(Transaction tx, long owner)
+    {
+        Interlocked.Increment(ref _itemOwnersReread);
+        using var found = tx.EnumerateIndex<ItemStack, long>(_stackByOwner, owner, owner);
+        while (found.MoveNext())
+        {
+            var s = found.CurrentComponent;
+            Cache(EntityId.FromRawValue((ulong)found.CurrentEntityPK), in s);
+        }
+    }
+
+    /// <summary>One stored stack into the cache; false when it is not held — in a listing's escrow, or in no slot this code puts anything in.</summary>
+    private bool Cache(EntityId id, in ItemStack s)
+    {
+        var instance = IsInstance(id);
+        if (instance && IsListing(s.Owner))
+        {
+            // In a listing's escrow: the listing's, not held.
+            _escrowItemOf[s.Owner] = id;
+            return false;
+        }
+
+        var slot = new ItemSlot { Stack = id, Template = s.Template, Mk = s.Mk, Count = s.Count, Instance = instance };
+        if (instance && EquipSlot.IsEquip(s.Slot))
+        {
+            CachedOf(s.Owner).Equipped[s.Slot - EquipSlot.First] = slot;
+            return true;
+        }
+
+        if (s.Slot is >= 1 and <= ItemLedger.Slots)
+        {
+            CachedOf(s.Owner).Slots[s.Slot] = slot;
+            return true;
+        }
+
+        // Nowhere this code puts anything: the audit names it; nothing here moves it.
+        return false;
+    }
+
+    /// <summary>The head, read by its key — created on a world's first use.</summary>
+    private void LoadItemHead(Transaction tx)
+    {
+        _itemHeadStale = false;
         using (var heads = tx.EnumerateIndex<ItemLedgerHead, int>(_itemHeadByKey, ItemLedger.HeadKey, ItemLedger.HeadKey))
         {
             if (heads.MoveNext())
@@ -283,7 +371,14 @@ public sealed partial class SimBridge
         _itemsDirty = true;
     }
 
+    /// <summary>An owner's grid as the transaction under way left it — and the owner noted, so a failed commit forgets it.</summary>
     private OwnerItems ItemsOf(long owner)
+    {
+        _itemsTouched.Add(owner);
+        return CachedOf(owner);
+    }
+
+    private OwnerItems CachedOf(long owner)
     {
         if (!_itemsOf.TryGetValue(owner, out var items))
         {
@@ -294,9 +389,41 @@ public sealed partial class SimBridge
         return items;
     }
 
+    /// <summary>A listing's escrow item set or cleared — and the listing noted, so a failed commit forgets it.</summary>
+    private void SetEscrow(long listing, EntityId item)
+    {
+        _escrowTouched.Add(listing);
+        if (item.IsNull)
+        {
+            _escrowItemOf.Remove(listing);
+        }
+        else
+        {
+            _escrowItemOf[listing] = item;
+        }
+    }
+
+    /// <summary>A failed commit: the owners, listings and head its transaction touched are read again on the next use.</summary>
+    private void ForgetTouchedItems()
+    {
+        foreach (var owner in _itemsTouched)
+        {
+            _itemsOf.Remove(owner);
+            _itemsStale.Add(owner);
+        }
+
+        foreach (var listing in _escrowTouched)
+        {
+            _escrowItemOf.Remove(listing);
+            _escrowStale.Add(listing);
+        }
+
+        _itemHeadStale = true;
+    }
+
     /// <summary>
-    /// A transaction that may hold item writes ended. Committed, its counts are published and its losses noted; not, and it held any, everything this code
-    /// remembers is read again on the next use.
+    /// A transaction that may hold item writes ended. Committed, its counts are published and its losses noted; not, what it touched is read again on the
+    /// next use (<see cref="ForgetTouchedItems"/>).
     /// </summary>
     /// <returns>Whether it committed.</returns>
     private bool EndItems(bool committed)
@@ -349,11 +476,17 @@ public sealed partial class SimBridge
             else
             {
                 Interlocked.Increment(ref _itemCommitsFailed);
-                _itemsLoaded = false;
-                _itemsOf.Clear();
             }
         }
 
+        // Not committed, whether or not it wrote rows: an equip or a refused move changes a grid without them.
+        if (!committed)
+        {
+            ForgetTouchedItems();
+        }
+
+        _itemsTouched.Clear();
+        _escrowTouched.Clear();
         _itemsDirty = false;
         Array.Clear(_pendingHeld);
         Array.Clear(_pendingMinted);

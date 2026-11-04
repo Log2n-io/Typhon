@@ -147,7 +147,7 @@ public sealed partial class SimBridge
         }
         else
         {
-            _escrowItemOf.Remove(from);
+            SetEscrow(from, EntityId.Null);
         }
 
         if (to == ItemLedger.World)
@@ -169,7 +169,7 @@ public sealed partial class SimBridge
         e.Set(ItemStackArch.Stack, stack);
         if (toListing)
         {
-            _escrowItemOf[to] = item;
+            SetEscrow(to, item);
             entry.L.Quantity = count;
             AppendItemRow(tx, from, to, key, to, 0, count, count, template, mk, kind, reference, worldTick);
         }

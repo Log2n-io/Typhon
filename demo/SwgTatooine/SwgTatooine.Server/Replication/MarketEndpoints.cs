@@ -600,6 +600,18 @@ public static class MarketEndpoints
 
     // ── Audit ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
+    // One vendor sale as the item walk reads it: its rows, consecutive, naming one credit row.
+    private struct VendorSale
+    {
+        public long CreditSeq;
+        public long FirstItem;
+        public long Seller;
+        public ushort Template;
+        public byte Mk;
+        public int Units;
+        public bool One;
+    }
+
     private sealed class Trail
     {
         public long Seller;
@@ -649,8 +661,6 @@ public static class MarketEndpoints
 
         // The item ledger's market rows: each listing's escrow replayed, who filled it and who emptied it; the vendor sales' rows grouped by their credit row.
         var trails = new Dictionary<long, Trail>();
-        var vendorFirst = new Dictionary<long, long>();
-        var vendorSales = new Dictionary<long, (long Seller, ushort Template, byte Mk, int Units, bool One)>();
         Trail TrailOf(long id)
         {
             if (!trails.TryGetValue(id, out var t))
@@ -662,73 +672,27 @@ public static class MarketEndpoints
             return t;
         }
 
-        using (var rows = tx.EnumerateIndex<ItemLedgerEntry, long>(dbe.GetIndexRef<ItemLedgerEntry, long>(e => e.Seq), long.MinValue, long.MaxValue))
-        {
-            while (rows.MoveNext())
-            {
-                var r = rows.CurrentComponent;
-                switch (r.Kind)
-                {
-                    case ItemMoveKind.List:
-                        if (!IsListing(r.To) || r.ToStack != r.To || IsListing(r.From) || r.From == ItemLedger.World)
-                        {
-                            result.Violation("MA-4", $"item seq {r.Seq}: a list row must go from a character into a listing, not {r.From} to {r.To}");
-                            continue;
-                        }
-
-                        var listed = TrailOf(r.To);
-                        listed.Seller = r.From;
-                        listed.Listed += r.Count;
-                        listed.Net += r.Count;
-                        Touch(listed, in r);
-                        break;
-                    case ItemMoveKind.Buy:
-                    case ItemMoveKind.Return:
-                        if (!IsListing(r.From) || r.FromStack != r.From || IsListing(r.To) || r.To == ItemLedger.World)
-                        {
-                            result.Violation("MA-4", $"item seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a listing to a character, not {r.From} to {r.To}");
-                            continue;
-                        }
-
-                        var emptied = TrailOf(r.From);
-                        emptied.Net -= r.Count;
-                        emptied.Collector = r.To;
-                        emptied.Bought |= r.Kind == ItemMoveKind.Buy;
-                        emptied.ReturnedHome |= r.Kind == ItemMoveKind.Return;
-                        Touch(emptied, in r);
-                        break;
-                    case ItemMoveKind.Vendor:
-                        if (IsListing(r.From) || r.From == ItemLedger.World || r.To != ItemLedger.World)
-                        {
-                            result.Violation("MA-5", $"item seq {r.Seq}: a vendor row must go from a character to World, not {r.From} to {r.To}");
-                        }
-
-                        vendorFirst.TryAdd(r.Ref, r.Seq);
-                        if (!vendorSales.TryGetValue(r.Ref, out var sale))
-                        {
-                            vendorSales[r.Ref] = (r.From, r.Template, r.Mk, r.Count, true);
-                        }
-                        else
-                        {
-                            vendorSales[r.Ref] = (sale.Seller, sale.Template, sale.Mk, sale.Units + r.Count,
-                                sale.One && sale.Seller == r.From && sale.Template == r.Template && sale.Mk == r.Mk);
-                        }
-
-                        break;
-                }
-            }
-        }
-
-        // The credit ledger's market rows, by the listing they name.
+        // The credit ledger's market rows, by the listing they name — read beside the item ledger rather than after it. MA-5 pairs each vendor sale's item
+        // rows with its credit row as the item walk closes that sale: both are written in one transaction, so the sales come in the same order in both
+        // ledgers and nothing is held per sale. Held per sale, it was two tables of 17 M entries each on a seeded 29 GB world (index-scan, 2026-11-04).
         var sales = new Dictionary<long, List<LedgerEntry>>();
         var taxes = new Dictionary<long, List<LedgerEntry>>();
         var fees = new Dictionary<long, List<LedgerEntry>>();
-        var vendorCredits = new Dictionary<long, LedgerEntry>();
-        using (var rows = tx.EnumerateIndex<LedgerEntry, long>(dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq), long.MinValue, long.MaxValue))
+        var credits = tx.EnumerateIndex<LedgerEntry, long>(dbe.GetIndexRef<LedgerEntry, long>(e => e.Seq), long.MinValue, long.MaxValue);
+        var vendor = default(LedgerEntry);
+        var hasVendor = false;
+        var open = default(VendorSale);
+        var inSale = false;
+
+        // Vendor credits the walk passed to reach a later sale's: held only on a broken ledger, so a sale after a broken one still finds its own.
+        var passed = new Dictionary<long, LedgerEntry>();
+
+        // The credit rows up to the next vendor row, the market's filed by listing; false at the ledger's end.
+        bool NextVendorCredit(ref Transaction.IndexEntityEnumerator<LedgerEntry, long> credit, out LedgerEntry found)
         {
-            while (rows.MoveNext())
+            while (credit.MoveNext())
             {
-                var r = rows.CurrentComponent;
+                var r = credit.CurrentComponent;
                 switch (r.Kind)
                 {
                     case TransferKind.Sale:
@@ -742,10 +706,152 @@ public static class MarketEndpoints
                         Add(fees, r.Ref, in r);
                         break;
                     case TransferKind.Vendor:
-                        vendorCredits[r.Seq] = r;
-                        break;
+                        found = r;
+                        return true;
                 }
             }
+
+            found = default;
+            return false;
+        }
+
+        // MA-5: one sale's item rows and the credit row they name, which name each other.
+        void CloseSale(ref Transaction.IndexEntityEnumerator<LedgerEntry, long> credit, in VendorSale s)
+        {
+            if (!passed.Remove(s.CreditSeq, out var paidBy))
+            {
+                if (!hasVendor)
+                {
+                    hasVendor = NextVendorCredit(ref credit, out vendor);
+                }
+
+                while (hasVendor && vendor.Seq < s.CreditSeq)
+                {
+                    passed[vendor.Seq] = vendor;
+                    hasVendor = NextVendorCredit(ref credit, out vendor);
+                }
+
+                if (!hasVendor || vendor.Seq != s.CreditSeq)
+                {
+                    result.Violation("MA-5", $"vendor item rows from seq {s.FirstItem} name credit seq {s.CreditSeq}, which is not a vendor row");
+                    return;
+                }
+
+                paidBy = vendor;
+                hasVendor = false;
+            }
+
+            if (paidBy.Ref != s.FirstItem)
+            {
+                result.Violation("MA-5", $"vendor credit seq {s.CreditSeq} names item seq {paidBy.Ref}, its item rows start at {s.FirstItem}");
+                return;
+            }
+
+            // One sale is one seller's units of one item, paid the floor on all of them, to that seller. An item with stats is paid by the condition it had
+            // left (Loïc, 2026-11-03), which its destroyed entity no longer says: from 1 credit to the floor of a new one.
+            var payout = MarketValues.VendorPayout(s.Template, s.Mk, s.Units);
+            var paid = ItemCatalog.HasStats(s.Template) ? paidBy.Amount >= 1 && paidBy.Amount <= payout : paidBy.Amount == payout;
+            if (!s.One || paidBy.To != s.Seller || !paid)
+            {
+                result.Violation("MA-5", $"vendor credit seq {s.CreditSeq} paid {paidBy.Amount} to {paidBy.To}; its rows sold {s.Units} of {s.Template} Mk "
+                    + $"{s.Mk} from {s.Seller}{(s.One ? "" : " and other items or sellers")}, worth {payout}");
+            }
+        }
+
+        try
+        {
+            using (var rows = tx.EnumerateIndex<ItemLedgerEntry, long>(dbe.GetIndexRef<ItemLedgerEntry, long>(e => e.Seq), long.MinValue, long.MaxValue))
+            {
+                while (rows.MoveNext())
+                {
+                    var r = rows.CurrentComponent;
+                    switch (r.Kind)
+                    {
+                        case ItemMoveKind.List:
+                            if (!IsListing(r.To) || r.ToStack != r.To || IsListing(r.From) || r.From == ItemLedger.World)
+                            {
+                                result.Violation("MA-4", $"item seq {r.Seq}: a list row must go from a character into a listing, not {r.From} to {r.To}");
+                                continue;
+                            }
+
+                            var listed = TrailOf(r.To);
+                            listed.Seller = r.From;
+                            listed.Listed += r.Count;
+                            listed.Net += r.Count;
+                            Touch(listed, in r);
+                            break;
+                        case ItemMoveKind.Buy:
+                        case ItemMoveKind.Return:
+                            if (!IsListing(r.From) || r.FromStack != r.From || IsListing(r.To) || r.To == ItemLedger.World)
+                            {
+                                result.Violation(
+                                    "MA-4",
+                                    $"item seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a listing to a character, not {r.From} to {r.To}");
+                                continue;
+                            }
+
+                            var emptied = TrailOf(r.From);
+                            emptied.Net -= r.Count;
+                            emptied.Collector = r.To;
+                            emptied.Bought |= r.Kind == ItemMoveKind.Buy;
+                            emptied.ReturnedHome |= r.Kind == ItemMoveKind.Return;
+                            Touch(emptied, in r);
+                            break;
+                        case ItemMoveKind.Vendor:
+                            if (IsListing(r.From) || r.From == ItemLedger.World || r.To != ItemLedger.World)
+                            {
+                                result.Violation("MA-5", $"item seq {r.Seq}: a vendor row must go from a character to World, not {r.From} to {r.To}");
+                            }
+
+                            // A sale's rows are consecutive (one ItemTransfer): a row naming another credit row closes the sale before it.
+                            if (inSale && r.Ref == open.CreditSeq)
+                            {
+                                open.Units += r.Count;
+                                open.One &= open.Seller == r.From && open.Template == r.Template && open.Mk == r.Mk;
+                            }
+                            else
+                            {
+                                if (inSale)
+                                {
+                                    CloseSale(ref credits, in open);
+                                }
+
+                                open = new VendorSale
+                                {
+                                    CreditSeq = r.Ref, FirstItem = r.Seq, Seller = r.From, Template = r.Template, Mk = r.Mk, Units = r.Count, One = true,
+                                };
+                                inSale = true;
+                            }
+
+                            break;
+                    }
+                }
+            }
+
+            if (inSale)
+            {
+                CloseSale(ref credits, in open);
+            }
+
+            // The rest of the credit ledger: its market rows filed, and every vendor credit no item row named.
+            if (hasVendor)
+            {
+                passed[vendor.Seq] = vendor;
+            }
+
+            while (NextVendorCredit(ref credits, out vendor))
+            {
+                passed[vendor.Seq] = vendor;
+            }
+
+            foreach (var (seq, unnamed) in passed)
+            {
+                result.Violation("MA-5", $"vendor credit seq {seq} paid {unnamed.Amount} and no item row names it");
+            }
+        }
+        finally
+        {
+            credits.Dispose();
         }
 
         // MA-1, MA-6: every stored listing on its own, and the caps.
@@ -946,40 +1052,6 @@ public static class MarketEndpoints
             if (!ever.Contains(id))
             {
                 result.Violation("MA-3", $"a list fee row names {id}, which was never listed");
-            }
-        }
-
-        // MA-5: the vendor's two rows name each other.
-        foreach (var (creditSeq, firstItem) in vendorFirst)
-        {
-            if (!vendorCredits.TryGetValue(creditSeq, out var credit))
-            {
-                result.Violation("MA-5", $"vendor item rows from seq {firstItem} name credit seq {creditSeq}, which is not a vendor row");
-            }
-            else if (credit.Ref != firstItem)
-            {
-                result.Violation("MA-5", $"vendor credit seq {creditSeq} names item seq {credit.Ref}, its item rows start at {firstItem}");
-            }
-            else
-            {
-                // One sale is one seller's units of one item, paid the floor on all of them, to that seller. An item with stats is paid by the condition
-                // it had left (Loïc, 2026-11-03), which its destroyed entity no longer says: from 1 credit to the floor of a new one.
-                var sale = vendorSales[creditSeq];
-                var payout = MarketValues.VendorPayout(sale.Template, sale.Mk, sale.Units);
-                var paid = ItemCatalog.HasStats(sale.Template) ? credit.Amount >= 1 && credit.Amount <= payout : credit.Amount == payout;
-                if (!sale.One || credit.To != sale.Seller || !paid)
-                {
-                    result.Violation("MA-5", $"vendor credit seq {creditSeq} paid {credit.Amount} to {credit.To}; its rows sold {sale.Units} of {sale.Template} Mk "
-                        + $"{sale.Mk} from {sale.Seller}{(sale.One ? "" : " and other items or sellers")}, worth {payout}");
-                }
-            }
-        }
-
-        foreach (var (creditSeq, credit) in vendorCredits)
-        {
-            if (!vendorFirst.ContainsKey(creditSeq))
-            {
-                result.Violation("MA-5", $"vendor credit seq {creditSeq} paid {credit.Amount} and no item row names it");
             }
         }
 

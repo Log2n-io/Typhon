@@ -573,7 +573,8 @@ internal sealed class CraftDeskChecks : ServedChecks
 
     /// <summary>
     /// A Workshop pass that does not commit tells nothing of what it would have done (review, 2026-11-03): the refine is refused, no notice of it is heard,
-    /// the units are where they were; the next refine goes through and is told.
+    /// the units are where they were; the next refine goes through and is told. And what it costs the item cache is the crafter's grid read again, not the
+    /// world's: the stacks were read whole once, before the first tick (index-scan, 2026-11-04: a whole read inside a tick stalled a 1.4 M-stack world).
     /// </summary>
     [Test]
     [CancelAfter(120_000)]
@@ -584,6 +585,7 @@ internal sealed class CraftDeskChecks : ServedChecks
         Stage(sim, c, ItemCatalog.CoreRanged, 1, 6);
         Harness.Ticks(1);
 
+        var reread = sim.Bridge.ItemOwnersRereadForChecks;
         sim.Bridge.FailNextWorkshopWriteForChecks();
         Refine(c.Link, ItemCatalog.CoreRanged, 1, 1);
         SessionHarness.Until(() => Count(c.Link, TatooineReplication.CraftFailed) == 1, "the refine refused with its pass");
@@ -600,6 +602,8 @@ internal sealed class CraftDeskChecks : ServedChecks
             Assert.That(units, Is.EqualTo(6));
             Assert.That(sim.Bridge.WorkshopAborted, Is.EqualTo(1));
             Assert.That(Notices.Heard(c.Link).Count(n => n.Kind == "refine"), Is.GreaterThan(0), "the refine that committed is told");
+            Assert.That(sim.Bridge.ItemLoadsForChecks, Is.EqualTo(1), "the stacks read whole more than once, before the first tick");
+            Assert.That(sim.Bridge.ItemOwnersRereadForChecks - reread, Is.EqualTo(1), "the failed pass read again more than the crafter's grid");
         });
         AuditsOk(sim, "after the refines");
     }

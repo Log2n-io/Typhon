@@ -838,6 +838,7 @@ internal sealed class MarketDeskChecks : ServedChecks
     /// <summary>
     /// BZ-10: the market audit is clean after real trading, and names each rule a corruption breaks — a quantity (MA-1), a second sale row (MA-2), a missing
     /// fee (MA-3), a list row into a character (MA-4), a vendor row naming the wrong credit row (MA-5), a seller over the cap (MA-6), a stale board (MA-7).
+    /// Two vendor sales, since MA-5 pairs the two ledgers as it walks them: a broken pair must leave the next one paired.
     /// </summary>
     [Test]
     [CancelAfter(180_000)]
@@ -853,6 +854,8 @@ internal sealed class MarketDeskChecks : ServedChecks
         Market.Buy(b.Link, sold, 20);
         Market.Vendor(a.Link, Hide, 2, 10);
         SessionHarness.Until(() => !Market.Listings(sim).ContainsKey(sold) && sim.Bridge.MarketVendorSales == 1, "the buy and the vendor sale");
+        Market.Vendor(a.Link, Hide, 2, 4);
+        SessionHarness.Until(() => sim.Bridge.MarketVendorSales == 2, "the second vendor sale");
         sim.Bridge.PublishMarketNowForChecks();
         Harness.Ticks(3);
         var clean = MarketEndpoints.Audit(sim.Dbe, sim.Bridge.MarketBoard);
@@ -904,6 +907,19 @@ internal sealed class MarketDeskChecks : ServedChecks
         var (vendorId, vendor) = FindCredit(sim, r => r.Kind == TransferKind.Vendor);
         Breaks("MA-5", tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor with { Ref = vendor.Ref + 1 }), tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor));
         Breaks("MA-5", tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor with { Amount = vendor.Amount + 1 }), tx => tx.OpenMut(vendorId).Set(LedgerArch.Entry, vendor));
+
+        // The first sale's rows naming a credit row past every vendor row: its rows and its credit are named, and the second sale is still paired.
+        var (vendorRowId, vendorRow) = FindItem(sim, r => r.Kind == ItemMoveKind.Vendor && r.Ref == vendor.Seq);
+        Corrupt(sim, tx => tx.OpenMut(vendorRowId).Set(ItemLedgerArch.Entry, vendorRow with { Ref = vendor.Seq + 1_000_000 }));
+        var unpaired = MarketEndpoints.Audit(sim.Dbe, board);
+        Corrupt(sim, tx => tx.OpenMut(vendorRowId).Set(ItemLedgerArch.Entry, vendorRow));
+        var ma5 = unpaired.Violations.Where(v => v.Contains("MA-5")).ToList();
+        Assert.Multiple(() =>
+        {
+            Assert.That(ma5, Has.Count.EqualTo(2), string.Join("; ", ma5));
+            Assert.That(ma5, Has.Some.Contains("which is not a vendor row"));
+            Assert.That(ma5, Has.Some.Contains($"vendor credit seq {vendor.Seq} paid"));
+        });
 
         var many = new List<EntityId>();
         Breaks("MA-6",

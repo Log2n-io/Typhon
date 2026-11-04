@@ -1,6 +1,7 @@
 using SwgTatooine.Server.Accounts;
 using SwgTatooine.Server.Terrain;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 
@@ -176,6 +177,11 @@ public sealed partial class TatooineSim
 
         // Before the runtime and before Declare: the seeded rows are stamped before its first tick and queue no notice (Hardening/HistorySeed.cs).
         SeedHistoryIfAsked();
+
+        // Every item stack, before the first tick rather than inside it: on a reopened world with a long history that read is seconds of page misses.
+        var warmed = Stopwatch.GetTimestamp();
+        var stacks = _bridge.WarmItems();
+        Console.WriteLine($"  items: {stacks:N0} stacks read in {Stopwatch.GetElapsedTime(warmed).TotalSeconds:F1} s");
 
         _runtime = TyphonRuntime.Create(Dbe, BuildServeSchedule, new RuntimeOptions
         {

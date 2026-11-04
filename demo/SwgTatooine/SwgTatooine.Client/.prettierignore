@@ -8,3 +8,7 @@ public/vendor
 # MSBuild output of SwgTatooine.Client.csproj, the content-only project that puts this folder in the solution.
 bin
 obj
+
+# Written by SwgTatooine.Tests' CraftVectorChecks, which compares them byte for byte: formatted, they read as stale and are rewritten.
+test/data/craft-vectors.json
+test/data/schematics.json

@@ -339,11 +339,10 @@ public sealed partial class SimBridge
 
         if (!committed)
         {
-            // Nothing moved: the items are read again, the commands refused so their clients hear it, the bodies' gear due again next tick.
+            // Nothing moved: the items it touched are read again (EndItems), the commands refused so their clients hear it, the bodies' gear due again next
+            // tick.
             Interlocked.Increment(ref _workshopCommitsFailed);
             _gearDue.AddRange(_gearScratch);
-            _itemsLoaded = false;
-            _itemsOf.Clear();
             foreach (var c in _equipsApplied)
             {
                 RefuseWorkshop(subs, in c, TatooineReplication.EquipFailed);
