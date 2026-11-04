@@ -304,6 +304,13 @@ internal sealed class ExclusiveWindow
         return openings;
     }
 
+    /// <summary>
+    /// <see cref="BeginRead"/>'s token without its refusal, for a reader that waits a running fence out instead (a snapshot walk, WALK-01): it checks
+    /// <see cref="IsOpen"/> itself and validates what it read with <see cref="ReadOverlapped"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int ReadToken() => Volatile.Read(ref _openings);
+
     /// <summary>Whether the window opened, closed or is open since <see cref="BeginRead"/> returned <paramref name="token"/>, for a foreign caller.</summary>
     /// <param name="token">What <see cref="BeginRead"/> returned.</param>
     /// <returns><see langword="true"/> when the read overlapped a fence and its answer cannot be trusted.</returns>

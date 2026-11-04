@@ -1577,8 +1577,87 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
     /// <returns>Number of entries visited (handed to <paramref name="action"/>).</returns>
     internal int ForEachEntry<TAction>(ref ChunkAccessor<TStore> accessor, ref TAction action, Action yield = null) where TAction : struct, IEntryAction<TKey>
     {
-        int visited = 0;
         var scan = BeginScan();
+        try
+        {
+            var bucket = 0;
+            return ScanBuckets(ref accessor, ref scan, ref bucket, ref action, yield, int.MaxValue);
+        }
+        finally
+        {
+            scan.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Where a resumable walk of the map stands between two <see cref="FillFrom{TAction}"/> calls: the scan's split bookkeeping and the next bucket. The
+    /// walk holds no page and no latch between fills.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ForEachEntry{TAction}"/>'s promise holds across fills (EMAP-02): an entry present for the whole walk is visited exactly once, whatever
+    /// splits run between or during the fills. <see cref="PagedHashMapBase{TStore}.SplitTolerantScan"/> keeps the bucket count each read validated
+    /// against, which time passing between two buckets does not disturb, and a map never shrinks. Dispose it, or the arrays a walk across splits rented are
+    /// not returned.
+    /// </remarks>
+    internal struct EntryCursor
+    {
+        internal SplitTolerantScan Scan;
+        internal int NextBucket;
+        internal bool Started;
+        internal bool Finished;
+
+        /// <summary>Gives back what the walk rented when the map split under it.</summary>
+        internal void Dispose()
+        {
+            if (Started)
+            {
+                Scan.Dispose();
+                Started = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Continues the walk <paramref name="cursor"/> describes, handing whole buckets to <paramref name="action"/> until at least
+    /// <paramref name="minEntries"/> were handed over or the map ends (<see cref="EntryCursor.Finished"/>). A bucket is the unit an optimistic read validates,
+    /// so a fill can exceed <paramref name="minEntries"/> by one bucket's chain.
+    /// </summary>
+    /// <remarks>The action must not stop the walk (return false): the rest of its bucket would be lost to the cursor. A fill holds what
+    /// <paramref name="accessor"/> holds; the caller disposes it between fills.</remarks>
+    /// <returns>Entries handed to the action.</returns>
+    internal int FillFrom<TAction>(ref ChunkAccessor<TStore> accessor, ref EntryCursor cursor, ref TAction action, int minEntries, Action yield = null)
+        where TAction : struct, IEntryAction<TKey>
+    {
+        if (cursor.Finished)
+        {
+            return 0;
+        }
+
+        if (!cursor.Started)
+        {
+            cursor.Scan = BeginScan();
+            cursor.NextBucket = 0;
+            cursor.Started = true;
+        }
+
+        var visited = ScanBuckets(ref accessor, ref cursor.Scan, ref cursor.NextBucket, ref action, yield, minEntries);
+        if (cursor.NextBucket >= BucketCount)
+        {
+            cursor.Finished = true;
+        }
+
+        return visited;
+    }
+
+    /// <summary>
+    /// The bucket loop of <see cref="ForEachEntry{TAction}"/> and <see cref="FillFrom{TAction}"/>: from <paramref name="bucket"/>, under the OLC read protocol,
+    /// stopping after the bucket that brought the count to <paramref name="stopAfter"/>, at the live bucket count, or when the action returns false.
+    /// <paramref name="bucket"/> is left at the first bucket not read.
+    /// </summary>
+    private int ScanBuckets<TAction>(ref ChunkAccessor<TStore> accessor, ref SplitTolerantScan scan, ref int bucket, ref TAction action, Action yield,
+        int stopAfter) where TAction : struct, IEntryAction<TKey>
+    {
+        int visited = 0;
 
         // Per-bucket optimistic snapshot buffers, addressed by pointer because action.Process takes the value as a byte*. So they live on the
         // stack or in native memory — never in a managed array (CLAUDE.md, Unsafe Code). This buffer used to be a pinned-heap array reached only
@@ -1601,8 +1680,14 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
         try
         {
-            for (int b = 0; b < BucketCount; b++)
+            for (; bucket < BucketCount; bucket++)
             {
+                var b = bucket;
+                if (visited >= stopAfter)
+                {
+                    break;   // a fill's quota, reached at a bucket boundary: this bucket is the next fill's first
+                }
+
                 if (yield != null && (b & (YieldBuckets - 1)) == YieldBuckets - 1)
                 {
                     yield();
@@ -1703,7 +1788,6 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
         finally
         {
             NativeMemory.Free(spilled);   // Free(null) is a no-op: most scans never spill
-            scan.Dispose();
             if (yield != null)
             {
                 PagedMMF.RefreshableWaitDepth--;

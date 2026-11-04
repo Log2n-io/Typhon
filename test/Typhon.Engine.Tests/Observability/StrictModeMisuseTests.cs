@@ -61,7 +61,7 @@ class StrictModeMisuseTests : TestBase<StrictModeMisuseTests>
         {
             try
             {
-                tx.Open(id);   // Open() calls AssertThreadAffinity() — a different thread than the creator → throw
+                tx.Open(id);   // Open() calls BeginOperation() — a different thread than the creator → throw
             }
             catch (Exception ex)
             {

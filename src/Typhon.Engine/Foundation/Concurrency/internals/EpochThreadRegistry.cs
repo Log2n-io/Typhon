@@ -88,6 +88,9 @@ internal sealed class EpochThreadRegistry : IDisposable
     /// </summary>
     public bool IsCurrentThreadInScope => _threadRegistry == this && _slots[_threadSlotIndex].Depth > 0;
 
+    /// <summary>The current thread's scope nesting depth in this registry, 0 when it holds none.</summary>
+    internal int CurrentThreadDepth => _threadRegistry == this ? _slots[_threadSlotIndex].Depth : 0;
+
     /// <summary>
     /// The epoch this thread is currently pinned to, or 0 when it is not pinned. Diagnostic only.
     /// </summary>

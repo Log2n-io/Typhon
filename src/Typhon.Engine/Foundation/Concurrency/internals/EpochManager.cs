@@ -5,6 +5,7 @@
 
 using JetBrains.Annotations;
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -135,6 +136,37 @@ public sealed class EpochManager : ResourceNode, IMetricSource
             var newEpoch = Interlocked.Increment(ref _globalEpoch);
             TyphonEvent.EmitConcurrencyEpochAdvance((uint)newEpoch);
         }
+    }
+
+    /// <summary>The calling thread's scope nesting depth: 0 when it holds no scope.</summary>
+    internal int CurrentThreadDepth => _registry.CurrentThreadDepth;
+
+    /// <summary>
+    /// Leaves the calling thread's only scope at a walk step (EP-03, EP-04): the thread unpins, so nothing it does not hold by slot reference stays
+    /// protected for it. Unlike <see cref="ExitScopeUnordered"/> it does not advance the global epoch: a walk suspends once per batch, and every advance
+    /// sends every other thread's warm B+Tree accessors down their cold path. The thread's own tags are released at the next advance any thread makes.
+    /// </summary>
+    /// <remarks>The caller has checked that the depth is exactly 1 and that the unit is its own (<see cref="EntityAccessor.TrySuspendEpochAtWalkStep"/>).</remarks>
+    internal void SuspendScope()
+    {
+        Debug.Assert(CurrentThreadDepth == 1, "a walk suspends only the thread's only scope");
+        _registry.UnpinCurrentThreadUnordered();
+    }
+
+    /// <summary>
+    /// Re-enters a scope suspended by <see cref="SuspendScope"/>, pinned at <paramref name="epoch"/>: the current one at a call boundary, where the epoch may
+    /// move anyway (EP-03); or, for a resume the page layer makes in the middle of a call, the one the scope left at, so what the call obtained since it began
+    /// is held as a call without the pause would hold it. Neither restores a page evicted or a chunk reclaimed during the pause: what a suspension relies on
+    /// is that nothing is held by the epoch alone across a walk step.
+    /// </summary>
+    /// <remarks>
+    /// Pinning below the global epoch lowers <see cref="MinActiveEpoch"/>: only more pages and retirements are held, never fewer. The pin is the same
+    /// sequentially consistent store a fresh scope makes, so the Dekker pair with every reclaimer holds (<c>EpochThreadRegistry.PinCurrentThread</c>).
+    /// </remarks>
+    internal void ResumeScopeAt(long epoch)
+    {
+        var depth = _registry.PinCurrentThread(epoch);
+        Debug.Assert(depth == 0, "a suspended scope resumes only on a thread holding none");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

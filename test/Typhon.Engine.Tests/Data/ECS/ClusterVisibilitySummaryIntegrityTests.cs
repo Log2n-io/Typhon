@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 
@@ -570,5 +571,140 @@ class ClusterVisibilitySummaryIntegrityTests : TestBase<ClusterVisibilitySummary
         cs.MaxDiedWord(cluster) = long.MaxValue;                            // a death that never happened — costs a probe, emits nothing wrong
 
         Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "an over-pessimistic summary is slower, never wrong, and must not be reported as a defect");
+    }
+
+    // ── A clean open establishes the summary (#1574) ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private const string CleanOpenMarker = "a clean open must establish";
+
+    /// <summary>
+    /// Populates and destroys two entities in one engine, closes it cleanly, and opens the file again: the reopened engine and a read-only transaction on it.
+    /// </summary>
+    private (IServiceScope Scope, DatabaseEngine Dbe) ReopenAfterDestroys()
+    {
+        using (var first = ServiceProvider.CreateScope())
+        {
+            var dbe = first.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<ClPosition>();
+            dbe.RegisterComponentFromAccessor<ClMovement>();
+            dbe.InitializeArchetypes();
+            var ids = Populate(dbe);
+            using var destroy = dbe.CreateQuickTransaction();
+            destroy.Destroy(ids[0]);
+            destroy.Destroy(ids[EntityCount - 1]);
+            Assert.That(destroy.Commit(), Is.True, "the destroys");
+        }
+
+        var scope = ServiceProvider.CreateScope();
+        var reopened = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        reopened.RegisterComponentFromAccessor<ClPosition>();
+        reopened.RegisterComponentFromAccessor<ClMovement>();
+        reopened.InitializeArchetypes();
+        return (scope, reopened);
+    }
+
+    /// <summary>The verifier's assertion, on the summary's state for every active cluster at <paramref name="tsn"/>.</summary>
+    private static void AssertEveryActiveClusterEstablished(ArchetypeClusterState cs, long tsn)
+    {
+        Assert.That(cs.ActiveClusterCount, Is.GreaterThanOrEqualTo(2), "premise: the reopened archetype holds two clusters");
+        for (var i = 0; i < cs.ActiveClusterCount; i++)
+        {
+            var c = cs.ActiveClusterIds[i];
+            Assert.That(cs.IsClusterFullyVisibleAt(c, tsn), Is.True,
+                $"CLUSTERVIS-03: {CleanOpenMarker} the summary of every active cluster, or each snapshot scan probes every entity (cluster {c})");
+        }
+    }
+
+    /// <summary>
+    /// CLUSTERVIS-03: after a clean close, every active cluster's summary is established, so the gate grants each cluster to a snapshot of the new session —
+    /// and what it grants is exact: the two entities destroyed before the close are neither counted by the occupancy popcount the grant enables nor emitted
+    /// by the scan. Before #1574 the born watermark stayed unknown until a spawn landed in the cluster.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CLUSTERVIS-03")]
+    public void ACleanReopen_EstablishesEveryActiveCluster_AndStaysExact()
+    {
+        var (scope, dbe) = ReopenAfterDestroys();
+        using (scope)
+        {
+            using var tx = dbe.CreateReadOnlyTransaction();
+            AssertEveryActiveClusterEstablished(ClusterStateOf(dbe), tx.TSN);
+
+            Assert.That(tx.Query<ClAnt>().Count(), Is.EqualTo(EntityCount - 2), "the popcount the grant enables must not count the destroyed entities");
+            var seen = 0;
+            foreach (var _ in tx.Query<ClAnt>())
+            {
+                seen++;
+            }
+
+            Assert.That(seen, Is.EqualTo(EntityCount - 2), "the scan must not emit the destroyed entities");
+            Assert.That(VisibilityIssues(dbe, out _), Is.Empty, "the established summary must bound every entity the EntityMap places");
+        }
+    }
+
+    /// <summary>
+    /// CLUSTERVIS-03's other half: an unclean close with no WAL segments — not a crash open — reopens with the TSN counter of the last clean close, below
+    /// the births its checkpoint wrote. No cluster is seeded from it, and the popcount and the scan agree with the entities a point read finds.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CLUSTERVIS-03")]
+    public void AnUncleanReopen_LeavesTheSummaryToItsSites()
+    {
+        EntityId[] ids;
+        using (var first = ServiceProvider.CreateScope())
+        {
+            var dbe = first.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<ClPosition>();
+            dbe.RegisterComponentFromAccessor<ClMovement>();
+            dbe.InitializeArchetypes();
+            ids = Populate(dbe);
+            dbe.ForceCheckpoint();
+            dbe.SimulateUncleanShutdownForTest = true;
+        }
+
+        using var scope = ServiceProvider.CreateScope();
+        var reopened = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        reopened.RegisterComponentFromAccessor<ClPosition>();
+        reopened.RegisterComponentFromAccessor<ClMovement>();
+        reopened.InitializeArchetypes();
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.False, "premise: no WAL segments, so not a crash open");
+
+        var cs = ClusterStateOf(reopened);
+        Assert.That(cs.ActiveClusterCount, Is.GreaterThanOrEqualTo(2), "premise: the checkpoint kept the clusters");
+        for (var i = 0; i < cs.ActiveClusterCount; i++)
+        {
+            Assert.That(cs.ClusterMaxBorn(cs.ActiveClusterIds[i]), Is.EqualTo(ArchetypeClusterState.VisibilityUnknown),
+                "CLUSTERVIS-03: an unclean open must not seed the summary from a counter its checkpoint may have outrun");
+        }
+
+        using var tx = reopened.CreateReadOnlyTransaction();
+        var opened = ids.Count(id => tx.TryOpen(id, out _));
+        Assert.That(tx.Query<ClAnt>().Count(), Is.EqualTo(opened), "the popcount agrees with point reads");
+        var seen = 0;
+        foreach (var _ in tx.Query<ClAnt>())
+        {
+            seen++;
+        }
+
+        Assert.That(seen, Is.EqualTo(opened), "the scan agrees with point reads");
+    }
+
+    /// <summary>The state #1574 left: a clean open that never establishes the summary. The verifier must reject it.</summary>
+    [Test]
+    [RuleMutant("CLUSTERVIS-03")]
+    public void ACleanOpenLeavingTheSummaryUnknown_IsRejected()
+    {
+        var (scope, dbe) = ReopenAfterDestroys();
+        using (scope)
+        {
+            var cs = ClusterStateOf(dbe);
+            for (var i = 0; i < cs.ActiveClusterCount; i++)
+            {
+                cs.MaxBornWord(cs.ActiveClusterIds[i]) = ArchetypeClusterState.VisibilityUnknown;
+            }
+
+            using var tx = dbe.CreateReadOnlyTransaction();
+            RuleMutants.AssertDetects("CLUSTERVIS-03", CleanOpenMarker, () => AssertEveryActiveClusterEstablished(cs, tx.TSN));
+        }
     }
 }

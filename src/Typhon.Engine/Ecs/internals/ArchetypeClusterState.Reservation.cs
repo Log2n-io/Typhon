@@ -127,8 +127,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <c>txTsn</c> may skip the per-entity born check for this cluster iff it is established and <c>&lt;= txTsn</c>.
     /// </summary>
     /// <remarks>
-    /// In-memory only, like <see cref="ClusterAabbs"/> — a reopen rewrites every record with <c>BornTSN = 0</c> (committed before this open, visible at every
-    /// snapshot), so the rebuild seeds 0 rather than persisting anything.
+    /// In-memory only, like <see cref="ClusterAabbs"/> — a crash open's rebuild rewrites every record with <c>BornTSN = 0</c> (committed before this open,
+    /// visible at every snapshot) and seeds 0; a clean open keeps its records and seeds the restored TSN counter (CLUSTERVIS-03,
+    /// <see cref="EstablishVisibilityAfterCleanOpen"/>). Nothing is persisted.
     /// </remarks>
     internal long ClusterMaxBorn(int clusterChunkId) => MaxBornOf(ref SlotWords(SlotWordTable, clusterChunkId));
 

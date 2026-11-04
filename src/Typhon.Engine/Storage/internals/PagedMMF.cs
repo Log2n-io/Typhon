@@ -441,6 +441,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     private PageInfo Slot(int memPageIndex) => _slots[memPageIndex];
 
     private SafeFileHandle _fileHandle;
+
+    /// <summary>
+    /// A second, synchronous, read-only handle on the data file, for the miss path's synchronous read (<see cref="ReadRecordedPage"/>). The main handle
+    /// is overlapped: a synchronous read through it goes through RandomAccess.ReadSyncUsingAsyncHandle, an OS event created per call — 11.4-12.0 µs per
+    /// 8 KiB read of an OS-cached page against 6.1 µs through this one (7 GB SWG file, 200k random reads, Windows). Same file, same system cache.
+    /// </summary>
+    private SafeFileHandle _readHandle;
+
+    private SafeFileHandle OpenReadHandle(string filePathName)
+        => File.OpenHandle(filePathName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.None);
     private long _fileSize;
 
     // BKP-01: created with the instance, so they exist before the constructor's first write (genesis writes from CreateFile). The map reference is
@@ -499,7 +509,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// a synchronous read through it allocates on Windows. Reads through both see the same file: neither bypasses the system cache.
     /// </summary>
     internal SafeFileHandle OpenDataFileReader()
-        => File.OpenHandle(DataFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.RandomAccess);
+        => File.OpenHandle(DataFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.None);
 
     private string _lockFilePath;
     private readonly IPageCacheBackpressureStrategy _backpressureStrategy;
@@ -762,6 +772,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         _windows = PageCacheWindow.Build(_memPagesAddr, pageCount);
         _debtBits = new long[(int)(((long)pageCount + 63) >> 6)];
         _clockSweepCurrentIndex.Value = 0;
+        InitProbation(pageCount);
 
         _metrics = new Metrics (this, MemPagesCount);
         _backpressureStrategy = options.BackpressureStrategyFactory();
@@ -1069,12 +1080,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     #endregion
 
+    // No access hint on the data file (I1 of the huge-scan assessment). FileOptions.RandomAccess is POSIX_FADV_RANDOM on Linux and FILE_FLAG_RANDOM_ACCESS on
+    // Windows: both turn the OS read-ahead off, so every miss of a walk in storage order was its own blocking 8 KiB read. Measured cold on Linux (ext4,
+    // 4M rows, 64 MiB cache): Count 7.1 -> 0.5 s, the PTA paged walk 8.3 -> 0.7 s, EnumerateIndex on a storage-ordered key 36.5 -> 3.7 s, foreach
+    // 31.2 -> 9.3 s, with the engine's own disk reads unchanged. Random point reads did not get slower (21 -> 12 s): the kernel reads ahead only for a
+    // sequential stream. SequentialScan measured the same as no hint, and a separate sequential handle lost most of the gain, since a walk interleaves
+    // its map and cluster pages on one thread. Windows was not measured cold: purging its cache needs an administrator.
     private void CreateFile()
     {
         // Create the Files
         var filePathName = Options.BuildDatabasePathFileName();
 
-        _fileHandle = File.OpenHandle(filePathName, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, FileOptions.Asynchronous | FileOptions.RandomAccess);
+        _fileHandle = File.OpenHandle(filePathName, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, FileOptions.Asynchronous);
+        _readHandle = OpenReadHandle(filePathName);
         _fileSize = 0L;
         _filePathId = filePathName.GetHashCode(StringComparison.Ordinal);
 
@@ -1100,7 +1118,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         // Create the Files
         var filePathName = Options.BuildDatabasePathFileName();
-        _fileHandle = File.OpenHandle(filePathName, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, FileOptions.Asynchronous | FileOptions.RandomAccess);
+        _fileHandle = File.OpenHandle(filePathName, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, FileOptions.Asynchronous);
+        _readHandle = OpenReadHandle(filePathName);
         {
             var fi = new FileInfo(filePathName);
             _fileSize = fi.Length;
@@ -1222,6 +1241,12 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             var guard = _evictionGuard;
             _evictionGuard = null;
             guard?.ReleaseAll();   // the quarantined slots made accessible before the block is freed
+            // A page trace started and never written: its buffer is native.
+            StopPageTrace()?.Free();
+            DisposeProbation();
+
+            _readHandle?.Dispose();
+            _readHandle = null;
             if (_fileHandle != null)
             {
                 TyphonEvent.EmitStorageFileHandle(1, _filePathId, 0);
@@ -1281,9 +1306,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool RequestPageEpoch(int filePageIndex, long currentEpoch, out int memPageIndex)
     {
+        // A walk step may have suspended the epoch scope of a transaction on this thread, and the operation reaching this page not resumed it (EP-03):
+        // resumed here, the pin covers the page before it is read. The engine's entry points resume first; this is the net under them.
+        if (EpochManager is { } epochs)
+        {
+            EntityAccessor.ResumeSuspendedBeforePageRead(epochs);
+        }
+
         while (true)
         {
-            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex, PageTraceKind.Epoch))
             {
                 return false;
             }
@@ -1323,7 +1355,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: true);
             }
 
-            pi.IncrementClockSweepCounter();
+            NoteRequested(pi);   // PS-25: the clock's counter, or a probation page's promotion
             EnsurePageVerified(memPageIndex);
             return true;
         }
@@ -1336,9 +1368,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool RequestPageEpochUnchecked(int filePageIndex, long currentEpoch, out int memPageIndex)
     {
+        // A walk step may have suspended the epoch scope of a transaction on this thread, and the operation reaching this page not resumed it (EP-03):
+        // resumed here, the pin covers the page before it is read. The engine's entry points resume first; this is the net under them.
+        if (EpochManager is { } epochs)
+        {
+            EntityAccessor.ResumeSuspendedBeforePageRead(epochs);
+        }
+
         while (true)
         {
-            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex, PageTraceKind.EpochUnchecked))
             {
                 return false;
             }
@@ -1373,7 +1412,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 CompletePendingRead(memPageIndex, pi, filePageIndex, checkShortRead: false);
             }
 
-            pi.IncrementClockSweepCounter();
+            NoteRequested(pi);   // PS-25
             // Skip EnsurePageVerified — caller will overwrite the page content. Set the flag under the page-state lock (STO-10) so it stays consistent with the
             // locked check-and-set in EnsurePageVerified.
             pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
@@ -1400,9 +1439,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </remarks>
     internal bool AcquirePageForRead(int filePageIndex, out int memPageIndex, bool warm = false)
     {
+        // No epoch net here, unlike the epoch-tagged requests: a read pin needs no scope, and the engine's own unpinned scans (a fence's, a structural one) run
+        // on threads a suspended walk may share.
         while (true)
         {
-            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex, warm ? PageTraceKind.ReadPinWarm : PageTraceKind.ReadPinCold))
             {
                 return false;
             }
@@ -1447,7 +1488,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
             if (warm)
             {
-                pi.IncrementClockSweepCounter();
+                NoteRequested(pi);   // PS-25
             }
 
             return true;
@@ -1470,9 +1511,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     internal bool RequestPageEpochNoSweep(int filePageIndex, long currentEpoch, out int memPageIndex)
     {
+        // A walk step may have suspended the epoch scope of a transaction on this thread, and the operation reaching this page not resumed it (EP-03):
+        // resumed here, the pin covers the page before it is read. The engine's entry points resume first; this is the net under them.
+        if (EpochManager is { } epochs)
+        {
+            EntityAccessor.ResumeSuspendedBeforePageRead(epochs);
+        }
+
         while (true)
         {
-            if (!FetchPageToMemory(filePageIndex, out memPageIndex))
+            if (!FetchPageToMemory(filePageIndex, out memPageIndex, PageTraceKind.NoSweep))
             {
                 return false;
             }
@@ -1544,6 +1592,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     /// <param name="filePageIndex">Index of the File Page to fetch</param>
     /// <param name="memPageIndex"></param>
+    /// <param name="traceKind">How the caller asks for the page, for a page trace (<see cref="PageTraceSession"/>); unused unless its flag is on.</param>
     /// <param name="timeout">The time (in tick) the method should wait to return successfully.</param>
     /// <param name="cancellationToken">An optional cancellation token for the user to cancel the call.</param>
     /// <returns><c>true</c> if the call succeeded, <paramref name="memPageIndex"/> will be valid. <c>false</c> if the operation was cancelled or time out
@@ -1552,7 +1601,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// This method will enter a wait cycle if the Memory Page is not allocated and there are no free Memory Pages available.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool FetchPageToMemory(int filePageIndex, out int memPageIndex, long timeout = Timeout.Infinite, CancellationToken cancellationToken = default)
+    private bool FetchPageToMemory(int filePageIndex, out int memPageIndex, PageTraceKind traceKind, long timeout = Timeout.Infinite,
+        CancellationToken cancellationToken = default)
     {
         // Hot path: cache hit. Kept EH-free + small so the JIT inlines this into RequestPageEpoch / RequestPageEpochUnchecked.
         // The cache-miss branch lives in FetchPageToMemoryOnMiss to keep its `using var` (try/finally) out of this method's IL —
@@ -1567,7 +1617,19 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             {
                 ++_metrics.MemPageCacheHit;
             }
+
+            // The page trace (I7), JIT-deleted unless its flag is on.
+            if (TelemetryConfig.ProfilerPageTraceEnabled)
+            {
+                NotePageTrace(filePageIndex, traceKind, false);
+            }
+
             return true;
+        }
+
+        if (TelemetryConfig.ProfilerPageTraceEnabled)
+        {
+            NotePageTrace(filePageIndex, traceKind, true);
         }
 
         return FetchPageToMemoryOnMiss(filePageIndex, out memPageIndex, timeout, cancellationToken);
@@ -1618,6 +1680,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (loadPage)
             {
                 ++_metrics.ReadFromDiskCount;
+                OwnLoads++;
                 MissBeforeReadProbe?.Invoke(filePageIndex);
 
                 pendingRead = new TaskCompletionSource<int>();
@@ -1685,7 +1748,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         try
         {
             using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
-            pendingRead.SetResult(RandomAccess.Read(_fileHandle, PageCacheWindow.PageMemory(_windows, memPageIndex).Span, pageOffset));
+            pendingRead.SetResult(RandomAccess.Read(_readHandle ?? _fileHandle, PageCacheWindow.PageMemory(_windows, memPageIndex).Span, pageOffset));
             if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
             {
                 TyphonEvent.EmitPageCacheDiskReadCompleted(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex, Stopwatch.GetTimestamp());
@@ -1704,6 +1767,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// </summary>
     private void AbandonUnpreparedSlot(int filePageIndex, int memPageIndex, PageInfo pi)
     {
+        UnplaceLoad(pi);
         _directory.TryRemove(filePageIndex, memPageIndex);
         pi.WriteFilePageIndexVolatile(-1);
 
@@ -1803,7 +1867,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         for (var i = 0; i < MemPagesCount; i++)
         {
             var pi = Slot(i);
-            if (pi.PageState != PageState.Idle || !TryAcquire(i, minActiveEpoch))
+            if (pi.PageState != PageState.Idle || !TryAcquire(i, minActiveEpoch, -1, out _, out _))
             {
                 continue;
             }
@@ -1991,6 +2055,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
     /// <summary>Back-pressure rounds waited in a commit's publish, past its append (AP-03). Diagnostic.</summary>
     internal static long PublishBackpressureRounds;
+
+    /// <summary>
+    /// Disk reads this thread's misses made, all caches: what an operation paid for the pages it found missing. Per thread, so counting costs no shared
+    /// write, on the miss path only. Diagnostic (the huge-scan harness's foreground loads).
+    /// </summary>
+    [ThreadStatic]
+    internal static long OwnLoads;
 
     /// <summary>Back-pressure rounds waited, all threads and caches. Diagnostic.</summary>
     internal static long TotalBackpressureRounds;
@@ -2288,6 +2359,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             PageInfo pi = default;
             memPageIndex = -1;
             int evictedFilePageIndex = -1;
+            byte evictedTag = 0;
 
             var forced = ForceBackpressureForTest != null && ForceBackpressureForTest();
             if (forced)
@@ -2301,12 +2373,20 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             //  one file write operation for both pages
             // Only a slot the clock would take itself (ADR-007): TryAcquire does not read the counter, so this took a page at counter 5 in no lap at all, and
             // every sequential walk went through the hot pages beside it.
-            if (!forced && filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex) && ((prevMemPageIndex + 1) < MemPagesCount))
+            // PS-25: probation over its target gives up its oldest page first; the clock's pages are not touched for it.
+            if (!forced && TryTakeFromProbation(minActiveEpoch, false, out memPageIndex, out evictedFilePageIndex, out evictedTag))
+            {
+                pi = Slot(memPageIndex);
+                found = true;
+            }
+
+            // The adjacency path takes only a clock page at counter 0: a probation page is the probation queue's to take.
+            if (!found && !forced && filePageIndex > 0 && _directory.TryGet(filePageIndex - 1, out var prevMemPageIndex)
+                && ((prevMemPageIndex + 1) < MemPagesCount))
             {
                 memPageIndex = prevMemPageIndex + 1;
                 pi = Slot(memPageIndex);
-                evictedFilePageIndex = pi.FilePageIndex;
-                if (pi.ClockSweepCounter == 0 && TryAcquire(memPageIndex, minActiveEpoch))
+                if (pi.ClockSweepCounter == 0 && pi.ProbationTag == 0 && TryAcquire(memPageIndex, minActiveEpoch, -1, out evictedFilePageIndex, out evictedTag))
                 {
                     found = true;
                 }
@@ -2324,11 +2404,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     memPageIndex = AdvanceClockHand();
                     pi = Slot(memPageIndex);
 
+                    // PS-25: the clock passes over a probation page, neither taking nor ageing it: the probation queue decides it.
+                    if (pi.ProbationTag != 0)
+                    {
+                        attempts++;
+                        continue;
+                    }
+
                     // If the counter is 0, the page is candidate for eviction, try to acquire it
                     if (pi.ClockSweepCounter == 0)
                     {
-                        evictedFilePageIndex = pi.FilePageIndex;
-                        if (TryAcquire(memPageIndex, minActiveEpoch))
+                        if (TryAcquire(memPageIndex, minActiveEpoch, -1, out evictedFilePageIndex, out evictedTag))
                         {
                             found = true;
                             break;
@@ -2338,6 +2424,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     // Decrement the counter for this page and loop
                     pi.DecrementClockSweepCounter();
                     attempts++;
+                }
+
+                // PS-25: the clock served nothing — every page of it hot or held. Probation gives up its oldest page whatever its size.
+                if (!found && !forced && TryTakeFromProbation(minActiveEpoch, true, out memPageIndex, out evictedFilePageIndex, out evictedTag))
+                {
+                    pi = Slot(memPageIndex);
+                    found = true;
                 }
 
                 // Should almost never happen, right. ...right?
@@ -2373,15 +2466,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                             }
                         }
 
-                        evictedFilePageIndex = pi.FilePageIndex;
-                        if (TryAcquire(memPageIndex, minActiveEpoch))
+                        if (TryAcquire(memPageIndex, minActiveEpoch, -1, out evictedFilePageIndex, out evictedTag))
                         {
                             found = true;
                             break;
                         }
 
-                        // Decrement the counter for this page and loop
-                        pi.DecrementClockSweepCounter();
+                        // Decrement the counter for this page and loop — a clock page's: a probation page's counter is its reference state (PS-25), never aged.
+                        if (pi.ProbationTag == 0)
+                        {
+                            pi.DecrementClockSweepCounter();
+                        }
+
                         attempts++;
                     }
 
@@ -2586,6 +2682,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 if (evictedFilePageIndex >= 0)
                 {
                     TyphonEvent.EmitPageEvicted(evictedFilePageIndex, 0);
+                    RecordEvicted(evictedFilePageIndex, evictedTag);
                 }
 
                 continue;
@@ -2629,6 +2726,13 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // key only just before it is published (the hit path validates it anyway, PS-15). The directory chains slots by this key (PS-17).
             pi.FilePageIndex = filePageIndex;
 
+            // PS-25: the clock or probation, decided now — the page the slot gave up goes to its set's ghost list, a ghost hit for this one moves the
+            // probation target — and set before the publish, so the first requester to find the page finds its placement.
+            if (_probation != null)
+            {
+                PlaceLoad(memPageIndex, filePageIndex, drawn ? -1 : evictedFilePageIndex, evictedTag);
+            }
+
             // Publish. From here a concurrent request for the same file page finds this slot, but it is not ready (PS-15) until the caller, which
             // owns it, has prepared it. There might have been a concurrent allocation for this FilePage, so we Get or Add and check which MemPage is set
             var newMemPageIndex = _directory.GetOrAdd(filePageIndex, memPageIndex);
@@ -2637,6 +2741,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             if (newMemPageIndex != memPageIndex)
             {
                 // Undo the page allocation, we are not going to use it
+                UnplaceLoad(pi);
                 pi.StateSyncRoot.EnterExclusiveAccess(ref WaitContext.Null);
                 pi.FilePageIndex = -1;
                 pi.PageState = PageState.Free;
@@ -2657,8 +2762,16 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         }
     }
 
-    private bool TryAcquire(int memPageIndex, long minActiveEpoch)
+    /// <summary>
+    /// Reclaims slot <paramref name="memPageIndex"/> when PS-01 allows it, leaving it Allocating for the caller. <paramref name="probationPage"/> ≥ 0 is a
+    /// probation take's: the slot must still hold that page, on probation, under its lock — popped from the queue, it may have been promoted or reloaded
+    /// since. <paramref name="evictedFilePage"/> is the page the slot held, -1 for a free slot, and <paramref name="evictedTag"/> its probation tag (PS-25),
+    /// cleared here: both read under the slot's lock, for the ghost lists.
+    /// </summary>
+    private bool TryAcquire(int memPageIndex, long minActiveEpoch, int probationPage, out int evictedFilePage, out byte evictedTag)
     {
+        evictedFilePage = -1;
+        evictedTag = 0;
         var info = Slot(memPageIndex);
 
         // First pass, check without locking (we won't bother to acquire the lock if the page is not in Free or Idle state)
@@ -2696,6 +2809,11 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             // We need to check the state again, because another thread might have changed between the first and second pass
             if (info.PageState is PageState.Free or PageState.Idle)
             {
+                if (probationPage >= 0 && (info.FilePageIndex != probationPage || info.ProbationTag == 0))
+                {
+                    return false;
+                }
+
                 // Drop the slot's read task if it completed successfully. A failed one stays: the slot's next owner overwrites or drops it. Not for a
                 // slot claimed since the first pass: its read is its owner's, and its requesters complete it — short-read check included (#1201).
                 if (Volatile.Read(ref info.ReadPending) && _readTasks.TryGetValue(memPageIndex, out var readTask) && readTask.IsCompletedSuccessfully)
@@ -2740,8 +2858,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                     ((PageBaseHeader*)(_memPagesAddr + memPageIndex * (long)PageSize))->ModificationCounter = 0;
                 }
                 info.ResetClockSweepCounter();
+                evictedFilePage = info.FilePageIndex;
                 info.FilePageIndex = -1;
                 info.AccessEpoch = 0;  // Clear epoch tag on reallocation
+
+                // PS-25: the page leaves probation with its slot.
+                var probationTag = info.ProbationTag;
+                if (probationTag != 0 && info.TryClearProbation(probationTag))
+                {
+                    evictedTag = probationTag;
+                    Interlocked.Decrement(ref _probationCount.Value);
+                }
 
                 // The writeback pair carries over to the next occupant (PS-10): the guards above proved the two equal, and the next modification bumps
                 // WritebackGen past them, so the new page is owed exactly when it should be. Resetting them to 0 is what used to let a capture published
@@ -3067,7 +3194,8 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     /// Reads a full page directly from the data file into the destination buffer.
     /// Used by <see cref="WalRecovery"/> for torn page detection during crash recovery.
     /// </summary>
-    internal void ReadPageDirect(int filePageIndex, Span<byte> destination) => RandomAccess.Read(_fileHandle, destination, filePageIndex * (long)PageSize);
+    internal void ReadPageDirect(int filePageIndex, Span<byte> destination)
+        => RandomAccess.Read(_readHandle ?? _fileHandle, destination, filePageIndex * (long)PageSize);
 
     /// <summary>
     /// Writes a full page directly to the data file from the source buffer (used by the structural / direct-write paths).

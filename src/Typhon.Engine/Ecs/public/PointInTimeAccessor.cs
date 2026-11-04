@@ -111,6 +111,9 @@ public sealed class PointInTimeAccessor : IDisposable
         CheckConfig.Require(CheckConfig.Enabled, workerId >= 0 && workerId < _workerAccessors.Length,
             $"workerId {workerId} out of range [0, {_workerAccessors.Length})");
 
+        // A lease's requests are the point-in-time accessor's operation (PS-25): a parallel walk's chunks are one operation, one probation budget.
+        PagedMMF.EnterOperation(TSN);
+
         var epochManager = _dbe.EpochManager;
         var depth = epochManager.EnterScope();
         try
@@ -124,11 +127,12 @@ public sealed class PointInTimeAccessor : IDisposable
             }
 
             acc.BeginLease();
-            return new WorkerLease(acc, epochManager, depth);
+            return new WorkerLease(acc, epochManager, depth, TSN);
         }
         catch
         {
             epochManager.ExitScope(depth);
+            PagedMMF.ExitOperation(TSN);
             throw;
         }
     }
@@ -144,12 +148,14 @@ public sealed class PointInTimeAccessor : IDisposable
         private readonly EntityAccessor _accessor;
         private readonly EpochManager _epochManager;
         private readonly int _depth;
+        private readonly long _operation;
 
-        internal WorkerLease(EntityAccessor accessor, EpochManager epochManager, int depth)
+        internal WorkerLease(EntityAccessor accessor, EpochManager epochManager, int depth, long operation = 0)
         {
             _accessor = accessor;
             _epochManager = epochManager;
             _depth = depth;
+            _operation = operation;
         }
 
         /// <summary>The worker's accessor: read, and write SingleVersion / Transient components, through it while the lease is open.</summary>
@@ -163,9 +169,20 @@ public sealed class PointInTimeAccessor : IDisposable
                 return;
             }
 
-            _accessor.EndLease();
-            _epochManager.ExitScope(_depth);
-            this = default;
+            try
+            {
+                _accessor.EndLease();
+                _epochManager.ExitScope(_depth);
+            }
+            finally
+            {
+                if (_operation != 0)
+                {
+                    PagedMMF.ExitOperation(_operation);
+                }
+
+                this = default;
+            }
         }
     }
 

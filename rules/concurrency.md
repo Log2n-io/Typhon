@@ -330,8 +330,8 @@ lock ordering and deadlock prevention are still to come.
   invariant the query scans in scope — the occupancy count, the entity-map count, existence check and collect, the SoA cluster scan, the B+Tree
             range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
             (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
-            it the moment it leaves the window. It marks the page recently used, as the epoch path does, so the change is only in what holds the
-            page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
+            it the moment it leaves the window. It marks the page recently used, as the epoch path does — for a page on probation, a request
+            from another operation promotes it (PS-25) — so the change is only in what holds the page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
             positioning faults: a window's pins are slot references, and nothing else releases them
   invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator: a transaction's, and any of LongWalkClusters or more; a
             shorter walk on a lease is bounded by the lease; a ClusterRef is valid for its step, EP-03, and MoveNext records a page handed out before it
@@ -344,6 +344,11 @@ lock ordering and deadlock prevention are still to come.
             key keeps the regular reader: TryGetMultiple's cost is the key's own length
   invariant a transaction's cluster walk of LongWalkClusters or more yields at every 64th cluster, and its back-pressure wait moves the epoch; a PTA worker's
             does not (EntityAccessor.NoteEntityOpen): a lease holds a bounded set of its own pages, and what other threads tag for as long as it lasts
+  invariant a query's foreach streams (EcsQuery.EcsQueryEnumerator): each archetype's entity map is read in fills of 64 keys, then four times more
+            per fill up to 4 096, through a resumable cursor (RawValuePagedHashMap.FillFrom, EntryCursor) and a scan accessor created and released
+            around each fill, so between fills it holds no page and its memory does not grow with the result. A snapshot walk (Transaction.Walk,
+            SnapshotWalker) holds its scan accessors' windows for its length and a batch's page for its step; every step is a yield point, with no
+            time gate, since it re-enters the transaction's scope at the current epoch (EP-03)
   note an ordered query's merge and a spatial query have no yield point: each holds a bounded set of its own pages and its epoch for the length of the call,
        so what other threads tag meanwhile stays protected until it returns. A merge's own opens can still refresh it: its parked leaf is then found again
        (LeafPageCursorState.RefreshesSeen), as a range cursor's is
@@ -457,7 +462,8 @@ lock ordering and deadlock prevention are still to come.
          ChunkBasedSegment.ScanForAllocatorState, ChunkBasedSegment.AllocatedChunks, ChunkBasedSegment.IsChunkAllocatedUnpinned,
          ArchetypeClusterState.RebuildActiveList, ComponentRevisionManager.EnumerateVersionedChainHeads,
          ChunkBasedSegment.CreateScanAccessor, ChunkAccessor.LoadIntoSlot, RawValuePagedHashMap.HeadLatch, EcsQuery.TryCountViaOccupancy,
-         EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.CollectMatchingFullCore,
+         EcsQuery.CountMatchingCore, EcsQuery.AnyMatchingCore, EcsQuery.CollectMatchingCore, EcsQuery.FillForeachBatchCore,
+         RawValuePagedHashMap.FillFrom, SnapshotWalker, SnapshotColumns.Fill,
          EcsQuery.ScanPerArchetypeBTree, EcsQuery.ScanPerArchetypeBTreeSelective, EcsQuery.ExecuteSpatial, RangeEnumerator,
          DatabaseEngine.CheckClusterVisibilitySummaries, Transaction.EnumerateArchetypeEntities, ArchetypeClusterState.RebuildSpatialStateFromData,
          FreeQuarantine.Free, PagedMMF.BeginRestartableIndexWrite, PagedMMF.EndRestartableIndexWrite, PagedMMF.DisarmIndexRestart,
@@ -529,6 +535,9 @@ lock ordering and deadlock prevention are still to come.
             completes and its dispose throws nothing (with the rollback's refreshes removed, the dispose throws a back-pressure timeout after 5 s);
             ACommitJustOverTheLimit_IsRefusedBeforeItsAppend — 50 000 spawns into 8 MiB are refused before the append (with a refresh between the
             placements, the publish failed and stopped the engine)
+  verified: StreamingForeachTests.AStreamingWalk_HoldsABoundedSetOfPages [VerifiesRule] and TransactionWalkTests.AWalk_HoldsABoundedSetOfPages
+            [VerifiesRule] (read-only and read-write) — 30 000 entities over more than 200 cluster pages, at most 200 slot-referenced or epoch-held
+            while the walk runs
   verified: ClusterRebuildMergeTests.TheRebuild_OfAClusterSegmentLargerThanTheCache_Completes — the spatial rebuild of a cluster segment larger than an
             8 MiB cache, under one epoch scope as the open's, serial and on 4 workers [VerifiesRule]; epoch-tagged again, both time out
 
@@ -542,9 +551,10 @@ lock ordering and deadlock prevention are still to come.
             a slot evicted to make room, the accessor disposed (its cluster-cache entry given to another archetype: four are kept, least
             recently used replaced) — to its EntityAccessor's ClusterGeneration, and the handle re-resolves its base from the cluster id
             it kept (EntityRef.ClusterBase) once the generation has moved. Transient pages never move: their accessors report nothing
-  invariant a fast-path reference — a ClusterRef and every span or ref it hands out, an index enumerator's CurrentComponent — is valid
-            until its enumerator's next MoveNext or Dispose; the enumerator's own accessor holds the current page for that long. Under
-            strict mode (CheckConfig.Enabled) a ClusterRef used after its step throws, from every data member
+  invariant a fast-path reference — a ClusterRef and every span or ref it hands out, an index enumerator's CurrentComponent, a WalkBatch and every
+            span it hands out — is valid until its enumerator's next MoveNext or Dispose; the enumerator's own accessor holds the current page for
+            that long, or the walk's own buffer the values. Under strict mode (CheckConfig.Enabled) a ClusterRef used after its step throws, from
+            every data member; a WalkBatch throws in every build
   invariant so the epoch may be refreshed at any call boundary: a transaction refreshes it every 128 entity opens
             (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns, every 128 destroys, every 128 cluster walks, every 128
             archetypes a spatial query reads, every 128 entries of a view's refresh, every 128 index lookups and every 128 index entries examined, whether the snapshot sees them or not: a walk of rows newer than its snapshot reads the same pages and emits
@@ -576,6 +586,17 @@ lock ordering and deadlock prevention are still to come.
   invariant no whole-value store changes a collection handle: it counts no reference, so an empty handle in the value keeps the stored
             collection and a handle naming another buffer throws (CollectionHandles.Keep — EntityRefMut.Set, ClusterRef.Set,
             EntityAccessor.Teleport). Enable(comp, value) alone adopts one, into a component holding none
+  invariant a transaction's epoch scope may also be LEFT at a walk step (EntityAccessor.TrySuspendEpochAtWalkStep, a call boundary: what the step
+            hands out lives in the walk's buffers or on pages its scan accessors hold by slot reference), and is re-entered before any page is read,
+            at the current epoch: by the next step (ResumeForWalkStep) or by any operation (ResumeIfSuspended), each at a call boundary. Nothing the
+            transaction holds across a step is held by the epoch alone — what a suspension relies on, since no resume restores a page evicted or a chunk
+            reclaimed during the pause. Every entry point resumes first — BeginOperation, ResolveEntity,
+            NoteEntityOpen, NeedsEpochGuard, RequireLeaseIfPointInTime, an EntityRef's read and write paths, every query execution
+            (EcsQuery.CheckRealmScope), a foreach's fill, a navigation, a cluster enumerator's MoveNext — and the page layer resumes any transaction an
+            operation reached an epoch-tagged page request without resuming (EntityAccessor.ResumeSuspendedBeforePageRead) at the epoch it left at, as
+            a call without the pause would hold what it obtained: counted, and a Debug assertion. A read below the page layer (a node through a warm
+            accessor's held slot) only the entry points cover. Its snapshot is not its epoch: it stays in the
+            chain, so the cleanup cutoff holds whether or not its scope is suspended (TXC-01, VIS-06)
   never cache a pointer into a page across calls on the strength of the epoch alone, and never hand one to a caller: a refresh at the
         next call boundary makes the page evictable while the pointer lives on
   scope: EntityRef.Read, EntityRef.TryRead, EntityRef.ReadRaw, EntityRef.ReadSlotRef, EntityRef.ClusterBase, EntityRefMut.Set,
@@ -583,7 +604,9 @@ lock ordering and deadlock prevention are still to come.
          EntityAccessor.ShareStagedCollections, Transaction.ReleaseStagedCollections, Transaction.PublishStagedEntry, ClusterRef.Set,
          EntityAccessor.Teleport, EntityAccessor.ResolveClusterBases,
          EntityAccessor.ReresolveClusterBase, EntityAccessor.EnsureClusterCache, EntityAccessor.NoteEntityOpen,
-         EntityAccessor.EpochRefreshDue, PagedMMF.UnderPressure, PointInTimeAccessor.FlushWorker, ChunkAccessor.TrackGeneration, ClusterRef.CheckStep, ClusterEnumerator.MoveNext
+         EntityAccessor.EpochRefreshDue, PagedMMF.UnderPressure, PointInTimeAccessor.FlushWorker, ChunkAccessor.TrackGeneration, ClusterRef.CheckStep, ClusterEnumerator.MoveNext,
+         WalkBatch, EntityAccessor.TrySuspendEpochAtWalkStep, EntityAccessor.ResumeIfSuspended, EntityAccessor.ResumeForWalkStep,
+         EntityAccessor.ResumeSuspendedBeforePageRead, EntityAccessor.BeginOperation, EpochManager.SuspendScope, EpochManager.ResumeScopeAt
   on_violation: the cache gives the slot to another page while the pointer lives on — reads return another entity's values, and a
                 write through the pointer lands in another entity while the intended write is lost (#1199: a handle opened, then an
                 archetype switch and 130 spawns or a 200-entity enumeration, then another thread's reads: wrong values in 2 to 4 runs of
@@ -615,6 +638,11 @@ lock ordering and deadlock prevention are still to come.
             foreign one throws, and an accessor refuses a stale copy [VerifiesRule]
   verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes — no public member of either handle returns a reference
             [VerifiesRule]
+  verified: WalkEpochSuspensionTests.APausedWalk_HoldsNoEpoch [VerifiesRule] — a writer spawns 3 000 entities beside a walk paused between steps:
+            the thread is unpinned and fewer than 50 pages are epoch-held, against more than 100 for an idle transaction;
+            APausedWalk_StillHoldsItsSnapshot [VerifiesRule] — every value rewritten twice and the cleanup run during the pause, the walk reads the
+            snapshot's; EveryEntryPoint_ResumesBeforeReadingAPage [VerifiesRule] — seventeen operations, each made with the scope suspended, none
+            reaches the page layer's net; Mutant_AnEntryPointThatDoesNotResume_IsRejected [RuleMutant]
 
 ### EP-04: A thread holds an epoch pin only for a bounded scope, released on that thread `[fatal]` `[silent]`
   invariant every epoch scope a thread enters is exited by that same thread when the work it covers ends: an EpochGuard, a Transaction, a
@@ -632,6 +660,11 @@ lock ordering and deadlock prevention are still to come.
             that is parked, between ticks or in a stalled tick holds no pin
   note a lease exits in order (ExitScope with its depth), a Transaction unordered: a transaction opened before a lease and disposed inside it makes
        the lease's exit throw its depth mismatch, loudly, as RT-01 accepts for a body that leaks a scope
+  invariant a walk step leaves its transaction's scope only when that scope is the thread's only depth (EpochManager.CurrentThreadDepth == 1): an
+            unordered exit beneath a lease or a guard breaks that scope's depth check, and with any other scope the thread stays pinned anyway. A
+            scope opened on the thread during the pause is borrowed, not nested under: the operation it covers leaves the suspension in place
+            (EntityAccessor.ResumeEpoch), and a dispose under it exits no unit of the transaction's (Transaction.ExitEpochAndRemove). Suspending does
+            not advance the global epoch: a walk suspends once per batch, and an advance sends every thread's warm B+Tree accessors cold
   invariant a refresh moves the calling thread's pin only: a flush made for another thread's accessor (PointInTimeAccessor.FlushWorker, from the thread
             that completed the system) moves no epoch, and commits under a scope of its own
   rationale: #1532. InitLightweight entered a scope on a worker's first parallel chunk and never left it, one per parallel system (depth 9 on all 16
@@ -643,14 +676,16 @@ lock ordering and deadlock prevention are still to come.
   scope: PointInTimeAccessor.cs (Enter, WorkerLease, FlushWorker, AdvanceSnapshot, Attach, Dispose), EntityAccessor.cs (InitLightweight,
          NeedsEpochGuard, RequireLeaseIfPointInTime, BeginLease, EndLease, FlushAtSystemEnd), EntityAccessor.ECS.cs (For, GetClusterEnumerator),
          ComponentInfo.cs (ReleaseWindows), PagedMMF.cs (CountPagesWithSlotReferences),
-         TyphonRuntime.cs (ExecuteChunkWithAccessor, OnParallelQueryCleanup)
+         TyphonRuntime.cs (ExecuteChunkWithAccessor, OnParallelQueryCleanup), EntityAccessor.TrySuspendEpochAtWalkStep, EntityAccessor.ResumeEpoch,
+         Transaction.ExitEpochAndRemove, EpochManager.CurrentThreadDepth
   verified: WorkerEpochPinTests.ParkedWorkers_HoldNoEpochPin_BetweenTicks [VerifiesRule] (4 workers, two parallel systems, measured inside the idle gap:
             no worker pinned; before the fix every worker pinned at depth 2, the floor frozen 200 epochs behind, 16 pages held); WorkerEpochPinTests.ParkedWorkers_KeepingTheirFirstChunksPin_AreRejected [RuleMutant];
             APointInTimeWorker_UsedOutsideItsLease_Throws and ALease_PinsItsThreadForItsLengthOnly_AndAWorkerIndexMayMoveBetweenThreads [VerifiesRule]
             (each fails with its guard removed: no throw outside a lease, a lease that never unpins);
             APointInTimeWorker_HandsOutNoWalkerOutsideItsLease and ALease_IsReleasedOnAThrow_NestsWithAnother_AndHostsATransaction [VerifiesRule];
             Workers_HoldNoPageBySlotReference_OnceTheirSystemsEnd [VerifiesRule] (counted by a system after the last parallel one and in the idle gap:
-            0 pages; 210 with the release removed)
+            0 pages; 210 with the release removed); WalkEpochSuspensionTests.AWalkUnderAnotherScope_DoesNotSuspend and
+            AScopeOpenedDuringAPause_IsBorrowed_AndStaysLifo [VerifiesRule] — a guard opened before or during the pause exits in order
 
 ## Module: SIGNAL — Wake signals versus resource counts
 

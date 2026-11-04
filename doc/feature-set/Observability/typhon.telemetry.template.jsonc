@@ -27,6 +27,10 @@
         // Whether opt-in per-tick gauge snapshots are requested by configuration.
         "Enabled": false,
       },
+      "PageTrace": {
+        // Whether the page cache may record a page trace: one record per page request, hit or miss, while a capture runs (DatabaseEngine.StartPageTrace, or TYPHON_PAGE_TRACE_FILE). Replayed against eviction policies by scripts/page-trace-replay.py. Off by default. On, every page request makes a call and an interlocked pair even while no capture runs, and a capture adds an interlocked increment per record: it perturbs the timings beside it.
+        "Enabled": false,
+      },
       "Scheduler": {
         // Whether Scheduler component telemetry is enabled in configuration.
         "Enabled": false,

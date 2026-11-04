@@ -270,7 +270,7 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// during the scan.
     /// </para>
     /// </remarks>
-    protected struct SplitTolerantScan
+    internal struct SplitTolerantScan
     {
         private readonly int _startCount;
         private readonly int _n0Shift;

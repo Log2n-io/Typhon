@@ -49,6 +49,14 @@
           "enabledField": "ProfilerGaugesEnabled",
           "desc": "Whether opt-in per-tick gauge snapshots are requested by configuration."
         },
+        // Independent of the profiler master: a capture of every page request is a diagnostic of its own, and the profiler's hit counters would only
+        // cost it more. Off, the JIT deletes the record call from the page cache's hit path.
+        {
+          "name": "PageTrace",
+          "kind": "rawLeaf",
+          "field": "ProfilerPageTraceEnabled",
+          "desc": "Whether the page cache may record a page trace: one record per page request, hit or miss, while a capture runs (DatabaseEngine.StartPageTrace, or TYPHON_PAGE_TRACE_FILE). Replayed against eviction policies by scripts/page-trace-replay.py. Off by default. On, every page request makes a call and an interlocked pair even while no capture runs, and a capture adds an interlocked increment per record: it perturbs the timings beside it."
+        },
         {
           "name": "Scheduler",
           "kind": "subtreeResolved",

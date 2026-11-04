@@ -164,6 +164,7 @@ public static class CommandLine
         c.WarmTicks = r.Int("--warm", c.WarmTicks, "ticks run before measuring starts", min: 0);
         c.MeasuredTicks = r.Int("--ticks", c.MeasuredTicks, "ticks measured", min: 1);
         c.PageCacheMiB = r.Int("--cache-mib", c.PageCacheMiB, "page cache size, MiB", min: 1);
+        c.PlainClock = r.Switch("--plain-clock", "evict with the page cache's plain clock instead of scan-resistant eviction (PS-25), for an A/B");
         c.ParallelQueryMinChunkSize = r.Int("--min-chunk", c.ParallelQueryMinChunkSize, "global parallel-query chunk floor", min: 0);
         c.AwarenessMinChunk = r.Int("--awareness-min-chunk", c.AwarenessMinChunk, "chunk floor for the awareness system alone; 0 uses the global one", min: 0);
         c.CostBasedChunking = !r.Switch("--entity-chunking", "chunk by entity count instead of by cost (P2 off)");
@@ -201,6 +202,8 @@ public static class CommandLine
         c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");
         c.DatabaseName = r.Str("--db-name", c.DatabaseName, "the database's file name, without directory or extension", "<name>");
         c.Persist = r.Switch("--persist", "keep the database across runs and reopen it instead of building a fresh world");
+        c.SeedHistoryThousands = r.Int("--seed-history", c.SeedHistoryThousands,
+            "thousands of credit-ledger rows (and ~4x item rows) to seed a fresh served world with, for hardening; a reopened world is not seeded", min: 0);
         c.ReportDirectory = r.Str("--report-dir", null, "where --sweep writes its report", "<path>");
         c.TickLogPath = r.Str("--tick-log", null, "write one line per tick here", "<path>");
 

@@ -885,8 +885,11 @@ CK-08 (flush-only cycles) are later increments.
             its torn bytes were re-checksummed for the next open to serve (#1304); held back after it, the close's flush skipped it under a clean
             marker. A flush-only cycle after a fatal cycle failure writes nothing
   invariant the recovery's passes work in bounded batches (DatabaseEngine.RecoveryBatchSize entities, chains or records) and call
-            DatabaseEngine.RecoveryBatchPoint between them: the pass's ChangeSet saved, the thread's epoch pin refreshed so the batch's pages stop
-            being epoch-held, and a flush-only cycle once the owed pages pass the dirty-page threshold. The passes: the entity-map rebuild, the
+            DatabaseEngine.RecoveryBatchPoint between them: the pass's ChangeSet marks released — its pages stay owed (PS-10), unevictable until
+            written — the thread's epoch pin refreshed so the batch's pages stop being epoch-held, and a flush-only cycle once the owed pages pass
+            the dirty-page threshold. Released, not saved (#1588): a save per batch rewrote the pages each batch re-dirtied, and the index
+            rebuild's random inserts re-dirty the same B+Tree pages batch after batch (a 7 GB crash open at 512 MiB: >91 GB in >5.5 min saved,
+            15.3 GB in 95 s released). The passes: the entity-map rebuild, the
             Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild. A pass
             calls it only where it holds no page address across it, and records every page it writes through an accessor without a ChangeSet as
             owed (the HEAD rebuild's clusters): refreshed, an unrecorded page could be evicted unwritten (PS-10). The replay's ChangeSet is saved
@@ -2487,7 +2490,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             are data. A revision segment's is every chunk no other names: a root, or a chunk no chain will link (an overflow chunk whose
             predecessor's page is as of before its growth), whose bytes no one reads — filtered by a header check, a root whose overflow chunk the
             disk has as free kept its hold. A named chunk the crash rebuild of an EntityMap adopts as its entity's root is freed as it is adopted
-            (#1251). Read through a scan accessor: a segment may outgrow the cache
+            (#1251). Read through a scan accessor, its epoch moved every LockWordRecovery.ChunksPerEpoch chunks: a segment may outgrow the
+            cache, and under one epoch every page the walk passed stays protected (a 6 GB revision segment filled a 512 MiB cache, and the open
+            timed out on back-pressure)
   scope: PagedMMF.TakeCaptureTicket, PagedMMF.EndLockHold, PagedMMF.BeginCapture, PagedMMF.EndCapture, PagedMMF.WritePagesForCheckpoint,
          PagedMMF.SavePages, ComponentRevisionManager.ChainLockTicket, ComponentRevisionManager.EndChainLockHold,
          ComponentRevisionManager.ResetChainLocksAfterCrash, ComponentRevisionManager.ResetChainLocks, LockWordRecovery.ResetLocks,
@@ -2637,6 +2642,47 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
                 past their first latch, their pins up to 4,000 epochs behind, held the whole cache. With the reserve, 15 of 15 runs pass and the
                 longest back-pressure wait is 68-352 ms. Without the inheritance, ChaosStressTests.UltimateStress_AllSubsystems at the 8 MiB floor
                 timed out about one run in six on four Linux cores: a grow waiting for a page, the publishes blocked on its lock 170,000 epochs behind
+
+### PS-25: A first load waits on probation until a different operation asks for it again; the probation area's size follows the ghost hits `[perf][silent]`
+  invariant with PagedMMFOptions.ScanResistantEviction (the default), a page a miss loads inside an operation — the transaction open on the thread, or the
+            point-in-time accessor whose lease it holds (PagedMMF.EnterOperation; operations ended out of order leave the thread in the innermost one
+            still open, never one that ended) — is placed on probation under that operation's tag (PageInfo.ProbationTag, 1-255), with its clock
+            counter at 0; outside any operation (the checkpoint, a fence, recovery) it joins the clock at once, as it always did
+  invariant a request for a probation page from its own operation counts in the page's clock counter, one CAS step from the value read, lap by
+            lap: 1 for the load's request, 2 for one again (CAR's T1 reference bit), which buys the page one more lap of the probation queue (3);
+            asked for again in that lap (4), it is a page its operation keeps coming back to — an index's interior node under a walk — and joins
+            the clock at its next take, its counter reset to a fresh load's 1. A page a walk reads once, or many times in a row, leaves after one
+            more lap at most. One from any other operation, or from outside any, moves it to the clock at once. Neither pass of the sweep ages a
+            probation page's counter
+  invariant the clock's sweep passes over probation pages, neither taking nor ageing them. Once the cache has been full, an allocation first takes
+            probation's oldest page without a reference bit while probation holds more than its target p (a page with one goes to the back, its
+            bit consumed, or joins the clock if it is its second, at most 64 a take); then the clock; then probation's oldest whatever p; then pass 2. Every take goes through
+            TryAcquire, so PS-01 holds unchanged: a pinned, dirty, owed or epoch-held probation page is never taken, and goes to the back of the
+            queue; and TryAcquire re-checks under the slot's lock that the slot still holds the popped page on probation — promoted or reloaded
+            since the pop, it is left alone
+  invariant the pages the two sets give up are remembered, up to one per cache slot each: B1 for probation's, with their loader's tag, B2 for the
+            clock's (ProbationPolicy). A miss is decided before the page its slot gave up is recorded (ARC's order). A miss on a B1 page raises p
+            by max(1, |B2|/|B1|) and loads it into the clock when another operation asks; a miss on a B2 page lowers p by max(1, |B1|/|B2|) and
+            loads it into the clock. p stays within [N/256, N/2], starting at N/16: rails, not the operating point. Nothing is reserved: with
+            no walk, p drifts down and the clock holds the cache
+  invariant the hit path pays one byte read on the line the counter is on; the policy's lock is taken on the miss path only
+  scope: PagedMMF.NoteRequested, PagedMMF.TryTakeFromProbation, PagedMMF.PlaceLoad, PagedMMF.UnplaceLoad, PagedMMF.TryAcquire,
+         PagedMMF.AllocateMemoryPageCore, PagedMMF.EnterOperation, PagedMMF.ExitOperation, PagedMMF.OperationTag, ProbationPolicy,
+         PagedMMFOptions.ScanResistantEviction
+  on_violation: a walk larger than the cache evicts the working set: on a full 64 MiB cache, the replay of three long walks beside live traffic
+                counted 20-24k foreground misses under the plain clock against about 650 with this rule (claude/scratch/huge-scan-assessment.md, I8).
+                A reserved area instead of an adaptive one cost a working set near the cache size 75 % more misses with no walk at all
+  rationale: ARC's adaptation (Megiddo and Modha, FAST 2003) on the clock, as CAR (Bansal and Modha, FAST 2004), with one change: promotion needs a
+             different operation, not merely a second hit — 63-65 % of a walk's requests re-read its own pages. Deviates from EP-02's "marks the page
+             recently used" for first loads, and from ADR-007's rejection of ARC, approved 2026-11-03
+  verified: PageCacheProbationTests.AHotSet_SurvivesAWalkLargerThanTheCache [VerifiesRule] — a hot set read by many operations, then a walk four times
+            a 256-slot cache: every hot page resident; Mutant_ThePlainClock_LosesTheHotSet [RuleMutant]. APageAskedForByAnotherOperation_JoinsTheClock,
+            ALoadOutsideAnyOperation_GoesToTheClock, AWalksOwnRereads_PromoteNothing, AMissOnAPageProbationLetGo_GrowsTheTarget_AndJoinsTheClock,
+            AMissOnAPageTheClockLetGo_ShrinksTheTarget, WithNoWalk_AWorkingSetNearTheCacheSizeMissesAsOnTheClock, ARepeatedWalk_CachesItself,
+            AProtectedProbationPage_IsNeverTaken, UnderConcurrency_TheProbationCountMatchesTheSlots, APagePromotedDuringTheTake_IsLeftToTheClock,
+            TheTarget_NeverExceedsHalfTheCache, WithTheOptionOff_NoPageIsOnProbation, APageItsOperationAskedForAgain_GetsOneMoreLap,
+            OperationsEndingOutOfOrder_LeaveNoEndedOperation, AfterTheQueueChurns_EveryProbationPageCanStillBeTaken, TheGhostList_MatchesItsModel,
+            APageItsOperationKeepsComingBackTo_JoinsTheClock
 
 ## Module: WAL Recovery
 
@@ -2810,7 +2856,8 @@ of the LSN value).
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
 
 ### CS-04: An open that did not complete closes as a crash `[fatal][silent]`
-  invariant an engine whose InitializeArchetypes threw is disposed as a crash would leave it: no PersistArchetypeState, no
+  invariant an engine whose InitializeArchetypes threw, or whose component registration before it threw (DatabaseEngine.RegisterComponentFromAccessor),
+            is disposed as a crash would leave it: no PersistArchetypeState, no
             PersistEngineState, no chunk summary, no MarkCleanShutdown, and no final checkpoint cycle (the checkpoint manager is
             crash-stopped). CS-02 cleared the flag at open, so the next open recovers
   invariant an open that follows a clean close (or an open that never completed after one) sets the failed-open marker in the same

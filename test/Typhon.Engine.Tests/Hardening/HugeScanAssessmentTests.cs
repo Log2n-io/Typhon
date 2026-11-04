@@ -175,6 +175,10 @@ public unsafe class HugeScanAssessmentTests
     private static readonly long CacheMiB = long.TryParse(Environment.GetEnvironmentVariable("TYPHON_HS_CACHE_MIB"), out var c) ? c : 64;
     private static readonly bool Live = Environment.GetEnvironmentVariable("TYPHON_HS_LIVE") == "1";
     private static readonly bool Prefill = Environment.GetEnvironmentVariable("TYPHON_HS_PREFILL") == "1";
+    private static readonly string TraceFile = Environment.GetEnvironmentVariable("TYPHON_HS_TRACE");
+
+    /// <summary>The eviction policy (PS-25): "clock" for the plain clock, anything else for scan-resistant eviction, the default.</summary>
+    private static readonly bool ScanResistant = Environment.GetEnvironmentVariable("TYPHON_HS_EVICTION") != "clock";
     private static string RunDb => Environment.GetEnvironmentVariable("TYPHON_HS_DB") ?? Path.Combine(Dir, "base", "hs.typhon");
 
     private static DatabaseEngine Open(long cacheMiB) =>
@@ -188,7 +192,11 @@ public unsafe class HugeScanAssessmentTests
             .Register<HsSpatial>()
             .ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(-WorldExtent, -WorldExtent), new Vector2(WorldExtent, WorldExtent), cellSize: 100f))
             .PageCacheSize((ulong)cacheMiB << 20)
-            .ConfigureStorage(s => s.VerifyOnOpen = OpenVerification.Spine));
+            .ConfigureStorage(s =>
+            {
+                s.VerifyOnOpen = OpenVerification.Spine;
+                s.ScanResistantEviction = ScanResistant;
+            }));
 
     private static string IdsFile(string name) => Path.Combine(Path.GetDirectoryName(RunDb)!, name + ".ids");
 
@@ -407,6 +415,20 @@ public unsafe class HugeScanAssessmentTests
                 }
             });
 
+            // The snapshot walk (I3): one cluster per batch, at the transaction's snapshot, holding no epoch between batches.
+            yield return new Scenario($"TxWalk_{Tag}", ctx =>
+            {
+                using var tx = ctx.Dbe.CreateReadOnlyTransaction();
+                foreach (var batch in tx.Walk<TArch>())
+                {
+                    var span = batch.GetReadOnlySpan(Comp);
+                    for (var bits = batch.Rows; bits != 0; bits &= bits - 1)
+                    {
+                        ctx.Visit(Seq(span[BitOperations.TrailingZeroCount(bits)]));
+                    }
+                }
+            });
+
             yield return new Scenario($"ForeachWhereLambda_{Tag}", ctx =>
             {
                 using var tx = ctx.Dbe.CreateReadOnlyTransaction();
@@ -577,6 +599,28 @@ public unsafe class HugeScanAssessmentTests
                     ctx.Visit(Seq(rows.CurrentComponent));
                 }
             });
+
+            // I6 through the field query's stream: the same rows as IndexShuffled, by a predicate on the same unrelated key, read in storage order.
+            yield return new Scenario($"WhereFieldForeachShuffled_{Tag}", ctx =>
+            {
+                using var tx = ctx.Dbe.CreateReadOnlyTransaction();
+                foreach (var e in tx.Query<TArch>().WhereField(ShuffledAll))
+                {
+                    ctx.Visit(Seq(e.Read(Comp)));
+                }
+            });
+
+            yield return new Scenario($"WhereFieldForeachBroad_{Tag}", ctx =>
+            {
+                using var tx = ctx.Dbe.CreateReadOnlyTransaction();
+                var n = 0;
+                foreach (var _ in tx.Query<TArch>().WhereField(Broad))
+                {
+                    n++;
+                }
+
+                ctx.Visited = n;
+            }, ChecksEveryRow: false);
 
             yield return new Scenario($"OrderedShuffledAll_{Tag}", ctx =>
             {
@@ -866,6 +910,86 @@ public unsafe class HugeScanAssessmentTests
             ctx.Visited = tx.Query<HsSpatialArch>().WhereRay<HsSpatial>(-WorldExtent, 0.5, 0.5, 1, 0, 0, 2 * WorldExtent).Execute().Count;
         }, ChecksEveryRow: false, ExpectedRows: 0);
 
+        // I10: a snapshot walk paused 5 s after its first batch while a writer appends. Between batches the walk holds no epoch, so what the writer touches
+        // stays evictable: the peak of epoch-held pages and the writer's back-pressure rounds against TailChase_Ver's idle transaction (8 128 pages).
+        yield return new Scenario("PausedWalk_Ver", ctx =>
+        {
+            using var tx = ctx.Dbe.CreateReadOnlyTransaction();
+            var latencies = new List<double>();
+            Exception writerFault = null;
+            var stop = false;
+            var writer = new Thread(() =>
+            {
+                try
+                {
+                    var seq = ctx.Rows + 1;
+                    while (!Volatile.Read(ref stop))
+                    {
+                        var commit = Stopwatch.StartNew();
+                        using (var w = ctx.Dbe.CreateQuickTransaction())
+                        {
+                            for (var i = 0; i < 1000; i++, seq++)
+                            {
+                                var row = new HsVersioned { Seq = seq, Group = GroupOf(seq), Value = 1, Shuffled = ShuffledOf(seq) };
+                                w.Spawn<HsVerArch>(HsVerArch.Row.Set(in row));
+                            }
+
+                            w.Commit();
+                        }
+
+                        latencies.Add(commit.Elapsed.TotalMilliseconds);
+                    }
+                }
+                catch (Exception e)
+                {
+                    writerFault = e;
+                }
+            }) { IsBackground = true, Name = "hs-appender" };
+
+            var suspendedDuringPause = false;
+            var heldAfterPause = -1;
+            var heldWhileAppending = -1;
+            using (var walk = tx.Walk<HsVerArch>())
+            {
+                var first = true;
+                while (walk.MoveNext())
+                {
+                    var batch = walk.Current;
+                    var span = batch.GetReadOnlySpan(HsVerArch.Row);
+                    for (var bits = batch.Rows; bits != 0; bits &= bits - 1)
+                    {
+                        ctx.Visit(span[BitOperations.TrailingZeroCount(bits)].Seq);
+                    }
+
+                    if (first)
+                    {
+                        first = false;
+                        writer.Start();
+                        Thread.Sleep(5000);
+                        suspendedDuringPause = tx.EpochSuspended && !ctx.Dbe.EpochManager.IsCurrentThreadInScope;
+                        ctx.Dbe.MMF.GetMetrics().GetMemPageExtraInfo(out var running);
+                        heldWhileAppending = running.EpochProtectedPageCount;
+                        Volatile.Write(ref stop, true);
+                        writer.Join();
+
+                        // The appender gone, only this thread could still pin what it touched: the I10 measure, against TailChase_Ver's idle transaction.
+                        ctx.Dbe.MMF.GetMetrics().GetMemPageExtraInfo(out var census);
+                        heldAfterPause = census.EpochProtectedPageCount;
+                    }
+                }
+            }
+
+            if (writerFault != null)
+            {
+                throw new InvalidOperationException("the appender failed beside the paused walk", writerFault);
+            }
+
+            latencies.Sort();
+            var p99 = latencies.Count == 0 ? 0 : latencies[(int)(latencies.Count * 0.99)];
+            ctx.Note = $"suspended {suspendedDuringPause}, epoch-held while appending {heldWhileAppending}, after {heldAfterPause}, appender commits {latencies.Count}, p99 {p99:F1} ms, "
+                       + $"max {(latencies.Count == 0 ? 0 : latencies[^1]):F1} ms";
+        }, Writes: true);
+
         // A walk at an old snapshot, near the ledger's end, while a writer appends: every row the writer adds is invisible to the walk, so MoveNext skips
         // them and never emits, and the walk's refresh runs only on an emission.
         yield return new Scenario("TailChase_Ver", ctx =>
@@ -898,6 +1022,8 @@ public unsafe class HugeScanAssessmentTests
             }) { IsBackground = true, Name = "hs-appender" };
             writer.Start();
             Thread.Sleep(5000);
+            ctx.Dbe.MMF.GetMetrics().GetMemPageExtraInfo(out var idleCensus);
+            ctx.Note = $"epoch-held while appending {idleCensus.EpochProtectedPageCount} (an idle transaction)";
             using (var rows = tx.EnumerateIndex<HsVersioned, long>(ctx.Dbe.GetIndexRef<HsVersioned, long>(v => v.Seq), ctx.Rows - 1000, long.MaxValue))
             {
                 while (rows.MoveNext())
@@ -1083,7 +1209,6 @@ public unsafe class HugeScanAssessmentTests
         private void Loop(bool write)
         {
             var rand = new Random(write ? 1 : 2);
-            var ownLoads = typeof(PagedMMF).GetField("OwnLoads", BindingFlags.Static | BindingFlags.NonPublic);
             var seen = 0L;
             while (!_stop)
             {
@@ -1124,7 +1249,7 @@ public unsafe class HugeScanAssessmentTests
                     list.Add(ms);
                 }
 
-                var own = ownLoads == null ? 0L : (long)ownLoads.GetValue(null);
+                var own = PagedMMF.OwnLoads;   // this thread's disk reads
                 (write ? WriterLoads : ReaderLoads)[_phase] += own - seen;
                 seen = own;
                 Thread.Sleep(1);
@@ -1189,6 +1314,12 @@ public unsafe class HugeScanAssessmentTests
         var dbe = Open(CacheMiB);
         var openMs = openWatch.Elapsed.TotalMilliseconds;
         ctx.Dbe = dbe;
+
+        // A page trace (I7) of this engine from its open: the prefill and the hot-set reads give the replay the cache the walk starts from.
+        if (TraceFile != null)
+        {
+            dbe.StartPageTrace(64L << 20);
+        }
         var cachePages = (int)(CacheMiB << 20) / PagedMMF.PageSize;
         var metrics = dbe.MMF.GetMetrics();
 
@@ -1262,6 +1393,10 @@ public unsafe class HugeScanAssessmentTests
         try
         {
             hotAfterReads = ReadHot(dbe, ctx.HotIds, 1);
+            if (TraceFile != null)
+            {
+                dbe.WritePageTrace(TraceFile);
+            }
             using var tx = dbe.CreateQuickTransaction();
             tx.OpenMut(ctx.HotIds[0]).Set(HsHotArch.Row, new HsHot { Key = 1, Value = 2 });
             tx.Commit();
@@ -1287,6 +1422,8 @@ public unsafe class HugeScanAssessmentTests
             readerBase = traffic == null ? null : Percentiles(traffic.ReadMs[0]), readerScan = traffic == null ? null : Percentiles(traffic.ReadMs[1]),
             trafficFailures = traffic?.Failures ?? 0, trafficFirstFailure = traffic?.FirstFailure,
             writerLoads = traffic?.WriterLoads, readerLoads = traffic?.ReaderLoads,
+            eviction = ScanResistant ? "adaptive" : "clock", probationTarget = dbe.MMF.ProbationTarget, probationCount = dbe.MMF.ProbationCount,
+            promotions = dbe.MMF.ProbationPromotions, probationGhostHits = dbe.MMF.ProbationGhostHits, clockGhostHits = dbe.MMF.ClockGhostHits,
         });
 
         TestContext.Progress.WriteLine($"{name}: {failure ?? "ok"} {scanMs:F0} ms, {ctx.Visited:N0} rows, {diskReads:N0} "

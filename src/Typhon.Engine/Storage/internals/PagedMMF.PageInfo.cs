@@ -65,6 +65,9 @@ public partial class PagedMMF
         /// <inheritdoc cref="PageInfo.ReadPending"/>
         [FieldOffset(58)] public bool ReadPending;
 
+        /// <inheritdoc cref="PageInfo.ProbationTag"/>
+        [FieldOffset(59)] public byte ProbationTag;
+
         /// <summary>
         /// The page directory's chain link (#1136): the next slot in this slot's bucket, plus one; 0 ends the chain. Owned by
         /// <see cref="PageDirectory"/>, which alone reads and writes it.
@@ -257,6 +260,27 @@ public partial class PagedMMF
         }
 
         public void ResetClockSweepCounter() => _p->ClockSweepCounter = 0;
+
+        /// <summary>
+        /// Moves the counter from <paramref name="from"/> to the next value, only if it still holds <paramref name="from"/>: one step of a probation page's
+        /// reference states (PS-25), which two concurrent requests must not take twice. False, and nothing changed, when another thread moved it first.
+        /// </summary>
+        public bool TryAdvanceClockSweepCounter(int from) => Interlocked.CompareExchange(ref _p->ClockSweepCounter, from + 1, from) == from;
+
+        /// <summary>
+        /// 0 when the page is on the main clock; otherwise it is on probation (I8, PS-25), and this is the tag of the operation that loaded it
+        /// (<see cref="PagedMMF.OperationTag"/>, 1-255). A probation page's clock counter holds its own operation's requests, lap by lap (1-4, see
+        /// PagedMMF.NoteProbationRequested): the clock passes over it without ageing it, and only the probation queue takes it. Set by the allocation
+        /// that loaded the page, before it is published; cleared by its promotion — a request from another operation, or its own operation's in a second
+        /// lap — or by <see cref="PagedMMF.TryAcquire"/> under <see cref="StateSyncRoot"/> when the slot is reclaimed.
+        /// </summary>
+        public byte ProbationTag => Volatile.Read(ref _p->ProbationTag);
+
+        /// <summary>Puts the page on probation for the operation tagged <paramref name="tag"/>, or on the main clock for 0. The slot's owner only.</summary>
+        public void SetProbationTag(byte tag) => Volatile.Write(ref _p->ProbationTag, tag);
+
+        /// <summary>Takes the page off probation if it is still there under <paramref name="tag"/>; true for the one caller that did.</summary>
+        public bool TryClearProbation(byte tag) => Interlocked.CompareExchange(ref _p->ProbationTag, 0, tag) == tag;
     }
 
     /// <summary>

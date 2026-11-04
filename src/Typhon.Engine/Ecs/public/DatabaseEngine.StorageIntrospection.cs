@@ -35,9 +35,14 @@ public partial class DatabaseEngine
     /// and not a reserved root page resolves to
     /// <see cref="StoragePageType.Unknown"/>.
     /// </summary>
-    public void ClassifyAllPages(Span<StoragePageType> dest)
+    public void ClassifyAllPages(Span<StoragePageType> dest) => ClassifyPages(dest, MMF.StorageFilePageCount);
+
+    /// <summary>
+    /// <see cref="ClassifyAllPages"/> over the first <paramref name="pageCount"/> pages, which may reach past the file's length to pages allocated and not
+    /// yet written (a page trace names them), up to the occupancy bitmap's capacity.
+    /// </summary>
+    internal void ClassifyPages(Span<StoragePageType> dest, int pageCount)
     {
-        var pageCount = MMF.StorageFilePageCount;
         if (dest.Length < pageCount)
         {
             throw new ArgumentException($"Destination span too small: need {pageCount} entries, got {dest.Length}.", nameof(dest));

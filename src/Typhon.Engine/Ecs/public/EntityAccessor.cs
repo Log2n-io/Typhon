@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
 
@@ -196,6 +197,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected bool NeedsEpochGuard()
     {
+        ResumeIfSuspended();
         if (_leaseDepth > 0)
         {
             return false;
@@ -216,6 +218,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected void RequireLeaseIfPointInTime()
     {
+        ResumeIfSuspended();
         if (_isPointInTime && _leaseDepth == 0)
         {
             ThrowReadOutsideLease();
@@ -256,17 +259,206 @@ public partial class EntityAccessor : IDisposable
     /// <summary>Whether a lease is open on this accessor on another thread than the caller's: a flush then would race the thread reading through it.</summary>
     internal bool IsLeasedByAnotherThread => _leaseDepth > 0 && _owningThreadId != Environment.CurrentManagedThreadId;
 
+    /// <summary>
+    /// The start of an operation: checks thread affinity under strict mode, and re-enters an epoch scope a walk step suspended
+    /// (<see cref="ResumeIfSuspended"/>).
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private protected void AssertThreadAffinity()
+    private protected void BeginOperation()
     {
         // Inline-guard form (not CheckConfig.Require): short-circuits on the JIT-folded gate BEFORE reading Environment.CurrentManagedThreadId, so the per-op
-        // TLS read is skipped entirely when strict mode is off (the whole body folds away — CheckConfig.Enabled is a static readonly). A throw is safe
-        // here — a call-boundary check, never reached while holding an OLC latch.
+        // TLS read is skipped entirely when strict mode is off (CheckConfig.Enabled is a static readonly). A throw is safe here — a call-boundary check, never
+        // reached while holding an OLC latch.
         if (CheckConfig.Enabled && _owningThreadId != Environment.CurrentManagedThreadId)
         {
             ThrowHelper.ThrowInvalidOp(
                 "EntityAccessor thread affinity violation: current thread differs from the creating thread. " +
                 "Each EntityAccessor instance must be used only from its creating thread.");
+        }
+
+        ResumeIfSuspended();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Epoch suspension at a walk step (EP-03, EP-04)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A walk step (<see cref="ArchetypeWalk{TArch}"/>) left this accessor's epoch scope: the thread holds no pin until the next operation resumes it. Set
+    /// and cleared on the owning thread only.
+    /// </summary>
+    private bool _epochSuspended;
+
+    /// <summary>The epoch the scope was pinned at when it was suspended: what a resume pins again.</summary>
+    private long _suspendedAtEpoch;
+
+    /// <summary>The next accessor suspended on this thread (<see cref="t_suspendedHead"/>).</summary>
+    private EntityAccessor _nextSuspended;
+
+    /// <summary>The accessors whose scope a walk step suspended on this thread: what the page layer resumes if an operation reached a page without doing so.</summary>
+    [ThreadStatic]
+    private static EntityAccessor t_suspendedHead;
+
+    /// <summary>Resumes made by the page layer rather than by the operation that reached it (tests: zero means every entry point resumes first).</summary>
+    internal static int SafetyNetResumesForTest;
+
+    /// <summary>Whether a walk step left this accessor's epoch scope and no operation has resumed it yet.</summary>
+    internal bool EpochSuspended => _epochSuspended;
+
+    /// <summary>
+    /// Re-enters the epoch scope a walk step suspended, at the current epoch: every caller is an operation's entry — a call boundary, where the epoch may
+    /// move (EP-03) — and nothing the transaction holds across a step is held by the epoch alone. Pinned at the epoch it left at instead, a resume after a
+    /// long pause would protect again every page the pause let others tag. One predictable branch on a field of this object when no walk is live.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ResumeIfSuspended()
+    {
+        if (_epochSuspended && !ResumeHooksOffForTest)
+        {
+            ResumeEpoch(atCurrentEpoch: true);
+        }
+    }
+
+    /// <summary>Mutant seam (EP-03): the entry points stop resuming, and only the page layer's net does. Read only once a walk has suspended.</summary>
+    internal static bool ResumeHooksOffForTest;
+
+    /// <summary>Whether this accessor was disposed: a walk that outlived its transaction refuses to read (<see cref="SnapshotWalker"/>).</summary>
+    internal bool IsDisposedForWalk => _isDisposed;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ResumeEpoch(bool atCurrentEpoch)
+    {
+        // A scope opened on this thread during the pause — a lease, a guard — covers this operation, and nesting this accessor's unit above it would break its
+        // LIFO exit (EP-04). Borrow it: the flag stays, and the next operation checks again.
+        if (_epochManager.IsCurrentThreadInScope)
+        {
+            return;
+        }
+
+        _epochManager.ResumeScopeAt(atCurrentEpoch ? _epochManager.GlobalEpoch : _suspendedAtEpoch);
+        _epochSuspended = false;
+        Unlink(this);
+    }
+
+    /// <summary>
+    /// Leaves this accessor's epoch scope at a walk step, holding only what its accessors hold by slot reference. Refused — false — when it would gain
+    /// nothing or break something: already suspended, a point-in-time worker, a B+Tree cursor live on the thread (it stands on what the pin protects, EP-02),
+    /// a scope above or below this one on the thread (another transaction's, a lease's: an unordered exit beneath a LIFO scope breaks its depth check, and
+    /// with any other scope the thread stays pinned anyway), or an accessor that is not in an operation-free state (<see cref="CanSuspendEpoch"/>).
+    /// </summary>
+    /// <remarks>
+    /// Gives back first what a refresh gives back (<see cref="FlushAndRefreshEpoch"/>): dirty accessor state committed, deferred slot releases flushed,
+    /// dirty marks released — holds that are not the epoch's but that a long walk must not keep growing.
+    /// </remarks>
+    internal bool TrySuspendEpochAtWalkStep()
+    {
+        if (_epochSuspended || _isPointInTime || LiveIndexCursors != 0 || !CanSuspendEpoch || _epochManager.CurrentThreadDepth != 1)
+        {
+            return false;
+        }
+
+        CommitAccessorChanges();
+        _changeSet?.FlushDeferredEvictions();
+        _changeSet?.ReleaseDirtyMarks();
+        _suspendedAtEpoch = _epochManager.CurrentThreadPinnedEpoch;
+        _epochManager.SuspendScope();
+        _epochSuspended = true;
+        _nextSuspended = t_suspendedHead;
+        t_suspendedHead = this;
+        return true;
+    }
+
+    /// <summary>
+    /// A walk step re-enters the scope it left at the CURRENT epoch rather than the one it left at: a step is a call boundary (EP-03), and pinned at the old
+    /// epoch the step would hold every page the pause let others tag. Returns false when there was nothing to resume, or an outer scope opened during the
+    /// pause covers the step (the suspension then stays, as in <see cref="ResumeIfSuspended"/>).
+    /// </summary>
+    internal bool ResumeForWalkStep()
+    {
+        if (!_epochSuspended || _epochManager.IsCurrentThreadInScope)
+        {
+            return false;
+        }
+
+        _epochManager.ResumeScopeAt(_epochManager.GlobalEpoch);
+        _epochSuspended = false;
+        Unlink(this);
+        return true;
+    }
+
+    /// <summary>Whether this accessor is between operations, where its scope may be left. A transaction says no while it commits or rolls back.</summary>
+    private protected virtual bool CanSuspendEpoch => true;
+
+    /// <summary>
+    /// Forgets a suspension without re-entering a scope: a transaction disposed while suspended, whose thread has no unit of it to exit. Returns whether it
+    /// was suspended.
+    /// </summary>
+    private protected bool DropSuspension()
+    {
+        if (!_epochSuspended)
+        {
+            return false;
+        }
+
+        _epochSuspended = false;
+        Unlink(this);
+        return true;
+    }
+
+    private static void Unlink(EntityAccessor accessor)
+    {
+        if (t_suspendedHead == accessor)
+        {
+            t_suspendedHead = accessor._nextSuspended;
+        }
+        else
+        {
+            for (var a = t_suspendedHead; a != null; a = a._nextSuspended)
+            {
+                if (a._nextSuspended == accessor)
+                {
+                    a._nextSuspended = accessor._nextSuspended;
+                    break;
+                }
+            }
+        }
+
+        accessor._nextSuspended = null;
+    }
+
+    /// <summary>
+    /// The page layer's safety net: a page is about to be read on a thread where a walk step suspended an accessor's scope and the operation reaching it did
+    /// not resume it. Resumes the accessor suspended at the oldest epoch, AT that epoch: this can be mid-call, where moving the pin is a refresh EP-03
+    /// forbids, so it pins where the scope left off — equivalent, for what the call obtained since its start, to never having left. It cannot restore a page
+    /// evicted or a chunk reclaimed during the pause, which is why the entry points resume first and this only counts (a test asserts it never runs) and
+    /// asserts in Debug. Nor does it see a read below the page layer — a node through a warm accessor's held slot — which the entry points alone cover.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void ResumeSuspendedBeforePageRead(EpochManager epochManager)
+    {
+        if (t_suspendedHead != null)
+        {
+            ResumeOldestSuspended(epochManager);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ResumeOldestSuspended(EpochManager epochManager)
+    {
+        EntityAccessor oldest = null;
+        for (var a = t_suspendedHead; a != null; a = a._nextSuspended)
+        {
+            if (a._epochManager == epochManager && (oldest == null || a._suspendedAtEpoch < oldest._suspendedAtEpoch))
+            {
+                oldest = a;
+            }
+        }
+
+        if (oldest != null && !epochManager.IsCurrentThreadInScope)
+        {
+            Interlocked.Increment(ref SafetyNetResumesForTest);
+            Debug.Assert(ResumeHooksOffForTest, "a page was read with a transaction's scope suspended by a walk step: an entry point does not resume it (EP-03)");
+            oldest.ResumeEpoch(atCurrentEpoch: false);
         }
     }
 
@@ -443,6 +635,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected void CheckEpochRefresh()
     {
+        ResumeIfSuspended();
         if (EpochRefreshDue(++_entityOperationCount) && LiveIndexCursors == 0)
         {
             FlushAndRefreshEpoch();
@@ -457,7 +650,7 @@ public partial class EntityAccessor : IDisposable
     /// </summary>
     internal ComponentCollectionAccessor<T> CreateComponentCollectionAccessorCore<T>(ref ComponentCollection<T> field) where T : unmanaged
     {
-        AssertThreadAffinity();
+        BeginOperation();
         return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field);
     }
 
@@ -469,7 +662,7 @@ public partial class EntityAccessor : IDisposable
         int fieldOffset,
         delegate*<EntityAccessor, EntityId, int, int, int, void> writeBack) where T : unmanaged
     {
-        AssertThreadAffinity();
+        BeginOperation();
         return new ComponentCollectionAccessor<T>(_changeSet, _dbe.GetComponentCollectionVSBS<T>(), ref field, this, entity, componentTypeId, fieldOffset,
             writeBack);
     }
@@ -490,6 +683,7 @@ public partial class EntityAccessor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void NoteEntityOpen()
     {
+        ResumeIfSuspended();
         if (EpochRefreshDue(++_entityOperationCount) && LiveIndexCursors == 0)
         {
             _entityOperationCount = 0;

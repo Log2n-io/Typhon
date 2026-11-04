@@ -158,6 +158,65 @@ internal sealed class LockWordRecoveryTests : TestBase<LockWordRecoveryTests>
     }
 
     /// <summary>
+    /// The reset walks a whole segment, which can be larger than the cache: it moves its epoch every <see cref="LockWordRecovery.PagesPerEpoch"/> pages
+    /// chunks, so the pages it has passed do not stay epoch-protected. Held under one scope, the 29 GB SWG world's 6 GB revision segment left all 65,536
+    /// slots of a 512 MiB cache protected and the crash open timed out on back-pressure. Measured from the root check, which the walk calls mid-pass:
+    /// bounded with the batches, growing with the walk without them.
+    /// </summary>
+    [Test]
+    // The batch size is thread-static: no other fixture sees it.
+    [CancelAfter(10_000)]
+    public void TheReset_MovesItsEpoch_SoAWalkLargerThanTheCacheKeepsNoPageProtected()
+    {
+        var segment = _dbe.GetComponentTable<MkWallet>().CompRevTableSegment;
+        const int chunks = 4_000;
+        for (var made = 0; made < chunks; made += 500)
+        {
+            Write(segment, (ref ChunkAccessor<PersistentStore> a) =>
+            {
+                for (var i = 0; i < 500; i++)
+                {
+                    unsafe
+                    {
+                        var chunk = segment.AllocateChunk(false, a.ChangeSet);
+                        var address = a.GetChunkAddress(chunk, true);
+                        new Span<byte>(address, segment.Stride).Clear();
+                        new Span<byte>(address + 4, 4).Fill(0xAB);   // a set word where a root holds its lock: the walk asks the root check
+                    }
+                }
+
+                return 0;
+            });
+        }
+
+        int PeakProtected(int chunksPerEpoch)
+        {
+            var saved = LockWordRecovery.ChunksPerEpochForTests;
+            LockWordRecovery.ChunksPerEpochForTests = chunksPerEpoch;
+            try
+            {
+                var peak = 0;
+                LockWordRecovery.ResetRootLocks(segment, _dbe, 4, 4, (ref ChunkAccessor<PersistentStore> _, ChunkBasedSegment<PersistentStore> _, int _) =>
+                {
+                    peak = Math.Max(peak, _dbe.MMF.CountEpochProtectedPages());
+                    return false;   // nothing is a root: the walk only reads
+                });
+                return peak;
+            }
+            finally
+            {
+                LockWordRecovery.ChunksPerEpochForTests = saved;
+            }
+        }
+
+        var pages = (chunks * segment.Stride) / PagedMMF.PageSize;
+        var unbatched = PeakProtected(int.MaxValue);
+        var batched = PeakProtected(segment.Stride > 0 ? PagedMMF.PageSize / segment.Stride : 64);
+        Assert.That(unbatched, Is.GreaterThan(pages / 2), $"without batches the walk protects what it passed ({pages} pages of chunks)");
+        Assert.That(batched, Is.LessThanOrEqualTo(8), "with them, about the page it is on");
+    }
+
+    /// <summary>
     /// An allocated chunk nothing names is a root or a chunk no chain will link, its bytes read by no one: reset whatever its header. Filtered by a root's
     /// header check, a root whose overflow chunk the disk has as free kept its hold (review of #1251).
     /// </summary>

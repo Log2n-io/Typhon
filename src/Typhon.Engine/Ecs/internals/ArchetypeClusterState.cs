@@ -1637,6 +1637,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     // Released, to pair with the acquiring readers (CLUSTERWALK-02); shrinking is the benign direction. One version bump for the whole pass.
                     Volatile.Write(ref ActiveClusterCount, w);
                     Interlocked.Increment(ref _clusterSetVersion);
+                    Interlocked.Increment(ref ReclaimGeneration);   // WALK-01: a walk's position in the list moved
                 }
 
                 evicted = true;
@@ -2244,6 +2245,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal long SlotMoveEpoch;
 
     /// <summary>
+    /// Bumped whenever an entry leaves <see cref="ActiveClusterIds"/> — the fence's reclamation, which compacts it in place — so a snapshot walk that spans
+    /// fences (<see cref="SnapshotWalker"/>) knows its position in the list moved and finds its next unvisited cluster again (WALK-01). Appends do not move
+    /// it: they leave every position where it was. <c>ClusterSetVersion</c>, which moves on appends too, would send every walk back to the start each tick.
+    /// </summary>
+    internal int ReclaimGeneration;
+
+    /// <summary>
     /// Telemetry counter: boundary crossings absorbed by the hysteresis margin since this cluster state was created. Cumulative counterpart to
     /// <see cref="LastTickHysteresisAbsorbedCount"/>; see <see cref="TotalMigrationCount"/> for why the cumulative form is the one a scrape can use, and for
     /// the repeat-<c>InitializeArchetypes</c> caveat that applies here too.
@@ -2488,6 +2496,35 @@ internal sealed unsafe partial class ArchetypeClusterState
             {
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// A clean open's half of the summary (CLUSTERVIS-03): every active cluster's born watermark established at <paramref name="bornBound"/>, the TSN
+    /// counter as the open restored it: every TSN and commit stamp ever issued is at or below it, and every one this session issues is above. Left
+    /// unknown, the gate denies every cluster of a reopened database until a spawn lands in it, and each snapshot scan pays a per-entity probe (#1574).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not 0, as the crash open's rebuild seeds: that rebuild rewrites every record with <c>BornTSN = 0</c>, while a clean open keeps the records it loaded,
+    /// whose births reach up to the counter. The counter bounds them all, as it bounds a migration's fold, so the gate grants each cluster to every
+    /// snapshot this session takes.
+    /// </para>
+    /// <para>
+    /// The died watermark stays at 0, because no occupancy bit on disk names a dead entity: a destroy clears its bit at publish
+    /// (<see cref="HideDestroyedSlot"/>, or the release), and a replayed destroy releases its slot (#1251).
+    /// </para>
+    /// <para>
+    /// Runs at open, before any transaction, so a plain store suffices. It stores rather than going through <see cref="NoteClusterBorn"/>, whose
+    /// structure signal would mark every cluster changed for this session's first tick.
+    /// </para>
+    /// </remarks>
+    internal void EstablishVisibilityAfterCleanOpen(long bornBound)
+    {
+        var ids = ReadActiveClusterList(out var count);   // CLUSTERWALK-02, though nothing else runs at open
+        for (var i = 0; i < count; i++)
+        {
+            Volatile.Write(ref MaxBornWord(ids[i]), bornBound);
         }
     }
 
@@ -10470,6 +10507,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                 // Issue #231: any change to the active cluster set invalidates the tier index.
                 Interlocked.Increment(ref _clusterSetVersion);
+                Interlocked.Increment(ref ReclaimGeneration);   // WALK-01: the swap moved an entry
                 return;
             }
         }

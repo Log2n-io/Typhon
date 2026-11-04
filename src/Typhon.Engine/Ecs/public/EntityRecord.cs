@@ -262,22 +262,6 @@ public static unsafe class EntityRecordAccessor
     /// <summary>Zero-initialize an entire entity record (header + locations).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void InitializeRecord(byte* record, int componentCount) => Unsafe.InitBlock(record, 0, (uint)RecordSize(componentCount));
-
-    /// <summary>Copy component locations from a raw record into an <see cref="EntityLocations"/> struct.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static void CopyLocationsTo(byte* record, ref EntityLocations locs, int componentCount) =>
-        // A span over locs, not a pinned pointer: locs can live inside a class. The record itself is page memory.
-        new System.ReadOnlySpan<int>(record + HeaderSize, componentCount).CopyTo(MemoryMarshal.CreateSpan(ref locs.Values[0], componentCount));
-}
-
-/// <summary>
-/// Inline storage for up to 16 component location ChunkIds. Value type — stored contiguously in List backing arrays,
-/// eliminating per-entity heap allocations during query enumeration.
-/// </summary>
-[StructLayout(LayoutKind.Sequential)]
-internal unsafe struct EntityLocations
-{
-    public fixed int Values[EntityRecordAccessor.MaxComponentCount];
 }
 
 /// <summary>
