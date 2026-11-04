@@ -893,6 +893,66 @@ internal sealed unsafe partial class ArchetypeClusterState
         return buf;
     }
 
+    /// <summary>
+    /// The dirty-bitmap snapshots of branch 2 and of the pure-Transient path, retained and alternated instead of allocated every tick (#1594).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Two, because one holder outlives the tick.</b> Finalize publishes the snapshot as <see cref="PreviousTickDirtySnapshot"/>, which
+    /// change-filtered dispatch reads during the NEXT tick's systems; the next Prep then takes a buffer of its own. So a snapshot taken at tick N lives until
+    /// tick N+1's Prep replaces the publication, and the buffer handed out there must never be the one published (<see cref="TakeDirtySnapshot"/>).
+    /// <c>DirtyBitmapRing.Archive</c> copies into its own slots, so it is not a third holder (design/Runtime/11-prep-phase-optimisation.md §7.3).</para>
+    /// <para><b>Growth is written back.</b> Three sites replace <see cref="FenceDirtyBits"/> with a larger array mid-tick — the pre-size, and the on-demand
+    /// grows of the Migrate phase — and each stores it back into its slot (<see cref="KeepGrownSnapshot"/>). Without that the buffer silently left the pair
+    /// and the allocation came back every tick with no error.</para>
+    /// </remarks>
+    private readonly long[][] _dirtySnapshots = new long[2][];
+
+    /// <summary>The slot of <see cref="_dirtySnapshots"/> this tick's snapshot came from, or -1 when this tick took none.</summary>
+    private int _dirtySnapshotSlot = -1;
+
+    /// <summary>
+    /// How many words of <see cref="FenceDirtyBits"/> the dirty bitmap filled this tick (branch 2). The buffer is retained and padded, so its length is
+    /// not the bitmap's: the pre-size bound reads this, or a retained buffer grown once would have grown its own bound, and itself, every tick.
+    /// </summary>
+    internal int FenceDirtyWords;
+
+    /// <summary>
+    /// Drains <see cref="ClusterDirtyBitmap"/> into the retained buffer that is not published as <see cref="PreviousTickDirtySnapshot"/> (#1594): the words
+    /// the bitmap holds, and zeros past them, where the Migrate phase two ticks ago set destination bits.
+    /// </summary>
+    /// <returns>The snapshot, at least <see cref="FenceDirtyWords"/> long.</returns>
+    internal long[] TakeDirtySnapshot()
+    {
+        // Never the published one: its readers are the ticks before the next publication. With nothing published either slot is free.
+        var slot = ReferenceEquals(_dirtySnapshots[0], PreviousTickDirtySnapshot) && _dirtySnapshots[0] != null ? 1 : 0;
+        var buffer = _dirtySnapshots[slot];
+        var words = ClusterDirtyBitmap.DrainInto(ref buffer);
+        if (words < buffer.Length)
+        {
+            Array.Clear(buffer, words, buffer.Length - words);
+        }
+
+        _dirtySnapshots[slot] = buffer;
+        _dirtySnapshotSlot = slot;
+        FenceDirtyWords = words;
+        return buffer;
+    }
+
+    /// <summary>
+    /// After <see cref="FenceDirtyBits"/> was replaced by a larger array on branch 2, stores it back into its slot of the pair, so the next tick that takes
+    /// the slot reuses it (#1594). A no-op on any other branch: branch 1's array is <see cref="RentBranch1ChangeList"/>'s.
+    /// </summary>
+    private void KeepGrownSnapshot()
+    {
+        if (FenceBranchPath == 2 && _dirtySnapshotSlot >= 0)
+        {
+            _dirtySnapshots[_dirtySnapshotSlot] = FenceDirtyBits;
+        }
+    }
+
+    /// <summary>The retained snapshot buffers (#1594). Test seam.</summary>
+    internal (long[] First, long[] Second) DirtySnapshotsForTests => (_dirtySnapshots[0], _dirtySnapshots[1]);
+
     /// <summary>Popcount of dirty entries after occupancy-masking. Drives WAL chunk sizing in Finalize. Path 1 leaves this at 0.</summary>
     internal int FenceEntryCount;
 
@@ -1010,6 +1070,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     }
 
                     Array.Resize(ref FenceDirtyBits, newLen);
+                    KeepGrownSnapshot();
                 }
             }
 
@@ -1073,6 +1134,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 Array.Resize(ref FenceDirtyBits, newLen);
+                KeepGrownSnapshot();
             }
         }
         finally
@@ -1139,6 +1201,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             }
 
             Array.Resize(ref FenceDirtyBits, newLen);
+            KeepGrownSnapshot();
         }
 
         // Per-cluster AABB + cell-mapping + spatial-index-slot arrays need to cover any newly allocated dst cluster.

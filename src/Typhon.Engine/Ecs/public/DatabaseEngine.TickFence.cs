@@ -1036,7 +1036,9 @@ public partial class DatabaseEngine
         // multiple Migrate workers each allocate new clusters and inter-archetype shadow/index allocations also grow segments — observed dstChunkId values
         // exceeded this bound under AntHill loads. The doubled-plus-buffer bound covers worst-case interleavings; the cost is ~32KB extra per archetype,
         // trivial. On-demand grow under _finalizeLock (ArchetypeClusterState.GrowFenceDirtyBitsForChunkId) remains as a safety net for pathological cases.
-        var existingLen = clusterState.FenceDirtyBits?.Length ?? 0;
+        // Branch 2's snapshot is a retained, padded buffer (#1594): its bound is the words the bitmap filled, never the buffer's length, which a resize
+        // has already padded past them — read as the length, the bound outgrew the buffer every tick, and the buffer with it.
+        var existingLen = clusterState.FenceBranchPath == 2 ? clusterState.FenceDirtyWords : clusterState.FenceDirtyBits?.Length ?? 0;
         var upperBound = Math.Max(clusterState.PrimarySegmentCapacity, existingLen) + 2 * clusterState.PendingMigrationCount + 64;
         // The per-cell indexes are sized per destination realm inside, from each realm's grid (Realms C1).
         var preSizeStart = Stopwatch.GetTimestamp();
@@ -1235,7 +1237,7 @@ public partial class DatabaseEngine
             ResetArchetypeFenceTickState(clusterState);
 
             var subSpan = Stopwatch.GetTimestamp();
-            var dirtyBits = clusterState.ClusterDirtyBitmap.Snapshot();
+            var dirtyBits = clusterState.TakeDirtySnapshot();
             clusterState.PrepSnapshotTicks += Stopwatch.GetTimestamp() - subSpan;
 
             // Snapshot-and-clear the written-slot union in the same step as the dirty bitmap (#559 §4.5), so Finalize reads a stable value while writers
@@ -1602,7 +1604,7 @@ public partial class DatabaseEngine
 
                 if (clusterState.ClusterDirtyBitmap.HasDirty)
                 {
-                    var transientDirtyBits = clusterState.ClusterDirtyBitmap.Snapshot();
+                    var transientDirtyBits = clusterState.TakeDirtySnapshot();
                     clusterState.PreviousTickDirtySnapshot = transientDirtyBits;
                     var transientDirtyClusterCount = 0;
                     for (var i = 0; i < transientDirtyBits.Length; i++)
@@ -1734,7 +1736,7 @@ public partial class DatabaseEngine
         try
         {
             var subSpan = Stopwatch.GetTimestamp();
-            var dirtyBits = clusterState.ClusterDirtyBitmap.Snapshot();
+            var dirtyBits = clusterState.TakeDirtySnapshot();
             clusterState.PrepSnapshotTicks += Stopwatch.GetTimestamp() - subSpan;
 
             // Snapshot-and-clear the written-slot union in the same step as the dirty bitmap (#559 §4.5), so Finalize reads a
@@ -2422,6 +2424,9 @@ public partial class DatabaseEngine
 
         if (entryCount == 0)
         {
+            // Nothing this tick: no snapshot for the next tick's change-filtered dispatch. Left as it was, it still named the tick before's set, which the
+            // next tick's systems then read as changed again — and, now the buffer is retained (#1594), named a buffer the next Prep could take.
+            clusterState.PreviousTickDirtySnapshot = null;
             return false;
         }
 
