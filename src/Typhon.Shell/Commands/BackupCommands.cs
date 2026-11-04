@@ -173,7 +173,7 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
 
     /// <summary>
     /// The request path: <c>backup.request</c> written (the one writer, <see cref="BackupOperations.RequestBackup"/>); with <c>--wait</c>, the engine's
-    /// status followed until its job for this request ended: 0 published (1 when suspect), 2 failed, deferred or timed out.
+    /// status followed until it answers this request (its own outcome, #1483): 0 published (1 when suspect), 2 failed, refused, deferred or timed out.
     /// </summary>
     private static int Request(string bundle, BackupStatusReport before, Settings settings, TimeSpan timeout, BackupOutput output, CancellationToken ct)
     {
@@ -203,8 +203,6 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             return BackupCli.ExitOk;
         }
 
-        var points = before.Status.PointsTotal;
-        var failures = before.Status.FailuresTotal;
         var deadline = DateTime.UtcNow + timeout;
         while (true)
         {
@@ -214,27 +212,35 @@ internal sealed class BackupCreateCommand : Command<BackupCreateCommand.Settings
             }
 
             var report = BackupOperations.ReadStatus(bundle);
-            var status = report.Status;
-            if (status != null && status.LastRequestId == id && status.State == BackupRunState.Idle)
+
+            // #1483: the engine's answer to THIS request, whatever other jobs ran meanwhile.
+            if (report.Status?.Request(id) is { State: not BackupRequestState.Running } answer)
             {
-                if (status.PointsTotal > points && status.LastPoint != null)
+                if (answer.State == BackupRequestState.Published)
                 {
-                    var exit = status.LastPoint.Suspect ? BackupCli.ExitWarning : BackupCli.ExitOk;
+                    var point = answer.Point;
+                    var exit = point is { Suspect: true } ? BackupCli.ExitWarning : BackupCli.ExitOk;
                     if (output.AsJson)
                     {
-                        output.Json(new { exitCode = exit, requestId = id, point = status.LastPoint });
+                        output.Json(new { exitCode = exit, requestId = id, point });
                     }
                     else
                     {
-                        output.Console.MarkupLine($"[green]Backed up[/] {Markup.Escape(bundle)} as point [bold]#{status.LastPoint.BackupId}[/] "
-                                                  + $"({status.LastPoint.Kind}, P={status.LastPoint.PointLsn}) by its running engine.");
+                        output.Console.MarkupLine(point == null
+                            ? $"[green]Backed up[/] {Markup.Escape(bundle)} by its running engine."
+                            : $"[green]Backed up[/] {Markup.Escape(bundle)} as point [bold]#{point.BackupId}[/] ({point.Kind}, P={point.PointLsn}) by its "
+                              + "running engine.");
                     }
 
                     return exit;
                 }
 
-                var why = status.FailuresTotal > failures ? status.LastFailure?.Message ?? "it failed"
-                    : "the engine could not take it now (its store was held by another writer, or it was closing); ask again";
+                var why = answer.State switch
+                {
+                    BackupRequestState.Refused => $"the engine refused it: {answer.Error}",
+                    BackupRequestState.Deferred => $"the engine could not take it now ({answer.Error}); ask again",
+                    _ => answer.Error ?? "it failed",
+                };
                 return output.Error(BackupCli.ExitFailed, $"Request {id} did not produce a point: {why}");
             }
 
@@ -617,9 +623,26 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
         var exit = result.SettleError != null
             ? BackupCli.ExitFailed
             : result.SuspectPages.Count > 0 || result.DamagedPages.Count > 0 ? BackupCli.ExitWarning : BackupCli.ExitOk;
+        // #1485: the build to open it with. The restore does not open it; the first open settles it, and only that build reproduces the point. A manifest
+        // that cannot be read (a restore of damaged pages) is said, never a failure of the restore that already succeeded.
+        List<string> manifest;
+        string manifestError = null;
+        try
+        {
+            manifest = BackupOperations.ReadSchemaManifest(result.Target)
+                .Select(a => $"{a.Name} {a.Version}"
+                             + (a.GetPublicKeyToken() is { Length: > 0 } t ? $" (token {Convert.ToHexString(t).ToLowerInvariant()})" : " (unsigned)"))
+                .ToList();
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            manifest = [];
+            manifestError = e.Message;
+        }
+
         if (output.AsJson)
         {
-            output.Json(new { exitCode = exit, result });
+            output.Json(new { exitCode = exit, result, schemaAssemblies = manifest, schemaManifestError = manifestError });
             return exit;
         }
 
@@ -650,6 +673,16 @@ internal sealed class BackupRestoreCommand : Command<BackupRestoreCommand.Settin
         if (result.SettleError != null)
         {
             console.MarkupLine($"[red]The restored database did not open: {Markup.Escape(result.SettleError)}[/]");
+        }
+
+        if (manifest.Count > 0)
+        {
+            console.MarkupLine($"Open it with the schema assemblies that wrote it, exactly: {Markup.Escape(string.Join(", ", manifest))}.");
+        }
+        else if (manifestError != null)
+        {
+            console.MarkupLine($"[yellow]Its schema-assembly manifest could not be read ({Markup.Escape(manifestError)}): open it with the build that "
+                               + "wrote the point.[/]");
         }
 
         console.MarkupLine("[grey]Its first open replays the WAL to the point and starts a new timeline.[/]");

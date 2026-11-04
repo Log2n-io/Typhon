@@ -71,7 +71,38 @@ internal sealed class BackupOpsState
 
     public BackupRunState State = BackupRunState.Idle;
     public BackupRunPhase Phase;
-    public Guid LastRequestId;
+    /// <summary>The answered requests, oldest first, at most <see cref="BackupStatus.KeptRequests"/>; replaced whole: a snapshot shares it (#1483).</summary>
+    public BackupRequestOutcome[] Requests = [];
+
+    /// <summary>
+    /// Records <paramref name="answer"/>: it replaces the entry of its request, else it is appended and the oldest beyond the cap drops. A final answer
+    /// stands: a later one for the same request (a failure reported after the point was published) is ignored.
+    /// </summary>
+    public void Answer(BackupRequestOutcome answer)
+    {
+        var requests = Requests;
+        for (var i = 0; i < requests.Length; i++)
+        {
+            if (requests[i].Id == answer.Id)
+            {
+                if (requests[i].State != BackupRequestState.Running)
+                {
+                    return;
+                }
+
+                var replaced = (BackupRequestOutcome[])requests.Clone();
+                replaced[i] = answer;
+                Requests = replaced;
+                return;
+            }
+        }
+
+        var keep = Math.Min(requests.Length, BackupStatus.KeptRequests - 1);
+        var next = new BackupRequestOutcome[keep + 1];
+        Array.Copy(requests, requests.Length - keep, next, 0, keep);
+        next[keep] = answer;
+        Requests = next;
+    }
     public DateTime NextDueUtc = DateTime.MinValue;
 
     /// <summary>The last point's duration and size, for the metrics.</summary>

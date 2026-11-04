@@ -37,6 +37,134 @@ public static class SchemaCompatibility
     /// </summary>
     public const string NotInDatabaseKind = "not_in_database";
 
+    /// <summary>
+    /// Diagnostic kind for an archetype whose stored component set (or revision) differs from the loaded assembly's (#1394). The Workbench opens with
+    /// <see cref="ArchetypeSetMigrationPolicy.Refuse"/>, so the archetype is skipped and the file left as stored: migrating it would rewrite every entity
+    /// of an archetype the user only meant to look at. Escalates <see cref="State.Ready"/> to <see cref="State.MigrationRequired"/>; the application,
+    /// opening the file with its own build, migrates it.
+    /// </summary>
+    public const string ArchetypeSetChangeKind = "archetype_set_change";
+
+    /// <summary>
+    /// Diagnostic kind for an open the engine refused over an archetype's stored schema (<see cref="ArchetypeSchemaException"/>): a downgrade, a removed
+    /// component, a component migrating under an archetype this process does not open (R10, typically an archetype class absent from the loaded
+    /// assemblies)… The detail is the engine's message, which names the archetype and the fix.
+    /// </summary>
+    public const string ArchetypeSchemaRefusedKind = "archetype_schema_refused";
+
+    /// <summary>Diagnostic kind for any other failure of <c>InitializeArchetypes</c>; the detail carries the exception.</summary>
+    public const string ArchetypeInitFailedKind = "archetype_init_failed";
+
+    /// <summary>
+    /// Adds one <see cref="ArchetypeSetChangeKind"/> diagnostic per archetype the engine skipped under <see cref="ArchetypeSetMigrationPolicy.Refuse"/>
+    /// (<see cref="DatabaseEngine.RefusedArchetypeSetChanges"/>, read after <c>InitializeArchetypes</c>) and escalates <see cref="State.Ready"/> to
+    /// <see cref="State.MigrationRequired"/>. Errors stay ahead of the informational <see cref="NotInDatabaseKind"/> notes.
+    /// </summary>
+    public static Result WithArchetypeSetChanges(DatabaseEngine engine, Result result)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(result);
+
+        var refused = engine.RefusedArchetypeSetChanges;
+        if (refused.Count == 0)
+        {
+            return result;
+        }
+
+        var archetypes = new List<Diagnostic>(refused.Count);
+        foreach (var r in refused)
+        {
+            if (r.Kind == Engine.ArchetypeSetChangeKind.Refused)
+            {
+                // Not a migration the application's build would run: an open consuming it is refused. Say that, with the engine's own refusal (it names
+                // the remedy); the rest of the database is open.
+                archetypes.Add(new Diagnostic(r.ArchetypeName, ArchetypeSetChangeKind,
+                    $"Archetype '{r.ArchetypeName}' is not shown: the loaded schema's declaration of it is refused against the stored one. {r.Changes}"));
+                continue;
+            }
+
+            var what = r.Kind switch
+            {
+                Engine.ArchetypeSetChangeKind.SetChange => $"its component set changed ({r.Changes})",
+                Engine.ArchetypeSetChangeKind.RevisionOnly => "its revision changed with the same set",
+                _ => "its stored component names predate a component rename",
+            };
+            archetypes.Add(new Diagnostic(r.ArchetypeName, ArchetypeSetChangeKind,
+                $"Archetype '{r.ArchetypeName}' is stored at revision {r.FromRevision} and the loaded schema declares revision {r.ToRevision}: {what}. The "
+                + "Workbench does not migrate archetype sets, so this archetype is not shown and the file is left as stored. Open the database with the "
+                + "application's build to migrate it."));
+        }
+
+        var diagnostics = new List<Diagnostic>(result.Diagnostics.Length + archetypes.Count);
+        foreach (var d in result.Diagnostics)
+        {
+            if (d.Kind != NotInDatabaseKind)
+            {
+                diagnostics.Add(d);
+            }
+        }
+
+        diagnostics.AddRange(archetypes);
+        foreach (var d in result.Diagnostics)
+        {
+            if (d.Kind == NotInDatabaseKind)
+            {
+                diagnostics.Add(d);
+            }
+        }
+
+        var state = result.State == State.Ready ? State.MigrationRequired : result.State;
+        return new Result(state, diagnostics.ToArray(), result.RegisteredCount);
+    }
+
+    /// <summary>
+    /// Runs <c>InitializeArchetypes</c> on <paramref name="engine"/> and folds its outcome into <paramref name="result"/> — the Workbench open's one call
+    /// (<c>EngineLifecycle</c>). Either way the archetypes the engine skipped under
+    /// <see cref="ArchetypeSetMigrationPolicy.Refuse"/> are reported (<see cref="WithArchetypeSetChanges"/>): an open that throws has recorded them already,
+    /// and dropping them hid the set changes the user has to act on behind the one refusal. A failure becomes the FIRST diagnostic, ahead of every other
+    /// error and every informational note, since the banner shows the first three; <paramref name="failure"/> is the exception, null on success.
+    /// </summary>
+    public static Result InitializeArchetypes(DatabaseEngine engine, Result result, out Exception failure)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(result);
+
+        failure = null;
+        try
+        {
+            engine.InitializeArchetypes();
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        var withArchetypes = WithArchetypeSetChanges(engine, result);
+        if (failure == null)
+        {
+            return withArchetypes;
+        }
+
+        var diagnostics = new Diagnostic[withArchetypes.Diagnostics.Length + 1];
+        diagnostics[0] = DescribeInitializeArchetypesFailure(failure);
+        withArchetypes.Diagnostics.CopyTo(diagnostics, 1);
+        var state = withArchetypes.State == State.Ready ? State.MigrationRequired : withArchetypes.State;
+        return new Result(state, diagnostics, withArchetypes.RegisteredCount);
+    }
+
+    /// <summary>
+    /// The diagnostic for an <c>InitializeArchetypes</c> that threw. An <see cref="ArchetypeSchemaException"/> is a refusal the engine explains in full, so
+    /// its message is the detail (no stack trace) under <see cref="ArchetypeSchemaRefusedKind"/>, named after the archetype; anything else is reported as
+    /// <see cref="ArchetypeInitFailedKind"/> with the whole exception.
+    /// </summary>
+    public static Diagnostic DescribeInitializeArchetypesFailure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is ArchetypeSchemaException refusal
+            ? new Diagnostic(refusal.ArchetypeName ?? "(InitializeArchetypes)", ArchetypeSchemaRefusedKind, refusal.Message)
+            : new Diagnostic("(InitializeArchetypes)", ArchetypeInitFailedKind, exception.ToString());
+    }
+
     public static Result ClassifyAndRegister(DatabaseEngine engine, LoadedSchema loaded)
     {
         ArgumentNullException.ThrowIfNull(engine);
@@ -87,6 +215,11 @@ public static class SchemaCompatibility
             {
                 engine.RegisterComponentByType(type, schemaValidation: SchemaValidationMode.Enforce);
                 registered++;
+            }
+            catch (SchemaMismatchException)
+            {
+                // #1485: an exact open (a drill's, a settle's) is refused whole, never reported and gone on with.
+                throw;
             }
             catch (SchemaDowngradeException sd)
             {

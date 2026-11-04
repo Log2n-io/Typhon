@@ -87,6 +87,34 @@ public static partial class BackupOperations
             outcome.ForcedCrashRecovery);
     }
 
+    /// <summary>
+    /// The schema assemblies a database names (its manifest, ADR-055), read from the file without opening it — for a restored bundle, which an open would
+    /// settle: the build to open it with (#1485). Empty for a database whose manifest names none.
+    /// </summary>
+    /// <param name="bundle">The <c>{name}.typhon</c> bundle.</param>
+    public static IReadOnlyList<System.Reflection.AssemblyName> ReadSchemaManifest(string bundle)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bundle);
+        using var source = new OfflineBundlePageSource(bundle);
+        var rows = new SchemaCatalogReader(source, []).ReadAssemblies(BootstrapReader.Read(source));
+        var result = new List<System.Reflection.AssemblyName>(rows.Count);
+        foreach (var row in rows)
+        {
+            var name = new System.Reflection.AssemblyName(row.SimpleName.AsString)
+            {
+                Version = new Version(row.VerMajor, row.VerMinor, row.VerBuild, row.VerRevision),
+            };
+            if (row.PublicKeyToken != 0)
+            {
+                name.SetPublicKeyToken(DatabaseEngine.ULongToToken(row.PublicKeyToken));
+            }
+
+            result.Add(name);
+        }
+
+        return result;
+    }
+
     /// <summary>Verifies the whole store. Never throws for damage: it reports it.</summary>
     /// <param name="store">The store directory.</param>
     /// <param name="level">Quick or full.</param>

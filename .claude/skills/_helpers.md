@@ -196,7 +196,7 @@ APIs"*. Set them on the ISSUE and the board follows. A normal `gho_` token suffi
 
 | Field | Field ID | Type | Options / format |
 |-------|----------|------|------------------|
-| Area | `IFSS_kgDOApo0DQ` | single-select | Runtime `IFSSO_kgDOBI3leQ` · Execution `IFSSO_kgDOBI3lcg` · Schema `…ldg` · MVCC `…ldQ` · Concurrency `…lcQ` · Storage `…lcw` · Durability `…ldA` · Spatial `…ldw` · Query `…leA` · Observability `…leg` · Resources `…lew` · Errors `…lfA` · Utilities `…lfQ` · Workbench `…lfg` · Indexes `…l4Q` (prefix `IFSSO_kgDOBI3`) |
+| Area | `IFSS_kgDOApo0DQ` | single-select | Runtime `IFSSO_kgDOBI3leQ` · Execution `IFSSO_kgDOBI3lcg` · Schema `…ldg` · MVCC `…ldQ` · Concurrency `…lcQ` · Storage `…lcw` · Durability `…ldA` · Spatial `…ldw` · Query `…leA` · Observability `…leg` · Resources `…lew` · Errors `…lfA` · Utilities `…lfQ` · Workbench `…lfg` · Indexes `…l4Q` (prefix `IFSSO_kgDOBI3`) · Subscriptions `IFSSO_kgDOBRQfSA` · Realms `IFSSO_kgDOBRQfSQ` |
 | Product | `IFSS_kgDOApsS4A` | single-select | Engine `IFSSO_kgDOBI9scA` · Workbench `…scg` · CLI `…sdA` · CI `…sdg` · User-adoption `IFSSO_kgDOBI-1jg` |
 | Priority | `IFSS_kgDOApoUaA` | single-select | P0 `IFSSO_kgDOBI2tpw` · P1 `…tqA` · P2 `…tqQ` · P3 `…tqg` |
 | Estimate | `IFSS_kgDOApoUaw` | single-select | XS `IFSSO_kgDOBI3lIw` · S `…lIg` · M `IFSSO_kgDOBI2trQ` · L `…trA` · XL `…tqw` |
@@ -241,5 +241,7 @@ MSYS_NO_PATHCONV=1 gh api graphql -f query='{ repository(owner:"Log2n-io",name:"
 ```
 
 Re-query IDs with `repository{ issueFields(first:40){ nodes{ ... on IssueFieldSingleSelect { id name options{id name} } ... on IssueFieldText { id name } } } }` if a mutation 404s — fields get added over time.
+
+**Adding an option to a field** (e.g. a new Area): REST `PATCH /orgs/log2n-io/issue-fields/<numeric id>` (`gh api /orgs/log2n-io/issue-fields` lists them) with the **full** `options` array, each existing option carrying its numeric `id` — the array replaces the set, and an option sent without `id` is deleted and recreated, dropping its value from every issue. GraphQL `updateIssueField` takes no option ids and fails with "Name has already been taken". Needs the `admin:org` scope (`gh auth refresh -h github.com -s admin:org`).
 
 **Issue Type** is separate again — `gh api graphql updateIssue(input:{id,issueTypeId})`; the MCP `update_issue` tool has no `type` field. Epic `IT_kwDOEcGj5M4CEI4A` · Feature `IT_kwDOEcGj5M4CEIDt` · Task `IT_kwDOEcGj5M4CEIDr` · Bug `IT_kwDOEcGj5M4CEIDs` · Question `IT_kwDOEcGj5M4CFL6-`.

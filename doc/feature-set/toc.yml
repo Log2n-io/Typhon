@@ -381,6 +381,8 @@
 - name: Schema
   href: Schema/README.md
   items:
+    - name: Archetype Component-Set Evolution
+      href: Schema/archetype-set-evolution.md
     - name: Component Family Classification
       href: Schema/component-family-classification.md
     - name: 'Component & Field Schema Declaration'

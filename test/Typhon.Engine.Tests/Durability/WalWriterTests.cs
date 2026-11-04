@@ -539,16 +539,24 @@ public class WalWriterTests : AllocatorTestBase
     [Test]
     [CancelAfter(5000)]
     [VerifiesRule("WP-17")]
-    [Category("Sensitive")] // wall-clock deadline bound
     public void WaitForDurable_NeverDurable_TimesOutAtItsDeadline()
     {
+        // Asserts the slices the wait asks the OS for, not the wall clock: an unclamped slice is 100 ms, and a hosted macOS runner wakes a 20 ms wait
+        // past 100 ms on its own (#1563), so elapsed time cannot tell the two apart.
         var (buffer, writer, segMgr) = CreateWriterPipeline();
+        var slices = 0;
+        var longest = 0;
+        writer.DurabilityWaitSliceProbe = ms =>
+        {
+            slices++;
+            longest = Math.Max(longest, ms);
+        };
         try
         {
             var ctx = WaitContext.FromTimeout(TimeSpan.FromMilliseconds(20));
-            var start = Stopwatch.GetTimestamp();
             Assert.Throws<WalBackPressureTimeoutException>(() => writer.WaitForDurable(1, ref ctx));
-            Assert.That(Stopwatch.GetElapsedTime(start), Is.LessThan(TimeSpan.FromMilliseconds(80)));
+            Assert.That(slices, Is.GreaterThan(0), "premise: the wait slept");
+            Assert.That(longest, Is.LessThanOrEqualTo(20), "a slice outlasted the deadline: the wait would give up at the backstop, not at its deadline");
         }
         finally
         {

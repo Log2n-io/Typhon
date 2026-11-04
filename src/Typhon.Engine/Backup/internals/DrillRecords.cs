@@ -10,7 +10,7 @@ namespace Typhon.Engine.Internals;
 /// <summary><c>{store}/drills/{utc}-{id:D8}.json</c>: one drill, immutable (plan 1416 §4.6, DL-14).</summary>
 internal sealed class DrillRecordFile
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;   // 2: Assemblies (#1485)
 
     public int FormatVersion { get; set; }
 
@@ -47,6 +47,9 @@ internal sealed class DrillRecordFile
     public IntegrityVerdict Verdict { get; set; }
 
     public int Findings { get; set; }
+
+    /// <summary>The schema assemblies the drill's open ran with (#1485); empty for a schemaless open, absent from a version-1 record.</summary>
+    public List<BackupSchemaAssembly> Assemblies { get; set; }
 
     public string Host { get; set; }
 
@@ -122,7 +125,7 @@ internal static class DrillRecords
             {
                 var bytes = StoreFileSystem.ReadAllBytes(fs, Path.Combine(directory, f.Name));
                 var record = JsonSerializer.Deserialize(bytes, BackupJsonContext.Default.DrillRecordFile);
-                if (record is { FormatVersion: DrillRecordFile.CurrentFormatVersion })
+                if (record is { FormatVersion: >= 1 and <= DrillRecordFile.CurrentFormatVersion })
                 {
                     records.Add(record);
                 }

@@ -735,6 +735,108 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
     }
 
     /// <summary>
+    /// The craft above, then a second crash. The sweep freed the old root as it was: its bytes still named the live item. The next allocation took it,
+    /// its page reached the disk with the bit set and the bytes not yet written, and the next crash open read two roots for the item and kept the old
+    /// one, whose content never reached the disk. The item read zeros, and the sweep freed the chain its record had named (#1516).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("CK-17")]
+    public unsafe void ACraftsSweptOldRoot_TakenAgain_IsNoRootAfterTheNextCrash()
+    {
+        EntityId newId;
+        int oldRoot;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var ids = new List<EntityId>();
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                for (var i = 0; i < 8; i++)
+                {
+                    ids.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = i, OwnerNo = 1, LastTradeSeq = -1 - i })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the build");
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+
+            // Chunks below the craft's root, free on disk at the crash: the replay re-applies the craft on a fresh root among them.
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            var below = new List<int>();
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                var cs = dbe.MMF.CreateChangeSet();
+                var a = revisions.CreateChunkAccessor(cs);
+                for (var i = 0; i < 4; i++)
+                {
+                    below.Add(revisions.AllocateChunk(cs, ref a));
+                }
+
+                a.Dispose();
+                cs.ReleaseDirtyMarks();
+            }
+
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    newId = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = 5, OwnerNo = 7, Price = 99, TradeCount = 1, LastTradeSeq = 42 }));
+                    Assert.That(tx.Commit(), Is.True, "the craft");
+                }
+
+                uow.Flush();
+            }
+
+            foreach (var chunk in below)
+            {
+                revisions.FreeChunkUnheld(chunk);
+            }
+
+            oldRoot = ItemRootOf(dbe, newId);
+            var es = dbe._archetypeStates[dbe.GetMetaByRouting(newId.ArchetypeId).ArchetypeId];
+            WriteSegmentPages(dbe, es.ClusterState.ClusterSegment);
+            WriteSegmentPages(dbe, revisions);
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            Assert.That(dbe.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+            Assert.That(ItemRootOf(dbe, newId), Is.LessThan(oldRoot), "premise: the replay re-applied the craft on a fresh root below the old one");
+
+            // The old root taken again as a spawn's root is, without clearing it, and its page written before the taker wrote it: what a capture
+            // between the allocation and the header's write leaves.
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            var taken = new List<int>();
+            var cs = dbe.MMF.CreateChangeSet();
+            while (!taken.Contains(oldRoot) && taken.Count < revisions.ChunkCapacity)
+            {
+                taken.Add(revisions.AllocateChunk(false, cs));
+            }
+
+            cs.ReleaseDirtyMarks();
+
+            Assert.That(taken, Does.Contain(oldRoot), "premise: the old root was free to take");
+            WriteChunkPages(dbe, revisions, oldRoot);
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope3 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope3.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the second reopen recovered from a crash");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            var item = read.Open(newId).Read(MkItemArch.Item);
+            Assert.That((item.ItemNo, item.OwnerNo, item.LastTradeSeq), Is.EqualTo((5L, 7L, 42L)), "the crafted item");
+        }
+
+        AssertStorageHealthy(reopened);
+    }
+
+    /// <summary>
     /// Two archetypes holding one Versioned component share its table, their updates durable in the log only. The scrub ran per archetype and swept the
     /// table each time with that archetype's roots: the other's chains were freed under their records (review of #1251).
     /// </summary>
@@ -1605,8 +1707,9 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
 
     /// <summary>
     /// A torn index segment the crash open replaces gives up its directory's CK-05 pair (#1302). Left registered, the abandoned directory's twin stayed
-    /// owned for good, and its primary, reused as a plain page, was routed through a pair that no longer existed. Staged: the index segment's chain cut
-    /// short a page before its directory ends, on a page torn by the crash — the completion refuses a torn page of the segment's, so the load replaces it.
+    /// owned for good, and its primary, reused as a plain page, was routed through a pair that no longer existed. Staged: the index segment's last page
+    /// links back to its root — a chain running past its directory into a page written as the segment's, which the load refuses, so it replaces the segment.
+    /// (A torn page of the segment's own is completed since #1304, and no longer stages a replacement.)
     /// </summary>
     [Test]
     [VerifiesRule("CK-05")]
@@ -1634,9 +1737,8 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
             dbe.SimulateHardCrash();
         }
 
-        var damage = Integrity.DamageKit.ShortenForwardChain(bundle, out var root, StorageSegmentKind.Index);
+        Integrity.DamageKit.LoopForwardChain(bundle, out var root, StorageSegmentKind.Index);
         var data = Integrity.DamageKit.DataPath(bundle);
-        ChaosPageIO.DamagePageOnDisk(data, (int)(damage.Ranges[0].Offset / PagedMMF.PageSize), PageDamageType.TornPage, PagedMMF.PageSize);
         var page = new byte[PagedMMF.PageSize];
         using (var f = System.IO.File.OpenRead(data))
         {
@@ -1659,8 +1761,8 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
     /// <summary>
     /// The same torn grow, the old tail's page on the disk torn as well: its first sector — the header, the incarnation, the link to nothing — as of the
     /// checkpoint, the rest not. The completion took the suspect page for one the grow had not written and initialized it empty, clearing its suspicion:
-    /// the items the checkpoint had written on it were gone, the open silent (review of #1296). A torn disagreeing page that is this segment's is not
-    /// completed: the segment is refused, as before the completion existed.
+    /// the items the checkpoint had written on it were gone, the open silent (review of #1296). A torn disagreeing page that is this segment's is linked
+    /// and kept suspect: the suspect resolution finds the checkpoint's chunks on it and refuses the open (RB-04, #1304).
     /// </summary>
     [Test]
     [VerifiesRule("CS-08")]
@@ -1719,7 +1821,115 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
             e = e.InnerException;
         }
 
-        Assert.That(e?.Message, Does.Contain("integrity check failed at load"), $"refused by the segment's load, not by {thrown.GetType().Name}: {thrown.Message}");
+        Assert.That(thrown, Is.InstanceOf<CorruptionException>().And.Message.Contains("RB-04"),
+            $"refused by the suspect resolution, for the live chunks on the torn page: {thrown.GetType().Name}: {thrown.Message}");
+    }
+
+    /// <summary>
+    /// The same torn grow over a torn old tail, with no live chunk left on the tail once the log is replayed: the window destroys every item the tail holds.
+    /// The completion refused any torn page of the segment's, so the open failed though the page would hold nothing to keep (#1304). Linked and kept
+    /// suspect, the page is judged by the suspect resolution, which finds no live chunk on it and lets the open complete.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CS-08")]
+    [CancelAfter(30_000)]
+    public void ATornGrowOverATornOldTailWithNoLiveChunk_Heals()
+    {
+        int oldTail;
+        var live = new HashSet<long>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+            var ids = new List<(EntityId Id, long No)>();
+            var no = 0;
+            while (revisions.AllocatedChunkCount < revisions.ChunkCapacity - 40)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                for (var i = 0; i < 20; i++, no++)
+                {
+                    ids.Add((tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })), no));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the spawns");
+            }
+
+            // The tail filled to its last chunk, so the window's spawns grow the segment rather than land on the tail.
+            while (revisions.AllocatedChunkCount < revisions.ChunkCapacity)
+            {
+                using var tx = dbe.CreateQuickTransaction();
+                ids.Add((tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 1, LastTradeSeq = -1 - no })), no));
+                no++;
+                Assert.That(tx.Commit(), Is.True, "a spawn that fills the tail");
+            }
+
+            var length = revisions.Length;
+            oldTail = revisions.Pages[length - 1];
+            var onTheTail = new List<EntityId>();
+            foreach (var (id, itemNo) in ids)
+            {
+                if (revisions.GetChunkLocation(ItemRootOf(dbe, id)).segmentIndex == length - 1)
+                {
+                    onTheTail.Add(id);
+                }
+                else
+                {
+                    live.Add(itemNo);
+                }
+            }
+
+            Assert.That(onTheTail, Is.Not.Empty, "premise: items live on the old tail");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                // In the window: every item on the old tail destroyed, then the spawns that grow the segment.
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    foreach (var id in onTheTail)
+                    {
+                        tx.Destroy(id);
+                    }
+
+                    Assert.That(tx.Commit(), Is.True, "the logged destroys");
+                }
+
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 100; i++, no++)
+                    {
+                        tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = no, OwnerNo = 2, LastTradeSeq = -1 - no }));
+                        live.Add(no);
+                    }
+
+                    Assert.That(tx.Commit(), Is.True, "the logged spawns");
+                }
+
+                uow.Flush();
+            }
+
+            Assert.That(revisions.Length, Is.GreaterThan(length), "premise: the revision segment grew");
+            WriteFilePage(dbe, revisions.RootPageIndex);
+            dbe.SimulateHardCrash();
+        }
+
+        var path = ServiceProvider.GetRequiredService<IOptions<ManagedPagedMMFOptions>>().Value.BuildDatabasePathFileName();
+        ChaosPageIO.DamagePageOnDisk(path, oldTail, PageDamageType.TornPage, PagedMMF.PageSize);
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
+        using (var read = reopened.CreateReadOnlyTransaction())
+        {
+            var found = new HashSet<long>();
+            foreach (var id in read.Query<MkItemArch>().Execute())
+            {
+                found.Add(read.Open(id).Read(MkItemArch.Item).ItemNo);
+            }
+
+            Assert.That(found, Is.EquivalentTo(live), "every live item, the logged ones included");
+        }
+
+        AssertStorageHealthy(reopened);
     }
 
     /// <summary>

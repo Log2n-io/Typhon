@@ -106,6 +106,10 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     /// </summary>
     private const int DurabilityWaitSliceMs = 100;
 
+    /// <summary>Test seam: called with each slice <see cref="WaitForDurabilitySignal"/> is about to sleep, so a test can check the clamp without timing
+    /// the OS's wake-up.</summary>
+    internal Action<int> DurabilityWaitSliceProbe { get; set; }
+
     // ═══════════════════════════════════════════════════════════════
     // CRC chain state (single-threaded — writer thread only)
     // ═══════════════════════════════════════════════════════════════
@@ -360,6 +364,7 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             }
         }
 
+        DurabilityWaitSliceProbe?.Invoke(sliceMs);
         Interlocked.Increment(ref _durabilityWaiters);
         try
         {

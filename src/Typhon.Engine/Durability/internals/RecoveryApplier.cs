@@ -61,6 +61,14 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     /// </remarks>
     private readonly Dictionary<ushort, int> _appliedContentChunkBySlot = new();
 
+    // Scratch for a collapse of a full chain before its replayed append (#1209), cleared after each: what it dropped is not freed here, the orphan sweep
+    // after the scrub frees what no surviving head names, under the rule the scrub's own frees follow (#1251).
+    private List<int> _collapsedContent;
+    private HashSet<int> _collapsedStale;
+
+    /// <summary>Chains full on disk that the replay collapsed to their head before appending to them (#1209). Diagnostic.</summary>
+    internal static long ChainsCollapsedForReplay;
+
     /// <summary>
     /// (slot, fieldId) → the collection handle the row held BEFORE this apply overwrote it, for storage that is overwritten in place.
     /// </summary>
@@ -641,6 +649,19 @@ internal sealed unsafe class RecoveryApplier : IDisposable
     private void AppendVersionedRevision(ComponentTable table, int chainRootChunkId, long tsn, byte[] payload, out int contentChunkId)
     {
         var info = GetRecoveryInfo(table);
+
+        // A chain full on disk — a long snapshot kept a hot entity's revisions to the limit — refused the replay's append, and nothing caught it: the open
+        // failed (#1209, CHAIN-03). An open has no snapshot, so no history is needed: the chain is collapsed to its head first, as the scrub would after the
+        // replay, and the append finds room. The content the collapse drops stays allocated for the orphan sweep, which frees what no surviving head names.
+        if (ComponentRevisionManager.IsChainFull(ref info.CompRevTableAccessor.GetChunk<CompRevStorageHeader>(chainRootChunkId)))
+        {
+            ComponentRevisionManager.ScrubChainToHead(table, chainRootChunkId, ref info.CompRevTableAccessor, ref info.CompContentAccessor,
+                _collapsedContent ??= [], _collapsedStale ??= [], out _);
+            _collapsedContent.Clear();
+            _collapsedStale.Clear();
+            System.Threading.Interlocked.Increment(ref ChainsCollapsedForReplay);
+        }
+
         var compRevInfo = new ComponentInfo.CompRevInfo
         {
             CompRevTableFirstChunkId = chainRootChunkId,

@@ -137,6 +137,7 @@ catch (TyphonException ex)
 |---|---|
 | `UniqueConstraintViolationException` | inserting a duplicate key into a `[Index]` (unique) field ([ch.2](02-modeling.md)) |
 | `SchemaValidationException` / `SchemaDowngradeException` | reopening a database with a changed struct and no revision bump, or with an *older* app than wrote it ([ch.2](02-modeling.md)) |
+| `ArchetypeSchemaException` | reopening with an archetype whose component set changed without an `[Archetype]` revision bump, lost a component, or went back a revision ([Archetype Component-Set Evolution](../feature-set/Schema/archetype-set-evolution.md)) |
 | `TyphonTimeoutException` | a lock or transaction blew its deadline under contention — transient |
 
 > ⚠️ Typhon's `TyphonTimeoutException` does **not** derive from `System.TimeoutException` — catch the Typhon type. And don't write speculative `catch` blocks for exceptions the docs list as *reserved but not yet thrown* (`TransactionConflictException`, etc.) — they'd be dead code until those types ship.

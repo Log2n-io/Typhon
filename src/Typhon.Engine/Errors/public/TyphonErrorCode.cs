@@ -62,6 +62,12 @@ public enum TyphonErrorCode
     /// <summary>A user-supplied migration function failed for one or more entities (see <see cref="SchemaMigrationException"/>).</summary>
     SchemaMigration                 = 3002,
 
+    /// <summary>
+    /// An exact-schema open (<see cref="SchemaMatch.Exact"/>: a drill, a restore's settle) found the registered schema or its assemblies different
+    /// from the database's (see <see cref="SchemaMismatchException"/>).
+    /// </summary>
+    SchemaMismatch                  = 3003,
+
     // 4xxx — Index
 
     /// <summary>An insert or update would create a duplicate key in a unique index (see <see cref="UniqueConstraintViolationException"/>).</summary>
@@ -135,6 +141,13 @@ public enum TyphonErrorCode
     /// registering the archetype and opening again recovers them.
     /// </summary>
     RecoveryArchetypeNotRegistered  = 7012,
+
+    /// <summary>
+    /// A crash open's WAL window holds records of an archetype the opening engine registers but left unopened under
+    /// <see cref="ArchetypeSetMigrationPolicy.Refuse"/>: its stored component set or revision differs from the build's (#1394). The open fails before
+    /// applying any record; opening under <see cref="ArchetypeSetMigrationPolicy.Apply"/> migrates the archetype and recovers them. Not a missing schema.
+    /// </summary>
+    RecoveryArchetypeSetChangeRefused = 7013,
 
     // 71xx — Backup (7101-7106: the store and restore, #1413; 7107-7108: online capture, #1412; 7109: lifecycle, #1415; 7110: ops, #1416;
     // 7111-7112: WAL archiving, #1418)

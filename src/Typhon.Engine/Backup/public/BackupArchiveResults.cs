@@ -57,6 +57,9 @@ public enum BackupTimelineReason
 
     /// <summary>A crash open dropped WAL segments past a break in the log.</summary>
     LogBreak,
+
+    /// <summary>Another build of a schema assembly opened the database (#1485): no restore replays the WAL across it.</summary>
+    BuildChange,
 }
 
 /// <summary>Why a range of LSNs is missing from a timeline's archive: no restore crosses it.</summary>

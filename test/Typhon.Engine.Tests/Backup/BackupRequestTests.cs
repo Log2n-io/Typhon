@@ -27,9 +27,9 @@ class BackupRequestTests : SchedulerTestBase<BackupRequestTests>
         var point = Tick(dbe);
 
         Assert.That(point?.Kind, Is.EqualTo(BackupKind.Full));
-        Assert.That(dbe.Backup.Status.LastRequestId, Is.EqualTo(id));
+        Assert.That(dbe.Backup.Status.Requests[^1].Id, Is.EqualTo(id));
         var after = BackupOperations.ReadStatus(bundle);
-        Assert.That(after.Status.LastRequestId, Is.EqualTo(id), "the file echoes it too");
+        Assert.That(after.Status.Requests[^1].Id, Is.EqualTo(id), "the file echoes it too");
         Assert.That(after.Status.LastPoint.BackupId, Is.EqualTo(point.Value.BackupId));
         Assert.That(after.Store.LatestRestorable.BackupId, Is.EqualTo(point.Value.BackupId), "and the store's own view comes with it");
     }

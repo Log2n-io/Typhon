@@ -401,6 +401,18 @@ public class DatabaseEngineOptions
     /// <see cref="DatabaseEngine.Backup"/> takes points only into a store the caller names.
     /// </summary>
     public BackupOptions Backup { get; set; }
+
+    /// <summary>
+    /// What an open does with an archetype whose persisted component set differs from this build's (#1394): migrate it (the default), or skip it and leave
+    /// the file untouched (<see cref="ArchetypeSetMigrationPolicy.Refuse"/>, for inspectors).
+    /// </summary>
+    public ArchetypeSetMigrationPolicy ArchetypeSetMigration { get; set; } = ArchetypeSetMigrationPolicy.Apply;
+
+    /// <summary>
+    /// How the open reconciles the registered schema with the database's (#1485): <see cref="SchemaMatch.Migrate"/> (default), or
+    /// <see cref="SchemaMatch.Exact"/>, which refuses any difference — what drills and restore settles open with.
+    /// </summary>
+    public SchemaMatch SchemaMatch { get; set; }
 }
 
 /// <summary>
@@ -626,23 +638,204 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private Dictionary<string, MigrationResult> _migratedComponents;
 
     /// <summary>
-    /// Per archetype, the cluster segment as it stood BEFORE this open's schema migration, together with the geometry it was written at. A migration changes
-    /// component sizes, which changes <c>ClusterSize</c>, which moves every offset in the cluster — so the old bytes can only be read through the old layout.
-    /// Captured before the fresh cluster is allocated and consumed by <see cref="RebuildClusterFromChains"/>, which is the only thing that can still reach
-    /// <c>SingleVersion</c> data: it has no revision chain, so the cluster slot is its only copy (#671).
-    /// </summary>
-    private Dictionary<ushort, (ChunkBasedSegment<PersistentStore> Segment, ArchetypeClusterInfo Layout)> _preMigrationClusters;
-
-    /// <summary>
-    /// Per archetype, the <c>EnabledBits</c> of every entity, read from the EntityMap as it stood before this open's schema migration (key: EntityKey).
+    /// The pre-migration state of one migrating archetype, as its persisted catalog records it (design 07 §5.3): the cluster segment as it stood BEFORE this
+    /// open's schema migration, the geometry it was written at, and the EntityMap record size of the persisted Versioned slot count.
     /// </summary>
     /// <remarks>
-    /// The migration replaces the EntityMap with a fresh one, and the record is the only authority for enabled state — a chain head proves a Versioned
-    /// component is present, never that it is enabled (#846, STAGE-02). Read from the record rather than from <see cref="_preMigrationClusters"/> because that
-    /// one exists only for archetypes with a SingleVersion slot, and its geometry is reconstructed, not recorded; the record's layout does not depend on
-    /// component sizes or indexes at all. Consumed by <see cref="RebuildClusterFromChains"/>, dropped with the old segments.
+    /// A migration changes component sizes, which changes <c>ClusterSize</c>, which moves every offset in the cluster — so the old bytes can only be read
+    /// through the old layout. The layout is rebuilt from the catalog (<see cref="BuildPersistedLayout"/>), never from the runtime slot list, so it is exact
+    /// whatever the open changes — index set included (§4.2). It is still validated, not trusted: <see cref="RebuildClusterFromChains"/> checks every occupied
+    /// slot's entity id before the first claim (§6.4).
     /// </remarks>
-    private Dictionary<ushort, Dictionary<long, ushort>> _preMigrationEnabledBits;
+    private sealed class PreMigrationCluster
+    {
+        /// <summary>The persisted cluster segment, loaded at <see cref="Layout"/>'s stride; null when the archetype persisted no cluster.</summary>
+        public ChunkBasedSegment<PersistentStore> Segment;
+
+        /// <summary>The geometry the persisted cluster was written at.</summary>
+        public ArchetypeClusterInfo Layout;
+
+        /// <summary>The persisted root page of <see cref="Segment"/>, for the refusal message.</summary>
+        public int SegmentSpi;
+
+        /// <summary>The EntityMap record size of the persisted Versioned slot count (<c>19 + 4·V</c>).</summary>
+        public int RecordSize;
+
+        /// <summary>
+        /// For each runtime slot, the persisted slot it reads from; null is the identity map, the only one a field-only migration has (old names are the
+        /// runtime names). A component-set migration supplies its name map (<see cref="ArchetypeSetDiff.NewToOld"/>), with
+        /// <see cref="ArchetypeSetDiff.NoSlot"/> for an added slot.
+        /// </summary>
+        public byte[] NewToOld;
+
+        /// <summary>The persisted slot runtime slot <paramref name="slot"/> reads from, or <see cref="ArchetypeSetDiff.NoSlot"/> when it has none.</summary>
+        public int OldSlotOf(int slot) => NewToOld == null ? slot : NewToOld[slot];
+    }
+
+    /// <summary>
+    /// Per migrating archetype, its pre-migration cluster (<see cref="PreMigrationCluster"/>). Captured before the fresh cluster is allocated and consumed by
+    /// <see cref="RebuildClusterFromChains"/>, which is the only thing that can still reach <c>SingleVersion</c> data — it has no revision chain, so the
+    /// cluster slot is its only copy (#671) — and whose old (chunk, slot) order is the placement order of every migration (SCHEMA-12).
+    /// </summary>
+    private Dictionary<ushort, PreMigrationCluster> _preMigrationClusters;
+
+    /// <summary>One entity's pre-migration EntityMap record, as far as a migration reads it: its enabled bits and the cluster position it records.</summary>
+    /// <param name="EnabledBits">The record's enabled bits, in PERSISTED slot numbering.</param>
+    /// <param name="ClusterChunkId">The pre-migration cluster the record places the entity in.</param>
+    /// <param name="SlotIndex">The slot of that cluster.</param>
+    /// <param name="Live">False when the record carries a death stamp.</param>
+    private readonly record struct PreMigrationRecord(ushort EnabledBits, int ClusterChunkId, byte SlotIndex, bool Live);
+
+    /// <summary>
+    /// A migrating archetype's pre-migration EntityMap records, indexed by the position each records — <c>chunk · N + slot</c> of the pre-migration cluster
+    /// geometry — rather than hashed by key: the re-placement reads every record AT the old (chunk, slot) it walks, so the lookup is one array index and the
+    /// snapshot one flat array of 8 bytes per slot, allocated once (a dictionary grown by doubling cost ~100 B per entity at 1M entities, measured). A slot
+    /// packs a LIVE record: its 48-bit entity key above its 16 enabled bits; 0 is an empty slot.
+    /// </summary>
+    /// <remarks>
+    /// A dead record (a death stamp the cleanup had not removed yet), a record whose position is out of the geometry or collides with a record already
+    /// there (a corrupt map), and every record when there is no cluster geometry, goes to a key-indexed overflow instead. A lookup by key (a chain-only
+    /// entity, which has no slot in the old cluster; a walked entity whose record names another slot or is dead) builds that index over the whole snapshot
+    /// on first use — rare by construction, and never on the common path.
+    /// </remarks>
+    private sealed class PreMigrationRecords
+    {
+        private readonly ulong[] _slots;
+        private readonly int _clusterSize;
+        private Dictionary<long, PreMigrationRecord> _byKey;
+        private bool _byKeyComplete;
+
+        /// <summary>The live records (no death stamp), wherever they are stored.</summary>
+        public int LiveCount { get; private set; }
+
+        /// <param name="chunkCapacity">The pre-migration cluster segment's chunk capacity; 0 when there is no cluster geometry.</param>
+        /// <param name="clusterSize">Its cluster size.</param>
+        public PreMigrationRecords(int chunkCapacity, int clusterSize)
+        {
+            _clusterSize = clusterSize;
+            _slots = chunkCapacity > 0 && clusterSize > 0 ? new ulong[(long)chunkCapacity * clusterSize] : null;
+            _byKeyComplete = _slots == null;
+        }
+
+        private static ulong Pack(long key, ushort enabledBits) => ((ulong)key << 16) | enabledBits;
+
+        public void Add(long key, ushort enabledBits, int chunk, int slot, bool live)
+        {
+            LiveCount += live ? 1 : 0;
+            if (live && _slots != null && key > 0 && key < 1L << 48 && chunk >= 0 && (uint)slot < (uint)_clusterSize)
+            {
+                var index = (long)chunk * _clusterSize + slot;
+                if (index < _slots.Length && _slots[index] == 0)
+                {
+                    _slots[index] = Pack(key, enabledBits);
+                    return;
+                }
+            }
+
+            (_byKey ??= [])[key] = new PreMigrationRecord(enabledBits, chunk, (byte)slot, live);
+        }
+
+        /// <summary>The record at (<paramref name="chunk"/>, <paramref name="slot"/>) when it is <paramref name="key"/>'s; false otherwise.</summary>
+        public bool TryGetAt(int chunk, int slot, long key, out PreMigrationRecord record)
+        {
+            if (_slots != null && chunk >= 0 && (uint)slot < (uint)_clusterSize)
+            {
+                var index = (long)chunk * _clusterSize + slot;
+                if (index < _slots.Length && _slots[index] != 0 && (long)(_slots[index] >> 16) == key)
+                {
+                    record = new PreMigrationRecord((ushort)_slots[index], chunk, (byte)slot, true);
+                    return true;
+                }
+            }
+
+            record = default;
+            return false;
+        }
+
+        /// <summary><paramref name="key"/>'s record wherever it is stored. Builds the key index over the whole snapshot on first use.</summary>
+        public bool TryGetByKey(long key, out PreMigrationRecord record)
+        {
+            if (!_byKeyComplete)
+            {
+                _byKey ??= [];
+                for (long i = 0; i < _slots.Length; i++)
+                {
+                    var s = _slots[i];
+                    if (s != 0)
+                    {
+                        _byKey[(long)(s >> 16)] = new PreMigrationRecord((ushort)s, (int)(i / _clusterSize), (byte)(i % _clusterSize), true);
+                    }
+                }
+
+                _byKeyComplete = true;
+            }
+
+            record = default;
+            return _byKey != null && _byKey.TryGetValue(key, out record);
+        }
+
+        /// <summary>The record of <paramref name="key"/>, walked at (<paramref name="chunk"/>, <paramref name="slot"/>): the slot's own when it names the
+        /// entity, otherwise wherever the record is.</summary>
+        public bool TryGet(int chunk, int slot, long key, out PreMigrationRecord record)
+            => TryGetAt(chunk, slot, key, out record) || TryGetByKey(key, out record);
+    }
+
+    /// <summary>
+    /// Per archetype, every entity's record in the EntityMap as it stood before this open's schema migration (<see cref="PreMigrationRecords"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The migration replaces the EntityMap with a fresh one, and the record is the only authority for enabled state — a chain head proves a Versioned
+    /// component is present, never that it is enabled (#846, STAGE-02). The old map is read at the record size of the persisted Versioned slot count
+    /// (<see cref="PreMigrationCluster.RecordSize"/>), which the catalog records whatever the open changes. Consumed by
+    /// <see cref="RebuildClusterFromChains"/>, dropped with the old segments.
+    /// </para>
+    /// <para>
+    /// The recorded cluster position is the strongest check of the reconstructed geometry there is (design 07 §6.4): on a clean open the map and the cluster
+    /// are the same checkpoint's image, so every occupied slot the walk reads must be the slot its entity's record names.
+    /// </para>
+    /// </remarks>
+    private Dictionary<ushort, PreMigrationRecords> _preMigrationRecords;
+
+    /// <summary>
+    /// Per realm-keyed spatial archetype a migration re-placed, the realm hint of each new cluster, indexed by cluster chunk id (SCHEMA-12, design 07 §6.3).
+    /// </summary>
+    /// <remarks>
+    /// Kept past the migration's own spatial rebuild so the crash open's recovery rebuild takes the same hints (D12,
+    /// <see cref="RebuildSpatialLayerAfterRecovery"/>). Keyed by CATALOG id. Cleared at the end of <see cref="InitializeArchetypes"/>.
+    /// </remarks>
+    private Dictionary<ushort, ClusterHomeHint[]> _migrationRealmHints;
+
+    /// <summary>
+    /// Test seam (AC-13): per archetype the last open's migration re-placed (catalog id), each new cluster chunk id and the old cluster chunk ids its
+    /// entities came from, in placement order. A cluster of chain-only entities (§6.2) lists <c>-1</c>. Null when no archetype migrated, and always null
+    /// unless <see cref="RecordRebuildPlacementForTest"/> is set.
+    /// </summary>
+    internal Dictionary<ushort, Dictionary<int, List<int>>> LastOpenRebuildPlacementMap;
+
+    /// <summary>
+    /// Entities the last open's migration found only through a Versioned chain head, with no slot in the pre-migration cluster (design 07 §6.2). Placed after
+    /// every old cluster, never dropped. Zero on every clean open; a non-zero count there is corruption and is logged.
+    /// </summary>
+    internal int LastOpenMigrationOrphanChainEntities;
+
+    /// <summary>
+    /// Test hook (§6.4, R11): adjusts the component sizes <see cref="BuildPersistedLayout"/> read from the catalog, by archetype name, so a test can stage a
+    /// reconstruction that does not match what the cluster was written at. Null in production.
+    /// </summary>
+    internal Action<string, int[]> AdjustPersistedLayoutSizesForTest;
+
+    /// <summary>
+    /// Test hook (R11): a migrating archetype's pre-migration EntityMap reads as unloadable, as a segment whose page directory cannot be resolved does, so a
+    /// test can stage the refusal <see cref="CapturePreMigrationEnabledBits"/> raises where no torn page is possible. False in production.
+    /// </summary>
+    internal bool FailPreMigrationEntityMapLoadForTest;
+
+    /// <summary>
+    /// Test hook (AC-13): <see cref="RebuildClusterFromChains"/> records <see cref="LastOpenRebuildPlacementMap"/>. Off in production, where nothing reads
+    /// it: the map holds an entry per new cluster for the engine's lifetime.
+    /// </summary>
+    internal bool RecordRebuildPlacementForTest;
 
     /// <summary>
     /// Every segment this open decided to ABANDON because a schema migration invalidated it, as <c>(root page index, the stride it was written at)</c>. Freed
@@ -1180,6 +1373,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>The body of <see cref="PersistRealmCatalogEntries"/>, from identities directly — a run-time registration persists before it publishes.</summary>
     private void PersistRealmCatalogRows(List<(ushort Id, SpatialGridConfig Grid)> rowsToWrite)
     {
+        // #1485: an exact open adds no realm the database does not hold.
+        if (ExactSchema && rowsToWrite.Count > 0)
+        {
+            throw new SchemaMismatchException("The realms", [$"{rowsToWrite.Count} realm(s) this open registers are not in the database"]);
+        }
+
         var cs = MMF.CreateChangeSet();
         if (_realmsTable == null)
         {
@@ -1492,26 +1691,99 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         state.SpatialBarrierOnly = value;
     }
 
-    /// <summary>
-    /// The slot whose component <see cref="InitializeArchetypes"/> could not resolve, for each archetype it skipped, by archetype id (#1071). Null until one is.
-    /// </summary>
-    private Dictionary<ushort, int> _skippedArchetypes;
+    /// <summary>Why <see cref="InitializeArchetypes"/> skipped an archetype.</summary>
+    private enum ArchetypeSkipReason : byte
+    {
+        /// <summary>One of its slots resolves to no registered component (#1071). <see cref="SkippedArchetype.Slot"/> names it.</summary>
+        UnresolvedSlot,
+
+        /// <summary>
+        /// Another archetype of the load context shares its durable name at a higher revision (D3, SCHEMA-10). <see cref="SkippedArchetype.SupersededBy"/>
+        /// is the winner's catalog id.
+        /// </summary>
+        Superseded,
+
+        /// <summary>
+        /// Its persisted component set or revision differs from this build's, and the engine runs under <see cref="ArchetypeSetMigrationPolicy.Refuse"/>
+        /// (D4): the archetype is left as stored, listed in <see cref="RefusedArchetypeSetChanges"/>.
+        /// </summary>
+        ArchetypeSetChange,
+
+        /// <summary>
+        /// This build's declaration of it is refused (R1, R3-R6) and the engine runs under <see cref="ArchetypeSetMigrationPolicy.Refuse"/> (D4): the
+        /// archetype is left as stored, listed in <see cref="RefusedArchetypeSetChanges"/> with the refusal; the rest of the database opens.
+        /// </summary>
+        SchemaRefused,
+    }
+
+    /// <summary>One skipped archetype: the reason and the detail its message needs. The text is built only when one is read.</summary>
+    private readonly record struct SkippedArchetype(ArchetypeSkipReason Reason, int Slot, ushort SupersededBy);
 
     /// <summary>
-    /// Why <see cref="InitializeArchetypes"/> gave archetype <paramref name="archetypeId"/> no storage, or null when it did not skip it.
+    /// Every archetype <see cref="InitializeArchetypes"/> skipped, and why, by archetype (catalog) id (#1071). Null until one is.
+    /// </summary>
+    private Dictionary<ushort, SkippedArchetype> _skippedArchetypes;
+
+    /// <summary>
+    /// Why <see cref="InitializeArchetypes"/> gave archetype <paramref name="archetypeId"/> no storage, as a clause ("its component X is not registered…"),
+    /// or null when it did not skip it.
     /// </summary>
     internal string SkippedArchetypeReason(ushort archetypeId)
     {
-        if (_skippedArchetypes == null || !_skippedArchetypes.TryGetValue(archetypeId, out var slot))
+        if (_skippedArchetypes == null || !_skippedArchetypes.TryGetValue(archetypeId, out var skipped))
         {
             return null;
         }
 
         var meta = ArchetypeRegistry.GetMetadata(archetypeId);
-        var component = meta?._slotToComponentType?[slot];
+        if (skipped.Reason == ArchetypeSkipReason.Superseded)
+        {
+            var winner = ArchetypeRegistry.GetMetadata(skipped.SupersededBy);
+            return $"it is superseded by '{winner?.ArchetypeType?.Name}' (revision {winner?.Revision}), which shares its name '{meta?.Name}'";
+        }
+
+        if (skipped.Reason == ArchetypeSkipReason.SchemaRefused)
+        {
+            string refusal = null;
+            foreach (var r in _refusedArchetypeSetChanges ?? [])
+            {
+                if (r.ArchetypeName == meta?.Name && r.Kind == ArchetypeSetChangeKind.Refused)
+                {
+                    refusal = r.Changes;
+                }
+            }
+
+            return $"this build's declaration of it is refused, and this engine skips such an archetype "
+                   + $"(DatabaseEngineOptions.ArchetypeSetMigration = {nameof(ArchetypeSetMigrationPolicy.Refuse)}): {refusal}";
+        }
+
+        if (skipped.Reason == ArchetypeSkipReason.ArchetypeSetChange)
+        {
+            return $"its stored component set or revision differs from this build's, and this engine does not migrate archetype sets "
+                   + $"(DatabaseEngineOptions.ArchetypeSetMigration = {nameof(ArchetypeSetMigrationPolicy.Refuse)})";
+        }
+
+        var component = meta?._slotToComponentType?[skipped.Slot];
         return component == null
-            ? $"its slot {slot} has no component type"
+            ? $"its slot {skipped.Slot} has no component type"
             : $"its component {component.Name} is not registered with this engine (RegisterComponentFromAccessor<{component.Name}>())";
+    }
+
+    /// <summary>
+    /// The complete refusal for any use of an archetype skipped because a higher revision of its durable name superseded it (D3, design 07 §8), or null when
+    /// <paramref name="archetypeId"/> was not superseded.
+    /// </summary>
+    internal string SupersededArchetypeMessage(ushort archetypeId)
+    {
+        if (_skippedArchetypes == null || !_skippedArchetypes.TryGetValue(archetypeId, out var skipped) || skipped.Reason != ArchetypeSkipReason.Superseded)
+        {
+            return null;
+        }
+
+        var loser = ArchetypeRegistry.GetMetadata(archetypeId);
+        var winner = ArchetypeRegistry.GetMetadata(skipped.SupersededBy);
+        return $"Archetype '{loser?.ArchetypeType?.Name}' is not open in this engine: it is superseded by '{winner?.ArchetypeType?.Name}' (revision "
+               + $"{winner?.Revision}), which shares its name '{loser?.Name}'.";
     }
 
     /// <summary>
@@ -1520,6 +1792,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     private InvalidOperationException NotAClusterArchetype(Type archetype, ushort archetypeId)
     {
+        var superseded = SupersededArchetypeMessage(archetypeId);
+        if (superseded != null)
+        {
+            return new InvalidOperationException(superseded);
+        }
+
         var reason = SkippedArchetypeReason(archetypeId);
         return new InvalidOperationException(reason != null
             ? $"Archetype {archetype.Name} has no storage in this engine: InitializeArchetypes skipped it because {reason}."
@@ -1595,6 +1873,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// production.
     /// </summary>
     internal Action<ArchetypeMetadata> AfterClusterLayoutPublishedForTest;
+
+    /// <summary>
+    /// Test hook, SCHEMA-11's mutant: <see cref="ClassifyArchetypeSchema"/> matches slots by count alone, as the pre-#1394 check did, so a same-count
+    /// reorder or swap reads as identical. Per engine; false in production.
+    /// </summary>
+    internal bool SkipArchetypeSlotNameMatchForTest;
+
+    /// <summary>
+    /// Test hook, SCHEMA-13's mutant: <see cref="GuardUnopenedHoldersOfMigratedComponents"/> lets a component migrate under a persisted archetype this open
+    /// does not consume. Per engine; false in production.
+    /// </summary>
+    internal bool SkipUnopenedHolderGuardForTest;
 
     /// <summary>Backing paged memory-mapped file store holding all persisted segments of this database.</summary>
     public ManagedPagedMMF MMF { get; }
@@ -2255,6 +2545,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (MMF.IsDatabaseFileCreating)
         {
+            // #1485: an exact open reproduces a database as written — a drill's, a settle's — and so creates none (no catalog, no row).
+            if (ExactSchema)
+            {
+                throw new SchemaMismatchException("The database", ["it does not exist: an exact open reproduces a database as written, it creates none"]);
+            }
+
             CreateSystemSchemaR1();
         }
         else
@@ -2444,6 +2740,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 throw new InvalidOperationException("Simulated teardown-step failure (ThrowInDisposeCoreForTest).");
             }
+
+            // An environment-driven page trace is written first, while every segment is registered (its page types) and before the close's own requests.
+            WriteEnvironmentPageTrace();
 
             // Warm spatial-query windows pin this engine's pages on every thread that queried it. Unpin them while this page cache is still alive, and
             // before the final checkpoint and persistence steps need pages.
@@ -3038,19 +3337,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 discoveryIo.Dispose();
             }
 
+            // WAL segments on disk are NOT evidence of a crash: they survive a clean close. Only an unclean close leaves a window to recover (#1143) —
+            // after a clean one the final checkpoint and data flush made the data file current before the flag was set (CS-01). Gate the crash-path
+            // secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component registration builds the ComponentTables — so the
+            // clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the matching Phase-5 rebuild, so clear and rebuild always
+            // agree. A forced open (a repair, a restore) takes the crash path with or without segments: nested in the scan's branch, a repair of a
+            // bundle whose wal/ was removed rebuilt nothing and said it had (#1179, CS-06).
+            _walSegmentsAtOpen = walSegmentsPresent;
+            CrashRecoveryAtOpen = ForcedCrashRecoveryAtOpen || (walSegmentsPresent && !_cleanShutdownAtOpen);
+
+            // A crash open completes a segment grow torn by the crash rather than refusing the segment (#1296) — where the WAL can refill what a page the
+            // grow had not written held, as for the segments it replaces (TolerateTornSegmentsAtOpen); a clean open stays strict.
+            MMF.RepairTornGrowsAtLoad = TolerateTornSegmentsAtOpen;
+
             if (walSegmentsPresent)
             {
-                // WAL segments on disk are NOT evidence of a crash: they survive a clean close. Only an unclean close leaves a window to recover (#1143) —
-                // after a clean one the final checkpoint and data flush made the data file current before the flag was set (CS-01). Gate the crash-path
-                // secondary-index clear+rebuild (RB-01) on this, captured HERE at open — before component registration builds the ComponentTables — so the
-                // clear in BuildIndexedFieldInfo sees it. RunWalV2Recovery reads the same flag for the matching Phase-5 rebuild, so clear and rebuild always
-                // agree. The scan below still runs on a clean open: it reads the log, not the data file, and gives InitializeWalManager the LSN frontier
-                // (LOG-08).
-                CrashRecoveryAtOpen = !_cleanShutdownAtOpen || ForcedCrashRecoveryAtOpen;
-
-                // A crash open completes a segment grow torn by the crash rather than refusing the segment (#1296) — where the WAL can refill what a page
-                // the grow had not written held, as for the segments it replaces (TolerateTornSegmentsAtOpen); a clean open stays strict.
-                MMF.RepairTornGrowsAtLoad = TolerateTornSegmentsAtOpen;
+                // The scan still runs on a clean open: it reads the log, not the data file, and gives InitializeWalManager the LSN frontier (LOG-08).
 
                 // Two-phase WAL recovery: LoadFromDiskRaw preserves Pending entries for WAL cross-referencing
                 UowRegistry.LoadFromDiskRaw();
@@ -3717,7 +4019,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     continue;
                 }
-                if (SystemCrud.Read(_assembliesTable, chunkId, out AssemblyR1 asm, EpochManager))
+                // A row #1485 retired (no catalog row names it) is blank: skipped, as every reader of the manifest skips it.
+                if (SystemCrud.Read(_assembliesTable, chunkId, out AssemblyR1 asm, EpochManager) && asm.SimpleName.AsString.Length > 0)
                 {
                     var id = (ushort)chunkId;
                     _persistedAssemblies[id] = (chunkId, asm);
@@ -4123,10 +4426,21 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // this call's — splits persist it, under the split lock (#1205).
             anyUpdated |= state.EntityMap.FlushMeta(cs);
 
-            if (arch.EntityMapSPI == newEntityMapSpi && arch.ClusterSegmentSPI == newClusterSpi && arch.ClusterIndexSPI == newIndexSpi
+            // An archetype whose set, revision or stored names this open changes rides the schema commit with its whole row rewritten (design 07 §5.5), even
+            // when every SPI matches: a metadata-only change moves no segment. Only inside the commit — the checkpoint hook never rewrites a row's set.
+            ArchetypeSetMigrationPlan set = null;
+            var rewriteSet = commitRows != null && _archetypeSetMigrations != null && _archetypeSetMigrations.TryGetValue(meta.ArchetypeId, out set)
+                             && set.NewComponentNamesBufferId == 0;
+
+            if (!rewriteSet && arch.EntityMapSPI == newEntityMapSpi && arch.ClusterSegmentSPI == newClusterSpi && arch.ClusterIndexSPI == newIndexSpi
                 && arch.ClusterString64IndexSPI == newString64IndexSpi && arch.NextEntityKey == newNextKey)
             {
                 continue;
+            }
+
+            if (rewriteSet)
+            {
+                RewriteArchetypeRowForSetChange(ref arch, meta, state, set, cs);
             }
 
             arch.EntityMapSPI = newEntityMapSpi;
@@ -4372,6 +4686,30 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public bool RegisterComponentFromAccessor<T>(ChangeSet changeSet = null, SchemaValidationMode schemaValidation = SchemaValidationMode.Enforce)
         where T : unmanaged
     {
+        try
+        {
+            ComponentRegistrationProbe?.Invoke(typeof(T));
+            return RegisterComponentFromAccessorCore<T>(changeSet, schemaValidation);
+        }
+        catch
+        {
+            // CS-04: an open that throws while it registers its components did not complete either. Left unmarked, its dispose ran the full close on a
+            // half-registered engine — drains, final cycle, the clean flag — as if it had opened: a crash open's recovery that timed out on back-pressure
+            // in a component table's lock-word reset then closed with a NullReferenceException in its cleanup drain.
+            _archetypeInitIncomplete = true;
+            throw;
+        }
+    }
+
+    /// <summary>Test seam: runs as each component's registration starts, so a test can make an open fail there (CS-04).</summary>
+    internal Action<Type> ComponentRegistrationProbe { get; set; }
+
+    /// <summary>Whether this engine's dispose will close it as a crash, its open not completed (CS-04; tests).</summary>
+    internal bool OpenIncompleteForTests => _archetypeInitIncomplete;
+
+    /// <summary>The body of <see cref="RegisterComponentFromAccessor{T}"/>.</summary>
+    private bool RegisterComponentFromAccessorCore<T>(ChangeSet changeSet, SchemaValidationMode schemaValidation) where T : unmanaged
+    {
         // Track this component Type for the registry lifecycle pairing in Dispose. Adding even on early-return / failure branches below is safe:
         // UnregisterEngineUse is idempotent on Types it doesn't know about, and any Type the engine touched MAY have ended up in
         // `ArchetypeRegistry.ComponentTypeIds` via the static-constructor + `DeclareComponent` cascade before this method's body inspected anything.
@@ -4428,6 +4766,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (_persistedComponents != null && _persistedComponents.TryGetValue(persistedKey, out var persisted))
         {
+            // #1485: an exact open (a drill, a restore's settle) refuses any difference before the fork, the migration or a catalog write below. An
+            // ordinary one keeps the manifest naming the build that writes the database, first, so a migration staged below reads its row as now.
+            if (ExactSchema)
+            {
+                ThrowIfComponentNotExact(schemaName, persistedKey, persisted.Comp, persistedFields, resolver, definition);
+            }
+            else
+            {
+                var chunkId = persisted.ChunkId;
+                NoteDeclaringAssembly(definition.POCOType.Assembly, persisted.Comp.AssemblyId, id => RepointComponentAssembly(persistedKey, chunkId, id));
+            }
+
             // Schema validation: compare persisted vs runtime before loading data
             SchemaDiff diff = null;
             MigrationResult? migrationResult = null;
@@ -4450,7 +4800,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 // forks before the first byte of the change is written, so no restore replays across it.
                 if (!diff.IsIdentical)
                 {
-                    ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                    ForkTimeline(TimelineReason.SchemaChange);
                 }
 
                 if (diff.HasBreakingChanges && schemaValidation != SchemaValidationMode.Skip)
@@ -4681,10 +5031,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             // Create path: use the provided ChangeSet, or create a new one for standalone registration. A component new to an existing database is a
-            // schema change (Q4): the timeline forks before its table is written.
+            // schema change (Q4): the timeline forks before its table is written. An exact open refuses it instead (#1485).
             if (_componentsTable != null && !MMF.IsDatabaseFileCreating)
             {
-                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                if (ExactSchema)
+                {
+                    throw new SchemaMismatchException($"Component '{schemaName}'", [definition.POCOType.Assembly == typeof(DatabaseEngine).Assembly
+                        ? "the database holds no such engine catalog: this open would create it (a realm or setting the database does not have)"
+                        : "the database holds no such component: this build adds it"]);
+                }
+
+                ForkTimeline(TimelineReason.SchemaChange);
             }
 
             var cs = changeSet ?? MMF.CreateChangeSet();
@@ -4815,8 +5172,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         _archetypeInitIncomplete = false;
+
+        // #1485: the manifest takes the build this open registered only now that nothing refused it (a refused open leaves it, and the timeline, as found).
+        ApplyPendingDeclaringAssemblies();
         _openCompleted = true;
         StartBackupScheduler();
+        try
+        {
+            StartEnvironmentPageTrace();
+        }
+        catch (Exception e)
+        {
+            LogPageTraceStartFailed(e);   // a diagnostic must not fail the open
+        }
 
         // A crash open that sealed cleared it; one that did not recover (nothing in the window) clears it here (CK-08).
         if (CheckpointManager != null)
@@ -4845,12 +5213,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// refill it from — which is also true of a repair's forced recovery open (<see cref="DatabaseEngineOptions.ForceCrashRecoveryAtOpen"/>): it takes
     /// the crash path to rebuild derived structures, and must not empty a damaged segment on the way.
     /// </summary>
-    internal bool TolerateTornSegmentsAtOpen => CrashRecoveryAtOpen && !_cleanShutdownAtOpen && !_failedOpenAtOpen;
+    internal bool TolerateTornSegmentsAtOpen => CrashRecoveryAtOpen && !_cleanShutdownAtOpen && !_failedOpenAtOpen && _walSegmentsAtOpen;
+
+    // Whether the open found WAL segments: a damaged segment is replaced only where a log can refill it. Forced open over a bundle with no wal/, a
+    // replaced segment had nothing to refill it, and a no-op repair became data loss (#1179).
+    private bool _walSegmentsAtOpen;
 
     /// <summary>
     /// Whether the last session was an open after a clean close that never completed (<see cref="DurabilityWatermarks.BeginOpenAfterCleanClose"/>).
     /// </summary>
     private bool _failedOpenAtOpen;
+
+    /// <summary>Test read of the clean-shutdown flag this open found (the on-disk flag is cleared in the constructor, before a test could read it).</summary>
+    internal bool CleanShutdownAtOpenForTest => _cleanShutdownAtOpen;
 
     /// <summary>
     /// Set while <see cref="InitializeArchetypes"/> runs and left set when it throws. <see cref="DisposeCore"/> then skips every final-persistence step, as
@@ -4899,7 +5274,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         LastOpenVersionedHeadRebuildCount = 0;
         LastOpenVersionedHeadRebuildSkips = default;
         LastOpenClusterIndexRebuildCount = 0;
-        _headsTrusted = _cleanShutdownAtOpen
+        LastOpenRebuildPlacementMap = null;
+        LastOpenMigrationOrphanChainEntities = 0;
+        _lastOpenArchetypeSetMigrations = null;
+        _refusedArchetypeSetChanges = null;
+        // A forced open trusts nothing it is asked to rebuild: a repair that skipped the HEADs said it had rebuilt every derived structure (#1179, CS-03).
+        _headsTrusted = _cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen
             && (_migratedComponents == null || _migratedComponents.Count == 0);
         LogVersionedHeadReopenDecision(_headsTrusted, _cleanShutdownAtOpen, _checkpointLsnAtOpen);
         LogWalWatermarksSnapshot("open", _checkpointLsnAtOpen);
@@ -4946,7 +5326,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // belongs at the first open by a build that understands the new shape.
             if (!MMF.Bootstrap.TryGet(BK_SpatialGridConfig, out var stored) || stored.IntCount != SpatialGridConfigIntCount)
             {
+                // #1485: an exact open writes no setting the database does not hold.
+                if (ExactSchema)
+                {
+                    throw new SchemaMismatchException("The spatial grid",
+                        ["the database holds no grid configuration this open could match: it would write one"]);
+                }
+
                 SaveSpatialGridConfig(gridConfig);
+            }
+            else if (ExactSchema && TryLoadSpatialGridConfig(out var storedGrid) && !storedGrid.Equals(gridConfig))
+            {
+                throw new SchemaMismatchException("The spatial grid", ["the configuration this open declares is not the one the database holds"]);
             }
         }
         else if (TryLoadSpatialGridConfig(out var persistedGridConfig))
@@ -4969,6 +5360,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Load persisted archetype schemas for validation (keyed by name — reopen re-match is by name)
         _persistedArchetypes ??= new Dictionary<string, (int, ArchetypeR1)>();
         LoadPersistedArchetypes();
+        AfterPersistedArchetypesLoadedForTest?.Invoke();
 
         // Allocate per-engine state array indexed by per-process catalog id, plus the per-DB routing tables. Fixed sizing (RoutingTableSize) so a concurrent
         // registration in a peer engine can never overflow these — removes Face A's IndexOutOfRange sizing coupling.
@@ -4999,48 +5391,50 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Recorded afresh by every initialisation, so a reason never outlives the pass that found it.
         _skippedArchetypes?.Clear();
 
+        // Slot resolution for every archetype first, then the identity guards that need the whole consumed set, all before any routing id is read or
+        // assigned and before any byte moves (#1394, design 07 §5.1): one archetype per durable name (D3), then no component migrating under a persisted
+        // archetype this open leaves unopened (D10).
+        var resolvedSlots = ResolveArchetypeSlots();
+        ResolveDurableNameDuplicates(resolvedSlots);
+        var renameMap = _persistedArchetypes.Count > 0 ? BuildComponentRenameMap() : null;
+        // Every archetype is classified before the first is built, so every refusal precedes the first fresh segment (both policies). Under the Refuse
+        // policy (D4), an archetype that would migrate is skipped before the guard, so a component migrating under it still refuses (R10).
+        var classifiedSlots = ClassifyArchetypesBeforeBuild(resolvedSlots, renameMap);
+        GuardUnopenedHoldersOfMigratedComponents(resolvedSlots, renameMap);
+
+        // #1485: an exact open refuses an archetype that is not the catalog's — what the passes above would skip, migrate or rewrite, or one they keep
+        // that the catalog lacks — before anything of the archetypes is built, written, forked or replayed.
+        if (ExactSchema)
+        {
+            ThrowIfArchetypesNotExact(resolvedSlots);
+        }
+
         foreach (var meta in OwnArchetypes())
         {
-            // Connect slots to ComponentTables — skip archetypes with unregistered component types
-            if (meta._slotToComponentType == null || meta.ComponentCount == 0)
+            // Skipped by the passes above: a slot with no registered component (the reason is recorded), or superseded by a higher revision of its name.
+            if (!resolvedSlots.TryGetValue(meta.ArchetypeId, out var slotToTable))
             {
                 continue;
             }
 
-            var slotToTable = new ComponentTable[meta.ComponentCount];
-            var skippedSlot = -1;
-            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            // Schema validation: match the runtime archetype against its persisted row, slot by slot, by component name (SCHEMA-11).
+            // The persisted names, resolved, are what a migration rebuilds the old geometry from (design 07 §5.3). A set change, a revision-only bump or
+            // stale stored names rewrite the row in the schema commit; only a set change moves data (§5.5).
+            string[] persistedNames;
+            ArchetypeSetMigrationPlan setMigration;
+            if (classifiedSlots != null && classifiedSlots.TryGetValue(meta.ArchetypeId, out var classified))
             {
-                var compType = meta._slotToComponentType[slot];
-                if (compType == null)
-                {
-                    skippedSlot = slot;
-                    break;
-                }
-
-                // Schema evolution fallback: the CLR type may be from an older version (V1)
-                // while the registered ComponentTable uses the newer version (V2).
-                // Fall back to schema-name matching since both versions share the same name.
-                var table = GetComponentTable(compType) ?? FindComponentTableBySchemaName(compType);
-                if (table == null)
-                {
-                    skippedSlot = slot;
-                    break;
-                }
-                slotToTable[slot] = table;
+                (persistedNames, setMigration) = classified;
+            }
+            else
+            {
+                ClassifyArchetypeSchema(meta, slotToTable, renameMap, out persistedNames, out setMigration);
             }
 
-            // The registry is process-wide, so an archetype another part of the process declared is skipped here as a matter of course and cannot be refused.
-            // What is recorded is why, so the first call that reaches the archetype can say it instead of describing a state it is not in (#1071). The slot
-            // only: the message is built when one is read, not for every foreign archetype on every open.
-            if (skippedSlot >= 0)
+            if (setMigration != null)
             {
-                (_skippedArchetypes ??= [])[meta.ArchetypeId] = skippedSlot;
-                continue;
+                StageArchetypeSetChange(meta, setMigration);
             }
-
-            // Schema validation: compare runtime archetype against persisted schema
-            ValidateArchetypeSchema(meta);
 
             // ═══════════════════════════════════════════════════════════════════════
             // Cluster storage: EVERY archetype is cluster-backed, unconditionally — see the constant below.
@@ -5143,17 +5537,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // Allocate or reload per-archetype entity storage (RawValueHashMap) on THIS engine's MMF
             var stride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(meta._entityRecordSize);
 
-            // Skip O(1) EntityMap reopen if any of this archetype's component tables underwent migration.
-            // Migration creates new segments with preserved chunk IDs, but the persisted EntityMap
-            // points to old chunk IDs that may not be valid in the context of the new revision chain layout.
-            var hasMigratedSlot = false;
-            if (_migratedComponents != null)
-            {
-                for (var slot = 0; slot < meta.ComponentCount && !hasMigratedSlot; slot++)
-                {
-                    hasMigratedSlot = _migratedComponents.ContainsKey(slotToTable[slot].Definition.Name);
-                }
-            }
+            // Skip the O(1) EntityMap reopen when this open re-places the archetype: a component of it migrated (new component sizes, new cluster geometry)
+            // or its component set changed (new slots, new header, new record size). Both are one path from here: the persisted map and cluster describe the
+            // old geometry, so fresh ones are allocated and RebuildClusterFromChains re-places every entity (SCHEMA-12).
+            var migrating = IsMigratingArchetype(meta, slotToTable);
 
             // Reopen re-match by name (claude/design/Ecs/SourceGeneratedRegistry/04-solution-design.md §7.1):
             // restore this archetype's persisted routing id, or assign a fresh one for a newly-added archetype.
@@ -5163,23 +5550,43 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // archetype at its open. The timeline forks before the id is used.
             if (!hasPersisted && !MMF.IsDatabaseFileCreating)
             {
-                ForkTimeline(TimelineReason.SchemaChange, switchSegment: false);
+                ForkTimeline(TimelineReason.SchemaChange);
             }
 
             var routingId = hasPersisted ? persisted.Arch.RoutingId : _nextRoutingId++;
+            // #1485: the manifest names the build that writes the database (an exact open verified it already).
+            if (hasPersisted)
+            {
+                var declared = meta;
+                NoteDeclaringAssembly(meta.ArchetypeType?.Assembly, persisted.Arch.AssemblyId, id =>
+                {
+                    if (TryGetPersistedArchetype(declared, out var row))
+                    {
+                        RepointArchetypeAssembly(declared, row, id);
+                    }
+                });
+            }
 
             // A migration invalidates the cluster (new component sizes => new geometry), so the fresh one is allocated below and the old bytes would be
-            // orphaned. Capture the old segment at its OWN layout first: for a SingleVersion slot those bytes are the ONLY copy of the data (#671). Anything
-            // this cannot reconstruct faithfully still fails loudly rather than opening with silently zeroed components.
-            if (hasMigratedSlot)
+            // orphaned. Capture the old segment at its OWN layout first, as the persisted catalog records it: for a SingleVersion slot those bytes are the
+            // ONLY copy of the data (#671), and for every archetype its (chunk, slot) order is the placement order (SCHEMA-12). Anything this cannot load
+            // still fails loudly rather than opening with silently zeroed components.
+            PreMigrationCluster preMigration = null;
+            if (migrating && hasPersisted)
             {
-                CapturePreMigrationCluster(meta, slotToTable, isClusterEligible, hasPersisted, persisted);
+                preMigration = CapturePreMigrationCluster(meta, persistedNames, persisted, setMigration);
             }
             _metaByRouting[routingId] = meta;
             _routingByCatalog[meta.ArchetypeId] = routingId;
 
+            // The WAL addresses (routing id, slot) in the committed slot numbering (SCHEMA-09, LOG-06): a crash open's replay translates through this.
+            if (setMigration is { MovesData: true })
+            {
+                (_setMigrationByRouting ??= new ArchetypeSetMigrationPlan[RoutingTableSize])[routingId] = setMigration;
+            }
+
             bool isFreshAllocation;
-            if (!hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0
+            if (!migrating && hasPersisted && persisted.Arch.EntityMapSPI > 0
                 && MMF.TryLoadChunkBasedSegment(persisted.Arch.EntityMapSPI, stride, out var loadedSegment, TolerateTornSegmentsAtOpen))
             {
                 // Reload existing EntityMap from persisted segment (O(1) reopen). An unusable meta opens as an empty map exactly when this open is about
@@ -5199,15 +5606,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
             else
             {
-                // A migration invalidated the persisted EntityMap (the branch above is skipped on hasMigratedSlot), so the fresh allocation below REPLACES it
+                // A migration invalidated the persisted EntityMap (the branch above is skipped when migrating), so the fresh allocation below REPLACES it
                 // and nothing will reference the old segment again. Record it for release — otherwise its pages stay bit-set in the occupancy map with no
                 // claimant forever, which is the largest of the three leaks review M9 describes (it never even named this one: 21 of the 26 pages per
                 // archetype). Deliberately not recorded when the load merely FAILED: a segment whose page directory could not be read must not have its page
                 // list trusted for a free — that is RB-01's rebuild path, not segment lifetime.
-                if (hasMigratedSlot && hasPersisted && persisted.Arch.EntityMapSPI > 0)
+                if (preMigration != null && persisted.Arch.EntityMapSPI > 0)
                 {
-                    (_abandonedMigrationSegments ??= []).Add((persisted.Arch.EntityMapSPI, stride));
-                    CapturePreMigrationEnabledBits(meta, slotToTable, persisted.Arch.EntityMapSPI, stride);
+                    // The OLD map's stride: its record holds one root per PERSISTED Versioned slot.
+                    var oldStride = RawValuePagedHashMap<long, PersistentStore>.RecommendedStride(preMigration.RecordSize);
+                    (_abandonedMigrationSegments ??= []).Add((persisted.Arch.EntityMapSPI, oldStride));
+                    CapturePreMigrationEnabledBits(meta, preMigration, persisted.Arch.EntityMapSPI, preMigration.RecordSize, oldStride);
                 }
 
                 // Fresh allocation (new archetype or legacy database without SPI)
@@ -5218,7 +5627,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 {
                     SlotToComponentTable = slotToTable,
                     EntityMap = RawValuePagedHashMap<long, PersistentStore>.Create(segment, EntityMapInitialBuckets, meta._entityRecordSize),
-                    NextEntityKey = 0,
+                    // A re-placed archetype resumes its persisted key counter: the rebuild raises it to the highest live key, but a destroyed entity's key
+                    // above that was handed out too, and an EntityLink elsewhere may still name it (AC-9).
+                    NextEntityKey = preMigration != null ? persisted.Arch.NextEntityKey : 0,
                 };
                 isFreshAllocation = true;
             }
@@ -5272,7 +5683,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // and every offset inside the chunk — so loading the persisted segment at the NEW stride reinterprets bytes written under the old one, which
                     // is worse than starting empty because it looks like data. Fall through to a fresh allocation; RebuildClusterFromChains re-places the
                     // entities and RebuildVersionedHeadFromChain refills the slots (#671).
-                    var loaded = !isPureTransient && !hasMigratedSlot && MMF.TryLoadChunkBasedSegment(
+                    var loaded = !isPureTransient && !migrating && MMF.TryLoadChunkBasedSegment(
                         clusterPersisted.Arch.ClusterSegmentSPI, clusterLayout.ClusterStride, out loadedCluster, TolerateTornSegmentsAtOpen);
 
                     // TransientStore segment always created fresh on reopen (Transient data doesn't survive restart)
@@ -5650,7 +6061,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         else
         {
             _preMigrationClusters = null;
-            _preMigrationEnabledBits = null;
+            _preMigrationRecords = null;
         }
 
         // Persist any new archetypes not yet in the database
@@ -5753,6 +6164,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             CommitPendingSchemaAtCleanOpen();
         }
+
+        // The migration's realm hints outlive its own spatial rebuild only for the crash open's recovery rebuild, which has run by now (D12).
+        _migrationRealmHints = null;
 
         _archetypeSpiPersistArmed = true;
     }
@@ -5908,7 +6322,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // they leave the log: a failure between the two finds the break again on the next open.
         if (_lastRecoveryResult.FirstDroppedSegmentId != 0)
         {
-            ForkTimeline(TimelineReason.LogBreak, false);
+            ForkTimeline(TimelineReason.LogBreak);
         }
 
         WalManager.SegmentManager.RetireSetAsideSegments();
@@ -5931,7 +6345,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>
     /// Recovery's spatial phase: drop the whole cell layer and rebuild it from the recovered cluster data, for every cluster-spatial archetype. The same
     /// fresh-grid, fresh-pool precondition <see cref="ArchetypeClusterState.RebuildSpatialStateFromData"/> documents; every realm's grid is shared by
-    /// the archetypes in it, so each is reset once and every archetype refilled.
+    /// the archetypes in it, so each is reset once and every archetype refilled. An archetype this open migrated is refilled with the realm hints its
+    /// migration computed (<see cref="_migrationRealmHints"/>, D12).
     /// </summary>
     private void RebuildSpatialLayerAfterRecovery()
     {
@@ -5947,17 +6362,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             realm.Grid.ResetCellState();
         }
 
-        foreach (var es in _archetypeStates)
+        for (var archetypeId = 0; archetypeId < _archetypeStates.Length; archetypeId++)
         {
-            var clusterState = es?.ClusterState;
+            var clusterState = _archetypeStates[archetypeId]?.ClusterState;
             if (clusterState == null || !clusterState.SpatialSlot.HasSpatialIndex)
             {
                 continue;
             }
 
             clusterState.ResetRealmCellPools();
-            // Realm 0's grid for an unkeyed archetype; a realm-keyed one files each cluster in the realm its first entity names (Realms C1d).
-            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
+            // Realm 0's grid for an unkeyed archetype; a realm-keyed one files each cluster in the realm its first entity names (Realms C1d), or in the realm
+            // hint a migration of this open gave it (D12): the clusters it carved out of an old one keep that one's realm, whatever entity comes first. A
+            // cluster beyond the hints — one the replay allocated — takes the first-valid-key rule; a replayed spawn may be a stray either way (D6, #1557).
+            // Every cluster takes its AABB-centre cell (D11).
+            ClusterHomeHint[] hints = null;
+            _migrationRealmHints?.TryGetValue((ushort)archetypeId, out hints);
+            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager, homeHints: hints);
         }
 
         _openClusterAabbRebuildMs += (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
@@ -6327,7 +6747,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // exist", and they survive a CLEAN shutdown. It stayed invisible because TestBase defaults to InMemoryWalFileIO, which leaves the WAL directory
             // empty and the whole branch unentered (regression test: MigratingReopen_OnDiskWal_PreservesEntities). The gate now requires an unclean close
             // (#1143); the migration exclusion stays, because a crash can still precede a migrating open.
-            if (WillRebuildEntityMapOnCrash(meta) && !HasMigratedSlot(state))
+            if (WillRebuildEntityMapOnCrash(meta) && !IsMigratingArchetype(meta, state.SlotToComponentTable))
             {
                 RebuildEntityMapOnCrash(meta, state);
                 continue;
@@ -6338,6 +6758,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // map being empty, which a map emptied by destroys is too — and every chain still allocated then reopened as a live entity (#1231).
             if (state.EntityMapLoaded)
             {
+                // The crash rebuild above establishes the visibility summary as it walks the clusters; a clean open walks nothing, so it establishes the
+                // summary here, or every snapshot scan of this session probes each entity (#1574, CLUSTERVIS-03). The restored TSN counter bounds every
+                // birth on disk only after a CLEAN close, the one that persists it: an unclean close with no WAL to replay is not a crash open, and its
+                // checkpointed pages can hold births above the stale counter. Nor a forced recovery open, whose replay has yet to run.
+                if (_cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen)
+                {
+                    state.ClusterState?.EstablishVisibilityAfterCleanOpen(TransactionChain.NextFreeId);
+                }
                 continue;
             }
 
@@ -6349,7 +6777,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // QueryRead one in #629: one accessor, two record shapes.
             if (meta.IsClusterEligible && state.ClusterState != null)
             {
-                RebuildClusterFromChains(meta, state, mapCs);
+                var setMigration = DataMovingSetMigrationOf(meta);
+                var start = Stopwatch.GetTimestamp();
+                var placed = RebuildClusterFromChains(meta, state, mapCs, setMigration);
+                if (setMigration != null)
+                {
+                    NoteArchetypeSetMigrated(setMigration, placed, Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+                }
+
                 continue;
             }
 
@@ -6360,102 +6795,47 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Walks the pre-migration cluster's occupancy bitmaps and returns each live entity's old <c>(chunkId, slotIndex)</c>, adding every entity found to
-    /// <paramref name="allEntityPKs"/> so a pure-<see cref="StorageMode.SingleVersion"/> archetype — which has no revision chains to enumerate — still
-    /// contributes its membership to the rebuild.
-    /// </summary>
-    private static unsafe Dictionary<long, (int ChunkId, int SlotIndex)> CollectPreMigrationPositions(ChunkBasedSegment<PersistentStore> oldSegment,
-        ArchetypeClusterInfo oldLayout, HashSet<long> allEntityPKs, ChangeSet cs)
-    {
-        var positions = new Dictionary<long, (int ChunkId, int SlotIndex)>();
-        var accessor = oldSegment.CreateChunkAccessor(cs);
-        try
-        {
-            for (var chunkId = 0; chunkId < oldSegment.ChunkCapacity; chunkId++)
-            {
-                if (!oldSegment.IsChunkAllocated(chunkId))
-                {
-                    continue;
-                }
-
-                var chunkBase = accessor.GetChunkAddress(chunkId);
-                var occupancy = *(ulong*)chunkBase;
-                while (occupancy != 0)
-                {
-                    var slotIndex = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-
-                    var entityPK = *(long*)(chunkBase + oldLayout.EntityIdsOffset + slotIndex * 8);
-                    if (entityPK == 0)
-                    {
-                        // A live slot ALWAYS carries its entity id — spawn and the rebuild both write the tail. Reading zero therefore does not mean "empty
-                        // slot" (the occupancy bit says otherwise), it means the geometry this cluster is being read through is WRONG, so EntityIdsOffset
-                        // points at something else entirely. That happens whenever the reconstructed pre-migration layout disagrees with what the cluster was
-                        // written at: a component's old size unavailable (which silently zeroed SingleVersion data until the OldCompSize fix), or the
-                        // AllowMultiple element-id tail having a different width because the index set changed.
-                        //
-                        // Skipping was the dangerous choice: every slot gets skipped, positions comes back empty, CopyPreMigrationSlot never runs, and the
-                        // database opens with every SingleVersion component silently zeroed. Failing here converts that entire class — not merely the causes
-                        // enumerated above — into a loud error, and it VALIDATES the reconstruction instead of trying to predict what can invalidate it.
-                        // Nothing else can: TryLoadChunkBasedSegment takes the stride from its caller and never checks it against the segment on disk.
-                        ThrowHelper.ThrowCorruption(
-                            "ClusterSegment",
-                            chunkId,
-                            $"pre-migration cluster chunk {chunkId} slot {slotIndex} is occupied but its entity id reads 0 at offset "
-                            + $"{oldLayout.EntityIdsOffset + slotIndex * 8} (stride {oldLayout.ClusterStride}, cluster size {oldLayout.ClusterSize}). The "
-                            + "reconstructed pre-migration cluster geometry does not match what this cluster was written at, so its SingleVersion bytes cannot "
-                            + "be copied out. Refusing to open rather than zeroing those components. See https://github.com/Log2n-io/Typhon/issues/671.");
-                    }
-
-                    positions[entityPK] = (chunkId, slotIndex);
-                    allEntityPKs.Add(entityPK);
-                }
-            }
-        }
-        finally
-        {
-            accessor.Dispose();
-        }
-
-        return positions;
-    }
-
-    /// <summary>
     /// Copies one entity's <see cref="StorageMode.SingleVersion"/> component bytes out of the pre-migration cluster into its newly claimed slot, applying the
     /// migration's field map when that component's layout changed and a straight copy when it did not.
     /// </summary>
     /// <remarks>
     /// Only SingleVersion is copied. A Versioned slot is refilled by <c>RebuildVersionedHeadFromChain</c> from the authoritative chain, and a Transient slot has
     /// no persisted bytes in either cluster. Fields dropped by the migration are simply not copied, and fields added land on the zeroed new slot — the same
-    /// add/remove semantics <c>SchemaEvolutionEngine</c> gives the ComponentTable path.
+    /// add/remove semantics <c>SchemaEvolutionEngine</c> gives the ComponentTable path. Each runtime slot reads the persisted slot
+    /// <see cref="PreMigrationCluster.OldSlotOf"/> names, at the persisted geometry; a slot with none keeps the fresh chunk's zeros.
     /// </remarks>
-    private unsafe void CopyPreMigrationSlot(ArchetypeMetadata meta, ArchetypeEngineState state, byte* oldChunkBase, ArchetypeClusterInfo oldLayout,
-        (int ChunkId, int SlotIndex) oldPos, ArchetypeClusterInfo newLayout, byte* newClusterBase, int newSlotIndex)
+    private unsafe void CopyPreMigrationSlot(ArchetypeMetadata meta, ArchetypeEngineState state, PreMigrationCluster old, byte* oldChunkBase, int oldSlotIndex,
+        ArchetypeClusterInfo newLayout, byte* newClusterBase, int newSlotIndex)
     {
+        var oldLayout = old.Layout;
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
         {
-            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            var table = state.SlotToComponentTable[slot];
+            if (table?.StorageMode != StorageMode.SingleVersion)
             {
-                var table = state.SlotToComponentTable[slot];
-                if (table?.StorageMode != StorageMode.SingleVersion)
-                {
-                    continue;
-                }
-
-                var src = oldChunkBase + oldLayout.ComponentOffset(slot) + oldPos.SlotIndex * oldLayout.ComponentSize(slot);
-                var dst = newClusterBase + newLayout.ComponentOffset(slot) + newSlotIndex * newLayout.ComponentSize(slot);
-
-                if (_migratedComponents == null || !_migratedComponents.TryGetValue(table.Definition.Name, out var mr))
-                {
-                    // Untouched by this migration: same layout on both sides, so the bytes move verbatim. The sizes can still differ if a DIFFERENT component
-                    // resized the cluster, but this component's own size did not change — copy the smaller of the two to stay in bounds either way.
-                    var n = Math.Min(oldLayout.ComponentSize(slot), newLayout.ComponentSize(slot));
-                    Buffer.MemoryCopy(src, dst, n, n);
-                    continue;
-                }
-
-                // A user migration chain carries no field map: its functions do the remap, here exactly as in the segment migration.
-                SchemaEvolutionEngine.ConvertValue(in mr, src, oldLayout.ComponentSize(slot), dst, newLayout.ComponentSize(slot));
+                continue;
             }
+
+            var o = old.OldSlotOf(slot);
+            if (o == ArchetypeSetDiff.NoSlot)
+            {
+                continue;
+            }
+
+            var src = oldChunkBase + oldLayout.ComponentOffset(o) + oldSlotIndex * oldLayout.ComponentSize(o);
+            var dst = newClusterBase + newLayout.ComponentOffset(slot) + newSlotIndex * newLayout.ComponentSize(slot);
+
+            if (_migratedComponents == null || !_migratedComponents.TryGetValue(table.Definition.Name, out var mr))
+            {
+                // Untouched by this migration: same layout on both sides, so the bytes move verbatim. The sizes can still differ if a DIFFERENT component
+                // resized the cluster, but this component's own size did not change — copy the smaller of the two to stay in bounds either way.
+                var n = Math.Min(oldLayout.ComponentSize(o), newLayout.ComponentSize(slot));
+                Buffer.MemoryCopy(src, dst, n, n);
+                continue;
+            }
+
+            // A user migration chain carries no field map: its functions do the remap, here exactly as in the segment migration.
+            SchemaEvolutionEngine.ConvertValue(in mr, src, oldLayout.ComponentSize(o), dst, newLayout.ComponentSize(slot));
         }
     }
 
@@ -6467,42 +6847,35 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <para>
     /// Every entry is kept, all-enabled ones included, so that an entity MISSING from the snapshot means "unknown", never "all enabled". The difference
     /// matters on a migrating open after a crash: the old map is loaded tolerating a torn page wherever one is possible
-    /// (<see cref="TolerateTornSegmentsAtOpen"/>), and read under the same best-effort contract as the crash rebuild's
-    /// <see cref="SnapshotEntityMapEnabledBits"/> — a torn page loses its entries, and a lost entry must fall back to the weaker sources, not silently
+    /// (<see cref="TolerateTornSegmentsAtOpen"/>), and read best-effort — a torn page loses its entries, and a lost entry must fall back to the weaker
+    /// sources, not silently
     /// re-enable whatever that entity had disabled. Where no torn page is possible an unusable meta is refused instead (#1227).
     /// </para>
     /// <para>
-    /// The old records are read at the CURRENT record size, which is only valid while the archetype's Versioned slot count is unchanged — a revision bump
-    /// may change a component's StorageMode. When the persisted storage modes do not confirm the count (a mode changed, or a component is not found under
-    /// its current name after a rename), no snapshot is taken. Nor is one when the map cannot be loaded. The rebuild then falls back to the pre-migration
-    /// cluster's bits where one was kept, otherwise to the chain head.
+    /// The old records are read at <paramref name="oldRecordSize"/>, the record size of the PERSISTED Versioned slot count, which the catalog records whatever
+    /// this open changes (design 07 §5.3), and the snapshot keeps the persisted slot numbering. Before #1394 they were read at the current size, so no
+    /// snapshot was taken whenever the Versioned count could have changed.
+    /// </para>
+    /// <para>
+    /// A map that cannot be loaded is tolerated only where a torn page is possible (<see cref="TolerateTornSegmentsAtOpen"/>): nothing is snapshotted and
+    /// the rebuild falls back to the pre-migration cluster's bits, without the §6.4 cross-check. Anywhere else it refuses the open (R11): the map is then
+    /// the one image the cluster walk is validated against, and opening without it would carry entities across on their routing bits alone, silently.
     /// </para>
     /// </remarks>
-    private void CapturePreMigrationEnabledBits(ArchetypeMetadata meta, ComponentTable[] slotToTable, int entityMapSpi, int stride)
+    /// <exception cref="ArchetypeSchemaException">R11: the map cannot be loaded on an open where no torn page is possible.</exception>
+    private void CapturePreMigrationEnabledBits(ArchetypeMetadata meta, PreMigrationCluster old, int entityMapSpi, int oldRecordSize, int oldStride)
     {
-        var persistedVersionedCount = 0;
-        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        if (FailPreMigrationEntityMapLoadForTest || !TryLoadPreMigrationSegment(entityMapSpi, oldStride, out var oldSegment))
         {
-            var name = slotToTable[slot]?.Definition.Name;
-            if (name == null || _persistedComponents == null || !_persistedComponents.TryGetValue(name, out var persistedComp))
+            if (TolerateTornSegmentsAtOpen)
             {
                 return;
             }
 
-            if ((StorageMode)persistedComp.Comp.StorageMode == StorageMode.Versioned)
-            {
-                persistedVersionedCount++;
-            }
-        }
-
-        if (persistedVersionedCount != meta.VersionedSlotCount)
-        {
-            return;
-        }
-
-        if (!MMF.TryLoadChunkBasedSegment(entityMapSpi, stride, out var oldSegment, TolerateTornSegmentsAtOpen))
-        {
-            return;
+            throw new ArchetypeSchemaException(meta.Name, ArchetypeSchemaErrorKind.OldClusterUnreadable,
+                $"Archetype '{meta.Name}': its pre-migration entity map (SPI {entityMapSpi}, stride {oldStride}) could not be loaded, so the pre-migration "
+                + "cluster cannot be validated against it nor its enabled bits carried across. Refusing to open rather than lose or zero them. Nothing of "
+                + "this archetype was modified.");
         }
 
         using var guard = EpochGuard.Enter(EpochManager);
@@ -6514,7 +6887,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         RawValuePagedHashMap<long, PersistentStore> oldMap;
         try
         {
-            oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, EntityMapInitialBuckets, meta._entityRecordSize,
+            oldMap = RawValuePagedHashMap<long, PersistentStore>.Open(oldSegment, EntityMapInitialBuckets, oldRecordSize,
                 tolerateDamage: TolerateTornSegmentsAtOpen);
         }
         catch (InvalidOperationException ex)
@@ -6524,95 +6897,188 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 + "over. " + ex.Message, ex);
         }
 
-        (_preMigrationEnabledBits ??= [])[meta.ArchetypeId] = SnapshotEnabledBits(oldMap);
+        // Read and released (EP-02), as SnapshotEnabledBits does: the map can be larger than the cache. Indexed by the position each record names, in the
+        // geometry of the pre-migration cluster (see PreMigrationRecords).
+        var records = new PreMigrationRecords(ChunksInUse(old.Segment), old.Layout.ClusterSize);
+        var accessor = oldMap.Segment.CreateScanAccessor();
+        var action = new PreMigrationRecordSnapshotAction { Records = records };
+        oldMap.ForEachEntryQuiescent(ref accessor, ref action, MMF.IsSuspectPage);
+        accessor.Dispose();
+        (_preMigrationRecords ??= [])[meta.ArchetypeId] = records;
     }
 
-    private void CapturePreMigrationCluster(ArchetypeMetadata meta, ComponentTable[] slotToTable, bool isClusterEligible, bool hasPersisted,
-        (int ChunkId, ArchetypeR1 Arch) persisted)
+    /// <summary>One past the highest allocated chunk of <paramref name="segment"/> (0 for none): a segment's capacity grows by doubling, so sizing a
+    /// per-slot array by it would cost up to twice the slots in use.</summary>
+    private static int ChunksInUse(ChunkBasedSegment<PersistentStore> segment)
     {
-        if (!isClusterEligible)
+        if (segment == null)
         {
-            return;
+            return 0;
         }
 
-        // Only SingleVersion is unrecoverable without the old cluster. A Versioned slot's chain survives the migration and RebuildVersionedHeadFromChain
-        // refills its cluster slot; a Transient slot has no persisted bytes at all. So an archetype with no SV slot needs nothing RETAINED — but its old
-        // segment is abandoned all the same, and a segment that is never loaded can never be freed (ManagedPagedMMF.DeleteSegment works off the registry).
-        // Hence the load below is unconditional and `hasSv` decides only what happens to the result: kept for the byte copy, or loaded purely so its pages
-        // can go back (review M9).
-        var hasSv = false;
-        for (var slot = 0; slot < meta.ComponentCount && !hasSv; slot++)
+        for (var chunkId = segment.ChunkCapacity - 1; chunkId > 0; chunkId--)
         {
-            hasSv = slotToTable[slot]?.StorageMode == StorageMode.SingleVersion;
-        }
-
-        if (!hasPersisted || persisted.Arch.ClusterSegmentSPI <= 0)
-        {
-            return; // nothing persisted to recover from — the archetype is new, so there are no old bytes to lose
-        }
-
-        // Reconstruct the geometry the old cluster was written at: the migrated components at their PRE-migration size, everything else unchanged.
-        var oldSizes = new int[meta.ComponentCount];
-        var multipleIndexedFieldCount = 0;
-        for (var slot = 0; slot < meta.ComponentCount; slot++)
-        {
-            var table = slotToTable[slot];
-            oldSizes[slot] = _migratedComponents != null && _migratedComponents.TryGetValue(table.Definition.Name, out var mr) && mr.OldCompSize > 0 ? 
-                mr.OldCompSize : table.Definition.ComponentStorageSize;
-
-            if (table.IndexedFieldInfos == null)
+            if (segment.IsChunkAllocated(chunkId))
             {
-                continue;
+                return chunkId + 1;
+            }
+        }
+
+        return 0;
+    }
+
+    private struct PreMigrationRecordSnapshotAction : RawValuePagedHashMap<long, PersistentStore>.IEntryAction<long>
+    {
+        public PreMigrationRecords Records;
+
+        public unsafe bool Process(long key, byte* value)
+        {
+            ref var header = ref ClusterEntityRecordAccessor.GetHeader(value);
+            Records.Add(key, header.EnabledBits, ClusterEntityRecordAccessor.GetClusterChunkId(value), ClusterEntityRecordAccessor.GetSlotIndex(value),
+                header.DiedTSN == 0);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Builds a migrating archetype's <see cref="PreMigrationCluster"/> from its persisted row and the persisted catalog, and loads the persisted cluster at
+    /// that geometry when there is one (SCHEMA-12, design 07 §5.3).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The cluster is ALWAYS loaded when the row names one and the persisted set is not pure Transient (D7): its occupancy, in (chunk, slot) order, is the
+    /// order every entity is re-placed in, and its SingleVersion bytes have no other copy. Before #1394 it was loaded only for an archetype with a
+    /// SingleVersion slot, and its geometry was rebuilt from the RUNTIME slot list — the migrated components at their old size, the AllowMultiple count from
+    /// the RUNTIME index set — so a migration that also added an index could not be read and was refused (#671). The catalog keeps the pre-open sizes, modes
+    /// and index flags of every component until the commit (§4.2), so the refusal is gone.
+    /// </para>
+    /// <para>
+    /// The segment is queued for release before it loads: the fresh cluster replaces it whatever happens (review M9). A load failure refuses the open (R11)
+    /// rather than opening with the entities lost.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArchetypeSchemaException">R6: a persisted component has no catalog row. R11: the persisted cluster cannot be loaded.</exception>
+    private PreMigrationCluster CapturePreMigrationCluster(ArchetypeMetadata meta, string[] persistedNames, (int ChunkId, ArchetypeR1 Arch) persisted,
+        ArchetypeSetMigrationPlan set)
+    {
+        // A set change carries the geometry its classification already rebuilt from the same catalog; the field-only path rebuilds it here.
+        ArchetypeClusterInfo layout;
+        StorageMode[] modes;
+        ushort versionedMask;
+        if (set is { MovesData: true })
+        {
+            layout = set.OldLayout;
+            modes = set.OldStorageModes;
+            versionedMask = set.OldVersionedSlotMask;
+        }
+        else
+        {
+            layout = BuildPersistedLayout(persistedNames, meta.Name, out modes, out versionedMask, out _);
+        }
+
+        var old = new PreMigrationCluster
+        {
+            Layout = layout,
+            SegmentSpi = persisted.Arch.ClusterSegmentSPI,
+            RecordSize = ClusterEntityRecordAccessor.RecordSize(BitOperations.PopCount(versionedMask)),
+            // Each runtime slot reads the persisted slot its component NAME held (SCHEMA-11). The field-only path has the identity: its persisted names ARE
+            // the runtime names, since ClassifyArchetypeSchema opens nothing else without a set change.
+            NewToOld = set is { MovesData: true } ? set.Diff.NewToOld : null,
+        };
+        (_preMigrationClusters ??= [])[meta.ArchetypeId] = old;
+
+        // A pure-Transient archetype persists no cluster: nothing survived the close.
+        var pureTransient = modes.Length > 0;
+        for (var o = 0; o < modes.Length && pureTransient; o++)
+        {
+            pureTransient = modes[o] == StorageMode.Transient;
+        }
+
+        if (old.SegmentSpi <= 0 || pureTransient)
+        {
+            return old;
+        }
+
+        (_abandonedMigrationSegments ??= []).Add((old.SegmentSpi, layout.ClusterStride));
+        if (!TryLoadPreMigrationSegment(old.SegmentSpi, layout.ClusterStride, out var segment))
+        {
+            throw OldClusterUnreadable(meta.Name, old, "could not be loaded");
+        }
+
+        old.Segment = segment;
+        return old;
+    }
+
+    /// <summary>
+    /// Loads a migrating archetype's pre-migration segment (its cluster or its EntityMap), or takes the one a previous, interrupted pass of this open
+    /// loaded: a repeat <see cref="InitializeArchetypes"/> (#790) after one that stopped mid-build finds it registered, and a second registration is
+    /// refused. Nothing of an abandoned segment is written before the release, so the registered one still holds the persisted image.
+    /// </summary>
+    private bool TryLoadPreMigrationSegment(int rootPageIndex, int stride, out ChunkBasedSegment<PersistentStore> segment)
+        => MMF.TryGetLoadedChunkBasedSegment(rootPageIndex, out segment) || MMF.TryLoadChunkBasedSegment(rootPageIndex, stride, out segment,
+            TolerateTornSegmentsAtOpen);
+
+    /// <summary>
+    /// The cluster geometry an archetype was persisted at, rebuilt from the persisted catalog (design 07 §5.3, D8): per persisted slot, the component's
+    /// <see cref="ComponentR1.CompSize"/> and <see cref="ComponentR1.StorageMode"/>, and its <c>HasIndex &amp;&amp; IndexAllowMultiple</c> fields in
+    /// <see cref="FieldR1"/> for the element-id tail.
+    /// </summary>
+    /// <remarks>
+    /// Exact during an open: the catalog keeps the PRE-open row of every migrated component (a migrated row is staged and applied only by the commit), and an
+    /// AllowMultiple index change always comes with a migration, since it moves the component's stride (§4.2). The integrity scanner derives the same
+    /// layout from the same rows (<c>ClusterLayoutReader</c>). For the field-only path the names are the runtime names, and the sizes reproduce the old
+    /// <c>OldCompSize</c> substitution.
+    /// </remarks>
+    /// <exception cref="ArchetypeSchemaException">R6: a name has no catalog row.</exception>
+    internal ArchetypeClusterInfo BuildPersistedLayout(string[] oldNames, string archetypeName, out StorageMode[] modes, out ushort versionedMask,
+        out ushort transientMask)
+    {
+        var sizes = new int[oldNames.Length];
+        modes = new StorageMode[oldNames.Length];
+        versionedMask = 0;
+        transientMask = 0;
+        var multipleIndexedFieldCount = 0;
+        for (var o = 0; o < oldNames.Length; o++)
+        {
+            if (_persistedComponents == null || !_persistedComponents.TryGetValue(oldNames[o], out var row))
+            {
+                throw new ArchetypeSchemaException(archetypeName, ArchetypeSchemaErrorKind.CatalogRowMissing,
+                    $"Archetype '{archetypeName}' stores component '{oldNames[o]}' in slot {o}, but the catalog holds no row for it, so the stored cluster "
+                    + "layout cannot be reconstructed. Nothing of this archetype was modified.");
             }
 
-            for (var fi = 0; fi < table.IndexedFieldInfos.Length; fi++)
+            sizes[o] = row.Comp.CompSize;
+            modes[o] = (StorageMode)row.Comp.StorageMode;
+            if (modes[o] == StorageMode.Versioned)
             {
-                if (table.IndexedFieldInfos[fi].AllowMultiple)
+                versionedMask |= (ushort)(1 << o);
+            }
+            else if (modes[o] == StorageMode.Transient)
+            {
+                transientMask |= (ushort)(1 << o);
+            }
+
+            if (_persistedFieldsByComponent != null && _persistedFieldsByComponent.TryGetValue(oldNames[o], out var fields))
+            {
+                for (var f = 0; f < fields.Length; f++)
                 {
-                    multipleIndexedFieldCount++;
+                    if (fields[f].HasIndex && fields[f].IndexAllowMultiple)
+                    {
+                        multipleIndexedFieldCount++;
+                    }
                 }
             }
         }
 
-        // A migration that also changed the index set moves the AllowMultiple element-id tail, and the tail's size is not recorded per archetype — so the old
-        // stride cannot be reconstructed and every offset read out of the old cluster would be wrong. Refuse rather than copy garbage into SV components.
-        // SV-only: without an SV slot nothing is read out of the old cluster, so a wrong stride costs nothing (the load below is for the page list, which the
-        // segment's own directory supplies) and there is nothing to refuse.
-        if (hasSv && _componentsWithNewIndexes != null && _componentsWithNewIndexes.Count > 0)
-        {
-            ThrowHelper.ThrowInvalidOp(
-                $"Archetype '{meta.Name}' has a SingleVersion component and a migration that ALSO adds an index. The added index resizes the cluster's "
-                + "element-id tail, and the pre-migration tail size is not recorded, so the old cluster's offsets cannot be reconstructed to copy the "
-                + "SingleVersion bytes out. Apply the field change and the index addition in separate steps. See "
-                + "https://github.com/Log2n-io/Typhon/issues/671.");
-        }
-
-        var oldLayout = ArchetypeClusterInfo.Compute(meta.ComponentCount, oldSizes, multipleIndexedFieldCount, meta.VersionedSlotMask, meta.TransientSlotMask);
-
-        // The fresh cluster the caller allocates replaces this one, so its pages are owed back whether or not anything reads it first (review M9).
-        (_abandonedMigrationSegments ??= []).Add((persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride));
-
-        if (!hasSv)
-        {
-            // Nothing to copy out, so nothing is loaded here. ReleaseAbandonedMigrationSegments does the load, and it does it where a failure is survivable:
-            // oldLayout reconstructs the OLD component sizes but counts AllowMultiple fields from the NEW schema, so a migration that DROPS an AllowMultiple
-            // index yields a stride narrower than the segment was written at. That over-estimates chunks-per-page, which is harmless for the page list we
-            // actually want but can fault the bitmap walk — and a page-reclaim optimisation must never be able to fail an open.
-            return;
-        }
-
-        if (!MMF.TryLoadChunkBasedSegment(persisted.Arch.ClusterSegmentSPI, oldLayout.ClusterStride, out var oldSegment, TolerateTornSegmentsAtOpen))
-        {
-            ThrowHelper.ThrowInvalidOp(
-                $"Archetype '{meta.Name}' has a SingleVersion component and a schema migration, but its pre-migration cluster segment (SPI "
-                + $"{persisted.Arch.ClusterSegmentSPI}, stride {oldLayout.ClusterStride}) could not be loaded. SingleVersion keeps no revision chain, so those "
-                + "bytes have no second copy and opening would silently zero them. See https://github.com/Log2n-io/Typhon/issues/671.");
-        }
-
-        _preMigrationClusters ??= [];
-        _preMigrationClusters[meta.ArchetypeId] = (oldSegment, oldLayout);
+        AdjustPersistedLayoutSizesForTest?.Invoke(archetypeName, sizes);
+        return ArchetypeClusterInfo.Compute(oldNames.Length, sizes, multipleIndexedFieldCount, versionedMask, transientMask);
     }
 
+    /// <summary>R11 (design 07 §8): the pre-migration cluster cannot be loaded, or fails the §6.4 validation.</summary>
+    private static ArchetypeSchemaException OldClusterUnreadable(string archetypeName, PreMigrationCluster old, string reason)
+        => new(archetypeName, ArchetypeSchemaErrorKind.OldClusterUnreadable,
+            $"Archetype '{archetypeName}': its pre-migration cluster (SPI {old.SegmentSpi}, stride {old.Layout.ClusterStride}) {reason}, so its entities "
+            + "cannot be carried across. Refusing to open rather than lose or zero them. Nothing of this archetype was modified.");
     /// <summary>
     /// Frees every segment this open abandoned to a schema migration, once the migration rebuild has finished reading them.
     /// </summary>
@@ -6624,12 +7090,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// exists to close. Its "no concurrent reader" precondition holds by construction: this is the single-threaded open path.
     /// </para>
     /// <para>
-    /// A cluster whose <see cref="StorageMode.SingleVersion"/> bytes were needed is already registered (<see cref="CapturePreMigrationCluster"/> loaded it),
-    /// and so is an EntityMap whose enabled bits were snapshotted (<see cref="CapturePreMigrationEnabledBits"/>); both delete directly. Everything else — an
-    /// EntityMap that was not snapshotted, and the cluster of an archetype with no SV slot — was never loaded, so it is loaded here first, purely to obtain its
-    /// page list. That load is best-effort and every failure is swallowed: the reconstructed stride can be wrong (see <see
-    /// cref="CapturePreMigrationCluster"/>), and reclaiming pages must never be able to fail an open that would otherwise succeed. The cost of giving up is the
-    /// orphan we already had.
+    /// A pre-migration cluster is already registered (<see cref="CapturePreMigrationCluster"/> loads it for every migrating archetype, SCHEMA-12), and so is
+    /// an EntityMap whose records were snapshotted (<see cref="CapturePreMigrationEnabledBits"/>); both delete directly. Everything else — an EntityMap that
+    /// could not be snapshotted, an index segment a migration reallocated around — was never loaded, so it is loaded here first, purely to obtain its page
+    /// list. That load is best-effort and every failure is swallowed: reclaiming pages must never be able to fail an open that would otherwise succeed. The
+    /// cost of giving up is the orphan we already had.
     /// </para>
     /// <para>
     /// <b>Crash window, accepted deliberately.</b> The replacement SPI does not reach <c>ArchetypeR1</c> until the first checkpoint
@@ -6643,7 +7108,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         var abandoned = _abandonedMigrationSegments;
         _abandonedMigrationSegments = null;
         _preMigrationClusters = null; // the rebuild is done with them; the loop below frees the segments themselves
-        _preMigrationEnabledBits = null;
+        _preMigrationRecords = null;
 
         if (abandoned == null)
         {
@@ -6651,11 +7116,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         var cs = MMF.CreateChangeSet();
+        // A repeat InitializeArchetypes (#790) after an interrupted pass records a segment twice: release it once, never free a page list a second time.
+        var released = new HashSet<int>();
         try
         {
             for (var i = 0; i < abandoned.Count; i++)
             {
                 var (rootPageIndex, stride) = abandoned[i];
+                if (!released.Add(rootPageIndex))
+                {
+                    continue;
+                }
+
                 if (MMF.DeleteSegment(rootPageIndex, cs))
                 {
                     continue;
@@ -6686,51 +7158,637 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
+    /// <summary>One non-empty old cluster, in ascending chunk order, and its home (design 07 §6.3). Its entities are its occupied slots, re-read by the
+    /// placement.</summary>
+    private struct RebuildGroup
+    {
+        public int OldChunk;
+        public RebuildHomeKey Home;
+        public bool HasRealmHint;
+        public ushort Realm;
+    }
+
     /// <summary>
-    /// Re-place every live entity of a cluster-backed archetype into its (fresh) cluster and write the matching EntityMap records, deriving membership from the
-    /// Versioned revision chains.
+    /// The home of an old cluster (design 07 §6.3): its realm and the cell holding the centre of the box of its in-realm entity centres. Two consecutive old
+    /// clusters may share new clusters iff their keys are equal. <see cref="Unique"/> is the group's own index when no shareable home could be read — the
+    /// spatial field has no bytes in the old cluster, or no centre is finite — so that group closes on both sides (the strict form); -1 otherwise.
+    /// </summary>
+    private readonly record struct RebuildHomeKey(int Unique, ushort Realm, int CellX, int CellY, int CellZ);
+
+    /// <summary>Everything one migrating archetype's placement reads, built once per archetype.</summary>
+    private sealed class MigrationRebuildSources
+    {
+        public PreMigrationCluster Old;
+        public Dictionary<long, int>[] ChainHeads;
+        public int[] HeadHits;
+        public PreMigrationRecords Records;
+    }
+
+    /// <summary>
+    /// How <see cref="RebuildClusterFromChains"/> reads a spatial archetype's home keys out of its pre-migration cluster (design 07 §6.3): the spatial field
+    /// and the realm key at the persisted geometry, through the migration's conversion when their component changed layout in this open.
+    /// </summary>
+    private sealed class OldSpatialReader
+    {
+        public ArchetypeClusterState State;
+        public PreMigrationCluster Old;
+        public SpatialGrid Realm0Grid;
+        public bool Keyed;
+        public bool CellFromBytes;
+        public bool RealmFromBytes;
+        public int SpatialSlot;
+        public int SpatialOldSlot;
+        public int SpatialNewSize;
+        public int FieldOffset;
+        public SpatialFieldType FieldType;
+        public bool SpatialMigrated;
+        public MigrationResult SpatialMigration;
+        public int RealmSlot;
+        public int RealmOldSlot;
+        public int RealmNewSize;
+        public int RealmOffset;
+        public bool RealmMigrated;
+        public MigrationResult RealmMigration;
+
+        /// <summary>The scratch each conversion needs: zero when neither component changed layout.</summary>
+        public int ScratchSize => (SpatialMigrated ? SpatialNewSize : 0) + (RealmMigrated ? RealmNewSize : 0);
+
+        /// <summary>
+        /// The home key of the old cluster at <paramref name="chunkBase"/>: the realm of its first valid key in slot order, and the AABB-centre cell of its
+        /// in-realm finite centres in that realm's grid. <paramref name="scratch"/> holds <see cref="ScratchSize"/> bytes.
+        /// </summary>
+        public unsafe RebuildHomeKey HomeOf(byte* chunkBase, ulong occupancy, int group, byte* scratch, out bool hasRealmHint, out ushort realm)
+        {
+            hasRealmHint = false;
+            realm = 0;
+            var spatialScratch = scratch;
+            var realmScratch = scratch + (SpatialMigrated ? SpatialNewSize : 0);
+            SpatialGrid grid;
+            if (Keyed)
+            {
+                if (!RealmFromBytes)
+                {
+                    return new RebuildHomeKey(group, 0, 0, 0, 0);
+                }
+
+                for (var rest = occupancy; rest != 0 && !hasRealmHint; rest &= rest - 1)
+                {
+                    var key = RealmKeyAt(chunkBase, BitOperations.TrailingZeroCount(rest), realmScratch);
+                    if (State.IsValidRealmForEntity(key))
+                    {
+                        realm = key;
+                        hasRealmHint = true;
+                    }
+                }
+
+                if (!hasRealmHint)
+                {
+                    return new RebuildHomeKey(group, 0, 0, 0, 0);   // no valid key: the rebuild refuses the cluster, naming its realm (RLM-01)
+                }
+
+                grid = State.GridOfRealm(realm);
+            }
+            else
+            {
+                grid = Realm0Grid;
+                realm = grid.Realm.Value;
+            }
+
+            if (!CellFromBytes)
+            {
+                return new RebuildHomeKey(group, realm, 0, 0, 0);
+            }
+
+            var box = SpatialCentreBox.Empty;
+            for (var rest = occupancy; rest != 0; rest &= rest - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(rest);
+                if (Keyed && RealmKeyAt(chunkBase, slot, realmScratch) != realm)
+                {
+                    continue;
+                }
+
+                var field = ComponentAt(chunkBase, slot, SpatialSlot, SpatialOldSlot, SpatialNewSize, SpatialMigrated, in SpatialMigration, spatialScratch)
+                            + FieldOffset;
+                SpatialGrid.ReadSpatialCenter3D(field, FieldType, out var x, out var y, out var z);
+                box.Add(x, y, z);
+            }
+
+            return box.TryGetCell(grid, out var cellX, out var cellY, out var cellZ)
+                ? new RebuildHomeKey(-1, realm, cellX, cellY, cellZ)
+                : new RebuildHomeKey(group, realm, 0, 0, 0);
+        }
+
+        private unsafe ushort RealmKeyAt(byte* chunkBase, int slot, byte* scratch) =>
+            *(ushort*)(ComponentAt(chunkBase, slot, RealmSlot, RealmOldSlot, RealmNewSize, RealmMigrated, in RealmMigration, scratch) + RealmOffset);
+
+        /// <summary>The bytes of one old slot's component in its RUNTIME layout: in place when its layout did not change, converted into scratch
+        /// otherwise.</summary>
+        private unsafe byte* ComponentAt(byte* chunkBase, int entitySlot, int slot, int oldSlot, int newSize, bool migrated, in MigrationResult migration,
+            byte* scratch)
+        {
+            var src = chunkBase + Old.Layout.ComponentOffset(oldSlot) + entitySlot * Old.Layout.ComponentSize(oldSlot);
+            if (!migrated)
+            {
+                return src;
+            }
+
+            new Span<byte>(scratch, newSize).Clear();
+            SchemaEvolutionEngine.ConvertValue(in migration, src, Old.Layout.ComponentSize(oldSlot), scratch, newSize);
+            return scratch;
+        }
+    }
+
+    /// <summary>
+    /// Re-places every live entity of a migrating cluster-backed archetype into its fresh cluster, in OLD (chunk, slot) order, and writes the matching
+    /// EntityMap records (SCHEMA-12, design 07 §6.1).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Runs when the persisted EntityMap could not be reused — after a schema migration, which reallocates the component and revision segments and therefore
-    /// invalidates both the map and the cluster laid out for the old component sizes. The chains are the authoritative survivor: migration rewrites their
-    /// content and preserves chunk ids, so the head of each chain is this entity's current value at the new layout.
+    /// Runs when the persisted EntityMap could not be reused — after a schema migration, which invalidates both the map and the cluster laid out for the old
+    /// component sizes. Membership is the pre-migration cluster's occupancy, plus any Versioned chain head it does not hold; the chains carry every
+    /// Versioned value and the old cluster every SingleVersion value, which has no other copy (#671).
     /// </para>
     /// <para>
-    /// Only cluster POSITIONS and chain roots are established here. The HEAD bytes in each slot are filled by
-    /// <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> and the per-archetype B+Trees by
-    /// <see cref="ArchetypeClusterState.RebuildIndexesFromData"/>, both of which already run later in the open sequence and both of which need the records this
-    /// method writes.
+    /// <b>Placement (D7).</b> Phase 1 walks the old cluster in ascending (chunk, slot) order into one array, validating every occupied slot's entity id —
+    /// non-zero, carrying this archetype's routing id — before anything is claimed (§6.4): a mis-strided read yields words that almost never carry the
+    /// right routing id, and the refusal (R11) leaves the fresh segments unused and the file the pre-migration image. Phase 2 claims in that order through
+    /// <see cref="ArchetypeClusterState.ClaimSlotForRebuild"/>, which fills a cluster ascending: a non-spatial archetype is packed densely; a spatial one
+    /// closes the current cluster at an old-cluster boundary iff the home key (realm, AABB-centre cell) changes, so no new cluster mixes two homes and the
+    /// rebuild, which maps every cluster to its AABB-centre cell (D11), files no stray. Phase 3 appends the entities found only through a chain head
+    /// (§6.2). Before #1394 the claim ran in HashSet order, cell-agnostic: a migrated spatial world had cells mixed in every cluster, and the first tick
+    /// fence migrated most of it.
     /// </para>
     /// <para>
-    /// <b>A SingleVersion slot cannot be rebuilt from chains</b> — it has none, the cluster slot IS its data. When a migration invalidated the cluster,
-    /// <see cref="CapturePreMigrationCluster"/> kept the old segment and its geometry, and this method copies those bytes across through the migration's field
-    /// map. Membership then comes from the union of the chain heads and the old cluster's occupancy, so a PURE-SingleVersion archetype (no chains at all)
-    /// migrates too. A Transient slot has no persisted bytes in either home and is simply re-enabled (#671).
+    /// Only positions, chain roots, enabled bits and SingleVersion bytes are written here. The HEAD bytes of each Versioned slot are filled by
+    /// <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/>, then the per-archetype B+Trees by
+    /// <see cref="ArchetypeClusterState.RebuildIndexesFromData"/>, then the spatial layer with each new cluster's realm hint — each over the previous one's
+    /// output.
     /// </para>
     /// </remarks>
-    private unsafe void RebuildClusterFromChains(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs)
+    /// <param name="meta">The archetype.</param>
+    /// <param name="state">Its engine state, with the fresh EntityMap and cluster.</param>
+    /// <param name="cs">The change set the placement goes through.</param>
+    /// <param name="set">Its component-set migration (SCHEMA-11), or null: a field migration, or the legacy rebuild of a map that could not be loaded.</param>
+    /// <returns>The entities placed.</returns>
+    /// <exception cref="ArchetypeSchemaException">R11: an occupied slot of the pre-migration cluster fails the §6.4 validation. R9: an added Versioned slot
+    /// already has chain heads for this routing id whose entity is placed. R7: an added component's unique dense index on more than one entity. R12: an
+    /// added component carrying the spatial field or the realm key of a populated archetype. R7 and R12 count the chain-only entities too. All before the
+    /// first claim.</exception>
+    private unsafe int RebuildClusterFromChains(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs, ArchetypeSetMigrationPlan set)
     {
         var clusterState = state.ClusterState;
         var layout = clusterState.Layout;
         var slotToVi = layout.SlotToVersionedIndex;
         if (clusterState.ClusterSegment == null)
         {
-            return;
+            return 0;
         }
 
-        // The pre-migration cluster, when this open migrated a schema. It is the only surviving copy of every SingleVersion slot's bytes, and its occupancy is
-        // the only record of a pure-SingleVersion archetype's membership — such an archetype has no chains, so the head scan below finds nothing.
-        (ChunkBasedSegment<PersistentStore> Segment, ArchetypeClusterInfo Layout) oldCluster = default;
-        var hasOldCluster = _preMigrationClusters != null && _preMigrationClusters.TryGetValue(meta.ArchetypeId, out oldCluster);
-        if (!hasOldCluster && (meta.VersionedSlotMask == 0 || slotToVi == null))
+        PreMigrationCluster old = null;
+        _preMigrationClusters?.TryGetValue(meta.ArchetypeId, out old);
+        var oldSegment = old?.Segment;
+        if (oldSegment == null && (meta.VersionedSlotMask == 0 || slotToVi == null))
         {
-            return;
+            return 0;
         }
 
-        // Chain heads per Versioned slot: EntityPK -> compRevFirstChunkId. Same source the flat and crash rebuilds use.
+        var routingId = RoutingIdOf(meta);
+        var sources = new MigrationRebuildSources
+        {
+            Old = old,
+            ChainHeads = CollectMigrationChainHeads(meta, state, slotToVi, routingId),
+            HeadHits = new int[meta.ComponentCount],
+        };
+        _preMigrationRecords?.TryGetValue(meta.ArchetypeId, out sources.Records);
+
+        var spatial = meta.HasClusterSpatial && _realms != null && clusterState.SpatialSlot.HasSpatialIndex
+            ? CreateOldSpatialReader(state, old)
+            : null;
+
+        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
+        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(cs);
+        var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(cs);
+        // One accessor over the old cluster for the whole pass, both phases.
+        var oldAccessor = oldSegment != null ? oldSegment.CreateChunkAccessor(cs) : default;
+        var placement = RecordRebuildPlacementForTest ? new Dictionary<int, List<int>>() : null;
+        List<(int ChunkId, ushort Realm)> realmHints = null;
+        long maxEntityKey = 0;
+        var placedCount = 0;
+
+        try
+        {
+            // ─── Phase 1 (and 1b): old order and home keys, the whole old cluster validated before the first claim ───
+            // One group per non-empty old cluster, no per-entity array: Phase 2 re-reads each old cluster's occupancy and entity ids in the same order, from
+            // the chunk it reads the SingleVersion bytes out of anyway (an array of the walked entities cost 16 B per entity plus its doubling, measured).
+            var groups = new List<RebuildGroup>(oldSegment?.AllocatedChunkCount ?? 0);
+            var walked = 0;
+            if (oldSegment != null)
+            {
+                var scratchSize = spatial?.ScratchSize ?? 0;
+                var scratch = stackalloc byte[Math.Max(scratchSize, 1)];
+                // The recorded positions check the walk wherever the map and the cluster are one image: everywhere but an open after an unclean close,
+                // where a checkpoint is not page-consistent across segments (§6.2). Not CrashRecoveryAtOpen: the open after a refused one takes the crash
+                // path too (the failed-open marker), with the file as the last clean close left it, and gating on it made R11 single-shot.
+                walked = CollectPreMigrationOrder(meta, old, routingId, TolerateTornSegmentsAtOpen ? null : sources.Records, spatial, scratch,
+                    ref oldAccessor, groups);
+            }
+
+            // The refusals that need the entity count or the placed set, still before the first claim. Each counts every entity this placement places,
+            // the chain-only ones included (§6.2): R7 and R12 because a chain-only entity is absent in the added component too, R9 because it counts only
+            // the stale chains of placed entities. So when one of them can fire, the chain-only set is collected now rather than after Phase 2. The walked
+            // entities' ids, which both need as a set, are gathered only then.
+            List<long> orphans = null;
+            HashSet<long> walkedIds = null;
+            var orphansCollected = false;
+            if (set != null)
+            {
+                var staleChains = AddedSlotHasChainHeads(set, sources.ChainHeads);
+                // On a crash open R7 and R12 wait for the WAL window, which can spawn and destroy entities of the archetype: only its end says the population
+                // (ThrowIfSetMigrationPopulationsRefused, called by the replay before any record is applied).
+                var checkPopulation = !CrashRecoveryAtOpen && AddsPopulationSensitiveComponent(state, set);
+                if (staleChains || checkPopulation)
+                {
+                    if (HasChainOnlyCandidates(sources, set, exhaustive: true))
+                    {
+                        walkedIds = WalkedEntityIds(old, groups, ref oldAccessor, walked);
+                        orphans = CollectChainOnlyEntities(state, sources, walkedIds, set);
+                    }
+
+                    orphansCollected = true;
+                }
+
+                if (checkPopulation)
+                {
+                    var population = walked + (orphans?.Count ?? 0);
+                    ThrowIfAddedUniqueDenseIndex(meta, state, set, population, 0, crashOpen: false);
+                    ThrowIfAddedComponentCarriesPlacement(meta, state, set, population, 0, crashOpen: false);
+                }
+
+                if (staleChains)
+                {
+                    // The walked ids plus the chain-only ones (CollectChainOnlyEntities added those to the set): every entity the placement places.
+                    walkedIds ??= WalkedEntityIds(old, groups, ref oldAccessor, walked);
+                    ThrowIfAddedVersionedSlotHasChains(meta, state, set, sources.ChainHeads, walkedIds, routingId);
+                }
+            }
+
+            // ─── Phase 2: place group by group, in old order ───
+            var entityIdsOffset = old?.Layout.EntityIdsOffset ?? 0;
+            var lastHintedChunk = -1;
+            for (var g = 0; g < groups.Count; g++)
+            {
+                var group = groups[g];
+                // A spatial archetype closes the current cluster where the home key changes; a non-spatial one never closes, so it packs densely.
+                var start = spatial != null && (g == 0 || group.Home != groups[g - 1].Home);
+                for (var rest = *(ulong*)oldAccessor.GetChunkAddress(group.OldChunk); rest != 0; rest &= rest - 1)
+                {
+                    var slot = BitOperations.TrailingZeroCount(rest);
+                    var oldChunkBase = oldAccessor.GetChunkAddress(group.OldChunk);
+                    var entityPK = *(long*)(oldChunkBase + entityIdsOffset + slot * 8);
+                    var chunkId = PlaceRebuiltEntity(meta, state, cs, ref clusterAccessor, ref mapAccessor, recordBuf, sources, entityPK, oldChunkBase,
+                        group.OldChunk, slot, start);
+                    start = false;
+                    if (placement != null)
+                    {
+                        NotePlacement(placement, chunkId, group.OldChunk);
+                    }
+
+                    // One hint per new cluster: a run of entities lands in one cluster, and the hints are indexed by cluster.
+                    if (group.HasRealmHint && spatial is { Keyed: true } && chunkId != lastHintedChunk)
+                    {
+                        (realmHints ??= []).Add((chunkId, group.Realm));
+                        lastHintedChunk = chunkId;
+                    }
+
+                    maxEntityKey = Math.Max(maxEntityKey, EntityId.FromRaw(entityPK).EntityKey);
+                    placedCount++;
+                }
+            }
+
+            // ─── Phase 3: entities found only through a chain head, after every old cluster ───
+            if (!orphansCollected && HasChainOnlyCandidates(sources, set, exhaustive: false))
+            {
+                walkedIds ??= WalkedEntityIds(old, groups, ref oldAccessor, walked);
+                orphans = CollectChainOnlyEntities(state, sources, walkedIds, set);
+            }
+
+            if (orphans != null)
+            {
+                var start = true;
+                for (var i = 0; i < orphans.Count; i++)
+                {
+                    var chunkId = PlaceRebuiltEntity(meta, state, cs, ref clusterAccessor, ref mapAccessor, recordBuf, sources, orphans[i], null, -1, -1,
+                        start);
+                    start = false;
+                    if (placement != null)
+                    {
+                        NotePlacement(placement, chunkId, -1);
+                    }
+
+                    maxEntityKey = Math.Max(maxEntityKey, EntityId.FromRaw(orphans[i]).EntityKey);
+                    placedCount++;
+                }
+
+                // Counted for a migration only. Without a pre-migration descriptor this is the legacy rebuild of a map the open could not load, whose cluster
+                // was not kept either: every entity is chain-only there by construction, as it always was.
+                if (old != null)
+                {
+                    LastOpenMigrationOrphanChainEntities += orphans.Count;
+                    // An open after an unclean close can hold them legitimately: a checkpoint is not page-consistent across segments (§6.2, D6). An open
+                    // over one image cannot, the crash-path open after a refused one included.
+                    if (!TolerateTornSegmentsAtOpen)
+                    {
+                        LogMigrationChainOnlyEntities(meta.Name, orphans.Count);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (oldSegment != null)
+            {
+                oldAccessor.Dispose();
+            }
+
+            mapAccessor.Dispose();
+            clusterAccessor.Dispose();
+        }
+
+        if (maxEntityKey >= state.NextEntityKey)
+        {
+            state.NextEntityKey = maxEntityKey;
+        }
+
+        if (old != null && placement != null)
+        {
+            (LastOpenRebuildPlacementMap ??= [])[meta.ArchetypeId] = placement;
+        }
+
+        // Order matters. The placement established WHERE each entity lives; the Versioned slots themselves are still zeroed, because their bytes live in the
+        // revision chains. Fill the HEADs from those chains first, then build the indexes over real values — indexing first yields one entry per zeroed
+        // slot. Untrusted, and here the reason is circularity rather than durability: the placement SET each Versioned slot's enabled bit only where the
+        // entity had a chain head, so the bit carries no information independent of the root being classified. A slot the set migration added has no root
+        // on any entity by design (D5), and is classified as such rather than warned about.
+        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, false, out var headSkips, addedSlotMask: set?.Diff.AddedMask ?? 0);
+        NoteVersionedHeadRebuildSkips(meta, in headSkips);
+
+        // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
+        // reopen now points at the old geometry. This scan also covers a component that merely GAINED an index: its tree is created empty, and this fills it —
+        // the per-archetype replacement for ComponentTable.PopulateNewIndexes.
+        if (clusterState.IndexSlots != null && clusterState.ActiveClusterCount > 0)
+        {
+            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(cs));
+            LastOpenClusterIndexRebuildCount++;
+        }
+
+        // Spatial state is the third derived structure over cluster data, and its normal rebuild runs inside InitializeArchetypes — before this method has
+        // placed anything, so it would have seen an empty cluster. Redo it here or the archetype reopens with entities present and every spatial query empty.
+        // Each new cluster carries its old clusters' realm, so a cluster carved from an old one never flips realm on a realm stray (§4.6); the hints are kept
+        // for the crash open's recovery rebuild (D12).
+        if (spatial != null && clusterState.ActiveClusterCount > 0)
+        {
+            var hints = BuildRealmHints(realmHints);
+            if (hints != null)
+            {
+                (_migrationRealmHints ??= [])[meta.ArchetypeId] = hints;
+            }
+
+            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager, homeHints: hints);
+        }
+
+        cs.SaveChanges();
+        return placedCount;
+    }
+
+    /// <summary>
+    /// Phase 1 of <see cref="RebuildClusterFromChains"/>: the pre-migration cluster in ascending (chunk, slot) order, one group per non-empty old cluster with
+    /// its home key when the archetype is spatial, every occupied slot validated (design 07 §6.4).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two checks per occupied slot, both before the first claim. Its entity id must be non-zero and carry this archetype's routing id. And, when
+    /// <paramref name="records"/> is given (any open where no torn page is possible — a clean open, and the crash-path open after a refused or a forced one —
+    /// where the pre-migration EntityMap and cluster are one checkpoint's image), the entity's record
+    /// must name this very (chunk, slot), and every live record must be met by the walk.
+    /// </para>
+    /// <para>
+    /// The second check is what makes the validation sound. The entity-id tail sits at <c>8 + 8·C</c>, whatever the component sizes, and a cluster that
+    /// fills a page starts at the page's first byte, so a reconstruction with the wrong stride can still read every id it visits correctly — while
+    /// visiting the wrong chunks (measured: a stride grown from five clusters a page to one walked chunks 0, 5, 10 … as 0, 1, 2 …, every id valid, four
+    /// clusters in five skipped, their entities left to the chain-only pass with their SingleVersion bytes zeroed).
+    /// </para>
+    /// </remarks>
+    /// <returns>The entities walked: the occupied slots of every group.</returns>
+    /// <exception cref="ArchetypeSchemaException">R11: an occupied slot beyond the cluster size, a zero entity id, another archetype's routing id, a slot its
+    /// record does not name, or a live record the walk never met.</exception>
+    private unsafe int CollectPreMigrationOrder(ArchetypeMetadata meta, PreMigrationCluster old, ushort routingId, PreMigrationRecords records,
+        OldSpatialReader spatial, byte* scratch, ref ChunkAccessor<PersistentStore> oldAccessor, List<RebuildGroup> groups)
+    {
+        var walked = 0;
+        var liveRecordsMet = 0;
+        var segment = old.Segment;
+        var entityIdsOffset = old.Layout.EntityIdsOffset;
+        var fullMask = old.Layout.FullMask;
+        // Chunk 0 is the segment's reserved chunk, never a cluster (ScanActiveChunks skips it too).
+        for (var chunkId = 1; chunkId < segment.ChunkCapacity; chunkId++)
+        {
+            if (!segment.IsChunkAllocated(chunkId))
+            {
+                continue;
+            }
+
+            var chunkBase = oldAccessor.GetChunkAddress(chunkId);
+            var occupancy = *(ulong*)chunkBase;
+            if (occupancy == 0)
+            {
+                continue;
+            }
+
+            // A cluster never holds a bit past its size: one here means the occupancy word was read through the wrong geometry.
+            if ((occupancy & ~fullMask) != 0)
+            {
+                throw OldClusterUnreadable(meta.Name, old,
+                    $"has chunk {chunkId} occupied beyond its cluster size of {old.Layout.ClusterSize} (occupancy 0x{occupancy:X16}); the geometry rebuilt "
+                    + "from the catalog does not match what the cluster was written at");
+            }
+
+            var group = new RebuildGroup { OldChunk = chunkId };
+            for (var rest = occupancy; rest != 0; rest &= rest - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(rest);
+                var entityPK = *(long*)(chunkBase + entityIdsOffset + slot * 8);
+
+                // A live slot ALWAYS carries its entity id — spawn and the rebuild both write the tail — and that id carries the archetype's routing id. A
+                // word failing either test means the geometry this cluster is read through is WRONG. Skipping was the dangerous choice (every SingleVersion
+                // component silently zeroed); refusing converts the whole class into a loud error and validates the reconstruction instead of predicting
+                // what can invalidate it — TryLoadChunkBasedSegment takes the stride from its caller and never checks it.
+                if (entityPK == 0 || (ushort)entityPK != routingId)
+                {
+                    throw OldClusterUnreadable(meta.Name, old,
+                        $"has chunk {chunkId} slot {slot} occupied by entity id 0x{entityPK:X16}, which "
+                        + (entityPK == 0 ? "is zero" : $"carries routing id {(ushort)entityPK}, not this archetype's {routingId}")
+                        + "; the geometry rebuilt from the catalog does not match what the cluster was written at");
+                }
+
+                if (records != null)
+                {
+                    var entityKey = EntityId.FromRaw(entityPK).EntityKey;
+                    if (!records.TryGet(chunkId, slot, entityKey, out var record))
+                    {
+                        throw OldClusterUnreadable(meta.Name, old,
+                            $"has chunk {chunkId} slot {slot} occupied by entity id 0x{entityPK:X16}, which has no pre-migration record; the geometry rebuilt "
+                            + "from the catalog does not match what the cluster was written at");
+                    }
+
+                    if (record.ClusterChunkId != chunkId || record.SlotIndex != slot)
+                    {
+                        throw OldClusterUnreadable(meta.Name, old,
+                            $"has chunk {chunkId} slot {slot} occupied by entity id 0x{entityPK:X16}, whose pre-migration record places it at chunk "
+                            + $"{record.ClusterChunkId} slot {record.SlotIndex}; the geometry rebuilt from the catalog does not match what the cluster was "
+                            + "written at");
+                    }
+
+                    liveRecordsMet += record.Live ? 1 : 0;
+                }
+
+                walked++;
+            }
+
+            if (spatial != null)
+            {
+                group.Home = spatial.HomeOf(chunkBase, occupancy, groups.Count, scratch, out group.HasRealmHint, out group.Realm);
+            }
+
+            groups.Add(group);
+        }
+
+        if (records != null && liveRecordsMet != records.LiveCount)
+        {
+            throw OldClusterUnreadable(meta.Name, old,
+                $"holds {liveRecordsMet} of the {records.LiveCount} live entities its pre-migration entity map records; the geometry rebuilt from the catalog "
+                + "does not match what the cluster was written at");
+        }
+
+        return walked;
+    }
+
+    /// <summary>
+    /// The ids of every entity <see cref="CollectPreMigrationOrder"/> walked, re-read from the old clusters: the set R9 and the chain-only pass need, built
+    /// only when one of them runs (rare: a stale chain, a chain-only entity, an added component R7 or R12 counts).
+    /// </summary>
+    private static unsafe HashSet<long> WalkedEntityIds(PreMigrationCluster old, List<RebuildGroup> groups, ref ChunkAccessor<PersistentStore> oldAccessor,
+        int walked)
+    {
+        var ids = new HashSet<long>(walked);
+        for (var g = 0; g < groups.Count; g++)
+        {
+            var chunkBase = oldAccessor.GetChunkAddress(groups[g].OldChunk);
+            for (var rest = *(ulong*)chunkBase; rest != 0; rest &= rest - 1)
+            {
+                ids.Add(*(long*)(chunkBase + old.Layout.EntityIdsOffset + BitOperations.TrailingZeroCount(rest) * 8));
+            }
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// Places one entity at the next rebuild claim (<see cref="ArchetypeClusterState.ClaimSlotForRebuild"/>) and writes its entity-id tail, its EntityMap
+    /// record (chain roots, enabled bits) and its SingleVersion bytes. Returns the cluster it landed in.
+    /// </summary>
+    /// <remarks>
+    /// Every slot's enabled bit comes from the entity's PRE-MIGRATION RECORD, the one authority for enabled state (#846), read at the persisted slot
+    /// <see cref="PreMigrationCluster.OldSlotOf"/> names. Only when the snapshot has no entry for it — none was taken, or its page was torn — do weaker
+    /// sources apply: the pre-migration cluster's own bit, else ENABLED for a chain-only entity, which leaves the chain head as a Versioned slot's only
+    /// signal. A chain head proves a Versioned component PRESENT, never ENABLED: no head is absent, bit clear, whatever the record said (STAGE-02).
+    /// </remarks>
+    private unsafe int PlaceRebuiltEntity(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs, ref ChunkAccessor<PersistentStore> clusterAccessor,
+        ref ChunkAccessor<PersistentStore> mapAccessor, byte* recordBuf, MigrationRebuildSources sources, long entityPK, byte* oldChunkBase, int oldChunk,
+        int oldSlotIndex, bool startNewCluster)
+    {
+        var clusterState = state.ClusterState;
+        var layout = clusterState.Layout;
+        var slotToVi = layout.SlotToVersionedIndex;
+        var old = sources.Old;
+        var entityKey = EntityId.FromRaw(entityPK).EntityKey;
+
+        var (clusterChunkId, slotIndex) = clusterState.ClaimSlotForRebuild(ref clusterAccessor, cs, startNewCluster);
+        var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
+        clusterState.PublishClaimedSlot(clusterBase, slotIndex);
+
+        // The entity-id tail is what every cluster scan resolves a slot back to an entity through; without it the rebuilt cluster is anonymous.
+        *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8) = entityPK;
+
+        ClusterEntityRecordAccessor.InitializeRecord(recordBuf, meta.VersionedSlotCount);
+        ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
+        header.BornTSN = 0;   // committed before this open → visible at every snapshot
+        header.DiedTSN = 0;   // live
+        clusterState.NoteClusterBorn(clusterChunkId, 0);   // establishes a freshly allocated cluster as all-genesis (FreshClusterStaysUnknown)
+
+        // At the slot the entity was walked at (one array index); a chain-only entity, or one whose record names another slot, by key.
+        PreMigrationRecord record = default;
+        var hasRecord = sources.Records != null && sources.Records.TryGet(oldChunk, oldSlotIndex, entityKey, out record);
+        var recordBits = record.EnabledBits;
+
+        ushort enabledMask = 0;
+        for (var slot = 0; slot < meta.ComponentCount; slot++)
+        {
+            var o = old?.OldSlotOf(slot) ?? slot;
+            bool wasEnabled;
+            if (o == ArchetypeSetDiff.NoSlot)
+            {
+                wasEnabled = false;   // a slot the persisted set did not hold: absent (STAGE-02)
+            }
+            else if (hasRecord)
+            {
+                wasEnabled = (recordBits & (1 << o)) != 0;
+            }
+            else
+            {
+                wasEnabled = oldChunkBase == null || (*(ulong*)(oldChunkBase + old.Layout.EnabledBitsOffset(o)) & (1UL << oldSlotIndex)) != 0;
+            }
+
+            var vi = slotToVi == null ? -1 : slotToVi[slot];
+            if (vi >= 0)
+            {
+                var head = 0;
+                if (sources.ChainHeads[slot] != null && sources.ChainHeads[slot].TryGetValue(entityPK, out head))
+                {
+                    sources.HeadHits[slot]++;
+                }
+
+                ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
+                wasEnabled &= head != 0;
+            }
+
+            if (wasEnabled)
+            {
+                enabledMask |= (ushort)(1 << slot);
+                *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
+            }
+        }
+
+        // SingleVersion bytes have no other home: carry them over from the old cluster, remapped field by field when the component's layout changed.
+        if (oldChunkBase != null)
+        {
+            CopyPreMigrationSlot(meta, state, old, oldChunkBase, oldSlotIndex, layout, clusterBase, slotIndex);
+        }
+
+        header.EnabledBits = enabledMask;
+        ClusterEntityRecordAccessor.SetClusterChunkId(recordBuf, clusterChunkId);
+        ClusterEntityRecordAccessor.SetSlotIndex(recordBuf, (byte)slotIndex);
+        state.EntityMap.Insert(entityKey, recordBuf, ref mapAccessor, cs);
+        return clusterChunkId;
+    }
+
+    /// <summary>
+    /// The Versioned chain heads of a migrating archetype, per slot (EntityPK → compRevFirstChunkId; null for a slot with none). Same source the flat and
+    /// crash rebuilds use.
+    /// </summary>
+    private Dictionary<long, int>[] CollectMigrationChainHeads(ArchetypeMetadata meta, ArchetypeEngineState state, sbyte[] slotToVi, ushort routingId)
+    {
         var chainHeads = new Dictionary<long, int>[meta.ComponentCount];
-        var allEntityPKs = new HashSet<long>();
         for (var slot = 0; slot < meta.ComponentCount && slotToVi != null; slot++)
         {
             if (slotToVi[slot] < 0)
@@ -6747,162 +7805,197 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
             // A destroyed entity's chain is not a live entity (#1231). Not on a crash open that migrated: its chains are read before the scrub repairs them,
             // as in BuildFlatEntityMapEntries.
-            var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta));
+            var heads = ComponentRevisionManager.EnumerateVersionedChainHeads(table, routingId);
             if (!CrashRecoveryAtOpen)
             {
                 ComponentRevisionManager.DropTombstonedHeads(table, heads);
             }
 
             chainHeads[slot] = heads;
-            foreach (var pk in heads.Keys)
-            {
-                allEntityPKs.Add(pk);
-            }
         }
 
-        // Union in the old cluster's membership. An entity whose only components are SingleVersion has no chain head, so without this it would be dropped.
-        Dictionary<long, (int ChunkId, int SlotIndex)> oldPositions = null;
-        if (hasOldCluster)
-        {
-            oldPositions = CollectPreMigrationPositions(oldCluster.Segment, oldCluster.Layout, allEntityPKs, cs);
-        }
-
-        if (allEntityPKs.Count == 0)
-        {
-            return;
-        }
-
-        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
-        var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(cs);
-        var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(cs);
-        // One accessor for the whole pass. It used to be created per entity inside the copy, which is O(entities) accessor construction on a path that already
-        // walks every entity — cheap per call, but pure waste at scale and easy to hoist since every entity reads the same segment.
-        var oldClusterAccessor = hasOldCluster ? oldCluster.Segment.CreateChunkAccessor(cs) : default;
-        Dictionary<long, ushort> preMigrationBits = null;
-        _preMigrationEnabledBits?.TryGetValue(meta.ArchetypeId, out preMigrationBits);
-        long maxEntityKey = 0;
-
-        try
-        {
-            foreach (var entityPK in allEntityPKs)
-            {
-                var entityId = EntityId.FromRaw(entityPK);
-                var entityKey = entityId.EntityKey;
-
-                // bornTsn 0: committed before this open, so the claim establishes the summary as "all genesis" and a reopened DB starts on the fast path.
-                var (clusterChunkId, slotIndex) = clusterState.ClaimSlot(ref clusterAccessor, cs, 0);
-                var clusterBase = clusterAccessor.GetChunkAddress(clusterChunkId, true);
-                clusterState.PublishClaimedSlot(clusterBase, slotIndex);
-
-                // The entity-id tail is what every cluster scan resolves a slot back to an entity through; without it the rebuilt cluster is anonymous.
-                *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8) = entityPK;
-
-                ClusterEntityRecordAccessor.InitializeRecord(recordBuf, meta.VersionedSlotCount);
-                ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
-                header.BornTSN = 0;   // committed before this open → visible at every snapshot
-                header.DiedTSN = 0;   // live: it has a chain head
-                clusterState.NoteClusterBorn(clusterChunkId, 0);   // establishes a freshly allocated cluster as all-genesis (FreshClusterStaysUnknown)
-
-                // The pre-migration position, resolved BEFORE the enabled-bits loop so that loop can consult the old cluster's own bits.
-                (int ChunkId, int SlotIndex) oldPos = default;
-                var hasOldPos = oldPositions != null && oldPositions.TryGetValue(entityPK, out oldPos);
-                byte* oldChunkBase = hasOldCluster && hasOldPos ? oldClusterAccessor.GetChunkAddress(oldPos.ChunkId) : null;
-
-                // Every slot's enabled bit comes from the entity's PRE-MIGRATION RECORD, the one authority for enabled state (#846). Only when the snapshot
-                // has no entry for it — none was taken, or its page was torn — do weaker sources apply: the pre-migration cluster's bits where one was kept,
-                // else ENABLED, which is right for a Transient slot (no chain, no persisted bytes, and it would otherwise reopen permanently disabled) and
-                // for a Versioned slot leaves the chain head as the only signal.
-                ushort recordBits = 0;
-                var hasRecordBits = preMigrationBits != null && preMigrationBits.TryGetValue(entityKey, out recordBits);
-
-                ushort enabledMask = 0;
-                for (var slot = 0; slot < meta.ComponentCount; slot++)
-                {
-                    var wasEnabled = hasRecordBits
-                        ? (recordBits & (1 << slot)) != 0
-                        : oldChunkBase == null || (*(ulong*)(oldChunkBase + oldCluster.Layout.EnabledBitsOffset(slot)) & (1UL << oldPos.SlotIndex)) != 0;
-
-                    var vi = slotToVi == null ? -1 : slotToVi[slot];
-                    if (vi >= 0)
-                    {
-                        var head = 0;
-                        chainHeads[slot]?.TryGetValue(entityPK, out head);
-                        ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
-
-                        // A chain head proves the component is PRESENT, never that it is ENABLED: Disable keeps the payload, so a disabled component has a
-                        // head too (STAGE-02, "never deriving one of those two signals from the other"). No head ⟹ absent, bit clear, whatever the record said.
-                        wasEnabled &= head != 0;
-                    }
-
-                    if (wasEnabled)
-                    {
-                        enabledMask |= (ushort)(1 << slot);
-                        *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIndex;
-                    }
-                }
-
-                // SingleVersion bytes have no other home: carry them over from the old cluster, remapped field by field when the component's layout changed.
-                if (oldChunkBase != null)
-                {
-                    CopyPreMigrationSlot(meta, state, oldChunkBase, oldCluster.Layout, oldPos, layout, clusterBase, slotIndex);
-                }
-
-                header.EnabledBits = enabledMask;
-                ClusterEntityRecordAccessor.SetClusterChunkId(recordBuf, clusterChunkId);
-                ClusterEntityRecordAccessor.SetSlotIndex(recordBuf, (byte)slotIndex);
-
-                state.EntityMap.Insert(entityKey, recordBuf, ref mapAccessor, cs);
-
-                if (entityKey > maxEntityKey)
-                {
-                    maxEntityKey = entityKey;
-                }
-            }
-        }
-        finally
-        {
-            if (hasOldCluster)
-            {
-                oldClusterAccessor.Dispose();
-            }
-
-            mapAccessor.Dispose();
-            clusterAccessor.Dispose();
-        }
-
-        if (maxEntityKey >= state.NextEntityKey)
-        {
-            state.NextEntityKey = maxEntityKey;
-        }
-
-        // Order matters. The loop above established WHERE each entity lives; the slots themselves are still zeroed, because the component bytes live in the
-        // revision chains. Fill the HEADs from those chains first, then build the indexes over real values — indexing first yields one entry per zeroed slot.
-        // Untrusted, and here the reason is circularity rather than durability: the loop above SET each slot's enabled bit from whether the entity had a chain
-        // head (enabled ⟺ head != 0), so the bit carries no information independent of the root being classified. Asking it whether a rootless slot is expected
-        // would always answer yes, by construction.
-        clusterState.RebuildVersionedHeadFromChain(meta, state, cs, false, out var headSkips);
-        NoteVersionedHeadRebuildSkips(meta, in headSkips);
-
-        // Every entity just moved to a new (clusterChunkId, slotIndex), and a per-archetype index entry IS a cluster position, so any tree that survived the
-        // reopen now points at the old geometry. This scan also covers a component that merely GAINED an index: its tree is created empty, and this fills it —
-        // the per-archetype replacement for ComponentTable.PopulateNewIndexes.
-        if (clusterState.IndexSlots != null && clusterState.ActiveClusterCount > 0)
-        {
-            NoteUniqueIndexRebuildConflicts(meta, clusterState.RebuildIndexesFromData(cs));
-            LastOpenClusterIndexRebuildCount++;
-        }
-
-        // Spatial state is the third derived structure over cluster data, and its normal rebuild runs inside InitializeArchetypes — before this method has
-        // placed anything, so it would have seen an empty cluster. Redo it here or the archetype reopens with entities present and every spatial query empty.
-        if (meta.HasClusterSpatial && _realms != null && clusterState.ActiveClusterCount > 0)
-        {
-            // One walk, same as InitializeArchetypes — the ordering constraint that used to force cell state first is internal to it now (#872 step 2).
-            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
-        }
-
-        cs.SaveChanges();
+        return chainHeads;
     }
 
+    /// <summary>
+    /// The entities a chain head names that the pre-migration cluster does not hold (design 07 §6.2), in ascending EntityPK order; null when there are none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called only when <see cref="HasChainOnlyCandidates"/> says a head can name one, with the walked entities' ids, to which the chain-only ones are added.
+    /// </para>
+    /// <para>
+    /// Two kinds of head name no entity of the archetype. A slot the set migration ADDS: its chains are stale (R9), and an entity found only there is not one
+    /// the archetype holds. And, on a crash open, a chain whose newest revision is a tombstone: a destroyed entity whose cleanup had not released the chain
+    /// when the checkpoint wrote it (a clean open's heads have them dropped already). Its slot is free in the old cluster, and placing it would resurrect it
+    /// — the window's replay does not destroy it again, since its destroy lies below the checkpoint.
+    /// </para>
+    /// </remarks>
+    private List<long> CollectChainOnlyEntities(ArchetypeEngineState state, MigrationRebuildSources sources, HashSet<long> seen, ArchetypeSetMigrationPlan set)
+    {
+        var added = set?.Diff.AddedMask ?? 0;
+        var orphans = new List<long>();
+        for (var slot = 0; slot < sources.ChainHeads.Length; slot++)
+        {
+            var heads = sources.ChainHeads[slot];
+            if (heads == null || (added & (1 << slot)) != 0)
+            {
+                continue;
+            }
+
+            Dictionary<long, int> candidates = null;
+            foreach (var (entityPK, root) in heads)
+            {
+                if (!seen.Contains(entityPK))
+                {
+                    (candidates ??= [])[entityPK] = root;
+                }
+            }
+
+            if (candidates == null)
+            {
+                continue;
+            }
+
+            if (CrashRecoveryAtOpen)
+            {
+                ComponentRevisionManager.DropTombstonedHeads(state.SlotToComponentTable[slot], candidates);
+            }
+
+            foreach (var entityPK in candidates.Keys)
+            {
+                if (seen.Add(entityPK))
+                {
+                    orphans.Add(entityPK);
+                }
+            }
+        }
+
+        if (orphans.Count == 0)
+        {
+            return null;
+        }
+
+        orphans.Sort();
+        return orphans;
+    }
+
+    /// <summary>
+    /// Whether a Versioned chain head can name an entity the old cluster does not hold (design 07 §6.2). Free on the common path: Phase 2 counted, per slot,
+    /// the heads its entities matched, and every head matched means no chain-only entity. <paramref name="exhaustive"/> skips that shortcut, for a call
+    /// before Phase 2 has counted anything (R7, R9, R12). A slot the set migration adds names none (its chains are stale).
+    /// </summary>
+    private static bool HasChainOnlyCandidates(MigrationRebuildSources sources, ArchetypeSetMigrationPlan set, bool exhaustive)
+    {
+        var added = set?.Diff.AddedMask ?? 0;
+        for (var slot = 0; slot < sources.ChainHeads.Length; slot++)
+        {
+            var heads = sources.ChainHeads[slot];
+            if (heads != null && (added & (1 << slot)) == 0 && (exhaustive ? heads.Count > 0 : sources.HeadHits[slot] != heads.Count))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Records that new cluster <paramref name="newChunk"/> received an entity of old cluster <paramref name="oldChunk"/> (-1: a chain-only
+    /// one).</summary>
+    private static void NotePlacement(Dictionary<int, List<int>> placement, int newChunk, int oldChunk)
+    {
+        if (!placement.TryGetValue(newChunk, out var sourcesOfChunk))
+        {
+            placement[newChunk] = sourcesOfChunk = [];
+        }
+
+        if (sourcesOfChunk.Count == 0 || sourcesOfChunk[^1] != oldChunk)
+        {
+            sourcesOfChunk.Add(oldChunk);
+        }
+    }
+
+    /// <summary>The realm hints of a migration's new clusters, indexed by chunk id, or null when it has none.</summary>
+    private static ClusterHomeHint[] BuildRealmHints(List<(int ChunkId, ushort Realm)> realmHints)
+    {
+        if (realmHints == null || realmHints.Count == 0)
+        {
+            return null;
+        }
+
+        var maxChunk = 0;
+        for (var i = 0; i < realmHints.Count; i++)
+        {
+            maxChunk = Math.Max(maxChunk, realmHints[i].ChunkId);
+        }
+
+        var hints = new ClusterHomeHint[maxChunk + 1];
+        for (var i = 0; i < realmHints.Count; i++)
+        {
+            hints[realmHints[i].ChunkId] = new ClusterHomeHint(true, realmHints[i].Realm);
+        }
+
+        return hints;
+    }
+
+    /// <summary>
+    /// The reader of a spatial archetype's home keys in its pre-migration cluster (design 07 §6.3). The cell is read from the old bytes only when the spatial
+    /// component is SingleVersion: a Versioned one's cluster copy is a HEAD the chain supersedes, and a Transient one persists nothing, so its groups take
+    /// the strict form (every old-cluster boundary closes). The realm key is SingleVersion by construction (Realms refuses it on a Versioned component).
+    /// </summary>
+    private OldSpatialReader CreateOldSpatialReader(ArchetypeEngineState state, PreMigrationCluster old)
+    {
+        var clusterState = state.ClusterState;
+        ref readonly var ss = ref clusterState.SpatialSlot;
+        var reader = new OldSpatialReader
+        {
+            State = clusterState,
+            Old = old,
+            Realm0Grid = Realm0Grid,
+            Keyed = ss.HasRealmKey,
+            SpatialSlot = ss.Slot,
+            SpatialOldSlot = old?.OldSlotOf(ss.Slot) ?? ArchetypeSetDiff.NoSlot,
+            SpatialNewSize = clusterState.Layout.ComponentSize(ss.Slot),
+            FieldOffset = ss.FieldOffset,
+            FieldType = ss.FieldInfo.FieldType,
+        };
+
+        var spatialTable = state.SlotToComponentTable[ss.Slot];
+        reader.CellFromBytes = old?.Segment != null && reader.SpatialOldSlot != ArchetypeSetDiff.NoSlot
+                               && spatialTable.StorageMode == StorageMode.SingleVersion;
+        if (_migratedComponents != null && _migratedComponents.TryGetValue(spatialTable.Definition.Name, out var spatialMigration))
+        {
+            reader.SpatialMigrated = true;
+            reader.SpatialMigration = spatialMigration;
+        }
+
+        if (reader.Keyed)
+        {
+            var realmTable = state.SlotToComponentTable[ss.RealmKeySlot];
+            reader.RealmSlot = ss.RealmKeySlot;
+            reader.RealmOldSlot = old?.OldSlotOf(ss.RealmKeySlot) ?? ArchetypeSetDiff.NoSlot;
+            reader.RealmNewSize = clusterState.Layout.ComponentSize(ss.RealmKeySlot);
+            reader.RealmOffset = ss.RealmKeyOffset;
+            reader.RealmFromBytes = old?.Segment != null && reader.RealmOldSlot != ArchetypeSetDiff.NoSlot
+                                    && realmTable.StorageMode == StorageMode.SingleVersion;
+            if (_migratedComponents != null && _migratedComponents.TryGetValue(realmTable.Definition.Name, out var realmMigration))
+            {
+                reader.RealmMigrated = true;
+                reader.RealmMigration = realmMigration;
+            }
+        }
+
+        // Converting a component the cell is never read from would only cost: keep the flag to what HomeOf reads.
+        reader.SpatialMigrated &= reader.CellFromBytes;
+        reader.RealmMigrated &= reader.RealmFromBytes;
+        return reader;
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Schema migration of archetype '{archetype}': {count} entities have a Versioned revision chain but no slot in the pre-migration cluster. A clean open "
+        + "cannot hold such an entity (every live entity is in the cluster the last checkpoint wrote), so the file is inconsistent. They were placed after "
+        + "every other entity and nothing was dropped (design 07 §6.2).")]
+    private partial void LogMigrationChainOnlyEntities(string archetype, int count);
     /// <summary>
     /// Scan this archetype's Versioned revision chains
     /// (<see cref="ComponentRevisionManager.EnumerateVersionedChainHeads(ComponentTable, ushort?, bool, HashSet{int})"/>) and insert one EntityRecord per
@@ -6911,8 +8004,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// false) and the crash-recovery rebuild (<see cref="RebuildEntityMapOnCrash"/>, <paramref name="duringRebuild"/> = true, where the map was just emptied
     /// by <c>ClearForRebuild</c> so the faster split-aware <c>InsertDuringRebuild</c> is used).
     /// </summary>
-    private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild,
-        Dictionary<long, ushort> enabledSnapshot = null)
+    private unsafe void BuildFlatEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet mapCs, bool duringRebuild)
     {
         var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
@@ -7001,10 +8093,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             ref var header = ref EntityRecordAccessor.GetHeader(recordBuf);
             header.BornTSN = 0; // Always visible (committed before checkpoint)
             header.DiedTSN = 0; // Live entity
-            // Preserve the persisted (non-derivable) EnabledBits when available; fall back to all-enabled only when the entity has no snapshot entry
-            // (fresh/legacy rebuild, or a torn EntityMap page). A WAL replay window re-applies any enable/disable that post-dates the snapshot.
-            header.EnabledBits = enabledSnapshot != null && enabledSnapshot.TryGetValue(entityKey, out var preservedBits) ? 
-                preservedBits : (ushort)((1 << meta.ComponentCount) - 1);
+            // All enabled: a flat record has no other copy of its bits (legacy / migrated databases; every archetype is cluster-backed now, RB-01).
+            header.EnabledBits = (ushort)((1 << meta.ComponentCount) - 1);
 
             var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(mapCs);
             if (duringRebuild)
@@ -7374,29 +8464,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         return Stopwatch.GetTimestamp() - start;
     }
 
-    /// <summary>
-    /// True when any of this archetype's component tables was migrated by THIS open, which means its EntityMap and cluster were both freshly allocated and
-    /// must be re-populated from the chains + the pre-migration cluster rather than treated as recoverable state.
-    /// </summary>
-    private bool HasMigratedSlot(ArchetypeEngineState state)
-    {
-        if (_migratedComponents == null || state?.SlotToComponentTable == null)
-        {
-            return false;
-        }
-
-        for (var slot = 0; slot < state.SlotToComponentTable.Length; slot++)
-        {
-            var table = state.SlotToComponentTable[slot];
-            if (table != null && _migratedComponents.ContainsKey(table.Definition.Name))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     /// <summary>The bucket count every archetype's EntityMap is created with and opened against (its N0), which the integrity check reads too.</summary>
     internal const int EntityMapInitialBuckets = 256;
 
@@ -7455,22 +8522,20 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             using var guard = EpochGuard.Enter(EpochManager);
 
-            // EnabledBits are NON-derivable authoritative state (orthogonal to the chain/cluster data the rebuild re-derives), so snapshot them from
-            // the persisted EntityMap BEFORE it is discarded — re-deriving the map alone resets them (flat: hardcoded all-enabled; cluster: from the
-            // denormalized EnabledBits[C]) and silently loses every enable/disable not re-applied by a WAL replay window. A torn EntityMap page yields
-            // garbage keys that won't match the authoritative keys the rebuild looks up, so torn entries simply fall back (WAL-corrected on a hard crash).
-            var enabledSnapshot = SnapshotEntityMapEnabledBits(state);
-
-            // Discard the persisted EntityMap (a torn page is reclaimed by bitmap, never parsed) and re-derive every entry from authoritative data.
+            // Discard the persisted EntityMap (a torn page is reclaimed by bitmap, never parsed) and re-derive every entry from authoritative data. The
+            // enabled bits included: every commit keeps the cluster's EnabledBits[C] equal to the record and dirties the cluster page (ENABLE-01), so the
+            // cluster holds them. They used to be snapshotted from the map first, as the one value the rebuild could not derive: a walk of the whole map
+            // and a dictionary of every entity, which could only agree with the cluster or be wrong — a tear handed it garbage bits, and a crash during this
+            // pass left a partial map for the next open to snapshot (#398, #1306).
             state.EntityMap.ClearForRebuild(cs);
 
             if (meta.IsClusterEligible)
             {
-                RebuildClusterEntityMapEntries(meta, state, cs, enabledSnapshot);
+                RebuildClusterEntityMapEntries(meta, state, cs);
             }
             else
             {
-                BuildFlatEntityMapEntries(meta, state, cs, true, enabledSnapshot);
+                BuildFlatEntityMapEntries(meta, state, cs, true);
             }
 
             _crashRebuiltEntityMapSegments.Add(state.EntityMap.Segment.RootPageIndex);
@@ -7479,23 +8544,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             cs.SaveChanges();
         }
-    }
-
-    /// <summary>
-    /// Collects per-entity <c>EnabledBits</c> from the persisted EntityMap (keyed by EntityKey) so the crash rebuild can preserve this non-derivable state.
-    /// Best-effort: a chunk on a page that failed its CRC is not read (<see cref="PagedMMF.IsSuspectPage"/>), so its entities fall back to what the cluster
-    /// records.
-    /// </summary>
-    private Dictionary<long, ushort> SnapshotEntityMapEnabledBits(ArchetypeEngineState state)
-    {
-        if (state?.EntityMap == null || state.EntityMap.EntryCount == 0)
-        {
-            // Nothing persisted to preserve (e.g. a no-checkpoint crash where the map was never flushed); the WAL replay window is the
-            // authoritative source for enabled-bits in that case. Skipping the empty-map walk also avoids perturbing the replay path.
-            return new Dictionary<long, ushort>();
-        }
-
-        return SnapshotEnabledBits(state.EntityMap);
     }
 
     /// <summary>
@@ -7538,8 +8586,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Versioned slot's compRevFirstChunkId from the chain-head scan. BornTSN/DiedTSN = 0 (live, committed before checkpoint — same convention as the flat
     /// rebuild). Inserted via the split-aware <c>InsertDuringRebuild</c> into the just-cleared map.
     /// </summary>
-    private unsafe void RebuildClusterEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs,
-        Dictionary<long, ushort> enabledSnapshot = null)
+    private unsafe void RebuildClusterEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs)
     {
         var clusterState = state.ClusterState;
         if (clusterState?.ClusterSegment == null)
@@ -7611,26 +8658,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     header.DiedTSN = 0; // live (occupancy bit set)
                     clusterState.NoteClusterBorn(chunkId, 0);   // H1: reopened clusters are all-genesis, so seed the summary rather than leaving it unknown
 
-                    // Prefer the preserved (non-derivable) EnabledBits from the persisted EntityMap; otherwise reconstruct the per-entity 16-bit mask from
-                    // the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), which every commit keeps equal to the committed
-                    // record and dirties with the cluster page (ENABLE-01). This fallback is still only as good as what was checkpointed.
-                    ushort enabledMask;
-                    if (enabledSnapshot != null && enabledSnapshot.TryGetValue(entityKey, out var preservedBits))
+                    // The per-entity 16-bit mask from the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), which every
+                    // commit keeps equal to the committed record and dirties with the cluster page (ENABLE-01).
+                    ushort enabledMask = 0;
+                    for (var comp = 0; comp < meta.ComponentCount; comp++)
                     {
-                        enabledMask = preservedBits;
-                    }
-                    else
-                    {
-                        enabledMask = 0;
-                        for (var comp = 0; comp < meta.ComponentCount; comp++)
+                        var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
+                        if ((compEnabled & (1UL << slotIndex)) != 0)
                         {
-                            var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
-                            if ((compEnabled & (1UL << slotIndex)) != 0)
-                            {
-                                enabledMask |= (ushort)(1 << comp);
-                            }
+                            enabledMask |= (ushort)(1 << comp);
                         }
                     }
+
                     header.EnabledBits = enabledMask;
 
                     ClusterEntityRecordAccessor.SetClusterChunkId(recordBuf, chunkId);
@@ -7714,10 +8753,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
-    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, is saved — its pages written and
-    /// their marks released — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once the owed pages pass
-    /// the dirty-page threshold a flush-only cycle writes them. A pass calls it only where it holds no page address across the call: the refresh moves the
-    /// pin of every scope on this thread. Samples the epoch-held pages first.
+    /// Between bounded batches of a crash open's pass (#1183, CK-08): the batch's <paramref name="changeSet"/>, if any, has its marks released — its pages
+    /// stay owed (PS-10), unevictable until written — the pages the batch touched stop being epoch-held (the thread's pin moves to a new epoch), and once
+    /// the owed pages pass the dirty-page threshold a flush-only cycle writes them. Released, not saved (#1588): saved, every batch of 1,024 entities wrote
+    /// the pages it dirtied, and the index rebuild's random inserts re-dirtied the same B+Tree pages batch after batch — a 7 GB world's crash open at
+    /// 512 MiB wrote more than 91 GB in 5.5 min without finishing; released, it recovered in 95 s writing 15.3 GB. A pass calls it only where it holds no
+    /// page address across the call: the refresh moves the pin of every scope on this thread. Samples the epoch-held pages first.
     /// </summary>
     internal void RecoveryBatchPoint(ChangeSet changeSet, RecoveryPass pass)
     {
@@ -7740,7 +8781,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
-        changeSet?.SaveChanges();
+        changeSet?.ReleaseDirtyMarks();
         EpochManager.RefreshScope();
         RecoveryBatchPoints++;
         var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;
@@ -7957,7 +8998,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// crash (D1): post-recovery there are no readers of pre-crash snapshots, so no MVCC history is retained. Chain roots (the first chunks the EntityMap
     /// references) are preserved in place, so the EntityMap stays valid and locations are unchanged. Cluster HEAD values are unaffected — scrub keeps the
     /// head's content chunk, so the values written by <see cref="ArchetypeClusterState.RebuildVersionedHeadFromChain"/> + the WAL apply remain correct.
-    /// Invoked only on the crash path (CrashRecoveryAtOpen: WAL segments present and an unclean close); a clean reopen keeps its chains for lazy cleanup.
+    /// Invoked only on the crash path (CrashRecoveryAtOpen: an unclean close with WAL segments, or a forced open); a clean reopen keeps its chains for lazy
+    /// cleanup.
     /// Per table, over the roots the live records name (<see cref="CollectLiveChainRoots"/>): a sweep per archetype freed the chains of the other
     /// archetypes sharing the table (#1251).
     /// </summary>
@@ -8407,48 +9449,696 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
-    private void ValidateArchetypeSchema(ArchetypeMetadata meta)
+    /// <summary>What <see cref="ClassifyArchetypeSchema"/> found when it matched a runtime archetype against its persisted row (design 07 §5.2).</summary>
+    internal enum ArchetypeSchemaVerdict : byte
     {
+        /// <summary>No persisted row: a new archetype.</summary>
+        New,
+
+        /// <summary>Same component names in the same order, same revision.</summary>
+        Identical,
+
+        /// <summary>The set is identical once the rename journal resolves the stored names, but the stored names are stale. Opens as is.</summary>
+        NamesRefreshed,
+
+        /// <summary>Identical set, higher revision: a metadata-only change.</summary>
+        RevisionOnly,
+
+        /// <summary>The set or its order changed, with an effective revision increase and no removal: a component-set migration.</summary>
+        SetChange,
+    }
+
+    /// <summary>
+    /// The resolution of every archetype's slots to this engine's <see cref="ComponentTable"/>s, by catalog id, for each archetype whose slots all resolve.
+    /// An archetype with a slot no registered component answers is recorded in <see cref="_skippedArchetypes"/> instead.
+    /// </summary>
+    private Dictionary<ushort, ComponentTable[]> ResolveArchetypeSlots()
+    {
+        var resolved = new Dictionary<ushort, ComponentTable[]>();
+        foreach (var meta in OwnArchetypes())
+        {
+            // Connect slots to ComponentTables — skip archetypes with unregistered component types
+            if (meta._slotToComponentType == null || meta.ComponentCount == 0 || HideArchetypeForTest?.Invoke(meta) == true)
+            {
+                continue;
+            }
+
+            var slotToTable = new ComponentTable[meta.ComponentCount];
+            var skippedSlot = -1;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var compType = meta._slotToComponentType[slot];
+                if (compType == null)
+                {
+                    skippedSlot = slot;
+                    break;
+                }
+
+                // Schema evolution fallback: the CLR type may be from an older version (V1)
+                // while the registered ComponentTable uses the newer version (V2).
+                // Fall back to schema-name matching since both versions share the same name.
+                var table = GetComponentTable(compType) ?? FindComponentTableBySchemaName(compType);
+                if (table == null)
+                {
+                    skippedSlot = slot;
+                    break;
+                }
+                slotToTable[slot] = table;
+            }
+
+            // The registry is process-wide, so an archetype another part of the process declared is skipped here as a matter of course and cannot be refused.
+            // What is recorded is why, so the first call that reaches the archetype can say it instead of describing a state it is not in (#1071). The slot
+            // only: the message is built when one is read, not for every foreign archetype on every open.
+            if (skippedSlot >= 0)
+            {
+                (_skippedArchetypes ??= [])[meta.ArchetypeId] = new SkippedArchetype(ArchetypeSkipReason.UnresolvedSlot, skippedSlot, 0);
+                continue;
+            }
+
+            resolved[meta.ArchetypeId] = slotToTable;
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// D3 (SCHEMA-10): among the archetypes this open consumes, one per durable name. The highest <c>[Archetype(Revision)]</c> is consumed; every lower one is
+    /// removed from <paramref name="resolved"/>, recorded in <see cref="_skippedArchetypes"/> as <see cref="ArchetypeSkipReason.Superseded"/> and logged once.
+    /// Two at one revision refuse the open (R8).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Runs before any routing id is read or assigned: before it, two classes of one name both reached the per-archetype pass and were matched to ONE
+    /// persisted row, each reading the other's cluster under its own layout.
+    /// </para>
+    /// <para>
+    /// Grouped by the persisted row an archetype matches when it matches one (its <see cref="ArchetypeMetadata.Name"/>, else its
+    /// <see cref="ArchetypeMetadata.PreviousName"/>), by its name otherwise — so a class carrying a rename hint and a class still declaring the old name are
+    /// one durable identity, as the row they would share says. Only archetypes whose slots all resolve compete: a revision whose components this engine
+    /// does not register is skipped for that reason already, and never displaces the one it can open.
+    /// </para>
+    /// </remarks>
+    private void ResolveDurableNameDuplicates(Dictionary<ushort, ComponentTable[]> resolved, bool log = true)
+    {
+        Dictionary<string, ArchetypeMetadata> first = null;
+        Dictionary<string, List<ArchetypeMetadata>> groups = null;
+        foreach (var meta in OwnArchetypes())
+        {
+            if (!resolved.ContainsKey(meta.ArchetypeId))
+            {
+                continue;
+            }
+
+            var key = TryGetPersistedArchetype(meta, out var persisted) ? persisted.Arch.Name.AsString : meta.Name;
+            first ??= new Dictionary<string, ArchetypeMetadata>(StringComparer.Ordinal);
+            if (first.TryAdd(key, meta))
+            {
+                continue;
+            }
+
+            groups ??= new Dictionary<string, List<ArchetypeMetadata>>(StringComparer.Ordinal);
+            if (!groups.TryGetValue(key, out var group))
+            {
+                groups[key] = group = [first[key]];
+            }
+            group.Add(meta);
+        }
+
+        if (groups == null)
+        {
+            return;
+        }
+
+        foreach (var (name, group) in groups)
+        {
+            var winner = group[0];
+            for (var i = 1; i < group.Count; i++)
+            {
+                if (group[i].Revision > winner.Revision)
+                {
+                    winner = group[i];
+                }
+            }
+
+            // Any two at one revision refuse, not only a tie at the top: the revision is the only thing that orders two declarations of one name.
+            for (var i = 0; i < group.Count; i++)
+            {
+                for (var j = i + 1; j < group.Count; j++)
+                {
+                    if (group[i].Revision == group[j].Revision)
+                    {
+                        throw new ArchetypeSchemaException(name, ArchetypeSchemaErrorKind.DuplicateName,
+                            $"Archetype name '{name}' is declared by two classes in one load context, '{group[i].ArchetypeType.Name}' and "
+                            + $"'{group[j].ArchetypeType.Name}', both at revision {group[i].Revision}. A load context holds one archetype per name: give the "
+                            + "newer declaration a higher revision, or remove one.");
+                    }
+                }
+            }
+
+            for (var i = 0; i < group.Count; i++)
+            {
+                var loser = group[i];
+                if (ReferenceEquals(loser, winner))
+                {
+                    continue;
+                }
+
+                resolved.Remove(loser.ArchetypeId);
+                (_skippedArchetypes ??= [])[loser.ArchetypeId] = new SkippedArchetype(ArchetypeSkipReason.Superseded, -1, winner.ArchetypeId);
+                if (log)
+                {
+                    LogArchetypeRevisionSuperseded(name, loser.ArchetypeType.Name, loser.Revision, winner.ArchetypeType.Name, winner.Revision);
+                }
+            }
+        }
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "Archetype '{name}': '{loserType}' (revision {loserRevision}) is superseded by '{winnerType}' (revision {winnerRevision}) in this load context and is "
+        + "not opened.")]
+    private partial void LogArchetypeRevisionSuperseded(string name, string loserType, int loserRevision, string winnerType, int winnerRevision);
+
+    /// <summary>
+    /// The component rename journal (SCHEMA-04) as a map from every former name to the name its component carries now, chains collapsed, or null when the
+    /// journal records no component rename (design 07 §4.4).
+    /// </summary>
+    /// <remarks>
+    /// Nothing rewrites <see cref="ArchetypeR1.ComponentNames"/> when a component is renamed, so an archetype persisted before a rename keeps the old name
+    /// forever; matched without the journal, a rename reads as a removal plus an addition. This open's own renames are already in the table: the
+    /// carry-forward saves its journal row at registration.
+    /// </remarks>
+    private Dictionary<string, string> BuildComponentRenameMap()
+    {
+        Dictionary<string, string> map = null;
+        List<string> redirect = null;
+        var history = GetSchemaHistory();
+        for (var i = 0; i < history.Count; i++)
+        {
+            var entry = history[i];
+            if (entry.Kind != SchemaChangeKind.Rename || entry.Target != SchemaObjectKind.Component)
+            {
+                continue;
+            }
+
+            var previous = entry.PreviousName.AsString;
+            var current = entry.ComponentName.AsString;
+            if (string.Equals(previous, current, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            map ??= new Dictionary<string, string>(StringComparer.Ordinal);
+
+            // Oldest first, so every name that led to `previous` now leads on to `current`.
+            redirect?.Clear();
+            foreach (var (from, to) in map)
+            {
+                if (string.Equals(to, previous, StringComparison.Ordinal))
+                {
+                    (redirect ??= []).Add(from);
+                }
+            }
+            if (redirect != null)
+            {
+                foreach (var from in redirect)
+                {
+                    map[from] = current;
+                }
+            }
+            map[previous] = current;
+        }
+
+        return map;
+    }
+
+    /// <summary>
+    /// A persisted component name as this catalog knows it: the name itself while the catalog holds a row for it, else the journal's current name for it.
+    /// </summary>
+    /// <remarks>
+    /// The catalog is checked first because a former name can be taken again by a new component after its rename: a list written after that names the new
+    /// component, and the catalog row is the evidence. A list written before it and still naming the old component is indistinguishable from it; that
+    /// ambiguity predates this code and is not created by it.
+    /// </remarks>
+    private string ResolvePersistedComponentName(string persistedName, Dictionary<string, string> renameMap)
+        => renameMap != null
+           && (_persistedComponents == null || !_persistedComponents.ContainsKey(persistedName))
+           && renameMap.TryGetValue(persistedName, out var current)
+            ? current
+            : persistedName;
+
+    /// <summary>A name as the catalog stores it: <see cref="String64"/> truncates, so a runtime name compares with a stored one only through it.</summary>
+    private static string DurableComponentName(string name) => ((String64)name).AsString;
+
+    /// <summary>
+    /// The component schema names an <see cref="ArchetypeR1"/> row stores, in persisted slot order (design 07 §4.1).
+    /// </summary>
+    /// <exception cref="ArchetypeSchemaException">R5: the row records more components than an archetype can hold, the buffer is absent on a row with
+    /// components or is not an allocated buffer, cannot be read, or holds a different number of names.</exception>
+    /// <remarks>
+    /// Read through a shared, timed lock: a lock word left held would fail the read loudly, never return stale names, and a crash open has already reset
+    /// every collection-buffer lock as its segments loaded, before <see cref="InitializeArchetypes"/> (PS-20, <c>ResetCollectionBufferLocksAfterCrash</c>).
+    /// </remarks>
+    internal string[] ReadPersistedComponentNames(in ArchetypeR1 row, string archetypeName)
+    {
+        if (row.ComponentCount == 0)
+        {
+            return [];
+        }
+
+        // A count no archetype can have is a corrupt row: refused here, before anything builds a slot map from it (ArchetypeSetDiff.Compute would throw a
+        // bare ArgumentException).
+        if (row.ComponentCount > ArchetypeSetDiff.MaxSlots)
+        {
+            throw NamesUnreadable(archetypeName,
+                $"belongs to a row of {row.ComponentCount} components, more than an archetype can hold ({ArchetypeSetDiff.MaxSlots})");
+        }
+
+        var bufferId = row.ComponentNames._bufferId;
+        if (bufferId == 0)
+        {
+            throw NamesUnreadable(archetypeName, $"is missing (buffer id 0 on a row of {row.ComponentCount} components)");
+        }
+
+        var names = new string[row.ComponentCount];
+        var count = 0;
+        using (EpochGuard.Enter(EpochManager))
+        {
+            // A buffer id that names no allocated chunk of the names segment is corrupt too; read, it would fail inside the buffer segment with a message
+            // naming no archetype, or read another buffer's chunk.
+            var segment = GetComponentCollectionSegment<String64>();
+            if (bufferId < 0 || bufferId >= segment.ChunkCapacity || !segment.IsChunkAllocated(bufferId))
+            {
+                throw NamesUnreadable(archetypeName, $"names buffer {bufferId}, which is not an allocated buffer of the component-name segment");
+            }
+
+            var vsbs = GetComponentCollectionVSBS<String64>();
+            try
+            {
+                foreach (ref readonly var name in vsbs.EnumerateBuffer(bufferId))
+                {
+                    if (count == names.Length)
+                    {
+                        throw NamesUnreadable(archetypeName, $"holds more names than the row's {row.ComponentCount} components");
+                    }
+                    names[count++] = name.AsString;
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException and not ArchetypeSchemaException or InvalidDataException or IndexOutOfRangeException
+                                           or ArgumentException or TimeoutException)
+            {
+                throw NamesUnreadable(archetypeName, $"cannot be read from buffer {bufferId} ({ex.GetType().Name}: {ex.Message})");
+            }
+        }
+
+        if (count != names.Length)
+        {
+            throw NamesUnreadable(archetypeName, $"holds {count} names for the row's {row.ComponentCount} components");
+        }
+
+        return names;
+    }
+
+    private static ArchetypeSchemaException NamesUnreadable(string archetypeName, string reason)
+        => new(archetypeName, ArchetypeSchemaErrorKind.NamesUnreadable,
+            $"Archetype '{archetypeName}': its stored component list (ArchetypeR1.ComponentNames) {reason}, so its slots cannot be matched to this build's "
+            + "components. Nothing of this archetype was modified.");
+
+    /// <summary>
+    /// Matches a runtime archetype against its persisted row slot by slot, by component schema name resolved through the rename journal (SCHEMA-11), and
+    /// returns what it found or refuses the open (design 07 §5.2, §8). Replaces the count-and-revision check that let a same-count reorder or swap open
+    /// silently, reinterpreted. Hands back the persisted component names, rename-resolved, in persisted slot order (null for a new archetype): what a
+    /// migration rebuilds the persisted cluster geometry from (<see cref="BuildPersistedLayout"/>).
+    /// </summary>
+    /// <exception cref="ArchetypeSchemaException">R1, R3, R4, R5, R6.</exception>
+    /// <remarks>
+    /// <para>
+    /// Order: a downgrade (R3) is refused before the names are read, whatever they say. Then a change of set or order without an effective revision increase
+    /// (R1) — a same-count swap is a removal plus an addition, so it lands here rather than as a removal. Then a removal (R4). R7 and R9 need the entities and
+    /// the chains, and are checked by the re-placement before its first claim.
+    /// </para>
+    /// <para>
+    /// Every verdict but <see cref="ArchetypeSchemaVerdict.New"/> and <see cref="ArchetypeSchemaVerdict.Identical"/> hands back an
+    /// <see cref="ArchetypeSetMigrationPlan"/> in <paramref name="set"/>, which the caller stages for the schema commit (SCHEMA-09).
+    /// <see cref="ArchetypeSchemaVerdict.SetChange"/> carries the persisted geometry (<see cref="BuildPersistedLayout"/>, R6 when a name has no catalog row)
+    /// and re-places every entity; <see cref="ArchetypeSchemaVerdict.RevisionOnly"/> and <see cref="ArchetypeSchemaVerdict.NamesRefreshed"/> rewrite the row
+    /// alone — count, revision and a names buffer that names every component by its current name.
+    /// </para>
+    /// </remarks>
+    private ArchetypeSchemaVerdict ClassifyArchetypeSchema(ArchetypeMetadata meta, ComponentTable[] slotToTable, Dictionary<string, string> renameMap,
+        out string[] persistedNames, out ArchetypeSetMigrationPlan set)
+    {
+        persistedNames = null;
+        set = null;
         if (!TryGetPersistedArchetype(meta, out var persisted))
         {
-            return; // new archetype, not persisted yet — OK
+            return ArchetypeSchemaVerdict.New;
         }
 
         var arch = persisted.Arch;
+        var storedRevision = arch.Revision;
+        var revision = meta.Revision;
 
-        // <b>The ARCHETYPE's component set, which is a different change from a component's own fields and has no migration path</b> (#1391, EN-8).
-        // Both messages used to end with "Run 'tsh migrate <dbpath>' to upgrade", and that advice is wrong here: `tsh migrate` walks COMPONENTS and
-        // reports a per-component diff, so an added component shows up as "NEW - will be created on first use" and nothing it does changes the persisted
-        // archetype's component count. The operator ran the tool, saw a clean report, reopened, and met this same refusal. Saying what is actually
-        // needed -- and that it does not exist yet -- costs nothing and does not send anybody round that loop.
-        //
-        // Named by the DURABLE name rather than the CLR type: identity is `[Archetype(Name = ...)]` and defaults to the type's simple name, so a stack
-        // that set one was told about a type whose name appears nowhere in its own schema.
-        if (arch.ComponentCount != meta.ComponentCount)
+        // Named by the DURABLE name rather than the CLR type: identity is `[Archetype(Name = ...)]` and defaults to the type's simple name, so a stack that
+        // set one was told about a type whose name appears nowhere in its own schema.
+        if (revision < storedRevision)
         {
-            throw new InvalidOperationException(
-                $"Schema mismatch for archetype '{meta.Name}' (CLR type {meta.ArchetypeType.Name}, Id={meta.ArchetypeId}): " +
-                $"persisted with {arch.ComponentCount} components, runtime has {meta.ComponentCount}. " +
-                "Adding or removing a COMPONENT of an archetype changes its cluster geometry and there is no migration for it yet (EN-8): " +
-                "`tsh migrate` resolves a component's own FIELDS and will report this database as clean. Either restore the previous component set, " +
-                "or recreate the world.");
+            throw DowngradeRefusal(meta.Name, storedRevision, revision);
         }
 
-        // Revision mismatch
-        if (arch.Revision != meta.Revision)
+        var stored = ReadPersistedComponentNames(arch, meta.Name);
+        var resolved = new string[stored.Length];
+        var renamed = false;
+        for (var o = 0; o < stored.Length; o++)
         {
-            throw new InvalidOperationException(
-                $"Schema mismatch for archetype '{meta.Name}' (CLR type {meta.ArchetypeType.Name}, Id={meta.ArchetypeId}): " +
-                $"persisted revision {arch.Revision}, runtime revision {meta.Revision}. " +
-                "[Archetype(Revision)] is bumped when the component set changes, and that change has no migration yet (EN-8). If the set did NOT " +
-                "change, the revision was bumped on its own and putting it back opens this database.");
+            resolved[o] = ResolvePersistedComponentName(stored[o], renameMap);
+            renamed |= !string.Equals(resolved[o], stored[o], StringComparison.Ordinal);
         }
 
-        // Component name mismatch (per slot)
-        // Note: VSBS-persisted ComponentNames are validated by Persist_ComponentNames_StoredInVSBS test.
-        // At schema validation time the VSBS buffer may have persisted lock state from SystemCrud writes,
-        // so we rely on component count + revision checks above. The Persist_ComponentNames_StoredInVSBS
-        // test validates that component names round-trip correctly through VSBS.
+        var duplicate = ArchetypeSetDiff.FindDuplicate(resolved);
+        if (duplicate >= 0)
+        {
+            throw NamesUnreadable(meta.Name, $"holds component '{resolved[duplicate]}' twice");
+        }
+
+        var runtime = new string[slotToTable.Length];
+        for (var s = 0; s < runtime.Length; s++)
+        {
+            runtime[s] = DurableComponentName(slotToTable[s].Definition.Name);
+        }
+
+        if (SkipArchetypeSlotNameMatchForTest && resolved.Length == runtime.Length)
+        {
+            resolved = runtime;
+        }
+
+        persistedNames = resolved;
+
+        // Every open of an unchanged archetype lands here: settle it without building the diff. Stale stored names (a component renamed since the row was
+        // written) rewrite the row in the commit, so the integrity scanner and the next open read current names.
+        if (revision == storedRevision && resolved.AsSpan().SequenceEqual(runtime))
+        {
+            if (renamed && !SkipArchetypeNamesRefreshForTest)
+            {
+                set = MetadataOnlySetChange(meta, ArchetypeSchemaVerdict.NamesRefreshed, resolved, runtime, storedRevision);
+            }
+
+            return renamed ? ArchetypeSchemaVerdict.NamesRefreshed : ArchetypeSchemaVerdict.Identical;
+        }
+
+        var diff = ArchetypeSetDiff.Compute(resolved, runtime);
+        if (diff.IsIdentical)
+        {
+            // Same set, same order, higher revision (a lower one was refused above): a metadata-only commit.
+            set = MetadataOnlySetChange(meta, ArchetypeSchemaVerdict.RevisionOnly, resolved, runtime, storedRevision);
+            return ArchetypeSchemaVerdict.RevisionOnly;
+        }
+
+        if (revision == storedRevision && !AncestorRevisionIncreased(meta, renameMap, resolved, runtime))
+        {
+            throw RevisionNotBumpedRefusal(meta.Name, diff, storedRevision);
+        }
+
+        if (diff.HasRemovals)
+        {
+            throw ComponentRemovedRefusal(meta.Name, diff, storedRevision, revision);
+        }
+
+        // A set change: the persisted geometry is rebuilt from the catalog now (R6 before anything is built), and carried to the re-placement.
+        var oldLayout = BuildPersistedLayout(resolved, meta.Name, out var oldModes, out var oldVersionedMask, out _);
+        set = new ArchetypeSetMigrationPlan(meta.Name, ArchetypeSchemaVerdict.SetChange, diff, storedRevision, revision, oldLayout, oldModes, oldVersionedMask);
+        return ArchetypeSchemaVerdict.SetChange;
+    }
+
+    /// <summary>The <see cref="ArchetypeSetMigrationPlan"/> of a row change that moves no data: the row's count, revision and names alone.</summary>
+    private static ArchetypeSetMigrationPlan MetadataOnlySetChange(ArchetypeMetadata meta, ArchetypeSchemaVerdict verdict, string[] resolved, string[] runtime,
+        int storedRevision)
+        => new(meta.Name, verdict, ArchetypeSetDiff.Compute(resolved, runtime), storedRevision, meta.Revision, default, null, 0);
+
+    /// <summary>
+    /// Whether <paramref name="meta"/>'s set change (<paramref name="stored"/>, rename-resolved, against <paramref name="declared"/>) carries an effective
+    /// revision increase through an ancestor (D1): an ancestor whose own component set changes in this open with its revision raised, or a parent that
+    /// migrated its set in an EARLIER open — its committed row already names its declared set — while this archetype was not opened, when every difference
+    /// of this archetype's set lies in the parent's part.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The ancestor must be the one whose set changed (its stored names differ from its declared ones), not any ancestor: a revision-only bump of a parent
+    /// says nothing about a child that reordered its own components, and accepting it let that reorder through with the child's revision unmoved, which is
+    /// the case R1 exists for. An ancestor whose names cannot be read, or whose components this engine cannot name, is no witness.
+    /// </para>
+    /// <para>
+    /// The earlier-open case: a parent's set change commits in an open that does not consume the child (a component of the child unregistered), so the
+    /// child's row keeps the parent's old part. The parent's row then carries the bump — a committed set change always came with one, R1 refused it
+    /// otherwise — but no longer exceeds it, and without this the child was refused forever, with a message pointing at a revision nobody can raise. It
+    /// migrates when its own components are in the stored list in their declared order and only the parent's part differs; a change of its own still needs
+    /// its own revision.
+    /// </para>
+    /// </remarks>
+    private bool AncestorRevisionIncreased(ArchetypeMetadata meta, Dictionary<string, string> renameMap, string[] stored, string[] declared)
+    {
+        var parentId = meta.ParentArchetypeId;
+        var nearest = true;
+        while (parentId != ArchetypeMetadata.NoParent)
+        {
+            var parent = ArchetypeRegistry.GetMetadata(parentId);
+            if (parent == null)
+            {
+                return false;
+            }
+
+            if (TryGetPersistedArchetype(parent, out var parentRow))
+            {
+                var parentChanged = DeclaredSetDiffersFromStored(parent, parentRow.Arch, renameMap);
+                if (parentChanged && parent.Revision > parentRow.Arch.Revision)
+                {
+                    return true;
+                }
+
+                if (nearest && !parentChanged && ChangeConfinedToParentPart(parent, stored, declared))
+                {
+                    return true;
+                }
+            }
+
+            nearest = false;
+            parentId = parent.ParentArchetypeId;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether every difference between a child's <paramref name="stored"/> and <paramref name="declared"/> component lists lies in its parent's part: the
+    /// child's own components (declared after the parent's) appear in the stored list, all of them, in their declared order, and the rest of the stored
+    /// list is not the parent's declared list.
+    /// </summary>
+    private bool ChangeConfinedToParentPart(ArchetypeMetadata parent, string[] stored, string[] declared)
+    {
+        var parentDeclared = DeclaredComponentNames(parent);
+        if (stored == null || declared == null || parentDeclared == null || declared.Length < parentDeclared.Length
+            || !declared.AsSpan(0, parentDeclared.Length).SequenceEqual(parentDeclared))
+        {
+            return false;
+        }
+
+        var own = declared.AsSpan(parentDeclared.Length);
+        var ownCount = 0;
+        var rest = new List<string>(stored.Length);
+        foreach (var name in stored)
+        {
+            if (own.IndexOf(name) < 0)
+            {
+                rest.Add(name);
+                continue;
+            }
+
+            if (ownCount >= own.Length || !string.Equals(own[ownCount], name, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            ownCount++;
+        }
+
+        return ownCount == own.Length && !rest.ToArray().AsSpan().SequenceEqual(parentDeclared);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="meta"/>'s declared component names, in slot order, differ from those its persisted row stores (rename-resolved). False when
+    /// either side cannot be read: a slot this engine cannot name, or a stored list that is unreadable (the open that consumes that archetype refuses it, R5).
+    /// </summary>
+    private bool DeclaredSetDiffersFromStored(ArchetypeMetadata meta, in ArchetypeR1 row, Dictionary<string, string> renameMap)
+    {
+        var declared = DeclaredComponentNames(meta);
+        if (declared == null)
+        {
+            return false;
+        }
+
+        string[] stored;
+        try
+        {
+            stored = ReadPersistedComponentNames(row, meta.Name);
+        }
+        catch (ArchetypeSchemaException)
+        {
+            return false;
+        }
+
+        if (stored.Length != declared.Length)
+        {
+            return true;
+        }
+
+        for (var o = 0; o < stored.Length; o++)
+        {
+            if (!string.Equals(ResolvePersistedComponentName(stored[o], renameMap), declared[o], StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The durable names of <paramref name="meta"/>'s declared components, in slot order, through this engine's registered tables (the schema-name fallback
+    /// included) or else the component attribute; null when a slot has no name this engine can give.
+    /// </summary>
+    private string[] DeclaredComponentNames(ArchetypeMetadata meta)
+    {
+        if (meta._slotToComponentType == null)
+        {
+            return null;
+        }
+
+        var names = new string[meta.ComponentCount];
+        for (var s = 0; s < names.Length; s++)
+        {
+            var type = meta._slotToComponentType[s];
+            var table = type == null ? null : GetComponentTable(type) ?? FindComponentTableBySchemaName(type);
+            var name = table?.Definition.Name ?? type?.GetCustomAttribute<ComponentAttribute>()?.Name;
+            if (name == null)
+            {
+                return null;
+            }
+
+            names[s] = DurableComponentName(name);
+        }
+
+        return names;
+    }
+
+    /// <summary>R3 (design 07 §8): the runtime revision is below the stored one.</summary>
+    private static ArchetypeSchemaException DowngradeRefusal(string archetypeName, int storedRevision, int revision)
+        => new(archetypeName, ArchetypeSchemaErrorKind.Downgrade,
+            $"Archetype '{archetypeName}' is stored at revision {storedRevision} and this build declares revision {revision}: the database was written by a "
+            + "newer build. Open it with that build. Nothing of this archetype was modified.");
+
+    /// <summary>R1 (design 07 §8): the set or its order changed with no effective revision increase.</summary>
+    private static ArchetypeSchemaException RevisionNotBumpedRefusal(string archetypeName, ArchetypeSetDiff diff, int storedRevision)
+        => new(archetypeName, ArchetypeSchemaErrorKind.RevisionNotBumped,
+            $"Archetype '{archetypeName}' changed its component set ({diff.Describe()}) but is still at revision {storedRevision}. A component-set "
+            + $"change is a schema change: increase [Archetype(Revision)] (or the revision of the ancestor whose set changed) above {storedRevision} "
+            + "and open again. Nothing of this archetype was modified.");
+
+    /// <summary>R4 (design 07 §8): a stored component is no longer declared.</summary>
+    private static ArchetypeSchemaException ComponentRemovedRefusal(string archetypeName, ArchetypeSetDiff diff, int storedRevision, int revision)
+    {
+        var removed = new List<string>();
+        for (var o = 0; o < diff.OldToNew.Length; o++)
+        {
+            if (diff.OldToNew[o] == ArchetypeSetDiff.NoSlot)
+            {
+                removed.Add($"'{diff.PersistedNames[o]}'");
+            }
+        }
+
+        return new ArchetypeSchemaException(archetypeName, ArchetypeSchemaErrorKind.ComponentRemoved,
+            $"Archetype '{archetypeName}' revision {revision} no longer declares {string.Join(", ", removed)}, which revision {storedRevision} stored. "
+            + "Removing a component deletes its data and is not supported yet (#1561). Declare the component again, or recreate the database. Nothing "
+            + "of this archetype was modified.");
+    }
+
+    /// <summary>
+    /// D10 (SCHEMA-13, R10): a component whose layout migrates in this open must have every persisted archetype holding it consumed by this open.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A component's layout migrates once, catalog-wide, but only the archetypes this open consumes have their clusters re-laid. A persisted archetype it
+    /// skips — a component of it unregistered, or its class absent from the process — keeps its cluster at the old size while the commit re-lays the
+    /// component's catalog row; the next open that consumes it sees no migration pending, loads the cluster at the new stride and reads zeros or garbage
+    /// with no error (measured: <c>ArchetypeSchemaValidationTests.FieldMigrationWithAnUnopenedHolder_IsRefused</c>).
+    /// </para>
+    /// <para>
+    /// Runs before any archetype is built, so a refusal leaves the pre-migration image: the component rows are only staged until the open commits
+    /// (SCHEMA-09). Free when no component migrates.
+    /// </para>
+    /// </remarks>
+    private void GuardUnopenedHoldersOfMigratedComponents(Dictionary<ushort, ComponentTable[]> resolved, Dictionary<string, string> renameMap)
+    {
+        if (_migratedComponents == null || _migratedComponents.Count == 0 || _persistedArchetypes.Count == 0 || SkipUnopenedHolderGuardForTest)
+        {
+            return;
+        }
+
+        var migrated = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var name in _migratedComponents.Keys)
+        {
+            migrated.Add(DurableComponentName(name));
+        }
+
+        // The rows this open consumes, and for the others the archetype of this context that would have opened them, for the message.
+        var consumed = new HashSet<string>(StringComparer.Ordinal);
+        Dictionary<string, ArchetypeMetadata> skippedByRow = null;
+        foreach (var meta in OwnArchetypes())
+        {
+            if (!TryGetPersistedArchetype(meta, out var row))
+            {
+                continue;
+            }
+
+            var rowName = row.Arch.Name.AsString;
+            if (resolved.ContainsKey(meta.ArchetypeId))
+            {
+                consumed.Add(rowName);
+            }
+            else if (_skippedArchetypes != null && _skippedArchetypes.TryGetValue(meta.ArchetypeId, out var skip))
+            {
+                // Several classes can name one row (D3). A superseded one says less than the reason its winner was skipped, so it never hides that reason.
+                skippedByRow ??= new Dictionary<string, ArchetypeMetadata>(StringComparer.Ordinal);
+                if (!skippedByRow.TryGetValue(rowName, out var known)
+                    || (_skippedArchetypes[known.ArchetypeId].Reason == ArchetypeSkipReason.Superseded && skip.Reason != ArchetypeSkipReason.Superseded))
+                {
+                    skippedByRow[rowName] = meta;
+                }
+            }
+        }
+
+        foreach (var (rowName, row) in _persistedArchetypes)
+        {
+            if (consumed.Contains(rowName))
+            {
+                continue;
+            }
+
+            var names = ReadPersistedComponentNames(row.Arch, rowName);
+            for (var o = 0; o < names.Length; o++)
+            {
+                var component = ResolvePersistedComponentName(names[o], renameMap);
+                if (!migrated.Contains(component))
+                {
+                    continue;
+                }
+
+                var why = skippedByRow != null && skippedByRow.TryGetValue(rowName, out var holder)
+                    ? SkippedArchetypeReason(holder.ArchetypeId)
+                    : "no archetype class of this load context declares it";
+                throw new ArchetypeSchemaException(rowName, ArchetypeSchemaErrorKind.UnopenedHolder,
+                    $"Component '{component}' changes layout in this open, but archetype '{rowName}' stores it and is not opened by this process ({why}). "
+                    + $"Its cluster would be left in the old layout under the new catalog. Register every component of '{rowName}' (or declare its archetype "
+                    + "class) and open again. Nothing was modified.");
+            }
+        }
     }
 
     private void PersistNewArchetypes()

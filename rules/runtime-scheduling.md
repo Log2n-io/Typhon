@@ -394,6 +394,8 @@ descends from this one property.
               - write a StorageMode.SingleVersion or StorageMode.Transient component
               - write any component of an archetype that has a [SpatialIndex] field
               - call DatabaseEngine.WriteTickFence
+  never an off-DAG destroy (or spawn) of an entity of a non-spatial archetype holding an indexed SingleVersion or Transient
+        component: it removes (adds) a key in a tree the fence's index moves may be cutting (EW-01 (a), #1365)
   rationale: Versioned is MVCC and the structures such a write touches are all concurrent by construction — the
             revision chain, the EntityMap under its bucket write latch, a B+Tree under OLC, the WAL ring under
             claim/publish, UowRegistry under Interlocked, NextEntityKey under Interlocked. This is the engine's
@@ -426,7 +428,9 @@ descends from this one property.
 ### EW-01: The tick fence runs with no concurrent mutation of the structures it writes WITHOUT their protocol `[fatal]` `[silent]`
   invariant ∀ t ∈ fence_window: ¬∃ thread ≠ fence_thread mutating a structure the fence is, at t, writing
             through a path that has dropped that structure's latch or OLC validation. Concretely:
-              (a) a cluster B+Tree under a bulk VALUE REWRITE (UpdateValues -> RunBatch -> ApplyBatch)
+              (a) a cluster B+Tree under a bulk VALUE REWRITE (UpdateValues -> RunBatch -> ApplyBatch), or under a cut
+                  BATCH OF INDEX MOVES (PrepareMoveBatch -> ApplyMoveRange -> FinishMoveBatch, #1346), for every
+                  prep-sliceable archetype
               (b) the EntityMap under a pre-sorted BULK BATCH (UpdateValuesBulk / InsertNewBulk)
               (c) the per-cell spatial index, ClusterCellMap and ClusterAabbs, which the fence writes plainly
                   throughout (no latch on any path)
@@ -455,7 +459,11 @@ descends from this one property.
             prepare thread and released after the last of W parallel slices, which is a cross-thread lifecycle in the
             fence's hot path. It is a DETECTION gap and not a new hazard for a compliant application — EW-02 forbids
             an off-tick thread from writing any component of an archetype with a spatial field, which is the only kind
-            of archetype whose index the fence bulk-rewrites. See `verified:` for what is and is not covered. (c) is plain stores against a per-axis CAS writer (ClusterRef.cs:819,
+            of archetype whose index the fence bulk-rewrites. See `verified:` for what is and is not covered.
+            The move batch is armed across its whole licence, from the cut to the finish (#1365): its close is ONE
+            serial call (FinishMoveBatch, in a finally) after every range, so the release has a single home and needs
+            no count of slices — which is what the value rewrite lacks. A cut that throws disarms before the caller's
+            fallback to a whole ApplyMoves. (c) is plain stores against a per-axis CAS writer (ClusterRef.cs:819,
             ArchetypeClusterState.cs:9893-9900), and there the window is the ONLY thing ordering them.
             Scope correction (2026-10-05): the epoch guard is NOT among the licences — fence workers take guards
             (FenceExecSystem.cs:242,418,919,996) and the B+Tree / EntityMap mutators never took a per-operation one,
@@ -647,6 +655,28 @@ descends from this one property.
             covered by PrepSliceEquivalenceTests' SlicedPrep_BuildsTheSameQueueAsTheUnslicedPath (2, 4 and 8 workers), which fail when every item of a chunk
             is given the chunk's first position
 
+### CD-04: A system completes once, whatever throws on its way `[fatal]` `[silent]` (issue #1509)
+  invariant every system a dispatch reaches is completed exactly once (OnSystemComplete), whichever hook throws: the system-start hook, which
+            opens the system's transaction and selects its entities (TryStartSystem); the system-end hook, which commits or rolls it back
+            (EndSystem); the untyped ShouldRun gate; the reactive skip (CompletedByReactiveSkip); a parallel dispatch's cleanup
+            (CleanUpParallelDispatch). A throw fails THAT system: the failure is recorded against it, its successors are skipped as
+            DependencyFailed, and a parallel one starts no further phase. A failed start is completed without its end hook (RT-02)
+  invariant the single-threaded path (RunSystemSingleThreaded) holds the same hooks to the same rule: a throw fails the system and its
+            successors, never the tick
+  invariant a commit that throws in the end hook fails the system: its writes did not land, so nothing that reads them runs this tick
+  rationale: the hooks ran outside the bodies' try/catch. A throw escaped to the worker's last-resort catch, which marks the system failed and
+             completes nothing. A throw from a successor's gate also left every later successor of the predecessor's fan-out unreached. The
+             track's remaining count never reached zero: the dispatcher spun on it, and every worker found nothing ready and parked, for the
+             life of the process. The SWG demo hung that way at tick ~300 under 2 000 connecting sessions, and #879's commit NRE reached the
+             same catch. #1063 had closed it for a parallel prepare alone
+  scope: DagScheduler.TryStartSystem, DagScheduler.EndSystem, DagScheduler.CleanUpParallelDispatch, DagScheduler.CompletedByReactiveSkip,
+         DagScheduler.EvaluateShouldRunAndPrepare, DagScheduler.ExecuteInline, DagScheduler.CompleteParallelDispatch, DagScheduler.FailSingleThreaded
+  on_violation: the tick never ends: no exception reaches the host, the workers park, the dispatcher spins a core
+  verified: ExceptionHandlingTests.AThrowingLifecycleHook_FailsItsSystem_AndTheTickCompletes (the start hook, the end hook of a system run by a
+            worker and of one run inline as a successor, the untyped ShouldRun and the reactive skip, each on 2 workers: the tick advances,
+            the throwing system is Exception and its successor DependencyFailed), on 2 workers and single-threaded. Each multi-worker case hangs
+            the tick without its hook's guard
+
 ## Module: RT — Epoch scope around system bodies
 
 ### RT-01: Every system body runs inside an epoch scope, and must not block in it `[fatal]` `[silent]`
@@ -692,6 +722,26 @@ descends from this one property.
             AChunkedCallbackBody_CanRunThePublicClusterSpatialQuery, the case the rule exists for;
             ParallelChangeFilterEpochTests.AParallelChangeFilterOverAnIndexedComponent_KeepsTicking_AndSeesItsChanges the prepare (red without its
             scope: the Debug assert, then the hung tick)
+
+### RT-02: A system's transaction is started once per run and ended once, by that run `[fatal]` `[silent]` (issue #879)
+  invariant the start hook installs the run's transaction only into an empty slot (Interlocked.CompareExchange), and refuses before
+            touching anything when a run of the same system is live: it throws, the system fails (CD-04) and the tick ends failed
+  invariant the end hook takes the transaction exactly once (Interlocked.Exchange): an end that finds the slot empty for a system that takes
+            the start hook is a second end of one run — counted (TyphonRuntime.DuplicateSystemEnds) and logged Critical, never acted on
+  invariant a start that throws undoes its own work before it propagates — its transaction taken back out of the slot only if still its own,
+            disposed, its entity list returned, its lifecycle span closed — and the scheduler then fails the system WITHOUT calling the end hook
+            (CD-04). An end is only ever the end of a run whose start succeeded, so it never has to guess whose transaction the slot holds
+  requires: CD-01 — a system completed twice is what lets its next run start over the live one
+  rationale: two NullReferenceExceptions from a commit's tail, always on runtime workers, read as one Transaction ended by two owners: the
+             transaction's _dbe nulled by its reset while its Commit ran. A system completing twice (CD-01's window 1) ended its tick early;
+             the next tick started the still-running system again and overwrote its slot; the old run's end then committed and disposed the
+             new run's transaction under it, and a double dispose could pool one object twice
+  scope: TyphonRuntime.OnSystemStartInternal, TyphonRuntime.OnSystemEndInternal, TyphonRuntime.DuplicateSystemEnds
+  on_violation: a transaction committed, disposed or pooled by a run that does not own it: an NRE in a commit, one object handed to two
+                systems, a run's writes lost
+  verified: SystemTransactionLifecycleTests.ASystemEndedTwice_IsCounted_AndEndsNothingElse,
+            SystemTransactionLifecycleTests.ASystemStartedOverALiveRun_IsRefused_AndTheLiveRunCommits (red with an unguarded start: the
+            live run's writes are lost) [VerifiesRule]
 
 ## Module: Worker Wake
 
@@ -925,6 +975,21 @@ dormancy and amortization; the non-parallel path, the Versioned paths and the ch
             TickOffsetTests.ATransitivePlainReadPath_MayBeStaggered,
             TickOffsetTests.AThrottleOnlySystem_StillGetsAPhase,
             TickOffsetTests.AnOffsetOnAnUngatedSystem_IsRefusedAtBuild
+
+### DSEL-05: A QuerySystem receives its selection as a cluster range on every path `[silent]` (issue #908)
+  invariant a QuerySystem over a cluster archetype receives the clusters its entities were selected from as ClusterIds with a range covering
+            them — the chunk's share on the parallel path, the whole selection (0 to its count) on the serial one; with nothing narrowing the
+            system, the archetype's active list read once as a pair (CLUSTERWALK-02)
+  invariant TickContext.Accessor is non-null wherever TickContext.Transaction is: the transaction is an EntityAccessor, so one cluster walk
+            over ctx.Accessor runs on every dispatch path
+  invariant a selection of no cluster arrives as a non-null ClusterIds and an empty range; ClusterIds is null only for a system with no view
+            or no cluster state
+  rationale: DSEL-01 gave the serial path the same selection and stopped short of its context: ClusterIds null, the range (0, 0), Accessor
+             null. A walk written for the parallel path threw on ctx.Accessor, or over ctx.Transaction walked nothing, silently
+  scope: TyphonRuntime.OnSystemStartInternal, TickContext.ClusterIds, TickContext.Accessor
+  on_violation: a serial system walks no cluster, or throws, where the same body on the parallel path works
+  verified: DispatchSelectionTests.OneClusterWalk_VisitsTheSelection_SerialAndParallel (serial and parallel, the whole view and a tier: the walk
+            visits the entities the context lists; both serial cases red without the serial context's selection) [VerifiesRule]
 
 ## Module: BIND — QuerySystem ↔ archetype binding
 

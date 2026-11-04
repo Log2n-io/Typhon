@@ -25,9 +25,10 @@ and safe type widenings (`int`→`long`, `Float`→`Double`, …) are detected a
 automatically — segments are reallocated to the new stride and every entity is copied field-by-field, eagerly, at
 open. Lossy or semantic changes (narrowing, signed↔unsigned, cross-type, field split/merge) are **breaking**: the
 engine refuses to open until you register a `MigrationFunc<TOld, TNew>` (or a byte-level fallback) that transforms
-old bytes to new; chains of single-step migrations are resolved automatically via BFS. Archetype-level changes
-(component count or archetype `Revision` mismatch) are validated the same way but only as a hard fail — there is
-no automatic add/remove-component-from-archetype migration yet.
+old bytes to new; chains of single-step migrations are resolved automatically via BFS. An archetype's component set
+is matched by component name: adding a component (with a higher archetype `Revision`) migrates the archetype at
+open, every existing entity holding the new component **absent**; removing one is still refused (follow-up #1561).
+See [Archetype Component-Set Evolution](../Schema/archetype-set-evolution.md).
 
 ## 💻 Usage
 
@@ -77,9 +78,11 @@ tsh> schema-validate
 - Breaking changes require a registered `MigrationFunc<TOld, TNew>` or byte-level function; multi-step chains
   resolve via BFS over registered (from, to) revision pairs. A migration failure on any entity aborts before the
   old segment is touched — the database is left exactly as it was.
-- Archetype-level schema (component count, archetype `Revision`) is validated the same way but **only as a hard
-  error** ("Run `tsh migrate`") — there is no automatic migration for adding/removing a component on an archetype
-  or for changing archetype inheritance; the database must be recreated for those cases today.
+- An archetype's component set is matched by component name. Adding, inserting or reordering components with a
+  higher archetype `Revision` migrates the archetype at open, existing entities holding the added component absent
+  ([Archetype Component-Set Evolution](../Schema/archetype-set-evolution.md)); a set change without a revision
+  increase, a downgrade, or a removed component throws `ArchetypeSchemaException`. Removing a component is not
+  supported yet (#1561).
 - `tsh migrate` opens the database through the normal engine path (not raw/exclusive file access) and reports
   per-component OK/MIGRATED/FAIL; `schema-diff`, `schema-validate`, `schema-fields`, `schema-history`, and
   `schema-export` give pre-flight and audit visibility without mutating anything.
@@ -89,15 +92,16 @@ tsh> schema-validate
 - [SchemaEvolutionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaEvolutionTests.cs) — compatible auto-migration: add/remove/reorder fields, safe int→long/float→double widening, surviving indexes
 - [MigrationFunctionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/MigrationFunctionTests.cs) — breaking-change `MigrationFunc`/byte-level migration, chained multi-step BFS resolution, missing-migration and duplicate-registration failures
 - [SchemaValidationIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/SchemaValidationIntegrationTests.cs) — `SchemaValidationException` on an unmigrated breaking change, `SchemaDowngradeException`, `Skip` validation mode
-- [SchemaVersioningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SchemaVersioningTests.cs) — archetype-level schema persistence and tamper detection (component-count/revision mismatch hard-fails)
+- [SchemaVersioningTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/SchemaVersioningTests.cs) — archetype-level schema persistence and tamper detection (an unreadable stored component list or a revision mismatch is refused)
+- [ArchetypeSetMigrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Schema/ArchetypeSetMigrationTests.cs) — adding a component to a populated archetype: every entity carried across by name, the added one absent
 
 ## 🔗 Related
 
 - Source: `src/Typhon.Engine/Ecs/public/DatabaseEngine.cs` (`RegisterComponentFromAccessor`, `RegisterMigration`,
-  `ValidateArchetypeSchema`), `src/Typhon.Engine/Schema/internals/SchemaEvolutionEngine.cs`,
+  `ClassifyArchetypeSchema`), `src/Typhon.Engine/Schema/internals/SchemaEvolutionEngine.cs`,
   `src/Typhon.Engine/Schema/internals/MigrationRegistry.cs`, `src/Typhon.Engine/Schema/public/SchemaDiff.cs`,
   `src/Typhon.Shell/Commands/CommandExecutor.cs` (`migrate`, `schema-*` commands)
-- Related features: [Entity & Archetype Model](./entity-archetype-model.md)
+- Related features: [Entity & Archetype Model](./entity-archetype-model.md), [Archetype Component-Set Evolution](../Schema/archetype-set-evolution.md)
 - Sibling: [User-Defined Migration Functions](../Schema/migration-functions.md) — the engine-side `MigrationFunc<TOld, TNew>` mechanism breaking changes register here
 
 <!-- Deep dive: claude/design/Schema/README.md (component-level layers — Implemented), claude/design/Schema/03-compatible-evolution.md, claude/design/Schema/04-migration-functions.md, claude/design/Schema/05-operational-tooling.md, claude/design/Ecs/03-entity-model.md §Schema Versioning & Migration (archetype-level — partial) -->

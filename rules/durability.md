@@ -89,12 +89,16 @@ gating) land with the `RecoveryDriver` in P1.2; LOG-05 (DurableLsn honesty) ship
   invariant component identity on the wire = the per-archetype slot (0..15) resolved under the EntityId's per-DB routing id — (routingId, slot), BOTH durable
            (routing id persisted in ArchetypeR1.RoutingId + re-matched by name on reopen; slot order durable via ArchetypeR1.ComponentNames).
            NEVER the process-global dense ComponentTypeId — that is an in-memory-only handle, not persisted, and may be renumbered across runs.
+  invariant the slot (and a Spawn / SetEnabledBits mask) is in the numbering of the COMMITTED ComponentNames: an open that changes an archetype's
+           component set translates each record, committed → runtime, before any apply (ecs.md SCHEMA-09, SCHEMA-11; #1394)
   rationale (#514 Phase 2): the old dense ComponentTypeId-on-wire coupled replay to registration order → a crash→reopen under a shifted order could mis-map
            post-checkpoint records (silent data loss). (routingId, slot) is stable across crash→reopen by construction — this dissolves that risk.
   scope: RecordCodec.cs, RecordFormat.cs (SlotRecordBody.SlotIndex, CollectionDeltaRecordBody.SlotIndex); recovery RecoveryApplier maps (routingId, slot) → table
          ComponentTable.CollectionHandleRanges (the packed ranges the codec zeroes); RecordCodec.PackColumnHandleRange (the columnar twin)
   on_violation: the log is coupled to physical layout OR to registration order → replay breaks under page relocation / compaction / shifted schema order
-  verified: CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
+  verified: ArchetypeSetMigrationCrashTests.CrashOpen_WindowUnderOldSet_SlotAndFenceBlockReplayByName [VerifiesRule] — the committed-numbering
+    amendment (#1394): a window written under the old set replays onto the right components by name, through a set migration that shifts every
+    slot. CollectionDurabilityTests.Commit_WithCollections_PutsNoBufferIdOnTheWire [VerifiesRule],
     Log06Verifier_RejectsABufferIdOnTheWire [RuleMutant] — re-covered 2026-08-11 (#389) after the 2026-08-07
     retirement (#703). The retired fixtures (RecordCodecPropertyTests, FenceBlockCodecTests) are "Pure — no engine,
     no recovery": they construct records themselves and round-trip them, so neither can observe the EMITTER placing
@@ -686,6 +690,21 @@ append after it.
             entry first, so the cached path is the one reached). AFailedFirstWriteThatClaimedTheCommittedRevision_ThenARollback_LeavesIt
             verifies CHAIN-01's backstop: the claim forced, the rollback finds no pending entry of its own and touches nothing
 
+### CHAIN-03: A chain never names an index past 16 bits `[fatal]` (issues #1382, #1209)
+  invariant a chain's indices are 16-bit: an append is refused before it writes anything when FirstItemIndex + ItemCount, plus the chunk a grow
+            shifts FirstItemIndex by, would reach MaxChainRevisionIndex (ComponentRevisionManager.IsChainFull); a first write waits for a
+            compaction outside its pin and then throws ResourceExhaustedException (RevisionChain/AddRevision), ChainFullRefusals counting it
+  invariant an open collapses a chain full on disk to its head before it replays into it (RecoveryApplier.AppendVersionedRevision): an open has no
+            snapshot, so no history is needed, and the content the collapse drops is left to the orphan sweep, which frees what no surviving head
+            names (#1251)
+  rationale: past short.MaxValue the count wrapped negative, every reader misread the chain and the compaction's stackalloc of a negative
+             length overflowed the stack: the market with 4 desks under 16 writers crashed the process (#1382). The replay appended through the
+             same guard with no restart possible, so a chain a long snapshot had filled failed the open (#1209)
+  scope: ComponentRevisionManager.AddCompRev, ComponentRevisionManager.IsChainFull, RecoveryApplier.AppendVersionedRevision
+  on_violation: a wrapped chain read as garbage, or a stack overflow; a database that cannot open
+  verified: RevisionChainFullTests.AFullChain_RefusesTheAppend_AndTakesWritesAgainOnceTheSnapshotEnds,
+            RevisionChainFullTests.AChainFullOnDisk_ThenAReplayedUpdate_StillOpens (the open fails without the collapse) [VerifiesRule]
+
 ---
 
 ## Module: CK — Checkpoint v2
@@ -866,13 +885,16 @@ CK-08 (flush-only cycles) are later increments.
             its torn bytes were re-checksummed for the next open to serve (#1304); held back after it, the close's flush skipped it under a clean
             marker. A flush-only cycle after a fatal cycle failure writes nothing
   invariant the recovery's passes work in bounded batches (DatabaseEngine.RecoveryBatchSize entities, chains or records) and call
-            DatabaseEngine.RecoveryBatchPoint between them: the pass's ChangeSet saved, the thread's epoch pin refreshed so the batch's pages stop
-            being epoch-held, and a flush-only cycle once the owed pages pass the dirty-page threshold. The passes: the entity-map rebuild, the
+            DatabaseEngine.RecoveryBatchPoint between them: the pass's ChangeSet marks released — its pages stay owed (PS-10), unevictable until
+            written — the thread's epoch pin refreshed so the batch's pages stop being epoch-held, and a flush-only cycle once the owed pages pass
+            the dirty-page threshold. Released, not saved (#1588): a save per batch rewrote the pages each batch re-dirtied, and the index
+            rebuild's random inserts re-dirty the same B+Tree pages batch after batch (a 7 GB crash open at 512 MiB: >91 GB in >5.5 min saved,
+            15.3 GB in 95 s released). The passes: the entity-map rebuild, the
             Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild. A pass
             calls it only where it holds no page address across it, and records every page it writes through an accessor without a ChangeSet as
             owed (the HEAD rebuild's clusters): refreshed, an unrecorded page could be evicted unwritten (PS-10). The replay's ChangeSet is saved
-            when the replay completes, its marks released when it throws. OPEN: the spatial passes still epoch-tag (#1305); a partial entity map
-            on disk loses preserved EnabledBits (#1306)
+            when the replay completes, its marks released when it throws. OPEN: the spatial passes still epoch-tag (#1305). A partial entity map on
+            disk loses nothing: the rebuild never reads the persisted map, it takes the enabled bits from the clusters (ENABLE-01, #1306)
   invariant a crash open fails once its checkpointer has latched a fatal failure (CK-06): at the next batch point, and at its seal whether latched
             before it or by the seal's own cycle (DurabilityException, TyphonErrorCode.RecoveryCheckpointFailed). It could neither write what the
             recovery owes nor seal it, and an open that succeeded handed the application an engine that never checkpointed again. A seal cycle that
@@ -1193,6 +1215,11 @@ CK-08 (flush-only cycles) are later increments.
             and moves to the next page (ChunkBasedSegment.ClaimOnPage). Recovery's chain scans skip held chunks (ChunkBasedSegment.IsChunkLive,
             which reads the hold before the bitmap: the release frees the bitmap first)
   invariant a content chunk a rolled-back transaction allocated is freed at once: no committed page ever named it
+  invariant the crash open's orphan sweep clears a revision chunk before it frees it. A root is named by its own header: the old root of a spawn
+            the replay re-applied carries its live entity's EntityPK. Freed as it was, a spawn took it again without clearing it, a capture wrote
+            its page between the allocation and the header, and the next crash open found two roots for that entity and kept the stale one, whose
+            content never reached the disk: the entity read zeros, and its real chain was swept (#1516). Cleared, the page owes its write before the
+            free, so the seal's covered cycle writes it before the chunk can be taken again
   invariant held frees past PagedMMFOptions.FreeQuarantineCacheFraction of the cache ask once for a checkpoint (CheckpointManager.ForceCheckpoint),
             again only after a release: a trigger, never a cap — and not during a crash open's recovery, whose cycle is its seal: one mid-scrub
             would write a half-scrubbed file. The hold is never persisted: after a crash a held chunk is still named by the disk's stale pages,
@@ -1216,7 +1243,9 @@ CK-08 (flush-only cycles) are later increments.
             nothing does); TornCaptureRecoveryTests [VerifiesRule] — an overflow chunk freed by a compaction is
             not reused before a checkpoint (with DatabaseEngine.DisableFreeQuarantineForTest the next growth takes it and the first item recovers an
             old value), recovery's frees are held until its seal covered them, a free held at a clean close is freed in the file, a collection buffer
-            a cleanup released is not reused before a checkpoint, in a segment created or loaded by the open
+            a cleanup released is not reused before a checkpoint, in a segment created or loaded by the open, a re-applied craft's swept old root
+            taken again and written before its header is no root after the next crash (ACraftsSweptOldRoot_TakenAgain_IsNoRootAfterTheNextCrash:
+            without the clear the item reads zeros)
 
 ---
 
@@ -1576,7 +1605,8 @@ either durability, recoverability, or consistency.
   scope: WalWriter.cs (WaitForDurableSlow, WaitForDurabilitySignal, PulseDurabilityWaiters, AdvanceDurable, Dispose)
   verified: WalWriterTests.WaitForDurable_ConcurrentWaiters_EachWakesAsSoonAsItsLsnIsDurable [VerifiesRule] (8 waiters, 800 one-LSN advances,
             every wake within 10 ms; the old Wait(1)+Reset loop measured 16.5 ms to 1.4 s worst on 2026-10-28, the fix under 1 ms typical);
-            WalWriterTests.WaitForDurable_NeverDurable_TimesOutAtItsDeadline, WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce,
+            WalWriterTests.WaitForDurable_NeverDurable_TimesOutAtItsDeadline (counts the slices it sleeps: none longer than the deadline),
+            WaitForDurable_WriterFails_WakesTheBlockedWaiterAtOnce,
             WaitForDurable_TokenCancelled_WakesTheBlockedWaiterAtOnce, WaitForDurable_WriterDisposed_WakesTheBlockedWaiter [VerifiesRule]
 
 ---
@@ -1928,6 +1958,21 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     too early → other readers see uncommitted write (isolation violation)
     too late → committed revision invisible; crash in window → committed-but-invisible
       revision on disk (undetectable by standard checks)
+
+### UR-09: A released slot is never written by its former owner `[fatal]` (issue #1376)
+  invariant a unit of work's last registry act is Release: its dispose flushes first and releases after, in a finally, so a flush that
+            throws still gives the slot back
+  invariant a unit of work that appended no record (UnitOfWork.CommittedTransactionCount == 0: a rollback, a refusal, nothing written)
+            records no commit and does not flush on dispose
+  rationale: the dispose released, then flushed, and the flush ended in RecordCommit on the released id. The free slot was written
+             Committed with its committed bit set, overwriting a Pending entry if another unit of work had taken it; the page persisted
+             it, and the next open counted the entry active and never freed it: a slot leaked per non-Deferred unit of work, toward the
+             32 767 cap. An empty one also waited on the WAL's frontier, and with an expired deadline that timeout replaced the exception
+             the dispose was unwinding on. UR-01's Pending → Committed → Free ran Pending → Free → Committed on this path
+  scope: UnitOfWork.Dispose, UnitOfWork.RecordTransactionCommitted, UowRegistry.Release, UowRegistry.RecordCommit, Transaction.Commit
+  on_violation: a free slot reads Committed; a slot leaks across every reopen; an empty dispose blocks on the WAL
+  verified: UowRegistryTests.ADisposedImmediateUnitOfWork_LeavesItsSlotFree, UowRegistryTests.ADisposedNonDeferredUnitOfWork_LeavesNoSlotTakenAcrossAReopen,
+            UowRegistryTests.ANonDeferredUnitOfWorkThatCommittedNothing_DoesNotFlush — all three red with the release before the flush
 
 ---
 
@@ -2445,7 +2490,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             are data. A revision segment's is every chunk no other names: a root, or a chunk no chain will link (an overflow chunk whose
             predecessor's page is as of before its growth), whose bytes no one reads — filtered by a header check, a root whose overflow chunk the
             disk has as free kept its hold. A named chunk the crash rebuild of an EntityMap adopts as its entity's root is freed as it is adopted
-            (#1251). Read through a scan accessor: a segment may outgrow the cache
+            (#1251). Read through a scan accessor, its epoch moved every LockWordRecovery.ChunksPerEpoch chunks: a segment may outgrow the
+            cache, and under one epoch every page the walk passed stays protected (a 6 GB revision segment filled a 512 MiB cache, and the open
+            timed out on back-pressure)
   scope: PagedMMF.TakeCaptureTicket, PagedMMF.EndLockHold, PagedMMF.BeginCapture, PagedMMF.EndCapture, PagedMMF.WritePagesForCheckpoint,
          PagedMMF.SavePages, ComponentRevisionManager.ChainLockTicket, ComponentRevisionManager.EndChainLockHold,
          ComponentRevisionManager.ResetChainLocksAfterCrash, ComponentRevisionManager.ResetChainLocks, LockWordRecovery.ResetLocks,
@@ -2595,6 +2642,47 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
                 past their first latch, their pins up to 4,000 epochs behind, held the whole cache. With the reserve, 15 of 15 runs pass and the
                 longest back-pressure wait is 68-352 ms. Without the inheritance, ChaosStressTests.UltimateStress_AllSubsystems at the 8 MiB floor
                 timed out about one run in six on four Linux cores: a grow waiting for a page, the publishes blocked on its lock 170,000 epochs behind
+
+### PS-25: A first load waits on probation until a different operation asks for it again; the probation area's size follows the ghost hits `[perf][silent]`
+  invariant with PagedMMFOptions.ScanResistantEviction (the default), a page a miss loads inside an operation — the transaction open on the thread, or the
+            point-in-time accessor whose lease it holds (PagedMMF.EnterOperation; operations ended out of order leave the thread in the innermost one
+            still open, never one that ended) — is placed on probation under that operation's tag (PageInfo.ProbationTag, 1-255), with its clock
+            counter at 0; outside any operation (the checkpoint, a fence, recovery) it joins the clock at once, as it always did
+  invariant a request for a probation page from its own operation counts in the page's clock counter, one CAS step from the value read, lap by
+            lap: 1 for the load's request, 2 for one again (CAR's T1 reference bit), which buys the page one more lap of the probation queue (3);
+            asked for again in that lap (4), it is a page its operation keeps coming back to — an index's interior node under a walk — and joins
+            the clock at its next take, its counter reset to a fresh load's 1. A page a walk reads once, or many times in a row, leaves after one
+            more lap at most. One from any other operation, or from outside any, moves it to the clock at once. Neither pass of the sweep ages a
+            probation page's counter
+  invariant the clock's sweep passes over probation pages, neither taking nor ageing them. Once the cache has been full, an allocation first takes
+            probation's oldest page without a reference bit while probation holds more than its target p (a page with one goes to the back, its
+            bit consumed, or joins the clock if it is its second, at most 64 a take); then the clock; then probation's oldest whatever p; then pass 2. Every take goes through
+            TryAcquire, so PS-01 holds unchanged: a pinned, dirty, owed or epoch-held probation page is never taken, and goes to the back of the
+            queue; and TryAcquire re-checks under the slot's lock that the slot still holds the popped page on probation — promoted or reloaded
+            since the pop, it is left alone
+  invariant the pages the two sets give up are remembered, up to one per cache slot each: B1 for probation's, with their loader's tag, B2 for the
+            clock's (ProbationPolicy). A miss is decided before the page its slot gave up is recorded (ARC's order). A miss on a B1 page raises p
+            by max(1, |B2|/|B1|) and loads it into the clock when another operation asks; a miss on a B2 page lowers p by max(1, |B1|/|B2|) and
+            loads it into the clock. p stays within [N/256, N/2], starting at N/16: rails, not the operating point. Nothing is reserved: with
+            no walk, p drifts down and the clock holds the cache
+  invariant the hit path pays one byte read on the line the counter is on; the policy's lock is taken on the miss path only
+  scope: PagedMMF.NoteRequested, PagedMMF.TryTakeFromProbation, PagedMMF.PlaceLoad, PagedMMF.UnplaceLoad, PagedMMF.TryAcquire,
+         PagedMMF.AllocateMemoryPageCore, PagedMMF.EnterOperation, PagedMMF.ExitOperation, PagedMMF.OperationTag, ProbationPolicy,
+         PagedMMFOptions.ScanResistantEviction
+  on_violation: a walk larger than the cache evicts the working set: on a full 64 MiB cache, the replay of three long walks beside live traffic
+                counted 20-24k foreground misses under the plain clock against about 650 with this rule (claude/scratch/huge-scan-assessment.md, I8).
+                A reserved area instead of an adaptive one cost a working set near the cache size 75 % more misses with no walk at all
+  rationale: ARC's adaptation (Megiddo and Modha, FAST 2003) on the clock, as CAR (Bansal and Modha, FAST 2004), with one change: promotion needs a
+             different operation, not merely a second hit — 63-65 % of a walk's requests re-read its own pages. Deviates from EP-02's "marks the page
+             recently used" for first loads, and from ADR-007's rejection of ARC, approved 2026-11-03
+  verified: PageCacheProbationTests.AHotSet_SurvivesAWalkLargerThanTheCache [VerifiesRule] — a hot set read by many operations, then a walk four times
+            a 256-slot cache: every hot page resident; Mutant_ThePlainClock_LosesTheHotSet [RuleMutant]. APageAskedForByAnotherOperation_JoinsTheClock,
+            ALoadOutsideAnyOperation_GoesToTheClock, AWalksOwnRereads_PromoteNothing, AMissOnAPageProbationLetGo_GrowsTheTarget_AndJoinsTheClock,
+            AMissOnAPageTheClockLetGo_ShrinksTheTarget, WithNoWalk_AWorkingSetNearTheCacheSizeMissesAsOnTheClock, ARepeatedWalk_CachesItself,
+            AProtectedProbationPage_IsNeverTaken, UnderConcurrency_TheProbationCountMatchesTheSlots, APagePromotedDuringTheTake_IsLeftToTheClock,
+            TheTarget_NeverExceedsHalfTheCache, WithTheOptionOff_NoPageIsOnProbation, APageItsOperationAskedForAgain_GetsOneMoreLap,
+            OperationsEndingOutOfOrder_LeaveNoEndedOperation, AfterTheQueueChurns_EveryProbationPageCanStillBeTaken, TheGhostList_MatchesItsModel,
+            APageItsOperationKeepsComingBackTo_JoinsTheClock
 
 ## Module: WAL Recovery
 
@@ -2757,7 +2845,9 @@ of the LSN value).
   on_violation: flag survives an unclean session → next open trusts stale HEADs
 
 ### CS-03: HEAD rebuild skipped iff the clean flag was set `[fatal]`
-  invariant trusted ⇔ (BK_CleanShutdown == 1 at open ∧ no component migrated this session) — independent of CheckpointLSN
+  invariant trusted ⇔ (BK_CleanShutdown == 1 at open ∧ no component migrated this session ∧ the open not forced) — independent of
+            CheckpointLSN. A forced open (repair, restore) rebuilds the HEADs: it trusted them, and a repair said it had rebuilt every derived
+            structure (#1179)
   invariant trusted ⇒ skip RebuildVersionedHeadFromChain (persisted cluster-slot HEADs are current)
   invariant ¬trusted ⇒ rebuild runs exactly as before (the crash-window repair path is preserved)
   scope: DatabaseEngine.InitializeArchetypes, ArchetypeClusterState.RebuildVersionedHeadFromChain
@@ -2766,7 +2856,8 @@ of the LSN value).
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
 
 ### CS-04: An open that did not complete closes as a crash `[fatal][silent]`
-  invariant an engine whose InitializeArchetypes threw is disposed as a crash would leave it: no PersistArchetypeState, no
+  invariant an engine whose InitializeArchetypes threw, or whose component registration before it threw (DatabaseEngine.RegisterComponentFromAccessor),
+            is disposed as a crash would leave it: no PersistArchetypeState, no
             PersistEngineState, no chunk summary, no MarkCleanShutdown, and no final checkpoint cycle (the checkpoint manager is
             crash-stopped). CS-02 cleared the flag at open, so the next open recovers
   invariant an open that follows a clean close (or an open that never completed after one) sets the failed-open marker in the same
@@ -2838,12 +2929,13 @@ of the LSN value).
             ChunkSummaryFileTests (the format)
 
 ### CS-06: Crash recovery runs iff the last close was unclean `[fatal]`
-  invariant CrashRecoveryAtOpen = WAL segments on disk ∧ ¬clean flag at open, and every crash-path gate reads it: RB-01's index
-            clear + rebuild and EntityMap rebuild, RecoverySuspect checksum mode, WAL replay, CK-09's occupancy re-derive. The
-            tolerate-torn segment loads read TolerateTornSegmentsAtOpen, which is the same flag minus a failed open (CS-04)
-  invariant repair forces it (DatabaseEngineOptions.ForceCrashRecoveryAtOpen) and then ignores the chunk summary: the rebuild net
-            is what regenerates derived structures, and it runs on the crash path only. OPEN (#1179): the force takes effect only
-            when WAL segments are on disk; on a bundle without any, the forced open rebuilds nothing
+  invariant CrashRecoveryAtOpen = forced ∨ (WAL segments on disk ∧ ¬clean flag at open), and every crash-path gate reads it: RB-01's
+            index clear + rebuild and EntityMap rebuild, RecoverySuspect checksum mode, WAL replay, CK-09's occupancy re-derive. The
+            tolerate-torn segment loads read TolerateTornSegmentsAtOpen: the same flag, after an unclean close, minus a failed open (CS-04),
+            and only with WAL segments on disk — a segment is replaced or a torn grow completed only where a log can refill it
+  invariant repair forces it (DatabaseEngineOptions.ForceCrashRecoveryAtOpen, and a restore marker) and then ignores the chunk summary:
+            the rebuild net is what regenerates derived structures, and it runs on the crash path only, with or without WAL segments. The
+            decision sat inside the log scan's branch, so a forced open of a bundle whose wal/ was removed rebuilt nothing (#1179)
   invariant the ctor's WAL scan still runs whenever segments exist: it reads the log, not the data file, and gives LOG-08 its
             LSN frontier
   rationale: the flag used to mean "WAL segment files exist", which a clean close leaves true, so every reopen of a database with
@@ -2854,7 +2946,9 @@ of the LSN value).
   on_violation: (narrower) a crash is not recovered — torn derived structures trusted; (wider) every clean open reads the whole
                 file; (repair) a regeneration that rebuilds nothing and reports success
   verified: HealthyOpenTests.WalFilesOnDisk_RunRecoveryOnlyAfterAnUncleanClose,
-            HealthyOpenTests.ARepairOpen_RunsRecoveryAfterACleanClose_AndIgnoresTheSummary [VerifiesRule]
+            HealthyOpenTests.ARepairOpen_RunsRecoveryAfterACleanClose_AndIgnoresTheSummary,
+            HealthyOpenTests.ARepairOpen_WithNoWalSegments_RunsRecovery (red with the decision inside the scan's branch),
+            HealthyOpenTests.ARepairOpen_OfACrashedBundleWithNoWal_RefusesADamagedSegment (red without the segments clause) [VerifiesRule]
 
 ### CS-07: A clean open reads no data page `[perf]`
   invariant after a clean close (CS-05 summary adopted), an open reads segment directories, the bootstrap and the schema — not the
@@ -2886,8 +2980,12 @@ of the LSN value).
             brings back; a page it had written may hold data no log window does — an old lost write of the link alone — and is kept. A suspect
             page (its checksum failed) is judged by its first sector, which holds the header and the incarnation. Past the disagreeing page it is the
             grow's, written after the barrier, and is initialized. The disagreeing page itself, torn and this segment's, may hold a checkpoint's
-            data: the grow is not completed and the segment is refused — never emptied with its suspicion cleared, and never patched, which dirtied
-            it for a cycle to re-checksum its torn bytes. A directory's last page whose link agrees is checked too: one the grow had not written
+            data: its link is patched, it stays suspect and held back from every write, and RB-04 judges it — live chunks on it refuse the open,
+            none heal it. It is never emptied with its suspicion cleared. It was refused outright while a dirtied suspect page could be written
+            before the judgement, re-checksumming its torn bytes; with every save and cycle holding suspect pages back, the refusal failed a grow
+            over a torn tail that held no live chunk, and the second crash of a replay that grew over one (#1304). The directory's last page, torn
+            and this segment's, is still refused: its link was read from the torn page. A directory's last page whose link agrees is checked
+            too: one the grow had not written
             had no header and another owner's bits, and is initialized. A completion that initialized the page holding chunk 0 (the null id)
             reserves it again
   invariant DELIBERATE (#1303): a torn page past the tear is taken for the grow's. Under an old lost link — the double fault — it was a
@@ -3078,6 +3176,9 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
             is "rebuildable" iff it is cluster-eligible (cluster slots persist EntityKeys[N] + EnabledBits[C] +
             OccupancyBits — fully self-describing) OR all its non-Transient slots are Versioned (chain heads carry every
             location).
+            The enabled bits are re-derived from the cluster too (its EnabledBits[C], which ENABLE-01 keeps equal to the committed record): the
+            rebuild reads nothing of the persisted map. It used to snapshot the bits from it first, a walk of the whole map that could only agree
+            with the cluster or hand back a tear's garbage (#398).
             🔴 The old residual — "the rare non-cluster archetype that still owns a SingleVersion slot, reached via a
             Transient-indexed slot" — NO LONGER EXISTS as of #655. That shape was produced solely by the cluster-eligibility
             rule that disqualified any archetype holding an indexed Transient field; with the rule gone the archetype is
@@ -3106,7 +3207,7 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     derive from — its occupancy walk sees an empty cluster. Re-deriving there produced an EMPTY map and skipped the
     re-placement pass that is the actual rebuild (RebuildClusterFromChains), losing every entity of the archetype. So
     "integrity doubt ⟹ rebuild" must read "integrity doubt AND the primary data still exists ⟹ rebuild"; a migrating
-    open is repopulation, not recovery. Gate: DatabaseEngine.WillRebuildEntityMapOnCrash && !HasMigratedSlot.
+    open is repopulation, not recovery. Gate: DatabaseEngine.WillRebuildEntityMapOnCrash && !IsMigratingArchetype (a field or a set migration).
     (ComponentTable.RebuildSecondaryIndexEntriesFromHeads, DatabaseEngine.RebuildSecondaryIndexes).
     🔴 BOTH index homes, since #656. A cluster-backed archetype keeps its field indexes on the ARCHETYPE, and that home did
     NOT implement this rule: the cluster-index init block read the persisted SPI, loaded the segment and skipped its rebuild,
@@ -3663,10 +3764,14 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
             from the files, never the index; a recorded drop (BacklogReleased, CorruptMidSegment, TornAtCrash) or a missing
             range below L refuses with its range (Gap) and the LSNs still restorable; L past the archive ⇒ BeyondArchive
   invariant a restore never crosses a fork: L ≤ a child's OriginLsn is restored on the parent (ancestry walk), L > it on the
-            child from a child point only; a fork (SchemaChange at registration, BulkLoad before BulkEnd, Restore at adoption)
-            flips BK_TimelineId/Parent/OriginLsn/Reason in one fsynced meta write before any record of the new timeline; a fork is
-            folded into the previous one only at the same origin with no point stamped since it (a point between two schema
-            changes at one origin would otherwise share a timeline with the second one's records)
+            child from a child point only; a fork (SchemaChange at registration, BuildChange when another build of a schema
+            assembly opens it — SCHEMA-14, BulkLoad before BulkEnd, LogBreak when a crash open dropped segments past a
+            break, Restore at adoption) flips BK_TimelineId/Parent/OriginLsn/Reason
+            in one fsynced meta write before any record of the new timeline; every fork but a restore's first seals the active
+            segment (a served switch), so the parent's segments end at its origin and every LSN the parent wrote restores from it
+            (a commit racing the switch, between its service and the flip, lands past the origin, on the child); a fork is folded
+            into the last fork of the session while no point was stamped since it (no base lies between them, so no restore tells
+            them apart), and a point between two changes makes the second fork, even at the same origin
   invariant the engine's timelines are one immutable value, published with a release store and read with one acquire load: a
             point's timeline and parent, the archiver's filing, are of one fork, never a torn id; the meta keeps the ancestors a
             local segment may still belong to (BK_TimelineAncestry), so a restart files a held segment under its own timeline
@@ -3686,7 +3791,8 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
     is needed
   verified: RestoreToLsnOracleTests (T12: every frame end as a target, from either base, oracle state; forced crash recovery),
             FrameCutTests, ArchiveRestorePlannerTests (every refusal; a disagreeing base never mixed; never across a fork),
-            TimelineForkTests (two schema changes with a point between them fork twice at one origin), RestoreMarkerV2Tests,
+            TimelineForkTests (two schema changes with a point between them fork twice at one origin; a runtime schema change
+            restores to the LSN before it from the parent, by LSN and by time), RestoreMarkerV2Tests,
             RestoreCleanBaseTests (Mutant_AMarkerWithoutForceCrashRecovery_IsReported), RestorePlanTests (AC-A11) —
             [VerifiesRule("BKP-11")]. Source mutants seen red: fork flipped after FlushToDisk, a fork folded by origin alone, the
             ancestry not persisted
@@ -3828,11 +3934,16 @@ BKP-05, BKP-08), the chain lifecycle (#1415: BKP-13, BKP-14), the ops loop (#141
   invariant a closing engine stops the scheduler first, before the coordinator, waiting for its tick at most one tick; a tick left behind (a step
             parked below it) touches nothing of the engine after the stop returned, nor does a refresh still parked on the store
   invariant a backup.request selects auto or full and nothing else: the engine writes to BackupOptions.StorePath alone
+  invariant a backup.request is answered with its own job's outcome, by id, in the status (`BackupStatus.Requests`, the last 8): Running when its
+            job starts, then Published with its point, Failed, or Deferred when the job ends; Refused at once when its submit is refused for good; a
+            job of another source (schedule, archive, API) answers no request, and a second request does not erase the first one's answer (#1483)
   scope: BackupScheduler.Tick, BackupScheduler.RefreshStoreFacts, BackupScheduler.StopAndJoin, BackupScheduler.Start, BackupCoordinator.RunJob,
-         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore
+         BackupRequestFile.TryPoll, DatabaseEngine.DisposeCore, BackupOpsState.Answer
   on_violation: a full disk or a dead share crashes or stalls the database; a bundle-directory writer redirects backups anywhere
   verified: BackupSchedulerSafetyTests (a store throwing IOException, UnauthorizedAccessException or a non-I/O exception at every operation; a
             request naming a path; an unreadable request; requests refused; a store read parked on a dead share while the tick keeps stepping the archiver
             and publishing, AStoreReadParkedOnADeadShare_NeverStallsTheTick, source mutant seen red: the refresh run inline; a close with a step parked
-            in the tick) — [VerifiesRule("BKP-16")];
+            in the tick) — [VerifiesRule("BKP-16")]; BackupSchedulerTests (#1483: a scheduled point published, or failing, while a request
+            waits answers no request; two requests keep their own answers) [VerifiesRule("BKP-16")], Shell CreateWait_ReportsItsOwnRequestsRefusal_…,
+            Workbench BackUpNow_ByRequest_ReportsItsOwnRefusal_…;
             [RuleMutant("BKP-16")]: a tick that rethrows

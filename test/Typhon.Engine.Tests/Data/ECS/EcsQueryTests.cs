@@ -428,10 +428,19 @@ class EcsQueryTests : TestBase<EcsQueryTests>
         }
         using var qtx = dbe.CreateQuickTransaction();
 
-        // foreach ignores WhereField — must throw instead of iterating the whole archetype.
+        // foreach applies WhereField: it streams the matches, never the whole archetype.
+        var seen = 0;
+        foreach (var _ in qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 150))
+        {
+            seen++;
+        }
+
+        Assert.That(seen, Is.EqualTo(1), "foreach over a WhereField yields the matches only");
+
+        // foreach ignores OrderBy — use ExecuteOrdered.
         Assert.Throws<System.InvalidOperationException>(() =>
         {
-            foreach (var _ in qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 150)) { }
+            foreach (var _ in qtx.Query<CompDArch>().WhereField<CompD>(d => d.B >= 0).OrderByField<CompD, int>(d => d.B)) { }
         });
 
         // Execute ignores OrderBy/Skip/Take — use ExecuteOrdered.

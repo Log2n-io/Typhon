@@ -67,7 +67,7 @@ typhon backup list    --store S [--restorable]                 # points, chains,
 typhon backup verify  --store S [--level quick|full|deep]
 typhon backup restore --store S [--point X | --lsn L | --time T [--timeline t]] --to <bundle> [--dry-run]
 typhon backup log     --store S [--timeline t] [--lsn-from L1 --lsn-to L2 | --from T1 --to T2] [--commits]
-typhon backup drill   --store S --scratch D                    # restore to scratch, open, check deep, record, delete
+typhon backup drill   --store S --scratch D [--schema dll|dir] # restore to scratch, open with the app's build, check deep, record
 typhon backup compact --store S [--point X]
 typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
 ```
@@ -88,13 +88,14 @@ typhon backup prune   --store S --min-keep 3 --max-age 7d [--dry-run]
   health (and, with archiving, the recovery point), it does not stop the engine.
 - **Health never looks better than the backups are.** Stale backups, failures in a row, an unreachable store, a failed
   drill each lower it; a stopped engine's last status degrades by itself as time passes.
-- **A drill proves a point restores.** It restores into a scratch directory, opens the database (recovery runs), checks it
-  deep and records the result in the store. The `typhon` tool drills a point whose WAL tail it can replay without the
-  application's assemblies; a point whose tail holds the application's records is drilled in-process, by the application:
-  `OpenAndClose = b => BackupOperations.OpenAndCloseRestored(b, o => /* its registrations */)`.
+- **A drill proves a point restores, with the build that wrote it.** It restores into a scratch directory, opens the database with the
+  application's schema assemblies (recovery replays the tail with the application's code), checks it deep and records the result, and the
+  assemblies it ran with, in the store. The open is exact: another build of an assembly the point names, a component whose layout differs
+  under the same version, or one the point does not hold ends the drill as an error naming the difference — never a pass, never a migration.
+  A restore's settle in the Workbench opens the same way; `typhon backup restore` names the build to open the restored database with.
 - **Archiving never loses WAL silently.** A segment leaves the database un-archived only when the archive falls behind past
   its backlog limit; that range is then a recorded gap, which no restore crosses, and a new point is taken. A restore to an
-  LSN or an instant ends at the last whole transaction at or below it, and never crosses a schema change or a bulk load
+  LSN or an instant ends at the last whole transaction at or below it, and never crosses a schema change, a new build of the application or a bulk load
   (each starts a new timeline).
 - **One store per database**, a local or mounted filesystem path. Remote object stores, encryption and logical
   (entity-level) export are out of scope for now.

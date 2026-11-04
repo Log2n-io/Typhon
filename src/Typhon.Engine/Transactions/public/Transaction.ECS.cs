@@ -58,6 +58,7 @@ public unsafe partial class Transaction
     /// <inheritdoc/>
     internal override int CreateVersionedContentAndWrite<T>(EntityId id, byte slot, in T value)
     {
+        ResumeIfSuspended();
         EnsureMutable();
 
         var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
@@ -322,12 +323,31 @@ public unsafe partial class Transaction
         => new(this, false, sourceFile, sourceLine, sourceMethod);
 
     /// <summary>
+    /// Walks every entity of exactly <typeparamref name="TArch"/> visible at this transaction's snapshot, one batch at a time, holding a bounded window of
+    /// pages and, between batches, no epoch pin: <c>foreach (var batch in tx.Walk&lt;TArch&gt;()) { … }</c>. See <see cref="ArchetypeWalk{TArch}"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The archetype has no cluster storage in this engine.</exception>
+    public ArchetypeWalk<TArch> Walk<TArch>() where TArch : class
+    {
+        BeginOperation();
+        var meta = ArchetypeRegistry.GetMetadata<TArch>();
+        var engineState = meta == null ? null : _dbe._archetypeStates[meta.ArchetypeId];
+        if (engineState?.ClusterState == null || engineState.EntityMap == null)
+        {
+            throw new InvalidOperationException($"Archetype {typeof(TArch).Name} has no cluster storage in this engine: register it before walking it.");
+        }
+
+        return new ArchetypeWalk<TArch>(new SnapshotWalker(this, meta, engineState));
+    }
+
+    /// <summary>
     /// O(1) metadata count of live entities for <typeparamref name="TArchetype"/> and descendants.
     /// Uses LinearHash.EntryCount — fast but includes entities with DiedTSN set (not yet cleaned up).
     /// For exact counts respecting visibility, use <c>Query&lt;T&gt;().Count()</c>.
     /// </summary>
     public long EcsCount<TArchetype>() where TArchetype : class
     {
+        ResumeIfSuspended();
         var meta = ArchetypeRegistry.GetMetadata<TArchetype>();
         if (meta?.SubtreeArchetypeIds == null)
         {
@@ -368,6 +388,7 @@ public unsafe partial class Transaction
     /// </returns>
     public List<EntityId> EnumerateArchetypeEntities(ushort routingId)
     {
+        ResumeIfSuspended();
         var results = new List<EntityId>();
         var states = _dbe._stateByRouting;
         if (states == null || routingId >= states.Length)
@@ -476,21 +497,23 @@ public unsafe partial class Transaction
     {
         if (meta == null || _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
         {
-            ThrowNotSpawnable<TArch>(meta == null ? null : _dbe.SkippedArchetypeReason(meta.ArchetypeId));
+            ThrowNotSpawnable<TArch>(meta == null ? null : _dbe.SkippedArchetypeReason(meta.ArchetypeId),
+                meta == null ? null : _dbe.SupersededArchetypeMessage(meta.ArchetypeId));
         }
     }
 
     /// <summary>Out of line, so the message is not built into every inlined spawn.</summary>
     /// <typeparam name="TArch">The archetype the caller named.</typeparam>
     /// <param name="skipReason">Why InitializeArchetypes skipped it, when it did (#1071): the component that was never registered.</param>
+    /// <param name="supersededMessage">The complete refusal when a higher revision of its durable name superseded it (#1394 D3); wins over the reason.</param>
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowNotSpawnable<TArch>(string skipReason) =>
-        throw new InvalidOperationException(skipReason != null
+    private static void ThrowNotSpawnable<TArch>(string skipReason, string supersededMessage) =>
+        throw new InvalidOperationException(supersededMessage ?? (skipReason != null
             ? $"Archetype {typeof(TArch).Name} is not registered with this database, so there is nothing to spawn into: InitializeArchetypes skipped it "
               + $"because {skipReason}."
             : $"Archetype {typeof(TArch).Name} is not registered with this database, so there is nothing to spawn into. Register its components with "
-              + "DatabaseEngine.RegisterComponentFromAccessor (or RegisterComponents) and then call DatabaseEngine.InitializeArchetypes before spawning.");
+              + "DatabaseEngine.RegisterComponentFromAccessor (or RegisterComponents) and then call DatabaseEngine.InitializeArchetypes before spawning."));
 
     /// <summary>
     /// Spawns a new entity of archetype <typeparamref name="TArch"/> with the supplied initial component values.
@@ -528,7 +551,7 @@ public unsafe partial class Transaction
 
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
         int count = ids.Length;
@@ -666,7 +689,7 @@ public unsafe partial class Transaction
 
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
 
@@ -724,6 +747,7 @@ public unsafe partial class Transaction
     /// </summary>
     public void SpawnBatchWriteAll<T>(int baseIndex, int count, Comp<T> comp, ReadOnlySpan<T> values) where T : unmanaged
     {
+        ResumeIfSuspended();
         CheckConfig.Require(CheckConfig.Enabled, values.Length >= count, $"values span must be at least count elements");
         if (count == 0)
         {
@@ -804,7 +828,7 @@ public unsafe partial class Transaction
 
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
         var routingId = _dbe.RoutingIdOf(meta);
@@ -868,6 +892,7 @@ public unsafe partial class Transaction
     /// <param name="value">The component value to write. Its component type id selects the slot.</param>
     internal void SpawnWriteValueRaw(int entryIndex, in ComponentValue value)
     {
+        ResumeIfSuspended();
         var span = CollectionsMarshal.AsSpan(_spawnedEntities);
         ref var entry = ref span[entryIndex];
         var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
@@ -916,7 +941,7 @@ public unsafe partial class Transaction
     {
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         _pendingDestroys ??= new HashSet<EntityId>(ids.Length);
 
@@ -933,7 +958,7 @@ public unsafe partial class Transaction
     {
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
 
@@ -1070,7 +1095,7 @@ public unsafe partial class Transaction
     /// </summary>
     public override bool IsAlive(EntityId id)
     {
-        AssertThreadAffinity();
+        BeginOperation();
         if (id.IsNull)
         {
             return false;
@@ -1106,7 +1131,7 @@ public unsafe partial class Transaction
     {
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
         CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
@@ -1153,7 +1178,7 @@ public unsafe partial class Transaction
     {
         EnsureMutable();
         State = TransactionState.InProgress;
-        AssertThreadAffinity();
+        BeginOperation();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
         CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
@@ -1193,7 +1218,7 @@ public unsafe partial class Transaction
         {
             return null;
         }
-        AssertThreadAffinity();
+        BeginOperation();
 
         var routing = _dbe.RoutingIdOf(meta);
         var epoch = Volatile.Read(ref state.SlotMoveEpoch);   // before any lookup: a move after it is caught by the next call
@@ -1952,6 +1977,7 @@ public unsafe partial class Transaction
     /// <summary>Stage an EnabledBits change for commit. Called from EntityRefMut.Enable/Disable.</summary>
     internal override void StageEnableDisable(EntityId id, ushort newEnabledBits)
     {
+        ResumeIfSuspended();
         _pendingEnableDisable ??= new Dictionary<EntityId, ushort>();
         _pendingEnableDisable[id] = newEnabledBits;
     }
@@ -1997,7 +2023,7 @@ public unsafe partial class Transaction
 
     private protected override EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
-        AssertThreadAffinity();
+        BeginOperation();
         NoteEntityOpen();   // #1189: every 128 opens the transaction moves its epoch forward, read-only included
 
         // #1230: an open keeps nothing it read until it returns, so a back-pressure round inside it unwinds to here instead of waiting with the
@@ -2294,6 +2320,7 @@ public unsafe partial class Transaction
     /// </summary>
     internal override (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table, int chainRootChunkId = 0)
     {
+        ResumeIfSuspended();
         // #1382: until it claims its revision a first write leaves no trace on a throw (CHAIN-02), and its caller holds nothing across this call but
         // the handle, which re-resolves (EP-03). So a contended chain, or back-pressure, before the claim unwinds it: the epoch moves here, as at an
         // open's start, and the write runs again. Waiting with its pin, a writer queued behind a publish that held the chain while it waited on

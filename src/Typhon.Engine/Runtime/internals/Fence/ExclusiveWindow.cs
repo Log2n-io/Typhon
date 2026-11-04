@@ -147,9 +147,9 @@ internal sealed class ExclusiveWindow
     /// <remarks>
     /// <para>
     /// <b>Observation and violation are separate, and conflating them is what made this detector reject correct code.</b> The fence writes B+Trees and the
-    /// EntityMap every tick, almost entirely through their ordinary latched mutators; it drops the protocol on exactly one path per structure — a B+Tree's bulk
-    /// value rewrite, which repoints migrants' index entries and is therefore reached only for a SPATIAL archetype, and an EntityMap's pre-sorted bulk batch,
-    /// which a concurrent insert can invalidate by splitting the map. So:
+    /// EntityMap every tick, almost entirely through their ordinary latched mutators; it drops the protocol on a few named paths — a B+Tree's bulk value
+    /// rewrite, which repoints a spatial archetype's migrants' index entries, a B+Tree's batched index moves (every prep-sliceable archetype, #1346, armed from
+    /// the cut to the finish, #1365), and an EntityMap's pre-sorted bulk batch, which a concurrent insert can invalidate by splitting the map. So:
     /// </para>
     /// <list type="bullet">
     ///   <item>every fence-thread mutation still sets <see cref="ObservedFenceMutation"/>, because that is the anti-vacuity signal EW-01's verifier pairs with
@@ -260,10 +260,12 @@ internal sealed class ExclusiveWindow
 
         ThrowHelper.ThrowInvalidOp(
             $"EW-01 violation: thread {threadId} called {site} while the tick fence was rewriting that same structure without its latch — a B+Tree's bulk "
-            + "value rewrite or the EntityMap's pre-sorted batch, both reached only for a SPATIAL archetype's migrants. A concurrent mutation there relocates "
-            + "keys out from under a slice that is not validating versions, or splits the map the batch was sorted against. Do this work from a system, or "
+            + "value rewrite or batched index moves, or the EntityMap's pre-sorted batch. A concurrent mutation there relocates keys out from under a "
+            + "range that is not validating versions, or splits the map the batch was sorted against. Do this work from a system, or "
             + "from a side transaction committed and disposed before the creating system returns. A host driving WriteTickFence itself owns the same "
-            + "obligation. NOTE: an ordinary off-tick write to a Versioned, non-spatial entity is NOT this — it is safe and no longer reported.");
+            + "obligation. NOTE: an ordinary off-tick write of a Versioned, non-spatial entity's Versioned components is NOT this — it is safe and not "
+            + "reported; a spawn or destroy of one whose archetype indexes a SingleVersion or Transient field writes a tree the fence's index moves "
+            + "cut (EW-02).");
     }
 
     /// <summary>How many times a read the window overlapped is attempted before it is refused (<see cref="EndRead"/>).</summary>
@@ -301,6 +303,13 @@ internal sealed class ExclusiveWindow
 
         return openings;
     }
+
+    /// <summary>
+    /// <see cref="BeginRead"/>'s token without its refusal, for a reader that waits a running fence out instead (a snapshot walk, WALK-01): it checks
+    /// <see cref="IsOpen"/> itself and validates what it read with <see cref="ReadOverlapped"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int ReadToken() => Volatile.Read(ref _openings);
 
     /// <summary>Whether the window opened, closed or is open since <see cref="BeginRead"/> returned <paramref name="token"/>, for a foreign caller.</summary>
     /// <param name="token">What <see cref="BeginRead"/> returned.</param>

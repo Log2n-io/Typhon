@@ -1412,7 +1412,10 @@ public partial class DatabaseEngine
 
             try
             {
-                failure ??= ApplyStagedIndexMoves(clusterState, changeSet);
+                // Evaluated first: `failure ??= Apply…` skips the call once a failure is set, and every later archetype's batch was left unfinished
+                // (#1365, IX-08).
+                var archetypeFailure = ApplyStagedIndexMoves(clusterState, changeSet);
+                failure ??= archetypeFailure;
             }
             catch (Exception e)
             {

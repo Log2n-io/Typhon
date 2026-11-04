@@ -4,7 +4,8 @@
 A scenario that crashes the process or never returns cannot take the others with it, and a writing scenario cannot change what the next one reads.
 
     python3 scripts/huge-scan-assessment.py build --dir D --rows 4000000
-    python3 scripts/huge-scan-assessment.py run   --dir D [--match REGEX] [--live] [--cache-mib 64] [--timeout 600] [--results results.jsonl]
+    python3 scripts/huge-scan-assessment.py run   --dir D [--match REGEX] [--live] [--cold] [--prefill] [--trace DIR] [--cache-mib 64] [--timeout 600]
+                                                [--results results.jsonl]
     python3 scripts/huge-scan-assessment.py table --dir D [--results results.jsonl]
 
 Needs Release built first. A clone is `cp -c` (APFS) or `cp --reflink=auto`, so the base costs one copy of its size at most.
@@ -62,6 +63,15 @@ def clone(src, dst):
     subprocess.run(["cp", flag, "-R", str(src), str(dst)], check=True)
 
 
+def drop_os_cache():
+    """Empties the OS page cache, so the scenario reads the clone from the device (`--cold`). Linux only: macOS ignores the read-ahead hints, and
+    Windows needs an administrator to purge its standby list. `TYPHON_HS_DROP_CACHES` overrides the command, e.g. through `wsl.exe -u root` in WSL."""
+    if platform.system() != "Linux":
+        sys.exit("--cold needs Linux")
+    cmd = os.environ.get("TYPHON_HS_DROP_CACHES", "sync && echo 3 | sudo -n tee /proc/sys/vm/drop_caches > /dev/null")
+    subprocess.run(["sh", "-c", cmd], check=True)
+
+
 def scenarios(args, env):
     listing = pathlib.Path(args.dir) / "scenarios.txt"
     code, _, out = dotnet_test(f"FullyQualifiedName~{FIXTURE}.ListScenarios", dict(env, TYPHON_HS_LIST=str(listing)), 120)
@@ -83,6 +93,13 @@ def cmd_run(args):
     env["TYPHON_HS_CACHE_MIB"] = str(args.cache_mib)
     if args.live:
         env["TYPHON_HS_LIVE"] = "1"
+    if args.prefill:
+        env["TYPHON_HS_PREFILL"] = "1"
+    env["TYPHON_HS_EVICTION"] = args.eviction
+    if args.trace:
+        # A page trace per scenario (I7): every page request of the scenario's engine, from its open to the hot set's re-read, for page-trace-replay.py.
+        env["TYPHON__PROFILER__PAGETRACE__ENABLED"] = "true"
+        pathlib.Path(args.trace).mkdir(parents=True, exist_ok=True)
     results = pathlib.Path(args.dir) / args.results
     env["TYPHON_HS_RESULTS"] = str(results)
     base = pathlib.Path(args.dir) / "base"
@@ -93,7 +110,11 @@ def cmd_run(args):
     names = [n for n in every if re.search(args.match, n)]
     for i, name in enumerate(names):
         clone(base, run_dir)
+        if args.cold:
+            drop_os_cache()
         before = results.stat().st_size if results.exists() else 0
+        if args.trace:
+            env["TYPHON_HS_TRACE"] = str(pathlib.Path(args.trace) / f"{name}{'-live' if args.live else ''}.tptr")
         # By substring: the filter grammar has no quoting for a test-case argument, and no scenario name is contained in another (checked above).
         code, secs, out = dotnet_test(f"FullyQualifiedName~{FIXTURE}.Scan&FullyQualifiedName~{name}", env, args.timeout)
         wrote = results.exists() and results.stat().st_size > before
@@ -129,6 +150,11 @@ def main():
     parser.add_argument("--rows", type=int, default=4_000_000)
     parser.add_argument("--match", default=".")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--cold", action="store_true", help="drop the OS page cache after each clone (Linux)")
+    parser.add_argument("--prefill", action="store_true", help="start each scenario from a cache full of cold pages")
+    parser.add_argument("--eviction", choices=["adaptive", "clock"], default="adaptive",
+                        help="scan-resistant eviction (PS-25, the default) or the plain clock")
+    parser.add_argument("--trace", metavar="DIR", help="write a page trace per scenario into DIR (scripts/page-trace-replay.py)")
     parser.add_argument("--cache-mib", type=int, default=64)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--results", default="results.jsonl")

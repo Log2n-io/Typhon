@@ -32,6 +32,13 @@ internal struct VariableSizedBufferRootHeader
 /// <summary>The crash-open reset of a buffer segment's root lock words (PS-20).</summary>
 internal static class VariableSizedBufferRecovery
 {
+    /// <summary>
+    /// How many emptied chunks a buffer parks in its free list before it frees them to the segment: a quarter of its elements' worth of chunks, at least 8,
+    /// and below the 16-bit <see cref="VariableSizedBufferRootHeader.TotalFreeChunk"/> (#1210). Past ~8.1 M elements under one key the unclamped threshold
+    /// let the count wrap negative: emptied chunks stopped being freed, and a crash open took the root for no buffer root and skipped its lock reset.
+    /// </summary>
+    internal static int FreeChunkThreshold(int totalCount, int elementsPerChunk) => Math.Clamp(totalCount / (elementsPerChunk * 4), 8, short.MaxValue - 1);
+
     /// <summary>Frees every buffer lock a crash left held in <paramref name="segment"/>'s data file; returns how many were held.</summary>
     internal static unsafe int ResetRootLocksAfterCrash(ChunkBasedSegment<PersistentStore> segment, DatabaseEngine dbe)
     {
@@ -61,7 +68,8 @@ internal static class VariableSizedBufferRecovery
 
         for (var steps = 0; next != 0 && steps < segment.AllocatedChunkCount; steps++)
         {
-            if (next < 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocated(next))
+            // Unpinned: a held root's chain may span more pages than the cache, and a tagged check per link would hold every one (LockWordRecovery).
+            if (next < 0 || next >= segment.ChunkCapacity || !segment.IsChunkAllocatedUnpinned(next))
             {
                 return false;
             }
@@ -943,7 +951,7 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
             var cursor = rh.FirstStoredChunkId;
             var firstFree = rh.FirstFreeChunkId;
             var totalFree = rh.TotalFreeChunk;
-            var threshold = Math.Max(rh.TotalCount / (ElementCountPerChunk * 4), 8);
+            var threshold = VariableSizedBufferRecovery.FreeChunkThreshold(rh.TotalCount, ElementCountPerChunk);
             var unlinked = 0;
             var prevId = bufferId;
             var curId = ((VariableSizedBufferChunkHeader*)accessor.GetChunkAddress(bufferId))->NextChunkId;
@@ -1374,7 +1382,7 @@ public ref struct VariableSizedBufferAccessor<T, TStore> : IDisposable where T :
         // the root's count is 0 for a collection whose root holds only its header, and divided by it, every such read threw (#1285).
         var epc = _owner.ElementCountPerChunk;
         var tc = rootChunk.TotalCount;
-        var freeChunkThreshold = Math.Max(tc / (epc * 4), 8);
+        var freeChunkThreshold = VariableSizedBufferRecovery.FreeChunkThreshold(tc, epc);
 
         // To collect an empty chunk we need to latch both the previous and current chunks.
         // We can't make modifications otherwise

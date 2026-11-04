@@ -1,6 +1,7 @@
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.Threading;
 
 namespace Typhon.Engine;
@@ -57,14 +58,26 @@ public sealed class BackupDrillOptions
 /// <param name="SuspectPages">Pages the live database had damaged at capture, which the point faithfully holds.</param>
 /// <param name="RecordFile">The record written, or <c>null</c>.</param>
 /// <param name="ScratchBundle">The scratch bundle, when kept; <c>null</c> once deleted.</param>
+/// <param name="Assemblies">The schema assemblies the drill's open ran with (#1485): what "proven" was proven with. Empty for a schemaless open.</param>
 [PublicAPI]
 public sealed record BackupDrillReport(BackupPointSummary Point, BackupDrillOutcome Outcome, BackupDrillStage FailedStage, string Error,
     TimeSpan RestoreTime, TimeSpan OpenTime, TimeSpan CheckTime, WalRecoveryResult Recovery, IntegrityVerdict Verdict, int Findings, int SuspectPages,
-    string RecordFile, string ScratchBundle);
+    string RecordFile, string ScratchBundle, IReadOnlyList<BackupSchemaAssembly> Assemblies);
+
+/// <summary>One schema assembly an open of a restored bundle ran with (#1485).</summary>
+/// <param name="Name">Its simple name.</param>
+/// <param name="Version">Its version, as the manifest records it.</param>
+/// <param name="PublicKeyToken">Its public-key token in hex, or <c>null</c> when unsigned.</param>
+/// <param name="Mvid">Its module version id: which compilation it is, beyond its version.</param>
+/// <param name="Path">The file it was loaded from, or <c>null</c>.</param>
+[PublicAPI]
+public sealed record BackupSchemaAssembly(string Name, string Version, string PublicKeyToken, Guid Mvid, string Path);
 
 /// <summary>What an open and close of a restored bundle did (<see cref="BackupOperations.OpenAndCloseRestored(string, ILogger)"/>).</summary>
 /// <param name="CrashRecoveryRan">The open took the crash path: the WAL was replayed, derived structures rebuilt, the image sealed.</param>
 /// <param name="Recovery">The WAL recovery's figures; default when none ran.</param>
 /// <param name="Duration">Open to close.</param>
+/// <param name="Assemblies">The schema assemblies the open registered (#1485); <c>null</c> when the opener did not say.</param>
 [PublicAPI]
-public sealed record BackupSettleResult(bool CrashRecoveryRan, WalRecoveryResult Recovery, TimeSpan Duration);
+public sealed record BackupSettleResult(bool CrashRecoveryRan, WalRecoveryResult Recovery, TimeSpan Duration,
+    IReadOnlyList<BackupSchemaAssembly> Assemblies = null);

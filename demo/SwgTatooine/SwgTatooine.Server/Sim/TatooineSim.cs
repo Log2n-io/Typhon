@@ -226,6 +226,7 @@ public sealed partial class TatooineSim : IDisposable
                 opt.DatabaseName = _config.DatabaseName;
                 opt.DatabaseDirectory = _config.DatabaseDirectory ?? AppContext.BaseDirectory;
                 opt.DatabaseCacheSize = (ulong)_config.PageCacheMiB * 1024UL * 1024UL;
+                opt.ScanResistantEviction = !_config.PlainClock;
             })
             .AddScopedDatabaseEngine(opt =>
             {

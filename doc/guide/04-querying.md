@@ -93,14 +93,30 @@ List<EntityId> ordered = q.ExecuteOrdered();// ordered matches (requires OrderBy
 int n                 = q.Count();          // just how many
 bool any              = q.Any();            // does at least one match?
 
-foreach (EntityId id in q)                  // iterate matches without a HashSet
+foreach (var e in q)                        // stream the matches, no HashSet
 {
-    var ham = tx.Open(id).Read(Character.Ham);
+    var ham = e.Read(Character.Ham);
     // …react to each match…
 }
 ```
 
-`Execute` is the workhorse; `Count`/`Any` short-circuit when you don't need the entities; the `foreach` form iterates its own pre-collected match list instead of building a `HashSet` — cheaper than `Execute`, but not fully allocation-free streaming.
+`Execute` is the workhorse; `Count`/`Any` short-circuit when you don't need the entities; the `foreach` form streams: it reads the matches in batches as the loop consumes them, so its memory does not grow with the result and a `break` stops the scan. With a `WhereField` it streams in storage order, a cluster at a time, so a predicate on a key unrelated to where entities are stored — a group, a shuffled id — reads each page once instead of jumping to one per row. `foreach` refuses `OrderByField`, `Skip` and `Take` (use `ExecuteOrdered`), spatial predicates (use `Execute`), and a `WhereField` with an OR, as `Execute` does (use `ToView`).
+
+To process a **whole archetype** in one transaction — an audit, an export, a migration — walk it in batches instead:
+
+```csharp
+foreach (var batch in tx.Walk<Character>())     // one cluster of entities per batch, at the transaction's snapshot
+{
+    var hams = batch.GetReadOnlySpan(Character.Ham);
+    for (var bits = batch.Rows; bits != 0; bits &= bits - 1)
+    {
+        var slot = BitOperations.TrailingZeroCount(bits);
+        // batch.GetEntityId(slot), hams[slot] …
+    }
+}
+```
+
+The walk is the fastest way to read every entity of an archetype, holds a bounded set of pages at any size, and between batches holds nothing that would keep other threads' pages in the cache, so a slow consumer costs no one else. It shows the committed state at the snapshot minus your own destroys; your own uncommitted updates and spawns are not in it.
 
 > 💡 **Know which scan you triggered.** `Execute` picks one of three paths automatically: a **targeted** scan when you used `WhereField` (index-driven), a **spatial** scan when you used a spatial predicate (spatial-index-driven), or a **broad** scan otherwise (walk the archetype, apply any `Where` predicate per entity). The takeaway for cost: a `WhereField`/spatial query stays cheap as the archetype grows; a pure-`Where` query is linear in archetype size. Both are correct — choose with your data sizes in mind.
 

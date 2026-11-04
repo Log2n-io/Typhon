@@ -43,7 +43,7 @@ public static class DatabaseEngineExtensions
     public static Transaction CreateQuickTransaction(this DatabaseEngine dbe, DurabilityMode durabilityMode = DurabilityMode.Deferred,
         CommitDiscipline discipline = CommitDiscipline.TickFence)
     {
-#pragma warning disable TYPHON004 // Handed to the transaction below (OwnsUnitOfWork), which disposes it; a refusal gives it back (DisposeUnused)
+#pragma warning disable TYPHON004 // Handed to the transaction below (OwnsUnitOfWork), which disposes it; a refusal disposes it here
         var uow = dbe.CreateUnitOfWork(durabilityMode);
 #pragma warning restore TYPHON004
         dbe.LogUowLifecycle("CreateQuickTransaction: UoW created, calling CreateTransaction");
@@ -55,8 +55,8 @@ public static class DatabaseEngineExtensions
         catch
         {
             // A refusal (the active-transaction guard, TSN exhaustion) must give the registry slot back (#1267): nothing else holds this UoW, and a caller
-            // retrying the refusal would otherwise leak one slot per attempt. Without the durability flush: it hosted nothing (DisposeUnused).
-            uow.DisposeUnused();
+            // retrying the refusal would otherwise leak one slot per attempt. It appended nothing, so its dispose does not flush (#1376).
+            uow.Dispose();
             throw;
         }
 

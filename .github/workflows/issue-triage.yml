@@ -90,7 +90,7 @@ jobs:
                 most likely Issue Type (Bug, Feature or Question), flagged when it differs from the one
                 the issue already has; the single most likely Area (one of: Concurrency, Execution,
                 Storage, Durability, MVCC, Schema, Spatial, Query, Runtime, Observability, Resources,
-                Errors, Utilities, Workbench, Indexes - `Execution` is the transaction/commit layer, the
+                Errors, Utilities, Workbench, Indexes, Subscriptions, Realms - `Execution` is the transaction/commit layer, the
                 tick loop and system scheduling are `Runtime`); up to 3 links to possibly-duplicate
                 existing issues; and any missing info needed to act. Keep it
                 concise and friendly, and state that it is an automated first pass a maintainer will review.

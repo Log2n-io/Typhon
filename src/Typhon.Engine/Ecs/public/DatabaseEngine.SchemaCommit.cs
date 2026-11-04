@@ -87,6 +87,9 @@ public partial class DatabaseEngine
         public readonly List<CatalogPatch> Patches = [];
         public readonly List<SchemaHistoryR1> History = [];
         public readonly List<ChunkBasedSegment<PersistentStore>> Superseded = [];
+
+        /// <summary>The names buffers the rewritten archetype rows named before the commit (design 07 §5.5), freed after it.</summary>
+        public readonly List<int> ReplacedComponentNameBuffers = [];
         public int UserSchemaVersionBumps;
         public ChunkBasedSegment<PersistentStore> Intent;
         public StagedMetaCommit Staged;
@@ -236,6 +239,9 @@ public partial class DatabaseEngine
             cs.SaveChanges();
         }
 
+        // The archetype set changes' journal rows: built now, when the rebuild has counted and timed each re-placement.
+        JournalArchetypeSetChanges(pending);
+
         pending.Intent = WriteSchemaIntent(pending.Patches);
 
         if (WriteComponentRowsBeforeTheFlipForTest)
@@ -336,6 +342,8 @@ public partial class DatabaseEngine
 
         // The migration is no longer this open's to replay or rebuild: a repeat InitializeArchetypes (#790) finds the migrated catalog and treats it as such.
         _migratedComponents = null;
+        _archetypeSetMigrations = null;
+        _setMigrationByRouting = null;
 
         foreach (var staged in pending.ComponentRows)
         {
@@ -349,6 +357,7 @@ public partial class DatabaseEngine
         }
         ReleaseAbandonedMigrationSegments();
         FreeReplacedFieldLists(pending.ComponentRows);
+        FreeReplacedComponentNameLists(pending);
 
         // The journal is an audit trail, written last: a crash between the commit and here loses these rows, never the migration.
         if (pending.History.Count > 0)

@@ -952,6 +952,17 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
     }
 
     /// <summary>
+    /// The chunk-based segment already registered at <paramref name="filePageIndex"/>, if one is: what a repeat open pass (#790) finds of a segment its
+    /// earlier, interrupted pass loaded — <see cref="TryLoadChunkBasedSegment"/> refuses to register one twice.
+    /// </summary>
+    internal bool TryGetLoadedChunkBasedSegment(int filePageIndex, out ChunkBasedSegment<PersistentStore> segment)
+    {
+        segment = null;
+        return _segments != null && _segments.TryGetValue(filePageIndex, out var existing)
+            && (segment = existing as ChunkBasedSegment<PersistentStore>) != null;
+    }
+
+    /// <summary>
     /// Returns a previously loaded segment for the given page index, or loads it if not yet present.
     /// Safe to call when the segment may already be in the registry (e.g., system component segments loaded by the engine constructor).
     /// </summary>

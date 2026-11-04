@@ -484,6 +484,7 @@ internal static class WalArchiveReport
         TimelineReason.SchemaChange => BackupTimelineReason.SchemaChange,
         TimelineReason.BulkLoad => BackupTimelineReason.BulkLoad,
         TimelineReason.LogBreak => BackupTimelineReason.LogBreak,
+        TimelineReason.BuildChange => BackupTimelineReason.BuildChange,
         _ => BackupTimelineReason.Unknown,
     };
 

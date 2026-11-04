@@ -354,6 +354,9 @@ public sealed class SimConfig
     /// <summary>Page cache size in MiB. The static world alone is large, so this is not the place to be frugal.</summary>
     public int PageCacheMiB = 1024;
 
+    /// <summary>The page cache's plain clock instead of scan-resistant eviction (the engine's PS-25), for an A/B of the two.</summary>
+    public bool PlainClock;
+
     /// <summary>
     /// Where the database file lives. The simulation runs on a REAL on-disk database with a real WAL — most archetypes
     /// declare <c>ClusterDurability.Checkpoint</c> so their per-tick values ride the checkpoint rather than the WAL, but
@@ -398,6 +401,12 @@ public sealed class SimConfig
     /// </para>
     /// </remarks>
     public bool Persist;
+
+    /// <summary>
+    /// Thousands of credit-ledger rows <c>--seed-history</c> writes into a fresh world before it serves, with about four item rows each (Hardening/HistorySeed.cs);
+    /// 0 seeds nothing. A reopened world is never seeded.
+    /// </summary>
+    public int SeedHistoryThousands;
 
     // ── Live profiling ──────────────────────────────────────────────────────────────────────────────────────────────
     //

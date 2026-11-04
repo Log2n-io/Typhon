@@ -100,6 +100,11 @@ public sealed record BackupStoreStatusDto(string Health, string Reason, int Poin
 /// <summary>A capture's failure.</summary>
 public sealed record BackupFailureDto(DateTime? Utc, string Kind, string Message);
 
+/// <summary>
+/// The engine's answer to a recent <c>backup.request</c> (#1483): <c>Running</c>, <c>Published</c>, <c>Failed</c>, <c>Refused</c> or <c>Deferred</c>.
+/// </summary>
+public sealed record BackupRequestOutcomeDto(string Id, string State, BackupPointDto Point, string Error, DateTime? Utc);
+
 /// <summary>The engine's WAL archiver.</summary>
 public sealed record BackupArchiveStatusDto(string State, string TimelineId, long ArchivedThroughLsn, long LagBytes, long BacklogBytes,
     double LagSeconds, long GapsTotal, long LastGapFromLsn, long LastGapToLsn, DateTime? LastArchivedSealUtc, int ConsecutiveFailures,
@@ -113,7 +118,7 @@ public sealed record BackupEngineStatusDto(string Source, bool EngineLive, int P
     string Health, string HealthReason, string ReasonText, string State, string Phase, long ProgressPages, long ProgressOfPages, long ProgressBytes,
     BackupPointDto LastPoint, DateTime? LastSuccessUtc, DateTime? NextDueUtc, int ConsecutiveFailures, BackupFailureDto LastFailure, int ChainDepth,
     long StoreBytes, int RestorablePoints, BackupDrillSummaryDto LastDrill, BackupDrillSummaryDto LastPassedDrill, string RetentionBlocked,
-    BackupArchiveStatusDto Archive, string LastRequestId, DateTime? UpdatedUtc);
+    BackupArchiveStatusDto Archive, IReadOnlyList<BackupRequestOutcomeDto> Requests, DateTime? UpdatedUtc);
 
 /// <summary>
 /// How "Back up now" reaches this bundle: <c>inProcess</c> (this Workbench's session holds it), <c>request</c> (another live engine does, and accepts
@@ -205,9 +210,10 @@ public sealed record BackupVerifyReportDto(string Level, string Verdict, List<Ba
 /// <summary>What a recovery replayed.</summary>
 public sealed record BackupRecoveryDto(long RecordsReplayed, int UowsPromoted, int UowsVoided);
 
-/// <summary>A drill's report.</summary>
+/// <summary>A drill's report; <c>Assemblies</c>: the schema assemblies its open ran with (#1485), as "name version (token)".</summary>
 public sealed record BackupDrillReportDto(BackupPointDto Point, string Outcome, string FailedStage, string Error, double RestoreMs, double OpenMs,
-    double CheckMs, BackupRecoveryDto Recovery, string Verdict, int Findings, int SuspectPages, string RecordFile, bool NeedsSchema);
+    double CheckMs, BackupRecoveryDto Recovery, string Verdict, int Findings, int SuspectPages, string RecordFile, bool NeedsSchema,
+    IReadOnlyList<string> Assemblies);
 
 /// <summary>A compaction's result.</summary>
 public sealed record BackupCompactionResultDto(BackupPointDto Point, bool AlreadyBase, int ChainDepth, int Pages, int HolePages, long BytesRead,

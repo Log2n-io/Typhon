@@ -101,7 +101,7 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
         Assert.That(point?.Kind, Is.EqualTo(BackupKind.Full), "the kind is honoured: full although an incremental would do");
         Assert.That(point?.PackPath, Does.StartWith(Store));
         Assert.That(Directory.Exists(elsewhere), Is.False, "nothing is written anywhere else");
-        Assert.That(dbe.Backup.Status.LastRequestId, Is.EqualTo(id), "the request's id is echoed");
+        Assert.That(dbe.Backup.Status.Requests[^1].Id, Is.EqualTo(id), "the request's id is echoed");
         Assert.That(File.Exists(Path.Combine(dbe.MMF.BundleDirectory, "backup.request")), Is.False, "retired when its job started");
     }
 
@@ -114,7 +114,7 @@ class BackupSchedulerSafetyTests : SchedulerTestBase<BackupSchedulerSafetyTests>
         Spawn(dbe, 20);
         WriteRequest(dbe, "{ not json");
         Assert.That(Tick(dbe)?.Kind, Is.EqualTo(BackupKind.Full), "honoured within the grace: the first point, full");
-        Assert.That(dbe.Backup.Status.LastRequestId, Is.EqualTo(Guid.Empty));
+        Assert.That(dbe.Backup.Status.Requests, Is.Empty);
     }
 
     [Test]

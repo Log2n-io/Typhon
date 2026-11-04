@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-10-28 |
+| Last Updated | 2026-11-02 |
 | Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime, indexed queries between a write and its fence |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
@@ -175,11 +175,27 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
   enforce the open's WAL replay converts a migrated component's values from the layout it migrated from, through the same field map or user migration
           chain as the table, and refuses a value whose size is not that layout's; a chain whose types are not the stored and declared sizes, and a
           migration that would also change the storage mode, are refused at registration
+  invariant the archetype rows a migration commits carry, for every archetype whose set, revision or stored names the open changes (SCHEMA-11),
+            `ComponentCount`, `Revision` and a NEW `ComponentNames` buffer, all in the intent beside the new segment roots; such a row rides the commit
+            even when no segment moved (a metadata-only change), with one journal row (`Target = Archetype`) and one `UserSchemaVersion` bump per archetype
+  never the names buffer a rewritten archetype row replaced is freed before the rows naming the new one are written: it is freed after the flip, by
+        `CompleteSchemaCommit`; a crash in between leaves it named by nothing, which the next crash open's collection sweep reclaims
+  never the new names buffer exists before the crash open's collection sweep: it is allocated by `PrepareSchemaCommit`, which runs after that sweep
+        (`SweepCollectionOrphans`), so the sweep can never free it as named by nothing
+  invariant the slot numbering and the enabled-bit numbering of every WAL record of an archetype A above CheckpointLSN are those of the COMMITTED
+            `ArchetypeR1(A).ComponentNames`; an open that changes A's set translates them, committed → runtime, as each record is built
+            (`RecoveryDriver`): a Slot, FenceBlock column or CollectionDelta slot through `TranslateWalSlot`, a Spawn or SetEnabledBits mask through
+            `TranslateWalEnabledBits`; a Destroy is untouched. A slot the runtime set does not hold, and a Slot value or FenceBlock column whose length
+            is not its component's committed size, are refused before any record is applied (`InvalidDataException`). Every other open pays one flag
+            per record
   scope: DatabaseEngine.StageMigratedComponentRow, DatabaseEngine.PrepareSchemaCommit, DatabaseEngine.WaitForSchemaCommit,
          DatabaseEngine.CompleteSchemaCommit, DatabaseEngine.NotePendingSchemaCommitBuffers, DatabaseEngine.ApplyCommittedSchemaIntentToComponents,
          DatabaseEngine.ApplyCommittedSchemaIntentToArchetypes, DatabaseEngine.ThrowIfMigrationChainDoesNotFit,
          DatabaseEngine.ThrowIfMigrationChangesStorageMode, CheckpointManager.StageMetaCommit, CheckpointManager.UnstageMetaCommit, StagedMetaCommit,
-         DurabilityWatermarks.UpdateCheckpointLsn, SchemaEvolutionEngine.MigrateWalPayload, RecoveryApplier.MigrateSlots
+         DurabilityWatermarks.UpdateCheckpointLsn, SchemaEvolutionEngine.MigrateWalPayload, RecoveryApplier.MigrateSlots,
+         DatabaseEngine.StageArchetypeSetChange, DatabaseEngine.PersistArchetypeStateInto, DatabaseEngine.RewriteArchetypeRowForSetChange,
+         DatabaseEngine.JournalArchetypeSetChanges, DatabaseEngine.FreeReplacedComponentNameLists, DatabaseEngine.TranslateWalSlot,
+         DatabaseEngine.TranslateWalEnabledBits, DatabaseEngine.ThrowIfWalPayloadIsNotCommittedSize, RecoveryDriver.Run
   requires CK-05 — the meta flip is the only multi-field atomic write the file has; catalog rows are ordinary pages, written by `SavePages` with no WAL
   on_violation: two failures, both measured. A migrating crash-open that persisted the new catalog before replaying its window, then failed before the
                 seal, left a new-revision catalog over an old-layout window, and the next open — no migration left to run — copied the window's values in
@@ -190,8 +206,165 @@ discipline (MVCC revision chains vs in-place SV vs heap-backed Transient), so re
              the catalog's format unchanged and leaves every reader of `ComponentR1` / `ArchetypeR1` as it is: they only ever see one image. A migration
              is therefore committed when its open completes — `InitializeArchetypes` — never at registration, which is also when its archetype clusters are
              migrated: committing the component rows any earlier would publish a catalog whose clusters are still in the old layout.
-  verified: SchemaMigrationAtomicityTests [VerifiesRule] [RuleMutant], SchemaMigrationRecoveryTests [VerifiesRule]
+  verified: SchemaMigrationAtomicityTests [VerifiesRule] [RuleMutant], SchemaMigrationRecoveryTests [VerifiesRule],
+            ArchetypeSetMigrationTests.SetMigration_JournalsAnArchetypeRow [VerifiesRule], ArchetypeSetMigrationCrashTests [VerifiesRule] (every commit
+            stage on both paths and at open, the names buffers across a crash sweep, no WAL before the commit),
+            ArchetypeSetMigrationCrashTests.CrashOpen_PayloadOfAnotherSize_IsRefused [VerifiesRule] (a window value of another size refuses the open, end
+            to end through the replay, for a Slot record and a FenceBlock column)
 
+### SCHEMA-11: An archetype slot is matched by its component's schema name, never by its index `[fatal][silent]`
+  invariant ∀ persisted archetype A opened by an engine, ∀ runtime slot s of A: the persisted slot s' whose bytes, enabled bit, record root and WAL
+            records are read as s satisfies resolve(ArchetypeR1(A).ComponentNames[s']) == schemaName(slot s), where resolve follows the SchemaHistoryR1
+            rename journal (SCHEMA-04) for a stored name the catalog no longer holds
+  invariant names(persisted A) ≠ names(runtime A) as sequences, after resolve → the open MIGRATES A or refuses it; it never loads A's segments under the
+            runtime layout. Refused before the names are read: a runtime revision below the stored one (R3). Refused after: a change of set or order with
+            no effective revision increase, whatever the count — a same-count swap is a removal plus an addition (R1); a stored component the runtime no
+            longer declares (R4); a names buffer that is absent or disagrees with `ComponentCount` (R5); a stored name the catalog holds no row for (R6)
+  invariant the effective revision of A is its own `[Archetype(Revision)]`, or that of an ancestor whose OWN component set changed in this open and
+            whose declared revision exceeds that ancestor's persisted row, or — when A's parent migrated its set in an earlier open that left A
+            unopened, so the parent's committed row already names its declared set — the parent's committed bump, provided every difference of A's
+            set lies in the parent's part (A's own components present in their declared order). A revision-only bump of an ancestor is no witness:
+            it would let a child's reorder of its own components through with the child's revision unmoved
+  invariant a set change with an effective revision increase and no removal migrates A in the field migration's rebuild (SCHEMA-12): each runtime slot
+            reads the persisted slot its component name held (`ArchetypeSetDiff.NewToOld`) — SingleVersion bytes at the persisted geometry, the enabled
+            bit of the pre-migration record in PERSISTED numbering, the Versioned chain root at the runtime Versioned index — and the row is rewritten in
+            the schema commit (SCHEMA-09). A revision-only bump, or names that differ only through the journal, rewrite the row alone and move nothing
+  invariant ∀ entity e of A that predates the open, ∀ slot s the migration added: e is ABSENT in s — Versioned: root 0 ∧ bit clear; SingleVersion:
+            bytes 0 ∧ bit clear; Transient: bit clear — in the record and in the cluster word alike (STAGE-02, ENABLE-01)
+  enforce R1 and R3-R6 are raised by the classification of EVERY resolved archetype before the first is built, under both policies
+          (`ClassifyArchetypesBeforeBuild`): under Apply they refuse the open, and no archetype of it has fresh segments allocated; under Refuse each
+          skips its own archetype, listed as `ArchetypeSetChangeKind.Refused` with the refusal, and the rest of the database opens (D4). R8 and R10,
+          which are not of one archetype, refuse under both
+  enforce refused before the first claim, the file left the pre-migration image: an added Versioned slot with a revision chain already carrying A's
+          routing id whose entity the migration places (R9: those values would read as present; a destroyed entity's chain, whose tombstoned head a
+          crash open has not dropped yet, places nothing and is not counted); an added component with a unique, non-sparse index while A holds more
+          than one entity (R7: every entity would hold key 0); an added component carrying A's spatial field or its realm key while A holds an entity
+          (R12: every entity would be placed at position 0, or in realm 0) — an empty A migrates. R7 and R12 count EVERY entity A holds once the
+          open is done: on a clean open those the re-placement places, the chain-only ones included (SCHEMA-12); on a crash open the population at
+          the END of the WAL window, refused by the replay before any record is applied (`ThrowIfSetMigrationPopulationsRefused`): the placed
+          entities less those the window destroys, plus the window's spawns it does not destroy — each absent in every added component, the window
+          being in the committed set. Both refusals name the remedy, and on a crash open how to finish the recovery they left undone
+  invariant a crash open's WAL window is read in the committed numbering and translated to the runtime one before any apply (SCHEMA-09)
+  never a component dropped by the runtime set has its data discarded at open: removal is refused until an opt-in exists (#1561)
+  requires SCHEMA-04 (the rename journal), SCHEMA-09 (one flip), SCHEMA-12 (the re-placement), STAGE-02 (absent states), ENABLE-01 (both copies),
+           LOG-06 (WAL slot identity is durable via `ComponentNames`)
+  scope: DatabaseEngine.ClassifyArchetypeSchema, DatabaseEngine.ReadPersistedComponentNames, DatabaseEngine.BuildComponentRenameMap,
+         DatabaseEngine.ResolvePersistedComponentName, ArchetypeSetDiff.Compute, ArchetypeSetDiff.RemapEnabledBits, DatabaseEngine.IsMigratingArchetype,
+         DatabaseEngine.CapturePreMigrationCluster, DatabaseEngine.CopyPreMigrationSlot, DatabaseEngine.PlaceRebuiltEntity,
+         DatabaseEngine.ThrowIfAddedVersionedSlotHasChains, DatabaseEngine.ThrowIfAddedUniqueDenseIndex,
+         DatabaseEngine.ThrowIfAddedComponentCarriesPlacement, DatabaseEngine.TranslateWalSlot, DatabaseEngine.TranslateWalEnabledBits, RecoveryDriver.Run,
+         DatabaseEngine.ClassifyArchetypesBeforeBuild, DatabaseEngine.AncestorRevisionIncreased, DatabaseEngine.ThrowIfSetMigrationPopulationsRefused,
+         RecoveryDriver.RefuseSetMigrationPopulations
+  on_violation: before #1394 only the count and the revision were compared, so a reordered or swapped Register<T>() at the same count and revision
+                opened silently: SingleVersion columns read at the wrong offset and size, enabled bits on the wrong component, WAL slot records applied
+                to the wrong component. Well-formed bytes, no error.
+  verified: ArchetypeSchemaValidationTests.SameCountSwapWithoutRevision_IsRefused [VerifiesRule] [RuleMutant], ArchetypeSetDiffTests,
+            ArchetypeSetMigrationTests.InsertMidList_EveryComponentReadsBackByName, EnabledStates_SurviveBySlotName [VerifiesRule] (a mid-list insert
+            shifts every later slot: values and every enabled state read back by name, which an index mapping fails), the appended adds
+            (AddSingleVersion_*, AddVersioned_*) prove the absence clause only and verify STAGE-02,
+            ArchetypeSchemaValidationTests.ReorderOnly_WithRevisionBump_Migrates [VerifiesRule], RenamedComponent_* [VerifiesRule],
+            ParentRevisionOnlyBump_ChildReorder_IsRefused, ParentSetChangeWithBump_ChildMigratesAtItsOwnRevision,
+            ParentSetChangeCommittedWhileChildUnopened_ChildMigratesLater (the effective revision), ApplyPolicy_RefusalPrecedesEveryAllocation,
+            RefusePolicy_ConsumedArchetypeRefused_IsSkippedAndReported_TheRestOpens,
+            ArchetypeSetMigrationCrashTests.CrashOpen_WindowUnderOldSet_SlotAndFenceBlockReplayByName [VerifiesRule] (Slot and FenceBlock records),
+            CrashOpen_WindowUnderOldSet_SpawnAndSetEnabledBitsRemapped [VerifiesRule] (Spawn and SetEnabledBits records),
+            CrashOpen_WindowUnderOldSet_CollectionDeltaRemapped [VerifiesRule] (CollectionDelta records), CrashOpen_DestroyedEntityChain_DoesNotTripR9,
+            CrashOpen_ReplayedSpawns*, CrashOpen_ChainOnlyEntitiesCountForAnAddedUniqueIndex, CrashOpen_SpawnedThenDestroyedInTheWindow_IsNotCounted,
+            CrashOpen_DestroyInTheWindow_IsSubtracted (R7 / R12 over the population at the end of the window),
+            ArchetypeSetMigrationSpatialTests.Added*Component_* (R12)
+
+### SCHEMA-12: A migration re-places entities in old order and never mixes two homes in one cluster `[fatal][perf]`
+  invariant ∀ migrating archetype A with a persisted cluster: its entities are claimed in old (chunk, slot) order, every old cluster walked before the
+            first claim
+  invariant A non-spatial → densely packed: the new cluster count is ⌈live / N'⌉
+  invariant A spatial → homeKey(O) = (O's first valid realm key, per axis the cell of the centre of the AABB of O's in-realm finite entity centres, in
+            that realm's grid); a new cluster closes at an old-cluster boundary iff the home key changes, so no new cluster holds entities of two home
+            keys; each new cluster carries its groups' realm hint (ClusterHomeHint) and the rebuild files the cluster in that realm when a valid key of
+            the cluster names it (else the first-valid-key rule: a crash open's replay can move every entity of a cluster out of its hinted realm). A
+            spatial field with no bytes in the old cluster (a Versioned or Transient component) takes the strict form: every old-cluster boundary closes
+  invariant entities found only through a Versioned chain head (no slot in the old cluster) are placed after every old cluster, in clusters of their
+            own, counted (LastOpenMigrationOrphanChainEntities) and never dropped; a clean open has none. Two heads name no such entity and place
+            nothing: a head of a slot the set migration ADDS (a stale chain, R9), and on a crash open a head whose newest committed revision is a
+            tombstone — a destroyed entity whose chain the checkpoint wrote before its cleanup released it, its old-cluster slot already free; placed, it
+            would be resurrected, since its destroy lies below the checkpoint and the replay does not see it
+  invariant the realm hints of a crash open's migration reach the recovery rebuild (`RebuildSpatialLayerAfterRecovery`, D12): a new cluster keeps its
+            old cluster's realm across the replay; a cluster beyond the hints takes the first-valid-key rule
+  invariant the pre-migration cluster of a migrating archetype is ALWAYS loaded when its row names one and its set is not pure Transient, at the
+            geometry the persisted catalog records (ComponentR1 sizes and modes, FieldR1 AllowMultiple count — never the runtime slot list), and
+            validated before the first claim: every occupied slot inside the cluster size, its entity id ≠ 0 ∧ routing bits == routing id, and, on every
+            open where no torn page is possible (`!TolerateTornSegmentsAtOpen`: a clean open, and the crash-path open after a refused or forced one), the
+            slot its entity's pre-migration record names, with every live record met; there a pre-migration EntityMap that cannot be loaded refuses too.
+            Gated on CrashRecoveryAtOpen instead, R11 was single-shot: the refused open's failed-open marker sent the next one down the crash path,
+            where the walk passed on routing bits alone. A failure refuses the open (R11) and leaves the fresh segments unused
+  scope: DatabaseEngine.RebuildClusterFromChains, DatabaseEngine.CollectPreMigrationOrder, DatabaseEngine.PlaceRebuiltEntity,
+         DatabaseEngine.CapturePreMigrationCluster, DatabaseEngine.BuildPersistedLayout, DatabaseEngine.CapturePreMigrationEnabledBits,
+         DatabaseEngine.CollectChainOnlyEntities, DatabaseEngine.RebuildSpatialLayerAfterRecovery, DatabaseEngine.TolerateTornSegmentsAtOpen,
+         ArchetypeClusterState.ClaimSlotForRebuild, ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.MapClusterForRebuild,
+         ClusterHomeHint
+  on_violation: a re-placement in any other order mixes cells and realms in one cluster; the rebuild files every entity outside its cluster's cell as
+                a crossing, and the first tick fence migrates a large part of the archetype (before #1394 the claim ran in HashSet order). A geometry
+                reconstructed from the runtime slot list misreads the old cluster whenever the open also changes the index set (#671). A walk that
+                checks entity ids alone can read every id correctly while visiting the wrong chunks — the id tail sits at 8 + 8·C whatever the sizes —
+                and leave four clusters in five to the chain-only pass with their SingleVersion bytes zeroed (measured)
+  verified: MigrationTopologyTests [VerifiesRule], ArchetypeSetMigrationSpatialTests.SwgShaped_FieldMigration_NoForeignSlots [VerifiesRule],
+            ArchetypeSetMigrationCrashTests.CrashOpen_ChainOnlyEntities_ArePlacedNotLost [VerifiesRule],
+            ArchetypeSetMigrationCrashTests.CrashOpen_SetMigration_RecoveryRebuildKeepsHints [VerifiesRule] (red without the hints forwarded: 84 foreign
+            realm slots for 12 strays, measured), CrashOpen_DestroyedEntityChain_DoesNotTripR9 (red with tombstoned heads placed, measured),
+            RefusedOpen_TheCrashPathOpenAfterIt_IsRefusedAgain [VerifiesRule] (R11 on the open after a refused one), CleanOpen_PreMigrationMapUnloadable_IsRefused,
+            CrashOpen_ReplayMovesAClusterOutOfItsHintedRealm_FiledWhereItsEntitiesAre [VerifiesRule] (a hint no key names is ignored),
+            MigrationTopologyTests.Spatial_SetAdd_SameHomeRun_PacksDensely [VerifiesRule] (density on the set path)
+
+### SCHEMA-13: A component's layout migrates only when every persisted archetype holding it is opened `[fatal][silent]`
+  invariant ∀ component C in _migratedComponents, ∀ persisted ArchetypeR1 row R with C ∈ resolve(R.ComponentNames): R's archetype is consumed by
+            this open — otherwise the open is refused (R10) before any archetype is built, so the migration is never committed
+  never a commit that re-lays C's catalog row while a holder's cluster stays at C's old size
+  scope: DatabaseEngine.GuardUnopenedHoldersOfMigratedComponents
+  on_violation: the unopened archetype's cluster is read at C's new size by the next open that consumes it, with no migration pending any more:
+                measured, a SingleVersion holder read every column as zero, with no error
+  verified: ArchetypeSchemaValidationTests.FieldMigrationWithAnUnopenedHolder_IsRefused [VerifiesRule] [RuleMutant]
+
+### SCHEMA-14: An exact-schema open opens only with the build that wrote the database, and writes nothing of a difference `[silent]`
+  invariant with `SchemaMatch.Exact` (every drill, every restore's settle, #1485): each registered component the catalog holds equals its `ComponentR1`
+            row — name, revision, storage mode, size — and every `FieldR1`, by field id, in all it records (name, type, element type, array length,
+            offset, size, static and realm-key flags, index flags), and is declared by the assembly whose identity (simple name, version, public-key
+            token) its `AssemblyR1` row names
+  invariant the archetypes are judged by the open's own passes (SCHEMA-10, SCHEMA-11, #1394), classified as an inspector classifies
+            (`ArchetypeSetMigrationPolicy.Refuse`): every archetype of the engine's load context the open would migrate, rewrite or refuse — a set
+            change, a revision bump, stale stored names, a per-archetype refusal, and one skipped for a component the build declares and the database
+            never stored — is a difference, and so is each archetype it keeps that the catalog lacks, holds under another name, or that another
+            assembly than the manifest's declares
+  invariant what neither side holds is not compared: a component the loaded assembly declares and the database never stored is not registered (the
+            Workbench's SchemaCompatibility); a stored archetype the build declares the same way but cannot wire is skipped, and a replay that needs it
+            fails (7012). The manifest's assemblies must all be supplied (the resolver refuses a missing one; a file named for the drill is the build it
+            means)
+  never an exact open migrates, forks the timeline, creates the database, or adds a component, an engine catalog (a realm), a grid setting or an
+        archetype: a difference is refused (`SchemaMismatchException`, 3003) before the fork, the migration or a catalog write, naming what differs
+        (the component and field, the archetype and the change, or the assembly and both versions); a refused open never closes clean an image it did
+        not recover, so the right build still replays the WAL
+  invariant an ordinary open keeps the manifest naming the build that writes the database, once the open completed (a refused open leaves it and the
+            timeline as found): the `AssemblyR1` row of an assembly whose version or token the loaded build changed takes the loaded one's, a catalog
+            row whose type another assembly now declares names that assembly's row, and a manifest row no catalog row names any more is retired — all
+            durably, after a `BuildChange` fork (BKP-11), so a point's image names the build that wrote it and no restore replays one build's records
+            under another's manifest
+  enforce a schema assembly found by name at another version or token is never loaded in place of the one the manifest names (the Workbench's resolver,
+          which `typhon backup drill` and the drill and settle children share): it is reported, and an exact open refuses it
+  scope: DatabaseEngine.ThrowIfComponentNotExact, DatabaseEngine.CompareFields, DatabaseEngine.ThrowIfArchetypesNotExact,
+         DatabaseEngine.AssemblyMismatch, DatabaseEngine.ApplyPendingDeclaringAssemblies, DatabaseEngine.RecordDeclaringAssembly,
+         DatabaseEngine.RecordAssemblyIdentity, DatabaseEngine.RetireUnreferencedAssemblies, BackupDrillRunner.OpenAndCloseRestored
+  on_violation: a drill "proves" a point with a build that migrated it on the way, or a restore settles another build's schema over the point, and both
+                report success; an inspector that resolves by name alone loads another build and records it in the manifest, so the version check then
+                refuses the build that wrote the database
+  rationale: a restore is crash recovery with the real code (BKP-05), so the code must be the code that wrote the point. Version numbers are not proof —
+             dev builds stay at 1.0.0.0, unsigned assemblies have no token — so the stored schema is compared too; the version is compared as well because a
+             build can change behaviour (a migration function, a computed index) without changing a layout. The archetypes reuse the open's own
+             classification so that an exact open and an ordinary one never disagree on what a set change is
+  verified: ExactSchemaOpenTests [VerifiesRule("SCHEMA-14")] (a layout change, a component and an archetype the database does not hold, an archetype at
+            another revision, an assembly at another version and the build-change fork of the ordinary open that records it, a refused ordinary open
+            that writes nothing of it, an exact open of no database; nothing written, nothing forked; a refusal on a crashed image leaves its WAL to
+            replay), BackupDrillTests (the in-process opener refuses a build that adds a component), DrillWithSchemaAssembliesTests (real builds:
+            older, newer, same version with another field, same version with another archetype set, missing, a named file of another build; the
+            settle; a session never loads another build), BackupDrillSchemaCommandTests. Source mutants seen red: a name-only resolver match, the
+            exact component check skipped, the refused archetype changes ignored
 ---
 
 ## Module: MEMB — The archetype membership channel
@@ -211,12 +384,19 @@ entry may be used for. Both are silent when broken, which is why they are rules 
             `Unloading` for what no engine used, so reopening a database does not run the 4095-entry catalog out
   never two copies of an archetype name sharing a slot, or an engine consuming `GetAllArchetypes()`: one definition per name per process is what made a second
         database's open report a false MigrationRequired against the first's metadata (#554), and made a generation throw while a session held the schema (#384)
-  scope: ArchetypeRegistry.ScopedName, ArchetypeRegistry.GetArchetypesFor, ArchetypeRegistry.ReleaseContext, DatabaseEngine.UseArchetypesFrom, DatabaseEngine.OwnArchetypes
+  invariant within one load context, among the archetypes an engine consumes whose slots all resolve, a durable name is held by one archetype: the
+            highest [Archetype(Revision)] is consumed, every lower one is skipped (reason Superseded) and logged once; two at the same revision refuse
+            the open (R8). Archetypes are grouped by the persisted row they match (Name, then PreviousName), by name when they match none
+  never two consumed archetypes matched to one ArchetypeR1 row
+  scope: ArchetypeRegistry.ScopedName, ArchetypeRegistry.GetArchetypesFor, ArchetypeRegistry.ReleaseContext, DatabaseEngine.UseArchetypesFrom, DatabaseEngine.OwnArchetypes,
+         DatabaseEngine.ResolveDurableNameDuplicates, DatabaseEngine.LogArchetypeRevisionSuperseded
   on_violation: a session runs on another session's metadata, silently when the shapes agree and with a false schema mismatch when they do not; closing one session
     pulls the slot from under the other
   verified: ArchetypeRegistryLifecycleTests [VerifiesRule] — separate slots, metadata and component ids for two contexts of one schema, a context that no engine used
             released at unload, catalog ids reused over five reloads; EngineLifecycleSideBySideTests — live sessions open alongside each other and a default-context
             generation, one closing under the other, and concurrent opens. Both use one schema twice: two DIFFERENT schemas sharing an archetype name have no fixture
+            ArchetypeSchemaValidationTests.DuplicateName_HigherRevisionWins_LowerLoggedOnce, ArchetypeSchemaValidationTests.DuplicateName_EqualRevisions_IsRefused
+            [VerifiesRule] — two revisions of one durable name in one context (D3, #1394)
 
 ### MEMB-01: The structural epoch is released after the entries it accounts for `[fatal][silent]`
   invariant at every instant a view can observe `StructuralEpoch == view.LastStructuralEpoch`, that view's delta buffer holds no entry it has
@@ -461,8 +641,9 @@ structural mutation.
          dormancy promote, the checkerboard promote and the dispatch capture in OnParallelQueryPrepare (the chunk-partition sites
          read that capture, never the pair: CD-02), plus EcsQuery.TryCountViaOccupancy, EcsQuery.ScanClusterSoa and
          EcsQuery.ScanPerArchetypeBTreeSelective (the last two hoist it out of their scan loop), ClusterEnumerator.Create and
-         ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex and
-         StatisticsRebuilder — the last of these being the only reader on a thread no tick phase bounds
+         ClusterEnumerator.CreateScoped (reached from the PUBLIC ArchetypeAccessor.GetClusterEnumerator), TierClusterIndex,
+         SnapshotWalker.NextCluster (a snapshot walk, once per step) and StatisticsRebuilder — the last two being the readers on a thread no tick phase
+         bounds
   on_violation: `IndexOutOfRangeException` out of the parallel-query prepare, on a worker thread. LOUD, which is the only
                 good thing about it.
   rationale: #582 face 2. It makes the pair CONSISTENT, not the walk SAFE: what makes the walk safe is CLUSTERWALK-01, which keeps
@@ -527,7 +708,7 @@ structural mutation.
          ClusterRef.SpatialWriteChangesKeys, ClusterEnumerator.MarkCurrentDirty, ArchetypeAccessor.GetClusterEnumerator,
          EntityAccessor.GetClusterEnumerator, Transaction.Destroy, Transaction.DestroyBatch, Transaction.DestroyBulk, Transaction.DestroyInternal,
          Transaction.AddPendingDestroy, Transaction.OwnDestroyedSlotsFor, Transaction.CleanupEcsState, OwnDestroyedSlots.Unhidden,
-         ArchetypeClusterState.SlotMoveEpoch, DatabaseEngine.ExecuteMigrations
+         ArchetypeClusterState.SlotMoveEpoch, DatabaseEngine.ExecuteMigrations, SnapshotWalker.ReadRows, SnapshotWalker.NextGatherBatch
   on_violation: one transaction gives two answers about one entity. OpenMut on what the walk chose throws and aborts the tick (SWG LairLife, tick 137 260,
                 #1482); a TryOpen or an in-place ClusterRef write acts silently on a dead entity — a write into a slot about to be released, children
                 spawned for a dead parent, a double count
@@ -555,6 +736,72 @@ structural mutation.
             a spatial archetype migrates, at the fence, and EW-02 confines its writes to systems, whose commits end before the fence — so no compliant
             application reaches it; EcsQuery's snapshot gate has the same dependence
   NOT covered: a fence migration DURING a walk (outside the contract: a walk during the fence window is excluded, CLUSTERWALK-01 note)
+
+### WALK-01: A snapshot walk yields every entity visible at its snapshot exactly once, across any number of tick fences `[fatal][silent]`
+  invariant ∀ walk W = Transaction.Walk<TArch>() of transaction T, ∀ entity e of TArch visible at T's snapshot and present for W's whole length, not
+            destroyed by T: W yields e exactly once, however many fences run between or during its steps; an entity spawned or destroyed by another
+            transaction during W may or may not be yielded on a SingleVersion or Transient archetype, which promise no snapshot, and is decided by the
+            snapshot on one with a Versioned component (VIS-08, VIS-09). T's own pending spawns are never yielded, nor its own pending destroys
+            (CLUSTERWALK-04)
+  invariant on an archetype without a spatial index the walk is in cluster order. The fence never moves its entities between clusters — every
+            migration (a cell crossing, a relocation, a repair) is queued against a spatial grid — and only compacts the active list (the reclamation,
+            CLUSTERWALK-03) and reissues the chunks it frees. The walk keeps a bitmap of the chunk ids it visited, starts its search over when
+            ArchetypeClusterState.ReclaimGeneration moved (the compaction, and RemoveFromActiveList, bump it; appends do not), and passes over a
+            visited id: a reissued one holds only entities spawned after the walk began
+  invariant on a spatial archetype the walk is in entity-map order (EMAP-02 across fills: RawValuePagedHashMap.FillFrom): an entity keeps its key and
+            its bucket wherever the fence moves it. Each batch's columns are gathered from the slots its records name, resolved again when a fence ran
+            since the batch's fill
+  invariant a step never starts while a fence runs on another thread (ExclusiveWindow.IsOpen, waited out with the scope suspended), and a step a fence
+            overlapped is read again (ExclusiveWindow.ReadToken, ReadOverlapped): the reclamation compacts the list in place and frees chunks, and
+            a read that straddles it can see half of it
+  scope: Transaction.Walk, ArchetypeWalk, WalkBatch, SnapshotWalker, ArchetypeClusterState.ReclaimGeneration, ArchetypeClusterState.RemoveFromActiveList,
+         ArchetypeClusterState.DrainPendingClusterFinalizations, ExclusiveWindow.ReadToken, ExclusiveWindow.ReadOverlapped
+  on_violation: an off-tick walk — an audit, an export, a migration — spans hundreds of fences on a live server. Kept in cluster order across a
+                migration it meets an entity twice (moved into a cluster it had not reached) or never (moved into one it had passed); kept at its list
+                position across a reclamation it skips the clusters that slid back under it. Silent: every count is plausible
+  rationale: the fence's migrations move live entities, so per-entity knowledge is the only exact answer on a spatial archetype; the entity map has it
+             at about foreach's cost per entity. A migration log consumed by live walks would keep the cluster order there too, for fence machinery no
+             walk needs yet (decided 2026-11-02, design/Ecs/EntityClusters/13-snapshot-walks.md)
+  requires CLUSTERWALK-02, CLUSTERWALK-03, CLUSTERWALK-04, EMAP-02, VIS-08, VIS-09
+  verified: TransactionWalkTests.AReclamationBetweenSteps_LosesAndRepeatsNothing [VerifiesRule] — clusters the walk visited and clusters it had not,
+            emptied and reclaimed between two steps, their chunk ids reissued: every entity present throughout yielded once;
+            Mutant_AWalkThatKeepsItsPositionAcrossAReclamation_IsRejected [RuleMutant]. AMigrationBetweenSteps_LosesAndRepeatsNothing [VerifiesRule]
+            — the entities the walk saw and as many it had not moved to a corner cell and migrated by the fence between two steps: each yielded
+            once, with its own values; Mutant_ASpatialWalkInClusterOrder_IsRejected [RuleMutant]. AFenceDuringAStep_RedoesIt — a fence run while a
+            step reads makes it read again. StreamingFieldForeachTests.AReclamationDuringTheLoop_LosesAndRepeatsNothing [VerifiesRule] — the same
+            on a field query's stream, both paths
+
+### WALK-02: A field query's stream yields the matches at its snapshot; a walk filtered to the index's clusters still reads every cluster changed above it `[fatal][silent]`
+  invariant ∀ foreach over Query<TArch>().WhereField(p) in transaction T: the entities yielded are Execute()'s for the same query in T — p evaluated
+            at T's snapshot, the enabled gate (QENABLE-01), T's own pending spawns that match, T's own destroys hidden — each once (WALK-01). One
+            difference, and it is Execute()'s gap: on the selective plan a SingleVersion entity written since the last fence whose new value matches
+            while its tree key has not moved yet (QFENCE-01) is yielded when its cluster is read for another candidate, where Execute() misses it
+  invariant when the planner picks the index (Path A), the walk reads the clusters the tree's range named (SnapshotWalker.CandidateClusters, read
+            when the archetype's walk opens) and, whatever the tree said, every cluster with a pending destroy, a death or an update above the
+            snapshot: a change folds its cluster's watermark before it moves or removes the entity's entries (#1347, VIS-12), so an entity matching
+            at the snapshot that the tree no longer holds at a matching key is in such a cluster. On the full scan the walk prunes by the zone maps
+            at each cluster (SnapshotWalker.ClusterFilter), with the same admission for a cluster changed above the snapshot
+  invariant every predicate is evaluated on every row read, the indexed one included: between two batches a fence may reclaim a cluster and
+            reissue its chunk id, and the tree's verdict on a slot then names another entity. A row whose Versioned component has no value at the
+            snapshot (first supplied after it) never matches
+  invariant a spatial archetype's matches are collected whole, as Execute() collects them (its entities change cluster at fences, WALK-01)
+  invariant an archetype that carries the predicate's component with no index for it throws before the loop yields anything, as Execute() throws
+            before it returns
+  scope: EcsQuery.GetFieldEnumerator, EcsQuery.FillFieldBatch, EcsQuery.NextFieldArchetype, EcsQuery.EmitFieldMatches,
+         EcsQuery.CollectCandidateClusters, EcsQuery.ZoneMapFilter, SnapshotWalker.CandidateClusters, SnapshotWalker.ClusterFilter,
+         SnapshotWalker.ReservedRows
+  on_violation: a stream that skips a changed cluster drops, silently, the entities a concurrent update moved out of the range or a destroy removed
+                from the tree after the reader's snapshot; one that trusts the tree across a reissued chunk id yields entities that do not match
+  requires WALK-01, VIS-12, QENABLE-01
+  verified: StreamingFieldForeachTests.AFieldWalk_YieldsTheSnapshotsMatches_ChangedBeforeAndDuringTheLoop [VerifiesRule] — rows moved out of the
+            range, destroyed, moved in and spawned after the snapshot, on every path: before the loop (the selective plan's candidates are taken
+            after them, the update watermark admits the emptied cluster), and between two batches (after the candidates are taken);
+            Mutant_ACandidateWalkThatSkipsChangedClusters_IsRejected [RuleMutant]. AClusterEmptiedByDestroysAfterTheSnapshot_IsStillRead
+            [VerifiesRule] — the died watermark alone admits a cluster with no candidate left; Mutant_ACandidateWalkThatSkipsAClusterOfDestroys_
+            IsRejected [RuleMutant]. The pending-destroy term is not exercised by a test. AFieldWalk_YieldsWhatExecuteReturns,
+            OwnWrites_AndAWhereLambda_MatchExecute, TheEnabledGate_MatchesExecute (its non-exact half too), ASpatialArchetype_MatchesExecute,
+            AComponentSuppliedAfterTheSnapshot_DoesNotMatch — the stream against Execute(), the planner's own path included.
+            ANarrowRange_ReadsOnlyTheClustersThatCanHoldIt — both plans prune
 
 ## Module: CLUSTERVIS — The per-cluster MVCC visibility summary (H1)
 
@@ -625,6 +872,34 @@ popcounts the occupancy word on the strength of the grant alone and has nothing 
              churning archetype used to latch onto the per-entity probe forever. The cost is that "the bit is cleared at
              destroy" became load-bearing for every caller, and two callers never held it.
   requires CLUSTERVIS-01 (same summary, the publication half)
+
+### CLUSTERVIS-03: A clean open establishes the summary of every active cluster, never below a birth on disk `[fatal][silent]`
+  invariant after a clean open (the last close persisted the TSN counter, and no recovery is forced), before the first transaction,
+            every active cluster's born watermark is established — not `VisibilityUnknown` — at a value no birth on disk exceeds
+  never leaving a cleanly reopened cluster unknown until a spawn lands in it: the gate then denies it, and every snapshot
+        scan of the session (`ScanClusterSoa`, `tx.Walk`'s cluster path, a broad `WhereField`) probes the EntityMap per
+        entity. Measured: `tx.Walk` on Versioned read 3.4× the pages of an unversioned walk after a clean reopen (#1574).
+  never seeding after an unclean close: the TSN counter is persisted only by a clean close and a recovery's seal, so an
+        unclean close with no WAL to replay — not a crash open — reopens with a counter below the births its checkpoints
+        wrote, and a seed from it grants a cluster to snapshots that predate some of its entities: `Count()`'s popcount
+        and the scans count them while a point read hides them.
+  enforce the crash open's rebuild seeds 0 per cluster as it walks the occupancy (`RebuildClusterEntityMapEntries`), and
+          so does the migration's re-placement, since both rewrite every record with `BornTSN = 0`. A clean open walks
+          nothing and keeps the records it loaded, so it seeds every active cluster with the TSN counter the close
+          persisted (`EstablishVisibilityAfterCleanOpen`, gated on `_cleanShutdownAtOpen && !ForcedCrashRecoveryAtOpen`):
+          every birth on disk is at or below it, every snapshot of the new session above it. The died watermark stays 0,
+          because no occupancy bit on disk names a dead entity: a destroy clears its bit at publish (VIS-09's hide, or the
+          release), and a replayed destroy releases its slot (#1251). Any other open leaves the summary to its own sites.
+  scope: ArchetypeClusterState.EstablishVisibilityAfterCleanOpen, DatabaseEngine.RebuildEntityMapsFromPersistedData
+  on_violation: left unknown, no wrong result but a Versioned snapshot scan reads the EntityMap for every entity of every
+                cluster no spawn has touched since the open; seeded after an unclean close, `Count()` and the scans
+                disagree with a point read, silently.
+  verified: ClusterVisibilitySummaryIntegrityTests.ACleanReopen_EstablishesEveryActiveCluster_AndStaysExact
+            [VerifiesRule] — also shows the grant is exact: two entities destroyed before the close are neither counted
+            by the popcount nor emitted by the scan. ACleanOpenLeavingTheSummaryUnknown_IsRejected [RuleMutant].
+            AnUncleanReopen_LeavesTheSummaryToItsSites [VerifiesRule] — an unclean close without WAL segments: no cluster
+            is seeded.
+  requires CLUSTERVIS-01, CLUSTERVIS-02
 
 ---
 
@@ -743,13 +1018,14 @@ reclaimed.
   note: the migrating-open rebuild (`RebuildClusterFromChains`) re-places every entity and used to set a Versioned slot's
         bit from `head ≠ 0` — the forbidden derivation, re-enabling every disabled component on each schema migration
         (#846). It now takes presence from the head and the bit from the PRE-MIGRATION RECORD, snapshotted from the old
-        EntityMap before the migration replaces it (`CapturePreMigrationEnabledBits`). The record, not the old cluster:
-        the old cluster is kept only for archetypes with a SingleVersion slot, and its geometry is reconstructed, while
-        the record exists for every archetype and its layout does not depend on component sizes or indexes. The snapshot
-        keeps every entry, so a missing one means unknown, never all-enabled. Residual: when the old EntityMap cannot be
-        loaded, when the persisted storage modes do not confirm the Versioned slot count its records were written at, or
-        when an entity's entry was lost to a torn page, the rebuild falls back to the old cluster's bits where one was
-        kept, and otherwise to `head ≠ 0`.
+        EntityMap before the migration replaces it (`CapturePreMigrationEnabledBits`), read at the record size of the
+        PERSISTED Versioned slot count. The record is the authority; the old cluster's bits are the fallback.
+  note: the migration rebuild loads the pre-migration cluster for EVERY migrating archetype (SCHEMA-12), at the geometry
+        the persisted catalog records, and takes each slot's enabled bit from the pre-migration record (#1394). The
+        snapshot keeps every entry, so a missing one means unknown, never all-enabled. Residual: when the old EntityMap
+        cannot be loaded on an open where a torn page is possible (anywhere else that refuses the open, R11), or an
+        entity's entry was lost to a torn page, the rebuild falls back to the old cluster's bits, and for an entity found
+        only through a chain head (SCHEMA-12) to `head ≠ 0`.
   note: publication of a chain root created mid-life rides in `FlushPendingEnableDisable`'s existing record round trip.
         That relies on a coupling worth stating: supplying a value REQUIRES enabling, because `Write` is gated by the
         same EnabledBits as `Read`, so a mid-life creation cannot occur without a pending enable to carry its root.
@@ -776,6 +1052,12 @@ reclaimed.
             consumers).
   note: an absent component is still indexed under its slot's bytes; queries never match it and its first supply moves the entry
         (QENABLE-01)
+  note: a component ADDED to a populated archetype by a set migration (SCHEMA-11) is ABSENT on every pre-existing entity, in exactly
+        the states of an unsupplied spawn: Versioned root 0 ∧ bit clear (Enable refuses, Enable(comp, value) supplies); SingleVersion
+        zero bytes ∧ bit clear (Enable succeeds and reads zero); Transient bit clear. A Versioned add whose chains already carry the
+        archetype's routing id is refused (R9), since those chains would read as present. Verified by
+        ArchetypeSetMigrationTests.AddSingleVersion_OldValuesIntact_AddedZeroAndDisabled and AddVersioned_AddedAbsent_EnableRefuses
+        [VerifiesRule] (#1394)
 
 ---
 
@@ -797,8 +1079,10 @@ second copy is not derived on demand, so every path that changes one copy has to
             writes the occupant's full mask, clearing as well as setting — `PlaceSpawns`, `ApplySpawnedEntityToCluster`,
             and a cluster migration's transcription to its destination slot (`ExecuteMigrations`, step 6). A freed slot is
             therefore never trusted to be clean. The migration rebuild writes the bits from the pre-migration record
-            (`RebuildClusterFromChains`); the crash rebuild without a snapshot goes the other way and copies the cluster bits
-            INTO the record (`RebuildClusterEntityMapEntries`), which is why the cluster copy has to be exact.
+            (`RebuildClusterFromChains`); the crash rebuild goes the other way and copies the cluster bits INTO the record
+            (`RebuildClusterEntityMapEntries`), which is why the cluster copy has to be exact: it is the only source a crash open reads
+            (#398). Two transactions changing one entity's enabled state, last writer wins, can leave the copies unequal; the rebuild
+            then keeps the cluster's value, the other committed writer's, and those commits have no defined order.
   never writing a slot the entity no longer occupies. The record a commit reads can be a TOMBSTONE — another transaction
         destroyed the entity and committed first, releasing the slot at commit — and a spawn may already hold that slot.
         The publish writes only while the slot's occupancy bit is set and its EntityIds tail holds this entity's id.
@@ -1459,8 +1743,11 @@ cost 12 µs at 20M entries (#1205).
             Otherwise b existed at p's read, nothing moved from p into b since, and W reads b. The count each read saw is kept only where it changes,
             and nothing is allocated unless the map splits during W
   invariant AnyEntry only runs to the live count, without passing over
+  invariant so does a walk resumed between fills (RawValuePagedHashMap.FillFrom, EntryCursor: the streaming foreach, a spatial archetype's snapshot
+            walk): the cursor keeps the scan's state, which time passing between two buckets does not disturb, and a fill stops only at a bucket
+            boundary
   scope: PagedHashMapBase.BeginScan, PagedHashMapBase.SplitTolerantScan, RawValuePagedHashMap.ForEachEntry, RawValuePagedHashMap.CountEntries,
-         RawValuePagedHashMap.AnyEntry
+         RawValuePagedHashMap.AnyEntry, RawValuePagedHashMap.FillFrom, RawValuePagedHashMap.EntryCursor
   on_violation: a walk bounded by the count it read at its start never reached the bucket a split of an unread bucket created, so the entries moved
                 there went unvisited: a broad query (Execute, Count, Any, Where<T>, navigation views) missed live entities whenever the archetype grew
                 under it, about two scans in three in a churn test past 1 300 entities (#1351). One that ran to the live count without passing over
@@ -1471,4 +1758,5 @@ cost 12 µs at 20M entries (#1205).
             entries that stay throughout. QueryStressOracleTests' Where<T> check runs over the broad scan. Mutants, run by hand: the start count as the bound, every
             staged miss case and the concurrent test; no passing over, every duplicate case and the concurrent test; a passed-over parent not
             inherited, the images-of-images cases; the count each read saw replaced by the start count, ten of twelve and the concurrent test;
-            AnyEntry bounded by the start count, its test
+            AnyEntry bounded by the start count, its test. StreamingForeachTests.AMapSplitBetweenFills_LosesAndRepeatsNothing [VerifiesRule] — a foreach
+            whose map splits under it between two fills yields exactly its snapshot's entities

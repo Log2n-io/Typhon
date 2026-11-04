@@ -11,7 +11,7 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal sealed class BackupStatusFileContent
 {
-    public const int CurrentFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;   // 2: Status.Requests (the answered requests, #1483) replaces Status.LastRequestId
 
     public int FormatVersion { get; set; }
 

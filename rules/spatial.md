@@ -592,7 +592,11 @@
     narrowed by one ULP there drops a cluster grazing its edge — an SQ-01 false negative that no containment check
     on the storage side can see.
   invariant RecomputeClusterAabb scans all occupied slots via TZCNT loop
-    over the 64-bit occupancy word and calls ReadAndValidateBoundsFromPtr per slot
+    over the 64-bit occupancy word and calls ReadAndValidateBoundsFromPtr per slot (an f32 AABB tier reads the field
+    directly). The union is reduced in WORLD space (ReduceWorldBounds) and converted once per axis
+    (ClusterWorldBounds.ToCellRelative) — bit-identical to converting each entity, because the directed conversions are
+    monotone. The rebuild's map (MapClusterForRebuild) runs the same reduction, collecting the D11 centre box in the
+    same walk, so a rebuild's AABB is never a second copy of this computation
   post after the refresh pass: ∀ cluster C selected by ClusterProcessBitmap:
     ClusterAabbs[C.chunkId] ⊇ union of C's live entity AABBs, and == the exact union when a shrink was pending
     (corrected 2026-07-28: the pass no longer reads dirtyBits — it is driven by ClusterProcessBitmap +
@@ -603,7 +607,8 @@
     (b) blind full-struct store from the AabbRefresh fence phase
     The tick barrier separating dispatch from the fence is what makes (b) safe, and it is LOAD-BEARING. Relax it and
     the fence store silently discards concurrent grows → AABB too tight → this rule's own containment fails.
-  scope: ArchetypeClusterState.RecomputeClusterAabb, RecomputeDirtyClusterAabbs, RecomputeDirtyClusterAabbsSlice
+  scope: ArchetypeClusterState.RecomputeClusterAabb, ArchetypeClusterState.ReduceWorldBounds, ClusterWorldBounds.ToCellRelative,
+         RecomputeDirtyClusterAabbs, RecomputeDirtyClusterAabbsSlice
          (the parallel path that performs the store), RebuildClusterAabbs,
          ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink / WriteSpatialSet (the concurrent writer class),
          ClusterRef.TryGetCellOrigin, ClusterSpatialAabb.ToCellRelativeMin, ClusterSpatialAabb.ToCellRelativeMax,
@@ -1683,12 +1688,31 @@
     documents as a known residual) all leave a flag whose destination is not where the entity is. The drain
     (DatabaseEngine.DrainPreFlaggedMigrations) therefore re-reads the position and decides from it — dropping the
     flag when the entity is home (LastTickStaleFlagsDropped) — exactly as the dirty-bits scan does
-  invariant at a rebuild (RebuildSpatialStateFromData) a cluster takes its FIRST occupied slot's cell, and every other
-    slot is checked against it: a slot whose centre lies outside that cell by more than the hysteresis band is filed
-    as a crossing for the first fence (FileForeignCellSlots) — the cluster stays whole and its AABB keeps covering the
-    slot (CA-01) until it moves. A recovery or schema-migration claim (ClaimSlot) is cell-agnostic, so without the check
-    a mixed-cell cluster survived until its entities were next written. The check is O(1) per cluster whose box fits
-    the cell plus the band; only the others scan their slots (Realms P0.2)
+  invariant at every rebuild (RebuildSpatialStateFromData: open, plain reopen, crash recovery, migration) a cluster's cell
+    is the cell holding the centre of the AABB of its in-realm entity centres with finite coordinates — never its first
+    occupied slot's cell (#1394 D11; a cluster with no finite centre falls back to its first in-realm slot's cell). A
+    cluster whose entities satisfy this rule's first invariant therefore has no foreign-cell slot: on each axis, if the
+    box centre lies in the neighbour of the cell the entities belong to, the box's far edge is within the band of that
+    neighbour too (design 07 §6.3). The first-slot rule gave a cluster whose slot 0 sat in the band — legal, the dead
+    zone — the neighbour cell, and filed every other entity of it as a stray on every reopen. When the centre cell leaves
+    foreign slots (a cluster that breaks CC-02: recovery-mixed, or an entity that jumped after the last fence), the cell
+    with the fewest foreign slots among {centre, first occupied in-realm slot, per-axis median of the finite centres} is
+    taken (tie: centre), so such a cluster is never filed with more strays than the first-slot rule would file; the extra
+    scoring runs only for a cluster the centre cell leaves strays in
+  invariant at a rebuild every slot is then checked against the cluster's cell: a slot whose centre lies outside that cell
+    by more than the hysteresis band is filed as a crossing for the first fence (FileForeignCellSlots) — the cluster stays
+    whole and its AABB keeps covering the slot (CA-01) until it moves. A recovery claim (ClaimSlot) is cell-agnostic
+    (#1557), and an entity written after the last fence can be stored beyond its cluster's band, so without the check a
+    mixed-cell cluster survived until its entities were next written. The check is O(1) per cluster whose box fits the
+    cell plus the band; only the others scan their slots (Realms P0.2)
+  invariant a realm-keyed cluster's realm at a rebuild is its first valid realm key, unless a migration supplied a realm
+    hint for it (ClusterHomeHint, SCHEMA-12) and at least one valid key of the cluster names the hint's realm: then the
+    hint's realm, and a valid key of another realm is a realm stray. A cluster carved from an old one therefore never flips
+    realm because its first entity is a realm stray. A hint no valid key names is ignored — a crash open's replay can move
+    every entity of a cluster out of its hinted realm, and filing it there made every entity a crossing. The hints are
+    kept for the crash open's recovery rebuild (D12, #1394 S4). The centre box reads the slots whose key IS the cluster's
+    realm, as a migration's home key does; a slot whose key is invalid is rewritten to that realm by the reduce but
+    steers no cell
   invariant a write-time crossing flag is never lost to a fence it was not part of. The drain TAKES each cluster's pending
     slots (Interlocked.Exchange), so ClearAabbRefreshBookkeeping clears only what this fence consumed: a pending bit still
     set at the clear was raised after the drain — by a transaction committing on another thread while the fence ran — and
@@ -1705,12 +1729,15 @@
   scope: ArchetypeClusterState.AddClusterToPerCellIndex, ArchetypeClusterState.AddClusterToPerCellIndexLocked,
     ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.TryClaimPinnedSlot, ArchetypeClusterState.ClusterCellMap,
     DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster,
-    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots,
+    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.MapClusterForRebuild,
+    ArchetypeClusterState.ReduceWorldBounds, ArchetypeClusterState.PickFewestStraysCell, SpatialCentreBox, ClusterHomeHint, ArchetypeClusterState.FileForeignCellSlots,
     ArchetypeClusterState.ClearAabbRefreshBookkeeping, ArchetypeClusterState.ClusterMigrationTakenSlots,
     ArchetypeClusterState.FlagOutOfBarrierSpatialWrite, Transaction.PublishStagedEntry
   verified: RecoverySpatialRebuildTests.MixedCellClusterFromRecoveryClaim_FiledAtRebuild_FixedAtFirstFence (the replay packs
     four cells into shared clusters; the rebuild files exactly the slots outside their cluster's cell and none survives the
-    first fence). ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
+    first fence). ArchetypeSetMigrationSpatialTests.PlainReopen_BandResidentSlot0_NoStrays — every cluster's slot 0 moved into
+    the next cell's band, a fence, a clean close, a plain reopen: no foreign slot and a first fence that moves nothing (the
+    first-slot rule fails it: every cluster's other entities filed as strays). ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
     into two adjacent cells race eight writers moving entities across their boundary; after the fence every
     occupied slot resolves to its cluster's mapped cell and the two cells count what was spawned (7 of 30 runs
     failed before the latch and the occupancy-before-publish ordering; about 1 cold launch in 10 before the drain

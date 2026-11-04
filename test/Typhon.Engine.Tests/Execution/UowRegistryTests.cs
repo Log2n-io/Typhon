@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Typhon.Engine.Internals;
+
 namespace Typhon.Engine.Tests;
 
 class UowRegistryTests : TestBase<UowRegistryTests>
@@ -96,6 +98,89 @@ class UowRegistryTests : TestBase<UowRegistryTests>
         Assert.That(firstId, Is.EqualTo((ushort)1));
 
         dbe.UowRegistry.Release(firstId);
+    }
+
+    // ══════════════════════════════════════════════════════
+    // #1376 — a released slot is never written by its former owner (UR-09)
+    // ══════════════════════════════════════════════════════
+
+    private DatabaseEngine OpenWithComponents(IServiceScope scope)
+    {
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        RegisterComponents(dbe);
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
+    private static void SpawnIn(UnitOfWork uow)
+    {
+        using var tx = uow.CreateTransaction();
+        tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(1)));
+        Assert.That(tx.Commit(), Is.True, "the commit");
+    }
+
+    /// <summary>
+    /// #1376: a non-Deferred dispose released its slot, then flushed, and the flush recorded the unit of work committed into the free slot — another's by
+    /// then. The slot stays Free once its owner is gone, its committed bit clear.
+    /// </summary>
+    [Test]
+    [VerifiesRule("UR-09")]
+    public void ADisposedImmediateUnitOfWork_LeavesItsSlotFree()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = OpenWithComponents(scope);
+        ushort id;
+        using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            id = uow.UowId;
+            SpawnIn(uow);
+        }
+
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            Assert.That(dbe.UowRegistry.ReadEntry(id, dbe.EpochManager.GlobalEpoch).State, Is.EqualTo(UnitOfWorkState.Free), "the released slot");
+        }
+
+        Assert.That(dbe.UowRegistry.IsCommitted(id), Is.False, "no committed bit left on a free slot");
+    }
+
+    /// <summary>#1376: a unit of work that appended nothing, a rollback here, has nothing to make durable: its dispose records no commit.</summary>
+    [Test]
+    [VerifiesRule("UR-09")]
+    public void ANonDeferredUnitOfWorkThatCommittedNothing_DoesNotFlush()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = OpenWithComponents(scope);
+        var committedBefore = dbe.UowRegistry.CommittedTotal;
+        using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+        {
+            using var tx = uow.CreateTransaction();
+            tx.Spawn<CompAArch>(CompAArch.A.Set(new CompA(1)));
+            tx.Rollback();
+            Assert.That(uow.CommittedTransactionCount, Is.Zero, "a rollback appends nothing");
+        }
+
+        Assert.That(dbe.UowRegistry.CommittedTotal, Is.EqualTo(committedBefore), "no commit recorded for a unit of work that appended nothing");
+    }
+
+    /// <summary>
+    /// #1376: the stray committed entry was persisted with the registry page, and the next open counted it active and never freed it: a slot leaked per
+    /// non-Deferred unit of work, toward the 32 767 cap, for the database's life.
+    /// </summary>
+    [Test]
+    [VerifiesRule("UR-09")]
+    public void ADisposedNonDeferredUnitOfWork_LeavesNoSlotTakenAcrossAReopen()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = OpenWithComponents(scope);
+            using var uow = dbe.CreateUnitOfWork(DurabilityMode.GroupCommit);
+            SpawnIn(uow);
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = OpenWithComponents(scope2);
+        Assert.That(reopened.UowRegistry.ActiveCount, Is.Zero, "no slot taken after a clean close and a reopen");
     }
 
     [Test]

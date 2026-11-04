@@ -41,7 +41,10 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
         [CallerFilePath]   string callerFile = null,
         [CallerLineNumber] int    callerLine = 0,
         [CallerMemberName] string callerMethod = null)
-        => _inner.ToViewAt(_tx, bufferCapacity, callerFile, callerLine, callerMethod);   // at this query's snapshot (#1247)
+    {
+        _tx.ResumeIfSuspended();   // EP-03: re-enters a scope a walk step suspended
+        return _inner.ToViewAt(_tx, bufferCapacity, callerFile, callerLine, callerMethod);   // at this query's snapshot (#1247)
+    }
 
     /// <summary>Execute the navigation query and return matching source entity IDs.</summary>
     public HashSet<EntityId> Execute(
@@ -51,6 +54,7 @@ public unsafe class EcsNavigationQueryBuilder<TSourceArch, TSource, TTarget> whe
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        _tx.ResumeIfSuspended();   // EP-03: re-enters a scope a walk step suspended
         return ExecuteViaEntityMap();    // All entities use EntityMap-based enumeration (PK B+Tree removed)
     }
 

@@ -174,6 +174,9 @@ public sealed partial class TatooineSim
         // The cities' buildings, as the crowd's walks round them read them (SimBridge.Routes.cs): once, now the world is built or reopened.
         _bridge.PlanCityWalks();
 
+        // Before the runtime and before Declare: the seeded rows are stamped before its first tick and queue no notice (Hardening/HistorySeed.cs).
+        SeedHistoryIfAsked();
+
         _runtime = TyphonRuntime.Create(Dbe, BuildServeSchedule, new RuntimeOptions
         {
             BaseTickRate = _config.TickRateHz,

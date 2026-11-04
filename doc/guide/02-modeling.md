@@ -22,7 +22,7 @@ The three nouns again, now with the *why*:
 - An **archetype** is a *fixed set* of components — the shape `Character = Transform + Bounds + Ham + …`. You declare it as a class.
 - An **entity** is one instance of an archetype, addressed by an `EntityId`.
 
-💡 **Why a fixed shape per entity?** Because Typhon stores components **archetype-major**: every `Character`'s `Transform` sits contiguously in memory, separate from every other archetype's. Iterating "all characters' positions" is then a linear walk over packed memory — cache-friendly, branch-free, fast. That contiguity is the whole performance bet of ECS, and it's only possible because the shape is fixed at spawn. The cost: an entity can't grow a new component type after it's spawned (you model that with a different archetype, or an *enabled/disabled* component flag).
+💡 **Why a fixed shape per entity?** Because Typhon stores components **archetype-major**: every `Character`'s `Transform` sits contiguously in memory, separate from every other archetype's. Iterating "all characters' positions" is then a linear walk over packed memory — cache-friendly, branch-free, fast. That contiguity is the whole performance bet of ECS, and it's only possible because the shape is fixed at spawn. The cost: an entity can't grow a new component type after it's spawned (you model that with a different archetype, or an *enabled/disabled* component flag) — though the archetype's declared set can grow across schema revisions, existing entities holding the new component absent ([Archetype Component-Set Evolution](../feature-set/Schema/archetype-set-evolution.md)).
 
 ### Declaring an archetype
 
