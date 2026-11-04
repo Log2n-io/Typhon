@@ -89,6 +89,7 @@ System.Exception
    ├─ SchemaValidationException             (Diff: SchemaDiff)
    ├─ SchemaMigrationException              (ComponentName, IReadOnlyList<MigrationFailure>)
    ├─ SchemaDowngradeException              (ComponentName, PersistedRevision, RuntimeRevision)
+   ├─ SchemaMismatchException               (IReadOnlyList<string> Differences)
    └─ InvalidAccessException                (sealed; opt-in declared-access enforcement)
 ```
 
@@ -166,11 +167,12 @@ Thrown at commit when a component write carries a cascade FK field pointing at a
 
 ### Schema family
 
-Three exceptions, all direct subclasses of `TyphonException`:
+Four exceptions, all direct subclasses of `TyphonException`:
 
 - [`SchemaValidationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaValidationException.cs) — the runtime struct definition is incompatible with what's persisted. Carries the full `SchemaDiff` for programmatic inspection (which field changed, what type, what attribute). See [04-schema](04-schema.md).
 - [`SchemaMigrationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMigrationException.cs) — one or more entities failed during a schema migration. Carries `ComponentName` and `IReadOnlyList<MigrationFailure>` (see [§6](#6-migrationfailure--per-entity-migration-diagnostics)). Old segments remain untouched — the user can fix the migration function and re-run.
 - [`SchemaDowngradeException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaDowngradeException.cs) — the database was written by a newer application version (`PersistedRevision > RuntimeRevision`). The engine refuses to open it to prevent corruption.
+- [`SchemaMismatchException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMismatchException.cs) — an exact-schema open (every drill, every restore's settle) found the loaded build differs from the database: a component name, revision, layout or field, or the declaring assembly's identity doesn't match. Carries `IReadOnlyList<string> Differences`. Nothing is written; the drill or settle ends as Error. Error code `SchemaMismatch = 3003`.
 
 > **Worth calling out:** `SchemaDowngradeException` **reuses `TyphonErrorCode.SchemaValidation`** (3001), not a dedicated downgrade code. If you're routing on error code, downgrade and runtime-vs-persisted mismatches look identical at the wire level — disambiguate by the exception type.
 

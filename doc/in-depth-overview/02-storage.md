@@ -128,7 +128,9 @@ Pass 2 (counter-ignoring):    scan up to N slots
 
 The counter is incremented on every access via `PageInfo.IncrementClockSweepCounter`, capped at `ClockSweepMaxValue = 5`. Hot pages climb to 5 and survive several full sweeps; cold pages decrement to 0 and get reclaimed. The second pass exists for the case where every page is dirty or epoch-protected at the moment we sweep — we still need a slot, so we make one more circle ignoring the heuristic but respecting the *real* eviction blockers (DC, writeback debt, ACW, SlotRefCount, AccessEpoch).
 
-When both passes fail, the **backpressure path** kicks in (see [§6](#6-backpressure)). The clock hand `_clockSweepCurrentIndex` is a `CacheLinePaddedInt` to avoid false sharing with adjacent state.
+**Scan-resistant eviction (PS-25, default on; `PagedMMFOptions.ScanResistantEviction = true`):** a page loaded for the first time by one scan goes on *probation* — its `ProbationTag` is set. The clock skips probation pages entirely, neither taking nor ageing them (the counter description above applies only to clock pages). A probation page is promoted to a clock page when a *different* operation requests it (PS-25: `NoteRequested`); if no other operation does, the probation queue evicts it before the clock touches the working set. This keeps a scan larger than the cache from replacing the resident working set with its own pages.
+
+When both passes (and the probation queue, when active) fail, the **backpressure path** kicks in (see [§6](#6-backpressure)). The clock hand `_clockSweepCurrentIndex` is a `CacheLinePaddedInt` to avoid false sharing with adjacent state.
 
 ### Two micro-optimizations worth mentioning
 
