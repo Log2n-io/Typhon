@@ -80,10 +80,6 @@ internal sealed class AdminChecks : ServedChecks
     }
 
     /// <summary>
-    /// Credits given then taken: an <c>admingrant</c> row from World and an <c>admintake</c> row to it, the balance moved by each; more than it holds, an
-    /// amount of zero and one past the ceiling refused, writing no row; the economy's audit clean — conservation included.
-    /// </summary>
-    /// <summary>
     /// A request its caller gave up on — the endpoint's "no tick answered" — is never applied, however late the tick comes (review, 2026-11-03): retried, it
     /// would have been applied twice.
     /// </summary>
@@ -119,6 +115,10 @@ internal sealed class AdminChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// Credits given then taken: an <c>admingrant</c> row from World and an <c>admintake</c> row to it, the balance moved by each; more than it holds, an
+    /// amount of zero and one past the ceiling refused, writing no row; the economy's audit clean — conservation included.
+    /// </summary>
     [Test]
     [CancelAfter(120_000)]
     public void Credits_AreGivenAndTakenAsLedgerRows_AndARefusalWritesNothing()
