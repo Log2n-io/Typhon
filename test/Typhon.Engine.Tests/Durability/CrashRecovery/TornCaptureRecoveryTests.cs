@@ -2071,6 +2071,49 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
     }
 
     /// <summary>
+    /// CK-18 (#1562): a grow's old tail is never written before the directory the grow wrote. The grow initializes its new pages, owed, before it writes
+    /// the directory, and a cycle copies a page when it writes it: one that had taken the new pages and not the directory wrote them as the segment's, the
+    /// old tail went with its new link, and the crash open found the chain ahead of the directory onto a page written as the segment's — refused, which for
+    /// a cluster meant a fresh segment and the entities gone. Here a plain wave reaches the old tail before any cycle has written the directory: it stays
+    /// owed. The next cycle writes the directory, then the tail.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CK-18")]
+    [CancelAfter(30_000)]
+    public void AGrowsOldTail_IsWrittenOnlyOnceTheGrowsDirectoryIs()
+    {
+        var items = new List<EntityId>();
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var revisions = dbe.GetComponentTable<MkItem>().CompRevTableSegment;
+        var length = GrowRevisionsAfterACheckpoint(dbe, items);
+        Assert.That(dbe.MMF.DirectoryHoldCount, Is.GreaterThan(0), "the premise: the grow's old tail is held for its directory");
+
+        int memPageIndex;
+        using (EpochGuard.Enter(dbe.EpochManager))
+        {
+            dbe.MMF.RequestPageEpoch(revisions.Pages[length - 1], dbe.EpochManager.GlobalEpoch, out memPageIndex);
+        }
+
+        var skips = dbe.MMF.CheckpointSkipAwaitingDirectory;
+        Span<int> wave = [memPageIndex];
+        dbe.MMF.WritePagesForCheckpoint(wave, dbe.StagingBufferPool, out var written, filter: CheckpointWriteFilter.PlainOnly);
+        Assert.Multiple(() =>
+        {
+            Assert.That(written, Is.Zero, "the old tail, its link to the grow's page with it, was written before the directory");
+            Assert.That(dbe.MMF.CheckpointSkipAwaitingDirectory - skips, Is.EqualTo(1));
+            Assert.That(dbe.MMF.HasWritebackDebt(memPageIndex), Is.True, "the tail held back is still owed");
+        });
+
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "a cycle covers the held tail: directory first, then it");
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.MMF.HasWritebackDebt(memPageIndex), Is.False, "the tail, written once the directory was");
+            Assert.That(dbe.MMF.DirectoryHoldCount, Is.Zero, "a hold outlived its directory's write");
+        });
+    }
+
+    /// <summary>
     /// #1299: a content segment's chain ahead of its directory, ended where the directory ends, while the revision chains on the disk name content chunks
     /// on the grow's lost page — a page the same cycle wrote after the spawns that allocated there. Past the segment's capacity, the open's HEAD rebuild
     /// read it and threw; it now skips such a head, and the replay brings the revision back from the log.

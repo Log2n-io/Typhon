@@ -287,6 +287,10 @@ internal unsafe struct TransientStore : IPageStore, IDisposable
 
     /// <inheritdoc />
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void HoldForDirectory(int filePageIndex, ReadOnlySpan<int> directoryMemPageIndices) { }
+
+    /// <inheritdoc />
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ChangeSet CreateChangeSet(bool drainedByCheckpoint = false) => null;
 
     /// <inheritdoc />

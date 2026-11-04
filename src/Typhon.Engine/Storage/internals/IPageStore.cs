@@ -216,6 +216,14 @@ public unsafe interface IPageStore
     int GetOrAllocateDirectoryTwin(int primaryPageIndex, ChangeSet changeSet);
 
     /// <summary>
+    /// Holds a grow's old tail back from every checkpoint write until the directory pages the grow wrote are durable as it left them (CK-18): the tail
+    /// links to the grow's first page, and on the file without that page's directory entry it puts the chain ahead of the directory. Called by
+    /// <see cref="LogicalSegment{TStore}.CreateOrGrow"/> once it has written the link, the tail and the directory pages still latched.
+    /// <para>Persistent: records the hold. Transient: no-op — nothing is written.</para>
+    /// </summary>
+    void HoldForDirectory(int filePageIndex, ReadOnlySpan<int> directoryMemPageIndices);
+
+    /// <summary>
     /// Create a <see cref="ChangeSet"/> for tracking dirty pages during growth or maintenance.
     /// <para>Persistent: returns <c>new ChangeSet(mmf)</c>.</para>
     /// <para>Transient: returns <c>null</c> (no dirty tracking needed). CBS/LS handle null ChangeSets.</para>
