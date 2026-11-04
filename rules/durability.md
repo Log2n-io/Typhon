@@ -2694,7 +2694,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          PagedMMF.AllocateMemoryPageCore, PagedMMF.EnterOperation, PagedMMF.ExitOperation, PagedMMF.OperationTag, ProbationPolicy,
          PagedMMFOptions.ScanResistantEviction
   on_violation: a walk larger than the cache evicts the working set: on a full 64 MiB cache, the replay of three long walks beside live traffic
-                counted 20-24k foreground misses under the plain clock against about 650 with this rule (claude/scratch/huge-scan-assessment.md, I8).
+                counted 20-24k foreground misses under the plain clock against about 650 with this rule (claude/research/Storage/huge-scan-assessment.md, I8).
                 A reserved area instead of an adaptive one cost a working set near the cache size 75 % more misses with no walk at all
   rationale: ARC's adaptation (Megiddo and Modha, FAST 2003) on the clock, as CAR (Bansal and Modha, FAST 2004), with one change: promotion needs a
              different operation, not merely a second hit — 63-65 % of a walk's requests re-read its own pages. Deviates from EP-02's "marks the page
@@ -2706,7 +2706,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             AProtectedProbationPage_IsNeverTaken, UnderConcurrency_TheProbationCountMatchesTheSlots, APagePromotedDuringTheTake_IsLeftToTheClock,
             TheTarget_NeverExceedsHalfTheCache, WithTheOptionOff_NoPageIsOnProbation, APageItsOperationAskedForAgain_GetsOneMoreLap,
             OperationsEndingOutOfOrder_LeaveNoEndedOperation, AfterTheQueueChurns_EveryProbationPageCanStillBeTaken, TheGhostList_MatchesItsModel,
-            APageItsOperationKeepsComingBackTo_JoinsTheClock
+            APageItsOperationKeepsComingBackTo_JoinsTheClock, PassTwo_NeverAgesAProbationPage (every slot held, so pass 2 sweeps the cache: a
+            probation page's counter is unchanged; mutation-checked), ConcurrentRequestsOfOneOperation_AdvanceAPageOnce (8 threads of one
+            operation on a fresh probation page, 400 rounds: one step each time; a plain increment instead of the CAS overshoots)
 
 ## Module: WAL Recovery
 
