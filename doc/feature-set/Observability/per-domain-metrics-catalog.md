@@ -24,9 +24,11 @@ The architecture overview's Metrics Catalog enumerates ~40 instruments across ei
 Cache, I/O, Concurrency/AccessControl, B+Tree Index, WAL/Durability, Allocation Infrastructure, and Backup — each
 with a fixed name, an OTel instrument type (Counter, Histogram, or Gauge), a description, and (where relevant) a
 cross-reference to a Resource Taxonomy node. This is presently a documentation-only design target: no `Meter` in
-the codebase registers any of these specific names. The two exporters that do exist
-(`ResourceMetricsExporter`, `EcsMetricsExporter`) use a different, generic naming scheme (`typhon.resource.*`,
-`typhon.ecs.*`) built from resource paths and metric kinds, not the fixed per-domain names catalogued here.
+the codebase registers any of these specific names. The generic exporters that do exist
+(`ResourceMetricsExporter`, `EcsMetricsExporter`) use a different naming scheme (`typhon.resource.*`,
+`typhon.ecs.*`) built from resource paths and metric kinds, not the fixed per-domain names catalogued here. The Backup
+domain does have fixed-name gauges today (`BackupMetricsExporter`, meter `Typhon.Backup`, `typhon.backup.health`,
+`typhon.backup.last_duration_ms`, ...), but they report backup status, not the catalog's names.
 
 ## 💻 Usage
 
@@ -59,9 +61,9 @@ Not implemented — no Meter registers these names today; nothing below compiles
 
 ## ⚠️ Guarantees & limits
 
-- **Not implemented.** None of the ~40 catalogued names are registered as OTel instruments anywhere in
-  `src/Typhon.Engine/Observability` today — the only live meters are `Typhon.Resources` (resource-path-tagged) and
-  `Typhon.ECS` (per-archetype/per-component gauges), both with naming schemes distinct from this catalog.
+- **Not implemented.** None of the ~40 catalogued names are registered as OTel instruments anywhere in the engine
+  today — the live meters are `Typhon.Resources` (resource-path-tagged), `Typhon.ECS` (per-archetype/per-component
+  gauges) and `Typhon.Backup` (backup-status gauges), all with names distinct from this catalog.
 - Intended to coexist with, not replace, the generic [Resource Graph Metrics Bridge](./otel-metrics-export/resource-graph-metrics-bridge.md)
   bridge: the catalog targets fixed, dashboard-stable names for the highest-value domains; the resource bridge
   stays dynamic/generic for everything else.

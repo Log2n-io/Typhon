@@ -33,7 +33,7 @@ using Typhon.Engine;
 
 services.AddTyphonObservabilityBridge(options =>
 {
-    // Tighten or relax thresholds per resource path (leading "Root/" is optional).
+    // Tighten or relax thresholds per resource path (snapshot path, without the leading "Root/").
     options.Thresholds["Storage/PageCache"] = new HealthThresholds(0.70, 0.90);
 });
 
@@ -66,7 +66,9 @@ Console.WriteLine(detail.Description); // "Storage/PageCache at 92% utilization 
   (`ResourceSnapshot.FindMostUtilized()`); `GetDetailedResult()` does a full node walk and suits less frequent
   dashboard calls.
 - Reads the exporter's cached snapshot, not live state — status reflects the last `SnapshotInterval` refresh
-  (default 5s; see the Resource Metrics Export feature for the snapshot lifecycle).
+  (default 5s; see the Resource Metrics Export feature for the snapshot lifecycle). The snapshot is refreshed only by
+  `ResourceMetricsService` once `Start()`ed (or a manual `ResourceMetricsExporter.UpdateSnapshot()`); until the first
+  snapshot exists, both calls report `Healthy`.
 - `ITyphonHealthCheck` has no ASP.NET Core dependency; bridging to
   `Microsoft.Extensions.Diagnostics.HealthChecks.IHealthCheck` is a thin adapter the host writes (`HealthStatus`
   maps 1:1, `Description`/`Data` pass straight through).

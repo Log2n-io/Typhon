@@ -70,7 +70,7 @@ TYPHON__PROFILER__GAUGES__ENABLED=false dotnet run
 | Field | Default | Controls |
 |---|---|---|
 | `ConsumerCadence` | 1 ms | Drain-thread wake interval — lower = lower live-viewer latency, higher CPU |
-| `PerExporterChannelDepth` | 4 | Batches buffered per exporter before drop-newest kicks in |
+| `PerExporterChannelDepth` | 4 | Validated but not read today — the built-in file and TCP exporters each size their own queue at 64 batches |
 | `MergeBufferBytes` | 512 KB | Per-pass merge scratch capacity on the drain thread |
 | `SpilloverBufferCount` / `SpilloverBufferSizeBytes` | 8 × 16 MiB | Overflow rings a producer chains onto when its primary ring fills |
 

@@ -1,11 +1,11 @@
 ---
 uid: feature-storage-pluggable-storage-backend-transient-store
-title: 'Transient Store (heap-backed)'
-description: 'Pinned heap blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code.'
+title: 'Transient Store (native-memory)'
+description: 'Pinned native-memory blocks standing in for the page cache, so Transient components get raw-memory speed through the same segment code.'
 ---
 
-# Transient Store (heap-backed)
-> Pinned heap blocks standing in for the page cache, so `Transient` components get raw-memory speed through the same segment code.
+# Transient Store (native-memory)
+> Pinned native-memory blocks standing in for the page cache, so `Transient` components get raw-memory speed through the same segment code.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Storage](../README.md)
 **Assumes:** [Transient (Storage Mode)](../../Ecs/storage-modes/storage-mode-transient.md)
@@ -16,11 +16,11 @@ description: 'Pinned heap blocks standing in for the page cache, so Transient co
 promise no durability cost at all — no WAL, no checkpoint, no dirty tracking. Routing them through the
 page cache would mean paying for (and then discarding) eviction bookkeeping and dirty-counter
 updates the data will never need. The transient store gives those components their own backend — plain pinned
-heap memory — so the cost genuinely disappears instead of just being hidden.
+native memory (outside the GC heap) — so the cost genuinely disappears instead of just being hidden.
 
 ## ⚙️ How it works (in brief)
 
-`TransientStore` allocates 8 KiB pages from pinned heap blocks (`TransientOptions.PagesPerBlock` pages per
+`TransientStore` allocates 8 KiB pages from pinned native-memory blocks (`TransientOptions.PagesPerBlock` pages per
 block, one `IMemoryAllocator.AllocatePinned` call per block) and maps file-page index directly to memory-page
 index — there is no cache layer to translate, and pages are never evicted once allocated. All dirty-tracking
 and slot-ref-counting members of `IPageStore` are empty method bodies; combined with `AggressiveInlining` and
@@ -60,13 +60,13 @@ services.AddDatabaseEngine(options =>
 
 ## ⚠️ Guarantees & limits
 
-- No durability whatsoever, by design: data lives only in pinned heap memory and is gone on process exit or
+- No durability whatsoever, by design: data lives only in pinned native memory and is gone on process exit or
   crash — there is no recovery path, not even a degraded one.
 - Dirty tracking, slot-ref counting, and CRC verification are compiled away, not skipped at runtime — the
   `ChunkAccessor<TransientStore>` specialization has no instructions for them at all.
 - Pages are never evicted once allocated — the whole store must fit in `MaxMemoryBytes`; there is no spill-to-disk
   fallback. Hitting the cap throws `InsufficientMemoryException` rather than degrading.
-- `MemPagesBaseAddress` is `null` — transient pages live in separate, non-contiguous heap blocks, so the
+- `MemPagesBaseAddress` is `null` — transient pages live in separate, non-contiguous memory blocks, so the
   pointer-arithmetic reverse-mapping `PersistentStore` supports isn't available here (a `typeof(TStore)` branch
   routes around it).
 - `GetOrAllocateDirectoryTwin` always returns "no twin" — transient segments are never persisted, so the

@@ -23,7 +23,7 @@ Nothing to write against these subsystems — enable the profiler and the covera
 
 ```csharp
 // typhon.telemetry.json next to your executable is the only "code" this feature needs:
-// { "Typhon": { "Telemetry": { "Enabled": true, "Profiler": { "Enabled": true } } } }
+// { "Typhon": { "Profiler": { "Enabled": true } } }
 
 using var runtime = TyphonRuntime.Create(dbe, schedule =>
 {
@@ -51,7 +51,7 @@ runtime.Start();
 
 ## 🧪 Tests
 
-- [TyphonEventKindSuppressionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TyphonEventKindSuppressionTests.cs) — the default suppression deny-list: only `PageCacheFetch` is suppressed by default, the other 9 page-cache kinds and every other subsystem's kinds are open
+- [TyphonEventKindSuppressionTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TyphonEventKindSuppressionTests.cs) — the default suppression deny-list: among the baseline kinds only `PageCacheFetch` is suppressed by default (the other 9 page-cache kinds are open); a few extreme-frequency Data/Query domain leaves (e.g. `DataMvccChainWalk`, `QueryExecuteIterate`) are deny-listed too
 - [TraceEventEncodeEquivalenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Profiler/TraceEventEncodeEquivalenceTests.cs) — per-kind wire-encode equivalence across the built-in event set, catching struct-layer vs. codec argument-order/field-thread-through bugs
 
 ## 🔗 Related

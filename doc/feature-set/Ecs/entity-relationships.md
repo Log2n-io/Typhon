@@ -47,7 +47,7 @@ public struct BagData
 // FK on child — O(1) reverse lookup, no contention on the parent
 EntityId itemId = tx.Spawn<Item>(Item.Data.Set(new ItemData { Owner = bagId, Damage = 15 }));
 
-foreach (EntityRef item in tx.Query<Item>().Where(i => i.Owner == bagId))
+foreach (EntityRef item in tx.Query<Item>().Where<ItemData>(i => i.Owner.Id == bagId))
 {
     ItemData data = item.Read<ItemData>();
 }

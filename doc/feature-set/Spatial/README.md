@@ -28,6 +28,8 @@ description: 'Typhon''s spatial layer gives any component field a declarative [S
 | [Spatially-Coherent Entity Clustering](spatial-coherent-clustering.md) | Every entity in a cluster shares one grid cell, so spatial bookkeeping is per-cluster, not per-entity | ✅ Implemented | 🟣 Advanced |
 | [Tiered Simulation Dispatch](tiered-simulation-dispatch.md) | One simulation tier per spatial cell, four dispatch frequencies, zero per-entity distance checks | ✅ Implemented | 🟣 Advanced |
 | [Checkerboard Dispatch](checkerboard-dispatch.md) | Opt-in two-phase Red/Black cluster partitioning for systems that write across cell boundaries, dispatched as one DAG node with two internal phases | ✅ Implemented | 🟣 Advanced |
+| [Cluster Dormancy (Sleep / Wake)](cluster-dormancy.md) | Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched; opt in per archetype with `dbe.SetClusterDormancy<TArch>(...)` | ✅ Implemented | 🟣 Advanced |
+| [Trigger Volumes (Enter / Leave / Stay)](spatial-trigger-volumes.md) | Region occupancy diffed against the per-cell cluster index each cycle to emit Enter/Leave/Stay events at a configurable per-region frequency, reached through `dbe.SpatialTriggers<T>()` | ✅ Implemented  🟣 Advanced |
 
 ## Internal Features
 
@@ -35,7 +37,5 @@ description: 'Typhon''s spatial layer gives any component field a declarative [S
 
 | Feature | Summary | Status |
 |---|---|---|
-| [Per-Cell Cluster Index Internals](spatial-rtree-index/README.md) | Node layout, fanout and the lock protocol of the R-Tree a cell half holds once its density crosses the promotion threshold — most cells stay well below it and scan a linear list instead | ✅ Implemented |
-| [Trigger Volumes (Enter / Leave / Stay)](spatial-trigger-volumes.md) | Region occupancy diffed against the per-cell cluster index each cycle to emit Enter/Leave/Stay events at a configurable per-region frequency, reached through `dbe.SpatialTriggers<T>()` | ✅ Implemented |
-| [Cluster Spatial Queries](cluster-spatial-queries.md) | Per-cell broadphase + per-entity narrowphase AABB/Radius queries for cluster-eligible archetypes; raw enumerator needs an engine-internal `EpochGuard` scope, app code reaches the same path via the public `EcsQuery` predicates above | 🚧 Partial |
-| [Cluster Dormancy (Sleep / Wake)](cluster-dormancy.md) | Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched; no public configuration API yet | ✅ Implemented |
+| [Per-Cell Cluster Index Internals](spatial-rtree-index/README.md) | Node layout, fanout and the lock protocol of the R-Tree a cell half holds once its density crosses the opt-in promotion threshold — by default no cell promotes, and every cell scans a linear list instead | ✅ Implemented |
+| [Cluster Spatial Queries](cluster-spatial-queries.md) | Per-cell broadphase + per-entity narrowphase AABB/Radius queries for cluster-eligible archetypes; raw enumerator needs the epoch scope a system body already holds, code outside a system reaches the same path via the public `EcsQuery` predicates above | 🚧 Partial |

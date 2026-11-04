@@ -57,12 +57,13 @@ Immutable, validated at construction:
 
 | Field | Meaning |
 |---|---|
-| `WorldMin` / `WorldMax` | `Vector3` world-space bounds. Max strictly > Min on all three axes. |
+| `WorldMin` / `WorldMax` | `Vector3D` (double-precision) world-space bounds. Max strictly > Min on all three axes. |
 | `CellSize` | World units per cell. Must be > 0. |
 | `MigrationHysteresisRatio` | Fraction of cell size used as dead zone for cluster migration (default 0.05). |
 | `GridWidth` / `GridHeight` / `GridDepth` | Derived per axis. `ceil((Max - Min) / CellSize)`. `GridDepth` is `1` for a flat world. |
 | `CellCount` | Derived. `GridWidth × GridHeight × GridDepth`; must fit a 32-bit key. |
 | `InverseCellSize` | Precomputed `1 / CellSize`. |
+| Cluster placement & repair tuning | `ClusterTargetExtentRatio`, `MaxOpenClustersPerCell`, `ClusterDriftMarginRatio`, `ClusterRepairExtentRatio`, `ReclusterBudgetMs`, `RepairCooldownTicks`, … — constructor parameters with defaults; see the type's reference. |
 
 Cell keys are **pool slots** in a sparse structure: a root directory from packed block coordinates to a block (a dense `int[]` over every block of the world up to 16 384 blocks, a hash map beyond — [§8](#8-realms)), a dense per-block `int[]` of cell-slot indices, and a chunked pool holding one 64-byte `CellState` per *occupied* cell. A cell exists only once something occupies it; an empty region costs one absent hash entry rather than a descriptor per cell. Keys are handed out in creation order, so they renumber across a rebuild and must not be cached across one.
 
@@ -149,7 +150,7 @@ Tree metadata (root chunk id, node count, entity count, depth, variant) *can* be
 
 ### Concurrency model — `SpinWriteLock` (its own variant)
 
-Each R-Tree node has a 32-bit [`OlcLatch`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Concurrency/internals/OlcLatch.cs) embedded in its header. Reads use optimistic concurrency control — capture the version before the read, do the work, validate after; restart if anything changed. Writes need exclusive access, and the R-Tree takes it through a **plain `SpinWait` loop**:
+Each R-Tree node has a 32-bit [`OlcLatch`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/OlcLatch.cs) embedded in its header. Reads use optimistic concurrency control — capture the version before the read, do the work, validate after; restart if anything changed. Writes need exclusive access, and the R-Tree takes it through a **plain `SpinWait` loop**:
 
 ```csharp
 private static void SpinWriteLock(byte* nodeBase, out OlcLatch latch)

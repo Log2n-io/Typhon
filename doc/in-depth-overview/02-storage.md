@@ -1,14 +1,14 @@
 ---
 uid: overview-storage
 title: '02 — Storage'
-description: 'Storage is the physical layer: a paged data file managed by the engine's own page cache, segments built on top of pages, and accessors that hold short-lived,…'
+description: 'Storage is the physical layer: a paged data file managed by the engine''s own page cache, segments built on top of pages, and accessors that hold short-lived,…'
 ---
 
 # 02 — Storage
 
 **Code:** [`src/Typhon.Engine/Storage/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Storage)
 
-Storage is the physical layer: a paged data file managed by the engine's own page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the page CRC + seqlock snapshots the checkpoint relies on — bottoms out here. The shape of this layer (8 KB pages, two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
+Storage is the physical layer: a paged data file managed by the engine's own page cache, segments built on top of pages, and accessors that hold short-lived, JIT-inlined views into chunk memory. Everything above this layer — MVCC revision chains, B+Tree indexes, the ECS component tables, even the page CRC + seqlock snapshots the checkpoint relies on — bottoms out here. The shape of this layer (8 KB pages, scan-resistant two-pass clock-sweep eviction, generic `<TStore>` segments) is what makes the higher layers cheap.
 
 Because the cache is a fixed pool with on-demand load + clock-sweep eviction, **the database file can be arbitrarily larger than the cache** — resident memory is bounded by `DatabaseCacheSize`, not by database size. Persistent component data, B+Tree indexes, the per-archetype `EntityMap`, and the free-space bitmap all live in this paged store, so data volume and entity count scale with *disk*, not memory. The lone exception is **Transient** components (`TransientComponentSegment`), which are in-memory only by design. This larger-than-RAM property is routine for SQL and embedded engines (SQLite, LMDB) but sets Typhon apart from in-memory ECS frameworks, where the entire world must fit in process memory.
 
@@ -18,7 +18,7 @@ You read this doc when you're: tuning page-cache pressure, understanding why a b
   <img src="assets/typhon-storage-overview.svg" width="1200" alt="Storage layer overview">
 </a>
 <br>
-<sub>The layered storage model: two <code>IPageStore</code> backends (<code>PersistentStore</code> over the page cache, heap-backed <code>TransientStore</code>), the <code>PagedMMF</code> / <code>ManagedPagedMMF</code> cache core, the generic <code>&lt;TStore&gt;</code> segment hierarchy (<code>ChunkBasedSegment</code> extends <code>LogicalSegment</code>; VSBS / StringTable compose a chunk segment), the hot-path accessors, and the cross-cutting dirty-tracking / backpressure / page-CRC machinery.</sub>
+<sub>The layered storage model: two <code>IPageStore</code> backends (<code>PersistentStore</code> over the page cache, native-memory <code>TransientStore</code>), the <code>PagedMMF</code> / <code>ManagedPagedMMF</code> cache core, the generic <code>&lt;TStore&gt;</code> segment hierarchy (<code>ChunkBasedSegment</code> extends <code>LogicalSegment</code>; VSBS / StringTable compose a chunk segment), the hot-path accessors, and the cross-cutting dirty-tracking / backpressure / page-CRC machinery.</sub>
 
 ---
 
@@ -35,7 +35,7 @@ Three concentric layers, each with one obvious type:
 Two backends share the segment / accessor code via the [`IPageStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageStore.cs) struct-generic interface:
 
 - [`PersistentStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PersistentStore.cs) — wraps `ManagedPagedMMF`. The JIT inlines every delegation; assembly is identical to non-generic code.
-- [`TransientStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/TransientStore.cs) — heap-backed, no cache, no dirty tracking. The dirty-tracking methods are no-ops; `typeof(TStore)` branches in `ChunkAccessor` dead-code-eliminate the persistence machinery for transient components.
+- [`TransientStore`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/TransientStore.cs) — native-memory, no cache, no dirty tracking. The dirty-tracking methods are no-ops; `typeof(TStore)` branches in `ChunkAccessor` dead-code-eliminate the persistence machinery for transient components.
 
 Cross-cutting concerns sit alongside this layered core:
 
@@ -80,6 +80,7 @@ Each in-memory page has a sidecar [`PageInfo`](https://github.com/Log2n-io/Typho
 - `FilePageIndex` — which file page the slot holds (the slot's own index is its position in the table)
 - `PageState` — current state machine value (see below)
 - `ClockSweepCounter` — eviction heuristic (range 0..5, see [§2](#two-pass-clock-sweep-eviction))
+- `ProbationTag` — non-zero while a first-loaded page waits on probation, naming the operation that loaded it (see [§2](#scan-resistant-probation))
 - `DirtyCounter` (`DC`) — mutator marks a unit of work still holds on the page; > 0 prevents eviction
 - `WritebackGen` / `CapturedGen` — the page owes a write to the data file while they differ; prevents eviction until a checkpoint has made the bytes durable (see [§5](#5-changeset--dirty-tracking)). A bitmap with one bit per slot lets the checkpoint find the owed pages without visiting every slot
 - `ActiveChunkWriters` (`ACW`) — > 0 means writers are mid-flight; prevents *checkpoint snapshot* and eviction
@@ -112,29 +113,37 @@ State transitions are protected by `StateSyncRoot`. The Idle → Exclusive trans
 
 **The 8 MiB minimum is deliberately small — but it's the hard floor; production-sane sizing starts far higher.** The internal `TestMode` flag suppresses the small-cache warning and the min-size floor so a fixture *can* run below 8 MiB; fixtures that deliberately exercise eviction opt in via `[Property("CacheSize", ...)]` to a sub-floor cache under `TestMode`, while the general test default is a representative 8 MiB (right at the floor). That puts the eviction, backpressure, and dirty-counter paths under real pressure exactly where a test wants it, while the rest of the suite runs representatively. Production leaves `TestMode` off and gets the 256 MiB default; size `DatabaseCacheSize` — or the fluent `TyphonOptions.PageCacheSize(...)` — for your workload's largest single-transaction working set (real servers go much higher).
 
-The validator enforces: the size must be a multiple of the page size, at least 8 MiB (unless `TestMode`), and at most 2³¹ − 1 pages (about 16 TiB: a slot index is an `int`). **There is no other ceiling** (#945): the cache is one contiguous 64-bit allocation (`IMemoryAllocator.AllocateLargePinned`, 4 KiB-aligned, never zeroed), and the OS is the limit. A size the host cannot grant is refused at startup with a `StorageException` (`TyphonErrorCode.PageCacheAllocationFailed`) naming `DatabaseCacheSize`, the size and the limit that applied: the commit limit on Windows, the overcommit policy on Linux. The async write path, and the now-synchronous read path (changed in PS-15 to avoid thread-pool exhaustion under burst load — `PagedMMF.cs:1679-1681`), both use `Memory<byte>` and so cannot address past 2 GiB from one base; they go through fixed 1 GiB windows (`PageCacheWindow`). The page-access hot path is unchanged pointer arithmetic, and a page's address maps back to its slot exactly (rule PS-13).
+The validator enforces: the size must be a multiple of the page size, at least 8 MiB (unless `TestMode`), and at most 2³¹ − 1 pages (about 16 TiB: a slot index is an `int`). **There is no other ceiling** (#945): the cache is one contiguous 64-bit allocation (`IMemoryAllocator.AllocateLargePinned`, 4 KiB-aligned, never zeroed), and the OS is the limit. A size the host cannot grant is refused at startup with a `StorageException` (`TyphonErrorCode.PageCacheAllocationFailed`) naming `DatabaseCacheSize`, the size and the limit that applied: the commit limit on Windows, the overcommit policy on Linux. File I/O addresses the cache through `Memory<byte>`/`Span<byte>`, which cannot reach past 2 GiB from one base, so it goes through fixed 1 GiB windows (`PageCacheWindow`): the checkpoint's asynchronous writes, and the miss path's read — synchronous on the thread that missed, through a second, non-overlapped read handle, because an asynchronous read plus a blocking wait cost two pool threads per cold read and a burst exhausted the pool (#1518, PS-15). The page-access hot path is unchanged pointer arithmetic, and a page's address maps back to its slot exactly (rule PS-13).
 
 ### Two-pass clock-sweep eviction
 
 When a new page is requested and no `Free` slot exists, `AllocateMemoryPageCore` (in [`PagedMMF.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.cs)) runs **two passes** over the page array:
 
 ```
-Pass 1 (counter-respecting):  scan up to 2 × N slots
+Pass 1 (counter-respecting):  scan up to 2 × N slots on the shared clock hand
    if slot.ClockSweepCounter == 0 and TryAcquire succeeds → evict it
    else slot.DecrementClockSweepCounter and continue
-Pass 2 (counter-ignoring):    scan up to N slots
+Pass 2 (counter-ignoring):    scan up to N slots on a private cursor
    take the first slot TryAcquire succeeds on, regardless of counter
 ```
 
-The counter is incremented on every access via `PageInfo.IncrementClockSweepCounter`, capped at `ClockSweepMaxValue = 5`. Hot pages climb to 5 and survive several full sweeps; cold pages decrement to 0 and get reclaimed. The second pass exists for the case where every page is dirty or epoch-protected at the moment we sweep — we still need a slot, so we make one more circle ignoring the heuristic but respecting the *real* eviction blockers (DC, writeback debt, ACW, SlotRefCount, AccessEpoch).
+Each round is bounded (#1137): a pass visits at most the larger of `SweepBudgetFloor` (524 288 slots) and a 32nd of the cache, so on caches up to that size a round is exactly `2N` / `N`, and on larger ones a round's work under back-pressure stays bounded while pass 2 still covers every slot within 32 rounds.
+
+The counter is bumped on access (`NoteRequested`), capped at `ClockSweepMaxValue = 5`. Hot pages climb to 5 and survive several full sweeps; cold pages decrement to 0 and get reclaimed. The second pass exists for the case where every page is dirty or epoch-protected at the moment we sweep — we still need a slot, so we make one more circle ignoring the heuristic but respecting the *real* eviction blockers (DC, writeback debt, ACW, SlotRefCount, AccessEpoch).
 
 When both passes fail, the **backpressure path** kicks in (see [§6](#6-backpressure)). The clock hand `_clockSweepCurrentIndex` is a `CacheLinePaddedInt` to avoid false sharing with adjacent state.
 
+### Scan-resistant probation
+
+With `PagedMMFOptions.ScanResistantEviction` (default `true`; rule PS-25, ADR-076), a page that a miss loads **inside an operation** — the transaction open on the thread, or the point-in-time accessor whose lease it holds — does not join the clock: it waits on **probation** under that operation's tag (`ProbationTag`, 1–255), counter 0. A request from a *different* operation (or from outside any) moves it to the clock at once; repeated requests from its own operation buy it at most one more lap of the probation queue before it joins the clock. Pages loaded outside any operation (checkpoint, fence, recovery) join the clock directly. A walk larger than the cache therefore recycles its own pages instead of flushing the working set.
+
+Allocation order, once the cache has been full: probation's oldest page while probation holds more than its target `p`; then the clock (pass 1, which passes over probation pages without taking or ageing them); then probation's oldest whatever `p`; then pass 2. Every take still goes through `TryAcquire`, so the PS-01 blockers apply unchanged. The target `p` adapts ARC-style from ghost lists of recently evicted pages (`ProbationPolicy`, in [`PagedMMF.Probation.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/PagedMMF.Probation.cs)): a miss on a page probation gave up raises `p`, a miss on one the clock gave up lowers it, within `[N/256, N/2]`, starting at `N/16`. With no walk running, `p` drifts down and the clock holds the cache. `false` restores the plain clock, every load marking its page recently used.
+
 ### Two micro-optimizations worth mentioning
 
-`AllocateMemoryPageCore` has a fast prefix path: if `filePageIndex - 1` is already cached in `memPageIndex N`, the allocator tries `N + 1` first. This lets sequential page reads coalesce into a single disk write later when both pages flush.
+`AllocateMemoryPageCore` has a fast prefix path: if `filePageIndex - 1` is already cached in `memPageIndex N`, the allocator tries `N + 1` first — only when that slot is a clock page at counter 0, the same slot the clock would take itself. This lets sequential page reads coalesce into a single disk write later when both pages flush.
 
-CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the first time a page is touched after load. If `PageChecksumVerification.RecoveryOnly` is set (the default until recovery completes), it's skipped entirely. After recovery, `DatabaseEngine` flips the mode to `OnLoad` — every fresh load verifies, then `CrcVerified` is cached until the slot is reused. On mismatch *during recovery* the page is recorded **suspect** — rebuilt if it backs a derived structure, or a loud failure if it still backs a live primary chunk ([§7](#7-page-crc--seqlock-writes), and [11-durability §6](11-durability.md)); during normal operation a `PageCorruptionException` propagates.
+CRC verification is **lazy**. `EnsurePageVerified` runs only the first time a page is touched after load. If `PageChecksumVerification.RecoveryOnly` is set (the default until recovery completes), it's skipped entirely. After recovery, `DatabaseEngine` flips the mode to `OnLoad` — every fresh load verifies, then `CrcVerified` is cached until the slot is reused. On mismatch *during recovery* the page is recorded **suspect** — rebuilt if it backs a derived structure, or a loud failure if it still backs a live primary chunk ([§7](#7-page-crc--seqlock-writes), and [11-durability §6](11-durability.md)); during normal operation a `PageCorruptionException` propagates.
 
 ---
 
@@ -244,7 +253,7 @@ Free-page tracking is a **room-bits bitmap** (`RoomBlock[] _roomBlocks`): one bi
 
 `GrowChunkCapacity(minNewPageCount, changeSet)` doubles the segment up to 1 024 pages and grows it 1 024 pages at a time beyond that (or to the minimum requested). It sets the new pages' room bits, then calls `base.Grow`, which clears each new page in full — chunk bitmap included — and records the modification before unlatching it, so no page is written after it is published and each is owed a write from that moment: see [§5](#5-changeset--dirty-tracking) below.
 
-`EnsureCapacity(minChunkCount, changeSet)` is the pre-sizing entry point used by schema migration; `GrowIfNeeded` is the lazy variant used inside `AllocateChunk` when `_allocatedCount == _capacity`.
+`EnsureCapacity(minChunkCount, changeSet)` is the pre-sizing entry point used by schema migration; `AllocateChunk` grows lazily itself (`GrowChunkCapacity`) when it finds no room and no chunk was freed behind its scan.
 
 ### `ChunkAccessor<TStore>` — the hot-path accessor
 
@@ -359,9 +368,9 @@ Two mechanisms let the checkpoint snapshot a live page **consistently and verifi
 
 ### The seqlock — `ModificationCounter`
 
-Every page header has a `ModificationCounter : int`. Convention: **even = quiescent, odd = mid-modification**. `TryLatchPageExclusive` (≈ `PagedMMF.cs:1262`) bumps it from even → odd before any writes touch the payload; `UnlatchPageExclusive` (≈ `:1303`) bumps it odd → even after. Readers can detect a torn read by sampling the counter before *and* after their copy and rejecting the result on mismatch.
+Every page header has a `ModificationCounter : int`. Convention: **even = quiescent, odd = mid-modification**. `PagedMMF.TryLatchPageExclusive` bumps it from even → odd before any writes touch the payload; `UnlatchPageExclusive` bumps it odd → even after. Readers can detect a torn read by sampling the counter before *and* after their copy and rejecting the result on mismatch.
 
-`CopyPageWithSeqlock` (≈ `:1697`) is the consumer used by checkpoint: it spins while the counter is odd, copies the page into staging, and re-checks the counter — if it changed, retry. There are **two skip conditions**: an odd counter on a page whose `PageState` is *not* `Exclusive` is a **stale** counter — no writer to wait for — and is skipped **immediately** (logged via `LogStaleSeqlockCounterSkip`); an odd counter held by a *real* exclusive writer for longer than the **100 ms** threshold is also skipped (the writer is hung or in backpressure). A skipped page holds the checkpoint's coverage gate back (CK-03) but keeps its dirty bit / DC so the next cycle re-captures it.
+`CopyPageWithSeqlock` is the consumer used by checkpoint: it spins while the counter is odd, copies the page into staging, and re-checks the counter — if it changed, retry. There are **three skip causes**: a page with a live chunk writer (`ActiveChunkWriters > 0`, see [§5](#5-changeset--dirty-tracking)); an odd counter on a page whose `PageState` is *not* `Exclusive` is a **stale** counter — no writer to wait for — and is skipped **immediately** (logged via `LogStaleSeqlockCounterSkip`); an odd counter held by a *real* exclusive writer for longer than the **100 ms** threshold is also skipped (the writer is hung or in backpressure). A skipped page holds the checkpoint's coverage gate back (CK-03) but keeps its dirty bit / DC so the next cycle re-captures it.
 
 Critically — `InitHeader` in `LogicalSegment.cs` **preserves `ModificationCounter` and `ChangeRevision` across the clear** (PS-14). Zeroing `ModificationCounter` while a page is latched would leave the seqlock counter odd after unlatch — a quiescent page falsely advertising a write. Zeroing `ChangeRevision` would let a reused page number's per-sector stamp go backwards, since `PageSectorFooter` embeds its low 16 bits in every sector. The stale-counter guard above skips such a page immediately rather than spinning, but the correct invariant is the counter (and the slot-reuse reset in `TryAcquire`): a quiescent page must read even.
 
@@ -413,10 +422,15 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 | `DatabaseDirectory` | `Environment.CurrentDirectory` | Filesystem directory. Must exist. `DatabaseAbsoluteDirectory` returns the absolutized form. |
 | `DatabaseFileName` | `DatabaseName` (if unset) | Validated with the same rules, but no longer names any file: a database is the bundle directory `{DatabaseDirectory}/{DatabaseName}.typhon/`, and the paged data file inside it is always named `data` (no extension). |
 | `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, at least `MinimumCacheSize` (8 MiB), at most 2³¹ − 1 pages; otherwise only what the host grants (#945). |
+| `FreeQuarantineCacheFraction` | `0.125` | Share of the cache that freed Versioned revision/content chunks may occupy, held back from reuse until a checkpoint, before the engine asks for one (#1251). |
+| `ScanResistantEviction` | `true` | First loads inside an operation wait on probation before joining the clock ([PS-25](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md), see [§2](#scan-resistant-probation)). |
 | `PagesDebugPattern` | `false` | Fill a page-cache slot with a debug pattern when it is assigned. No longer observable: a page not read from disk is cleared right after ([PS-14](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)), a page read from disk is overwritten. |
+| `VerifyOnOpen` | `OpenVerification.Spine` | How much of the database to verify when opening it (the spine tier reads kilobytes, bounded by segment count). |
+| `YieldableLock` | `false` | Advertise this holder as willing to release the database on request (written as `yieldable` in `db.lock`; the Workbench sets it). |
+| `LockHandoffTimeout` | 5 s | How long a claimant waits for a yieldable holder to release; `TimeSpan.Zero` fails fast. |
 | `BackpressureStrategyFactory` (internal) | `() => new WaitForIOStrategy()` | Test hook to substitute the backpressure strategy. |
 
-Also exposed: `EnsureFileDeleted()` (best-effort delete of the backing file + lock file; for tests), `IsValid` / `Validate(silent, out validation)` (returns the multi-line error string or throws).
+Also exposed: `EnsureFileDeleted()` (best-effort delete of the backing file + lock file; for tests), `IsValid`, and the internal `Validate(silent, out validation)` (returns the multi-line error string or throws).
 
 `ManagedPagedMMFOptions` is currently a marker subclass — same shape, separate type for DI binding.
 

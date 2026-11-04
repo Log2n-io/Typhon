@@ -36,8 +36,8 @@ checkerboard-dispatched at once, and dormancy filters out sleeping clusters unde
 | Sub-feature | Use it when... |
 |---|---|
 | [Tier-Filtered & Amortized Dispatch](./tier-filtered-amortized-dispatch.md) | A system should only run against near/far cells, or should spread coarse-tier work across several ticks instead of doing it all at once |
-| [Cluster Dormancy (Sleep/Wake)](./cluster-dormancy.md) | A large share of clusters go idle for long stretches (empty regions, parked units) and shouldn't be dispatched at all while quiet |
-| [Checkerboard (Red/Black) Dispatch](./checkerboard-dispatch.md) | A parallel system reads/writes neighboring cells (diffusion, propagation) and needs conflict-free dispatch without going single-threaded |
+| [Cluster Dormancy (Sleep/Wake)](../../Spatial/cluster-dormancy.md) | A large share of clusters go idle for long stretches (empty regions, parked units) and shouldn't be dispatched at all while quiet |
+| [Checkerboard (Red/Black) Dispatch](../../Spatial/checkerboard-dispatch.md) | A parallel system reads/writes neighboring cells (diffusion, propagation) and needs conflict-free dispatch without going single-threaded |
 
 ## ⚠️ Guarantees & limits
 
@@ -64,7 +64,7 @@ checkerboard-dispatched at once, and dormancy filters out sleeping clusters unde
 
 - Source: [src/Typhon.Engine/Runtime/public/SimTier.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/SimTier.cs), [TierBudgetMetrics.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/public/TierBudgetMetrics.cs)
 - Also cataloged from the spatial-grid side: [Spatial category](../../Spatial/README.md) — [Tiered Simulation Dispatch](../../Spatial/tiered-simulation-dispatch.md), [Cluster Dormancy](../../Spatial/cluster-dormancy.md), [Checkerboard Dispatch](../../Spatial/checkerboard-dispatch.md) cover the same mechanisms from the cell/grid-configuration angle
-- Sub-features: [Tier-Filtered & Amortized Dispatch](./tier-filtered-amortized-dispatch.md), [Cluster Dormancy (Sleep/Wake)](./cluster-dormancy.md), [Checkerboard (Red/Black) Dispatch](./checkerboard-dispatch.md)
+- Sub-features: [Tier-Filtered & Amortized Dispatch](./tier-filtered-amortized-dispatch.md), [Cluster Dormancy (Sleep/Wake)](../../Spatial/cluster-dormancy.md), [Checkerboard (Red/Black) Dispatch](../../Spatial/checkerboard-dispatch.md)
 
 <!-- Deep dive: claude/overview/13-runtime.md §Spatial Tiers & Multi-Resolution Dispatch -->
 <!-- Deep dive: rules/spatial.md (modules TierClusterIndex, Dormancy, Checkerboard Partition) -->

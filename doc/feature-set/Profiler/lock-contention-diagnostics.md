@@ -29,14 +29,17 @@ happens outside a transaction.
 
 ## 💻 Usage
 
-Not usable yet — no engine emission exists. The roadmap reserves wire event-kind range 70-74
-(`LockAcquire` / `LockRelease` / `LockWaitBegin` / `LockWaitEnd`) for this feature; none of these event
-kinds, and no contention-capture hook on `AccessControl`, `AccessControlSmall`, or `ResourceAccessControl`,
-are implemented today.
+The forensic layer described here is not built. What exists today is the lower-level `Concurrency` domain of
+[Domain-Specific Tracing](./domain-tracing-expansion.md): instant records for `AccessControl` /
+`AccessControlSmall` / `ResourceAccessControl` acquire/release (thread id, `hadToWait`, elapsed µs on some kinds)
+plus a payload-less contention marker per lock type (`ConcurrencyAccessControlContention`,
+`ConcurrencyAccessControlSmallContention`, `ConcurrencyResourceContention`), gated by
+`Typhon:Profiler:Concurrency:*`. Those carry no lock identity, no holder thread and no call stack, and are not
+wait spans — that is the gap this feature would close.
 
 ```csharp
 // Illustrative only — design complete, not implemented yet. No "Typhon:Profiler:LockContention" config
-// key, no TyphonEvent factory, and no contention-capture hook exist in source today.
+// key and no LockWaitBegin/LockWaitEnd span kinds exist in source today.
 // var runtime = TyphonRuntime.Create(dbe, schedule => { /* ... */ });
 // // ...contention on AccessControl/AccessControlSmall/ResourceAccessControl would emit
 // // LockWaitBegin/LockWaitEnd spans automatically, no call-site changes required...
@@ -48,8 +51,9 @@ are implemented today.
 
 ## ⚠️ Guarantees & limits
 
-- **Not implemented.** No wire event kinds, capture hooks, or config surface exist in
-  `src/Typhon.Engine/Foundation/Concurrency/internals/` today; this is a complete design awaiting a build slot.
+- **Not implemented.** The lock types already emit `Concurrency`-domain instants (see Usage), but no lock-wait
+  span, holder identification, wait-point call stack or dedicated config key exists; this is a complete design
+  awaiting a build slot.
 - **Contention-only by design** — capturing every acquire/release was estimated at 1M+ events/sec (1.8B over
   30 minutes); capturing only actual waits cuts that by 100-10,000x while keeping exactly what's useful for
   debugging.
@@ -63,14 +67,15 @@ are implemented today.
   `ResourceAccessControl` — no new thread-identity mechanism.
 - **Scoped to three lock types**: `AccessControl`, `AccessControlSmall`, `ResourceAccessControl`. General
   span tracing, memory tracing, and I/O tracing are separate features, not part of this one.
-- **Reserved wire range 70-74** is held for this feature and won't be reused by other event kinds in the
-  meantime.
+- **No reserved wire range.** The 70-74 range the roadmap once earmarked is now used by other kinds
+  (`SpatialRealmRates`, `Subscriptions*`, `BackupArchiveSegment`); new kinds for this feature would take fresh
+  append-only IDs.
 
 ## 🔗 Related
 
 - Sibling features: [GC Event Tracing](./gc-event-tracing.md), [Off-CPU Thread Scheduling Capture](./offcpu-thread-scheduling.md), [Configuration & Performance Tuning](./profiler-configuration-tuning.md)
 - Sibling: [Reader-Writer & Resource Lifecycle Locks](../Foundation/access-control-lock-family/README.md) — the `AccessControl`/`AccessControlSmall`/`ResourceAccessControl` lock family this feature would instrument
-- Source (existing, related): `src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.cs`, `AccessControlSmall.cs`, `ResourceAccessControl.cs` — no contention-capture code present yet
+- Source (existing, related): `src/Typhon.Engine/Foundation/Concurrency/internals/AccessControl.cs`, `AccessControlSmall.cs`, `ResourceAccessControl.cs` (emit the `Concurrency`-domain instants), `src/Typhon.Profiler/TraceEventKind.cs` (`Concurrency*` kinds 90–116)
 
 <!-- Deep dive: claude/design/Profiler/03-deep-diagnostics.md, claude/design/Profiler/06-profiler-feature-roadmap.md §2.3 -->
 <!-- Architecture overview: claude/overview/09-observability.md, claude/overview/01-concurrency.md -->

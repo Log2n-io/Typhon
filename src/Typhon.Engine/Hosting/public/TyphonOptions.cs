@@ -167,9 +167,10 @@ public sealed class TyphonOptions
     /// o.Seed(1, tx => { /* initial data */ })
     ///  .Seed(2, tx => { /* data introduced in revision 2 */ });
     /// </code>
-    /// A fresh database runs every step; an existing one runs only the steps it has not applied yet. It is <b>crash-safe</b>: each
-    /// step advances the committed revision in the <i>same</i> transaction as its data, so a crash anywhere in a step rolls both
-    /// back and that step re-runs on the next open (a partial step never leaves committed data). Write your data through the
+    /// A fresh database runs every step; an existing one runs only the steps it has not applied yet. A step's data commits
+    /// atomically, so a crash inside a step leaves none of it and the step re-runs on the next open. The committed revision is
+    /// recorded <i>after</i> the step commits, in a separate bootstrap write: a crash in the window between the two re-runs that
+    /// one step on the next open, so a step that must not duplicate its data on such a re-run should check for it first. Write your data through the
     /// supplied <see cref="Transaction"/> (<c>tx.Spawn</c>/<c>tx.OpenMut</c>); the engine commits each step for you.
     /// </summary>
     /// <param name="revision">The step's revision. Must be &gt;= 1 and unique across all <see cref="Seed"/> calls on these options.</param>

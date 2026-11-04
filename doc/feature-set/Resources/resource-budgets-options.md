@@ -70,7 +70,8 @@ That is the entire type. There is no `PageCachePages`, `MaxPageCachePages`, `Tra
   starts — resizing requires a restart.
 - Validation is **range-checking, not budgeting**. `DatabaseEngineOptionsValidator` rejects a
   non-positive `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs` or
-  `CheckpointBarrierTimeoutMs` (and the wired `WalWriterOptions` sizes) at DI resolution. Nothing
+  `CheckpointBarrierTimeoutMs`, a `CheckpointDirtyPageThresholdPercent` outside 0–100 (and the wired
+  `WalWriterOptions` sizes) at DI resolution. Nothing
   sums your allocations against a memory ceiling — a configuration that passes can still ask for
   more RAM than the machine has.
 - There is no `Validate()`, `CalculateFixedAllocationBytes()` or `CalculateAvailableBudgetBytes()`

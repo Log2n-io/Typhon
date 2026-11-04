@@ -24,7 +24,7 @@ appends a new revision to that component's per-entity chain — a small circular
 overflow chunks automatically once it fills, with no size limit you need to plan for up front. `Destroy` appends
 a tombstone revision (no payload) rather than deleting anything immediately. Each new revision is stamped with
 the writing transaction's TSN and Unit-of-Work id and marked provisional — invisible to every other transaction
-— until commit publishes it. The prior revision is left exactly as it was; nothing is freed at write time.
+— until commit publishes it, replacing the TSN with the commit stamp readers order revisions by. The prior revision is left exactly as it was; nothing is freed at write time.
 
 ## 💻 Usage
 

@@ -23,7 +23,7 @@ registered `IOptions<TO>` for the paged-file options type you're using (`PagedMM
 `ManagedPagedMMFOptions`), and recursively deletes the `{DatabaseName}.typhon` **bundle directory**
 (data file, `db.lock`, and `wal/`) at the path those options describe. It reads the same
 `DatabaseName`/`DatabaseDirectory` the engine itself will use to open the database, so there is no
-separate path logic to keep in sync. Deletion is best-effort — failures (e.g. nothing to delete) are
+separate path logic to keep in sync. Deletion is best-effort — failures (e.g. a file still held open) are
 swallowed, not thrown.
 
 ## 💻 Usage
@@ -52,7 +52,7 @@ var engine = sp.GetRequiredService<DatabaseEngine>();
   is removed as a unit, so a stale lock can't block reopening.
 - **Waits out NTFS deferred delete.** Polls briefly after the recursive `Directory.Delete` so a
   subsequent create at the same path doesn't race the OS's pending-delete state.
-- **Best-effort, silent on failure.** Errors (e.g. no file existed) are caught and ignored —
+- **Best-effort, silent on failure.** A missing bundle is a no-op; errors (e.g. a file still held open) are caught and ignored —
   this is a convenience for clean-slate setup, not a verified-delete guarantee. Do not use it to
   assert deletion succeeded.
 - **Must be called before the engine opens the file.** Calling it against a `DatabaseEngine`/
@@ -63,7 +63,7 @@ var engine = sp.GetRequiredService<DatabaseEngine>();
 
 ## 🧪 Tests
 
-- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — `EnsureDeleted_RemovesLock` asserts both the `.bin` and `.lock` files are removed; every other test in the fixture calls `sp.EnsureFileDeleted<ManagedPagedMMFOptions>()` as its clean-slate setup step
+- [DatabaseFileLockingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DatabaseFileLockingTests.cs) — `EnsureDeleted_RemovesBundle` plants a data file and `db.lock` in the bundle and asserts the whole bundle directory is removed; every other test in the fixture calls `sp.EnsureFileDeleted<ManagedPagedMMFOptions>()` as its clean-slate setup step
 
 ## 🔗 Related
 

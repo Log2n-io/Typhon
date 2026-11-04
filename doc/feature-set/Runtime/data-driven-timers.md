@@ -97,7 +97,7 @@ dag.CallbackSystem("ProcessRespawns", ctx =>
 
 ## 🔗 Related
 
-- Related feature: [Declarative System Scheduling](./declarative-system-scheduling.md) (CallbackSystem, `shouldRun`)
+- Related feature: [Declarative System Scheduling](./declarative-scheduling/README.md) (CallbackSystem, `shouldRun`)
 - Related feature: [Reactive Dispatch / Change Filters](./reactive-dispatch-change-filters.md) (why this pattern uses a poll, not a filter)
 - Related feature: [Query System](../Ecs/query-system.md)
 - Related feature: [Storage Mode — SingleVersion](../Ecs/storage-modes/storage-mode-singleversion.md), [Storage Mode — Versioned](../Ecs/storage-modes/storage-mode-versioned.md)

@@ -53,15 +53,10 @@ class ClampSystem : QuerySystem
     }
 }
 
-try
-{
-    runtime.Tick();
-}
-catch (InvalidAccessException ex)
-{
-    // ex.SystemName == "Clamp", ex.UndeclaredType == typeof(Velocity)
-    // Fix: add `.Writes<Velocity>()` (or `.SideWrites<Velocity>()`) to Configure — never catch-and-continue.
-}
+// The throw happens inside Execute, on a runtime worker: the scheduler catches it and fails that system for the tick
+// (its transaction does not commit, its successors are skipped), never the whole tick.
+// The InvalidAccessException carries ex.SystemName == "Clamp", ex.UndeclaredType == typeof(Velocity).
+// Fix: add `.Writes<Velocity>()` (or `.SideWrites<Velocity>()`) to Configure — never catch-and-continue.
 ```
 
 ## ⚠️ Guarantees & limits

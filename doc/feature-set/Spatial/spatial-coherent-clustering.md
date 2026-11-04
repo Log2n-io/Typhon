@@ -109,7 +109,7 @@ variants — so 2D, 3D and sphere archetypes all use the same barrier.
 ## 🧪 Tests
 
 - [ClusterSpatialCoherenceTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialCoherenceTests.cs) — cluster-cell invariant at spawn/overflow (`Spawn_ManyEntitiesInSameCell_LandInSameCluster`, `Spawn_BeyondClusterCapacity_AllocatesSecondClusterInSameCell`), grid-config opt-in guards, reopen rebuild
-- [ClusterMigrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterMigrationTests.cs) — hysteresis (`PositionChangeWithinHysteresis_NoMigration`/`_BeyondHysteresis_Migrates`), atomic cross-cluster migration incl. Transient data, empty-cluster deallocation, reopen remapping
+- [ClusterMigrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterMigrationTests.cs) — hysteresis (`PositionChangeWithinHysteresis_NoMigration`/`PositionChangeBeyondHysteresis_Migrates`), atomic cross-cluster migration incl. Transient data, empty-cluster deallocation, reopen remapping
 
 ## 🔗 Related
 

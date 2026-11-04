@@ -11,7 +11,7 @@ description: 'Planned per-transaction overlay so index lookups see that transact
 
 ## 🎯 What it solves
 
-Secondary indexes are maintained on the commit path, not as part of the transaction body. So today, an entity you just `Spawn`ed or updated inside a still-open transaction is invisible to `EnumerateIndex` calls made later in that same transaction — even though direct component reads of that entity work fine via the transaction's own read-your-own-writes cache. This asymmetry is surprising: code that creates an entity and immediately looks it up by a secondary key gets a miss, not the entity it just wrote.
+Secondary indexes are maintained on the commit path, not as part of the transaction body. Today `EnumerateIndex` answers at the transaction's snapshot with its own spawns and destroys counted (#1247), but not its own value writes: an entity whose indexed field this still-open transaction changed is still found at its old key, and not at its new one — even though direct component reads of that entity see the new value. This asymmetry is surprising: code that re-keys an entity and immediately looks it up by the new key gets a miss.
 
 ## ⚙️ How it works (in brief)
 
@@ -21,12 +21,15 @@ A per-transaction, in-memory overlay records the index-key additions and removal
 
 ```csharp
 // Illustrative only — not implemented yet. Today, this pattern misses:
-var nameIndex = engine.GetIndexRef<Player, String64>(p => p.Name);
+var nameIndex = engine.GetIndexRef<PlayerData, String64>(p => p.Name);
 
 using var tx = engine.CreateQuickTransaction();
-var id = tx.Spawn<Player>(Player.Data.Set(player));   // component written; index NOT yet updated
+var e = tx.OpenMut(id);
+var data = e.Read(Player.Data);
+data.Name = "Renamed";
+e.Set(Player.Data, data);                             // component written; index NOT yet updated
 
-using var hit = tx.EnumerateIndex<Player, String64>(nameIndex, player.Name, player.Name);
+using var hit = tx.EnumerateIndex<PlayerData, String64>(nameIndex, data.Name, data.Name);
 hit.MoveNext();   // false today — overlay would make this true once shipped
 
 tx.Commit();
@@ -35,7 +38,7 @@ tx.Commit();
 ## ⚠️ Guarantees & limits
 
 - **Not implemented.** No `TransactionIndexOverlay`, `_additions`/`_removals` tracking, or overlay-aware merge path exists in `src/Typhon.Engine/Indexing/` today; this entry documents a planned fix, not shipped behavior.
-- **Current behavior:** `EnumerateIndex` and other secondary-index lookups only ever see committed data — a transaction cannot find its own just-created or just-updated entities via an index until it commits. Workaround today: track entity IDs directly instead of relying on an index lookup for an entity you just wrote in the same transaction.
+- **Current behavior:** `EnumerateIndex` sees the transaction's own spawns and hides its own destroys, but not its own writes to an indexed field: until commit, a re-keyed entity is found at its old key, not its new one. Workaround today: track entity IDs directly instead of relying on an index lookup for an entity whose key you just changed in the same transaction.
 - Once delivered, intended to give full read-your-own-writes semantics for index reads, matching the guarantee component reads already have via the transaction cache.
 - Designed to preserve today's rollback simplicity (discard an in-memory structure, no B+Tree undo) and today's write amplification (one physical B+Tree write per field at commit, not one per intermediate update).
 - Memory cost scales with the indexed fields a transaction actually touches — expected small for typical transactions (tens to low hundreds of entities).

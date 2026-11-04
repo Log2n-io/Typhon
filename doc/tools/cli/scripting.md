@@ -88,8 +88,11 @@ exception. In batch mode the exit code reflects the first error encountered.
 Validate integrity and schema in a pipeline, letting a non-zero exit fail the job:
 
 ```bash
-# Fail the build if any B+Tree is structurally invalid
-typhon game.typhon -c "btree-validate" || exit 1
+# Fail the build if the database is not sound (read-only; the verdict is the exit code)
+typhon check game.typhon || exit 1
+
+# Fail the build if one B+Tree index is structurally invalid
+typhon game.typhon -c "btree-validate PlayerStats.PlayerId" || exit 1
 
 # Assert an expected field value with jq
 HEALTH=$(typhon game.typhon --format json -c "read 1 PlayerStats" | jq '.[0].Health')

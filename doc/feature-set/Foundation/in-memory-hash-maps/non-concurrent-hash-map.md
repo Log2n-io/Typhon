@@ -19,7 +19,7 @@ Entries are packed `[hash | key]` (set) or `[hash | key | value]` (map) in one o
 ```csharp
 // Set: tracking a result set of entity IDs (the actual pattern used by EcsQuery's full-scan path)
 var pkResult = new HashMap<long>();          // initialCapacity defaults to 64
-reader.ExecuteFullScan(plan, evaluators, ct, tx, pkResult);
+query.ExecuteFullScanAcrossArchetypes(plan, plan.OrderedEvaluators, ct, pkResult);
 
 foreach (long pk in pkResult)
 {
@@ -54,7 +54,7 @@ cache.Dispose();
 - `TKey` must be `unmanaged, IEquatable<TKey>`; `TValue` is unconstrained on the map variant.
 - O(1) average for add/lookup/remove; worst case O(n) under pathological hash collisions (not expected with the built-in hash strategy).
 - Lookup is ~1.5-3x faster than `Dictionary<TKey,TValue>` in measured benchmarks; insert is roughly on par (resize cost dominates at small sizes).
-- Entries live in a GC-pinned array, not unmanaged memory — `Dispose()` drops the reference but the GC still reclaims it; disposal isn't strictly required for correctness, only for prompt release.
+- Entries live in a plain (movable) managed array, not unmanaged memory — `Dispose()` drops the reference but the GC still reclaims it; disposal isn't strictly required for correctness, only for prompt release.
 - `internal` (`Typhon.Engine.Internals`) — engine plumbing only.
 
 ## 🧪 Tests

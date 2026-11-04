@@ -478,6 +478,7 @@ Replication needs a way in. Start the runtime, then attach one or both transport
 **WebSocket, through ASP.NET Core** (`Typhon.Subscriptions.AspNetCore`) — for browsers:
 
 ```csharp
+// using Typhon.Subscriptions.AspNetCore;
 runtime.Start();
 
 var builder = WebApplication.CreateBuilder(args);

@@ -15,7 +15,7 @@ A flat `EntityId` with independent per-component tables gives no guarantee that 
 
 ## ⚙️ How it works (in brief)
 
-Archetypes are plain C# classes in a single-inheritance hierarchy, each declaring its components as `static readonly Comp<T>` fields; a derived archetype (e.g. `House : Archetype<House, Building>`) inherits its parent's components at stable slot indices and adds its own. Every `EntityId` packs a 48-bit monotonic `EntityKey` and a 16-bit per-DB archetype routing id into one `ulong` — the routing id routes to the entity's archetype, the `EntityKey` is the lookup key within it. Because keys are never recycled, a stale `EntityId` simply misses on lookup; no version/generation field is needed. Opening an entity (`Open`/`OpenMut`) pays one lookup and returns a handle — a read-only `EntityRef`, or an `EntityRefMut` from `OpenMut` — that amortizes it across all subsequent `Read`/`Write` calls for that entity. `Comp<T>` is the typed handle used both to declare a component on an archetype and to address it later — slot resolution is O(1) and type-checked by the compiler.
+Archetypes are plain C# classes in a single-inheritance hierarchy, each declaring its components as `static readonly Comp<T>` fields; a derived archetype (e.g. `House : Archetype<House, Building>`) inherits its parent's components at stable slot indices and adds its own. Every `EntityId` packs a 48-bit monotonic `EntityKey` and a 16-bit per-DB archetype routing id into one `ulong` — the routing id routes to the entity's archetype, the `EntityKey` is the lookup key within it. Because keys are never recycled, a stale `EntityId` simply misses on lookup; no version/generation field is needed. Opening an entity (`Open`/`OpenMut`) pays one lookup and returns a handle — a read-only `EntityRef`, or an `EntityRefMut` from `OpenMut` — that amortizes it across all subsequent `Read`/`Set` calls for that entity. `Comp<T>` is the typed handle used both to declare a component on an archetype and to address it later — slot resolution is O(1) and type-checked by the compiler.
 
 ## 💻 Usage
 
@@ -64,7 +64,7 @@ t.Commit();
 |---|---|---|
 | Components per archetype | 16 | `[Archetype]` registration throws if exceeded |
 | Registered archetypes | up to 65,536 per database (16-bit per-DB routing id) | Identity is the CLR type name (or `[Archetype(Name = "...")]`); the engine auto-assigns the catalog + per-DB routing ids |
-| `ComponentValue` inline payload | 112 bytes | Larger components use incremental Spawn (`Spawn` + `OpenMut` + `Write`) |
+| `ComponentValue` inline payload | 112 bytes | Larger components use incremental Spawn (`Spawn` + `OpenMut` + `Set`) |
 | Archetype inheritance | single parent only | No diamond inheritance — enforced at registration |
 
 ## ⚠️ Guarantees & limits

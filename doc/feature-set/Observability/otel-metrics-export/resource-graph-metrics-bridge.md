@@ -19,8 +19,9 @@ repeat.
 
 ## ⚙️ How it works (in brief)
 
-`ResourceMetricsExporter` creates one `Meter` named `"Typhon.Resources"` and registers one *observable*
-instrument per metric kind (Memory, Capacity, DiskIO, Throughput, Duration) — not one instrument per resource.
+`ResourceMetricsExporter` creates one `Meter` named `"Typhon.Resources"` and registers a fixed set of *observable*
+instruments per metric kind (Memory, Capacity, DiskIO, Throughput, Duration; 13 in all, listed below) — not one
+instrument per resource.
 Each observable callback reads the most recently captured `ResourceSnapshot` and yields one `Measurement<T>` per
 node that reports that kind, tagged with a `resource_path` attribute (and `metric_name` for the named
 Throughput/Duration metrics). `ResourceMetricsService` is a self-contained `Timer` that calls `UpdateSnapshot()`
@@ -69,12 +70,12 @@ services.AddOpenTelemetry().WithMetrics(builder => builder
 
 ## ⚠️ Guarantees & limits
 
-- One instrument per metric *kind*, not per resource — cardinality comes from the `resource_path` (and
+- A fixed set of instruments per metric *kind*, not per resource — cardinality comes from the `resource_path` (and
   `metric_name`) attribute, not from instrument count, so adding resources never requires new registration.
 - Observable callbacks read a cached snapshot; they never touch the resource graph directly, so an idle OTel
   pipeline (no exporter attached) costs nothing beyond the snapshot interval itself.
-- Values are only as fresh as the last `UpdateSnapshot()` — driven by `ResourceMetricsService.SnapshotInterval`
-  (default 5 s), not by the OTel scrape interval.
+- Values are only as fresh as the last `UpdateSnapshot()` — driven by `ResourceMetricsService` on
+  `ObservabilityBridgeOptions.SnapshotInterval` (default 5 s), not by the OTel scrape interval.
 - A resource only appears in a given instrument's output if its `IMetricSource.ReadMetrics` actually wrote that
   metric kind for the current snapshot — nodes that don't report a kind are simply absent, not zero.
 - `ResourceMetricsExporter` implements `IDisposable`; disposing it disposes the `Meter` and detaches every

@@ -18,7 +18,8 @@ must switch worlds without a reconnect.
 ## ⚙️ How it works (in brief)
 
 - **One realm per session.** The application places a session (`Place(session, realm, position)`, `Enter(session, realm)`, `Leave(session)`), or
-  its profile follows an entity (`AroundControlled()`, `Bind(entity)`), whose realm after the tick's fence is the session's — a teleport switches its
+  its profile follows an entity (`AroundControlled()`, `Bind(entity)`, or at run time `Session(s).Follow(entity)` /
+  `ctx.Subscriptions.Follow(session, entity)` — the entity's position and realm, none of its owner data), whose realm after the tick's fence is the session's — a teleport switches its
   sessions in the same tick. With several realms a session nobody placed is in none.
 - **The switch is one frame**: a `RESET` whose first block is `REALM` — the realm's bounds, cell, position width, kind and tag — over which every
   position that follows decodes. The committed realm (`RealmOf`) moves only when that frame is published; a skipped switch is retried.
@@ -58,8 +59,8 @@ ctx.Subscriptions.Enter(godSession, new RealmId(1));             // a camera wit
   and decoded with exactly one realm's frame (SUB-30).
 - An entity moving between realms leaves one and enters the other keeping its network identity (SUB-09, #1081). Sessions following it across see the same netId on both sides; sessions in the source realm see a leave.
 - A realm's position width is the replication block layout's (24 bits); a realm without `Replication` takes no session.
-- Not built: `At(realm, position)` (a fixed anchor is realm 0), `Follow(entity)`, `SessionsIn(realm)`, the `RealmClosed` session event, per-realm
-  position widths.
+- A session whose realm is unregistered under it moves into none and gets one `SessionEventKind.RealmClosed` event (`SessionEvent.Realm` names it).
+- Not built: `At(realm, position)` (a fixed anchor is realm 0), `SessionsIn(realm)`, per-realm position widths.
 
 ## 🧪 Tests
 

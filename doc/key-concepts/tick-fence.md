@@ -30,4 +30,4 @@ This is the sharpest case of Typhon's [visible ≠ durable](xref:guide-isolation
 
 - **Narrative:** [Guide ch.3 — transactions & durability](xref:guide-transactions) · [ch.5 — the tick loop](xref:guide-systems)
 - **Reference:** [Isolation & durability cheat sheet](xref:guide-isolation-durability)
-- **Feature detail:** [TickFence discipline](xref:feature-transactions-commit-discipline-commit-discipline-tickfence) · [parallel tick fence](xref:feature-runtime-tick-lifecycle-parallel-tick-fence)
+- **Feature detail:** [TickFence discipline](xref:feature-transactions-commit-discipline-commit-discipline-tickfence) · [parallel tick fence](xref:feature-runtime-tick-execution-engine-parallel-tick-fence)

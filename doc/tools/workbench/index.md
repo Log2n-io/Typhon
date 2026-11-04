@@ -38,8 +38,9 @@ adapts its navigator, default panels, and available commands to the mode you are
 | **Trace** | a `.typhon-trace` capture file | Profile | Replay a recorded run to find and explain where time went, tick by tick. |
 | **Attach** | a live, running engine | Observe | Watch an engine execute in real time and capture it for later analysis. |
 
-- **Open** hosts the engine in-process against a `.typhon` bundle (a directory). It is read-only —
-  inspection never mutates the database. Use the [CLI](../cli/index.md) when you need to write.
+- **Open** hosts the engine in-process against a `.typhon` bundle (a directory). Inspection is read-only —
+  it never mutates entity data; use the [CLI](../cli/index.md) when you need to write. (The Integrity and
+  Backups views can repair or restore a database, each behind an explicit plan and consent step.)
 - **Trace** loads a profiler capture: no live engine, just the recorded spans, systems, and query
   executions, browsable across the whole captured time window.
 - **Attach** connects to a running engine and streams its state live, with the same profiling surfaces as

@@ -39,7 +39,7 @@ There's no API to call from application code — this is the Workbench's own loa
 | Session outcome | When it happens | What you can still do |
 |---|---|---|
 | `Ready` | Every component registered with no diagnostics | Full session — browse, query, profile |
-| `MigrationRequired` | At least one component registered; one or more had a breaking change, schema error, or other failure | Browse/inspect the components that loaded; fix and rebuild the rest |
+| `MigrationRequired` | At least one component registered; one or more had a breaking change, schema error, or other failure — or an archetype would migrate its component set (the Workbench opens with `ArchetypeSetMigration = Refuse`, so it leaves the file as stored) | Browse/inspect the components that loaded; fix and rebuild the rest |
 | `Incompatible` | A schema downgrade, a failed migration function, or zero components registered | Session isn't usable until you fix the binary and re-attach |
 
 ## ⚠️ Guarantees & limits

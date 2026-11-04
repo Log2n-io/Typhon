@@ -53,12 +53,13 @@ public class MyCache : ResourceNode, IMetricSource
 
 // Reading a snapshot (e.g. periodic monitoring or a health check)
 ResourceSnapshot snapshot = resourceGraph.GetSnapshot();
-NodeSnapshot pageCache = snapshot.GetNode("Root/Storage/PageCache"); // Nodes[] keys include the "Root/" prefix
+// Nodes[] keys include the "Root/" prefix; the page cache reports on its store node, ManagedPagedMMF_{DatabaseName}
+NodeSnapshot pageCache = snapshot.GetNode("Root/Storage/ManagedPagedMMF_MyGame");
 if (pageCache?.Capacity is { } capacity)
 {
     Console.WriteLine($"PageCache utilization: {capacity.Utilization:P1}");
 }
-foreach (var t in pageCache.Throughput)
+foreach (var t in pageCache?.Throughput ?? [])
 {
     Console.WriteLine($"{t.Name}: {t.Count}");
 }
@@ -101,4 +102,4 @@ resourceGraph.ResetAllPeaks(); // start a new peak-measurement window
 - Sibling: [Snapshot & Query API](./snapshot-query-api/README.md) — freezes these metrics into a point-in-time snapshot for querying.
 
 <!-- Deep dive: claude/design/Resources/03-metric-source.md, claude/design/Resources/04-metric-kinds.md, claude/design/Resources/05-granularity-strategy.md -->
-<!-- Decision record: claude/adr/032-resource-system-architecture.md (see partial-supersession note — IMetricWriter ships with 5 methods; contention flows through IContentionTarget instead) -->
+<!-- Decision record: claude/adr/032-resource-system-architecture.md (see partial-supersession note — IMetricWriter ships with 5 methods; the IContentionTarget pathway was later removed, contention is profiler-trace-only) -->

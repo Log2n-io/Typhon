@@ -319,8 +319,6 @@
   items:
     - name: Data-Driven Timers / Scheduled Entities
       href: Runtime/data-driven-timers.md
-    - name: 'Declarative System Scheduling (Track → DAG → Phase, Auto-DAG)'
-      href: Runtime/declarative-system-scheduling.md
     - name: Overload Management
       href: Runtime/overload-management.md
     - name: Parallel Entity Processing (QuerySystem.Parallel)
@@ -343,10 +341,6 @@
     - name: 'Spatial Tiers & Adaptive Dispatch'
       href: Runtime/spatial-tiers-adaptive-dispatch/README.md
       items:
-        - name: Checkerboard (Red/Black) Dispatch
-          href: Runtime/spatial-tiers-adaptive-dispatch/checkerboard-dispatch.md
-        - name: Cluster Dormancy (Sleep/Wake)
-          href: Runtime/spatial-tiers-adaptive-dispatch/cluster-dormancy.md
         - name: 'Tier-Filtered & Amortized Dispatch'
           href: Runtime/spatial-tiers-adaptive-dispatch/tier-filtered-amortized-dispatch.md
     - name: System Types
@@ -373,11 +367,6 @@
           href: Runtime/tick-execution-engine/worker-pool-threading.md
     - name: 'Tick Lifecycle & Transaction Management'
       href: Runtime/tick-lifecycle/README.md
-      items:
-        - name: Parallel Tick Fence (WriteTickFence)
-          href: Runtime/tick-lifecycle/parallel-tick-fence.md
-        - name: Side-Transactions (Immediate Durability)
-          href: Runtime/tick-lifecycle/side-transactions.md
 - name: Schema
   href: Schema/README.md
   items:

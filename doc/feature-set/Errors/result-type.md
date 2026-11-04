@@ -19,7 +19,7 @@ Some lookups fail routinely as part of normal operation — a key isn't in the i
 
 ## 💻 Usage
 
-Typhon's own hot paths follow this pattern internally — B+Tree key lookups return `Result<int, BTreeLookupStatus>`, and MVCC revision-chain reads return `Result<ComponentInfo.CompRevInfo, RevisionReadStatus>` with four distinct outcomes:
+Typhon's own hot paths follow this pattern internally — B+Tree key lookups return `Result<int, BTreeLookupStatus>`, and MVCC revision-chain walks (`RevisionChainReader.WalkChain`, internal) return `Result<ComponentInfo.CompRevInfo, RevisionReadStatus>` with four distinct outcomes:
 
 ```csharp
 public enum RevisionReadStatus : byte
@@ -30,7 +30,7 @@ public enum RevisionReadStatus : byte
     Deleted = 3,           // entity was tombstoned at or before the reader's tick
 }
 
-Result<ComponentInfo.CompRevInfo, RevisionReadStatus> result = GetCompRevInfoFromIndex(pk, info, tick);
+Result<ComponentInfo.CompRevInfo, RevisionReadStatus> result = RevisionChainReader.WalkChain(ref compRevAccessor, firstChunkId, tsn, cards);
 if (result.IsSuccess)
 {
     var compRevInfo = result.Value; // direct field access — no throwing getter

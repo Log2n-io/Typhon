@@ -57,8 +57,8 @@ same DAG and the same tick; class-based registration is required to use RFC-07 a
   never observe the abort, and a system that has already started runs to completion, because abort granularity is
   the system, never the chunk.
 - `CompoundSystem.Add(...)` expands each sub-system into its own DAG registration at `dag.Add(compound)` time —
-  there is no aggregate group name; from outside the compound is atomic (all children complete before the
-  compound's successors start), but other systems depend on individual sub-system names, not the group.
+  there is no aggregate group name and no group-level DAG node; other systems depend on individual sub-system
+  names, not the group.
 - `Build()` rejects at startup: a lambda/class system with no name, `Parallel()`/`ChangeFilter` without an
   `Input` View, `ChangeFilter`/`Input` on a `CallbackSystem`, `ChunkedParallel` combined with any entity-context
   concept, duplicate names, and dependency cycles.

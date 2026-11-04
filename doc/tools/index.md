@@ -21,8 +21,8 @@ install. The Workbench even ships *inside* the CLI: `typhon ui` is the launcher.
 
 The two tools split cleanly along **read vs. write** and **interactive vs. automated**:
 
-- **Workbench = interactive, read-mostly exploration & profiling.** The backend is read-only by design.
-  It is the place for visual investigation: navigating archetypes, drilling into byte/cache-line layouts,
+- **Workbench = interactive, read-mostly exploration & profiling.** It never edits entity data (only the
+  Integrity and Backups views write, to repair or restore a database). It is the place for visual investigation: navigating archetypes, drilling into byte/cache-line layouts,
   walking the on-disk file map, and analysing profiler timelines and call trees. Think *DataGrip fused with
   a flight recorder*.
 - **CLI = automation, scripting, mutation, and CI.** Everything a GUI cannot do: a REPL and `.tsh` scripts,

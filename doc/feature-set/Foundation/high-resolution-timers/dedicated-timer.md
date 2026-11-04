@@ -44,7 +44,7 @@ heartbeat.Dispose(); // stops the thread, removes from the resource tree
 ## ⚠️ Guarantees & limits
 
 - Full thread isolation — no other timer or callback can delay this one's tick.
-- `internal sealed` engine type — used by subsystems that own their own dedicated timer (e.g. a heartbeat monitor), not constructible from application code.
+- `internal sealed` engine type — available for a subsystem that needs its own isolated timer (no in-tree subsystem uses one today), not constructible from application code.
 - Callback budget is a soft contract (target < 100µs); a slow callback delays only this timer's own subsequent ticks, never another timer's.
 - Exceptions thrown by the callback are caught, logged, and do not stop the timer.
 - 1ms intervals keep one logical core near-fully busy (Yield+Spin, no room for the Sleep phase); 5ms+ intervals let Sleep absorb most of the wait, dropping CPU to near zero.

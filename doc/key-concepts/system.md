@@ -29,4 +29,4 @@ Three shapes, picked by what the work looks like: **`CallbackSystem`** (non-enti
 ## Learn & use
 
 - **Narrative:** [Guide ch.5 — systems & the tick loop](xref:guide-systems)
-- **Feature detail:** [declarative system scheduling](xref:feature-runtime-declarative-system-scheduling) · [system types](xref:feature-runtime-system-types-callback-system)
+- **Feature detail:** [declarative system scheduling](xref:feature-runtime-declarative-scheduling-index) · [system types](xref:feature-runtime-system-types-callback-system)

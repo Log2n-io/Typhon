@@ -47,7 +47,7 @@ for (var n = ring.OldestAvailableTick; n <= ring.NewestTick; n++)
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `RuntimeOptions.TelemetryRingCapacity` | 1024 | Ring size (must be a power of 2); trades retention window for memory (~`capacity × (32B + systemCount × 48B)`). |
+| `RuntimeOptions.TelemetryRingCapacity` | 1024 | Ring size (must be a power of 2); trades retention window for memory (~`capacity × (64B + systemCount × 72B)`). |
 
 ## ⚠️ Guarantees & limits
 - **Always on, zero allocation** — `Record` copies into pre-allocated slots; there is no opt-in flag and no per-tick GC pressure.

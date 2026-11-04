@@ -19,14 +19,13 @@ change?" checks per system — repetitive and easy to get subtly wrong.
 
 ## ⚙️ How it works (in brief)
 Two independent gates run before a system does any real work. `shouldRun` is a zero-arg predicate
-checked first, before the system's View is even refreshed — false means skip immediately, no input
-cost paid at all. `changeFilter` is checked second (QuerySystem/PipelineSystem only): it narrows the
-view's `Input` so the system gets only the View's `Added` entities plus entities whose listed
-component types were written since the last tick (`dirtySet ∪ Added`), and the system is skipped
-entirely if that set is empty and no consumed event queue has events. The dirty set is built as a
-side effect of the View's normal refresh — draining its existing ring buffer of writes — so there is
-no extra write-path cost; the only added cost is one membership check per ring-buffer entry already
-being processed.
+checked first — false means skip immediately, before any change-filter or dispatch work. `changeFilter`
+is checked second (QuerySystem only): it narrows the view's `Input` so the system gets only the View's
+`Added` entities plus entities whose listed component types were written in the previous tick
+(`dirtySet ∪ Added`), and the system is skipped entirely if that set is empty and no consumed event
+queue has events. The dirty set comes from the component table's per-tick dirty bitmap, which the
+write path already maintains, intersected with the View's entity set — so there is no extra
+write-path cost.
 
 ## 💻 Usage
 ```csharp
@@ -76,19 +75,24 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 | `b.ChangeFilter(params Type[])` | none | Reactive gate, narrows entity set to `dirtySet ∪ Added`. Requires `b.Input(...)`. |
 
 ## ⚠️ Guarantees & limits
-- Evaluation order is fixed: `shouldRun` first → View refresh (if any) → event-queue/`changeFilter`
-  empty check → dispatch. A false `shouldRun` never pays View refresh or filter cost.
+- Evaluation order is fixed: `shouldRun` first → event-queue/`changeFilter` empty check → dispatch.
+  A false `shouldRun` never pays filter cost. Pull-mode input Views (a plain `Query<T>().ToView()`) are
+  re-queried once at tick start, before any system dispatches, whether or not their system then runs.
 - `changeFilter` is OR logic across listed types — an entity qualifies if *any* listed component was
   written, not all.
 - `changeFilter` requires `Input`; `Build()` rejects it on a `CallbackSystem` or any system without a
-  View — there is no entity set to narrow.
+  View — there is no entity set to narrow. It also rejects it combined with `TickDivisor > 1`,
+  `CellAmortize`, or `Checkerboard`: each tick's dirty set is delivered once, so skipping or splitting
+  ticks would drop changes.
+- `changeFilter` types must be `SingleVersion` or `Transient` — a `Versioned` type has no dirty tracking
+  and is rejected when the runtime is created.
 - Skip cost is ~200-300ns in both cases; `shouldRun` predicates must be cheap, thread-safe, and
   side-effect-free — they run on whichever worker thread dispatches the system, with no synchronization.
-- If the View's ring buffer overflows, the dirty-tracking falls back to a full re-scan and treats every
-  entity in the View as dirty for that tick — correct but conservative, not a silent miss.
+- When the dirty set cannot be resolved to entities (first tick, or a `SingleVersion` table without
+  indexed fields), the system falls back to the full View — correct but conservative, not a silent miss.
 - A system can combine `shouldRun`, `changeFilter`, and consumed event queues; it executes if
   `shouldRun` passes AND (the filtered entity set is non-empty OR a consumed queue has events).
-- A `QuerySystem`/`PipelineSystem` with *neither* `changeFilter` nor consumed events runs every tick
+- A `QuerySystem` with *neither* `changeFilter` nor consumed events runs every tick
   its predecessors allow — there's no reactive trigger to gate it.
 
 ## 🧪 Tests

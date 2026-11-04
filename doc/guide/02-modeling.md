@@ -112,12 +112,12 @@ A single archetype freely mixes modes — `Character` has all three — because 
 
 ### Fields
 
-Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon store and memory-map components without serialization.
+Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
 
-> **Two sizing rules that catch newcomers:**
+> **Two component rules that catch newcomers:**
 >
-> 1. **Only `public` fields count toward a component's size.** Typhon derives the stored layout from the struct's **public** fields (not `sizeof(T)`), so a `private` field is invisible to storage — adding `private int _pad` does **not** change anything.
-> 2. **A component must be at least 8 bytes.** Chunk storage has an 8-byte minimum stride. A `Versioned` component with a single 4-byte field (one `int`/`float`) trips `Invalid component/chunk stride: 4 bytes …` at open time. Fix it by adding a **public** field so the struct reaches 8 bytes — or, as `Wallet` does, by picking a type that's already 8 (`long Credits`). `SingleVersion`/`Transient` components clear 8 bytes automatically via their internal per-entity key, so this only bites tiny `Versioned` components.
+> 1. **Only `public` fields are schema fields.** Typhon stores the whole struct (`sizeof(T)`, padding included), but only its **public** fields are known to the schema — indexable, migrated, decoded by tools. Keep data in public fields; a `private` field is just bytes (fine for padding).
+> 2. **A component must be at least 8 bytes.** Chunk storage has an 8-byte minimum stride. A `Versioned` component with a single 4-byte field (one `int`/`float`) trips `Invalid component/chunk stride: 4 bytes …` at open time. Fix it by adding a field (public, or private padding) so the struct reaches 8 bytes — or, as `Wallet` does, by picking a type that's already 8 (`long Credits`). `SingleVersion`/`Transient` components clear 8 bytes automatically via their internal per-entity key, so this only bites tiny `Versioned` components.
 
 ### Indexes — fast lookup by field value
 

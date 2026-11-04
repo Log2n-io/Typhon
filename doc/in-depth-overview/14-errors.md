@@ -59,7 +59,7 @@ Two more rules worth knowing up front:
 
 ## 2. Exception hierarchy
 
-All public exception types live in [`Errors/public/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Errors/public) (one exception: `ResourceExhaustedException` lives under `Resources/public/` because it ships with the resource graph it describes).
+All public exception types live in [`Errors/public/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Errors/public) (exceptions: `ResourceExhaustedException` and its `TransactionSequenceExhaustedException` live under `Resources/public/` because they ship with the resource graph they describe, and `ArchetypeSchemaException` lives under `Schema/public/`).
 
 ```
 System.Exception
@@ -80,15 +80,21 @@ System.Exception
    │  ├─ WalClaimTooLargeException          (RequestedBytes, BufferCapacity)
    │  ├─ WalSegmentException                (SegmentPath)
    │  ├─ CommitDurabilityUncertainException (HighLsn)
+   │  ├─ CommitPublishIncompleteException   (HighLsn, Durable; committed, never rolled back — reopen)
    │  ├─ BulkSessionAlreadyActiveException  (ActiveBulkSessionId)
    │  ├─ BulkSessionClosedException         (BulkSessionId)
-   │  └─ BulkLoadCheckpointTimeoutException (BulkSessionId, Timeout)
+   │  ├─ BulkLoadCheckpointTimeoutException (BulkSessionId, Timeout)
+   │  └─ BackupException                    (backup / restore family: BackupStoreLocked, BackupStoreMismatch, BackupPackCorrupt,
+   │                                          BackupChainBroken, BackupFormatUnsupported, BackupAborted, BackupPlanChanged,
+   │                                          BackupArchiveDiverged, RestoreRefused, RestoreTargetUnreachable — each …Exception)
    ├─ ResourceExhaustedException            (direct subclass; IsTransient => true)
+   │  └─ TransactionSequenceExhaustedException (sealed; IsTransient => false)
    ├─ UniqueConstraintViolationException    (parameterless ctor only — currently)
    ├─ ForeignKeyViolationException          (Child, Parent, ParentDying; IsTransient => ParentDying)
    ├─ SchemaValidationException             (Diff: SchemaDiff)
    ├─ SchemaMigrationException              (ComponentName, IReadOnlyList<MigrationFailure>)
    ├─ SchemaDowngradeException              (ComponentName, PersistedRevision, RuntimeRevision)
+   ├─ SchemaMismatchException               (Differences; SchemaMatch.Exact open against a different build)
    └─ InvalidAccessException                (sealed; opt-in declared-access enforcement)
 ```
 
@@ -166,11 +172,15 @@ Thrown at commit when a component write carries a cascade FK field pointing at a
 
 ### Schema family
 
-Three exceptions, all direct subclasses of `TyphonException`:
+Four exceptions are direct subclasses of `TyphonException`:
 
 - [`SchemaValidationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaValidationException.cs) — the runtime struct definition is incompatible with what's persisted. Carries the full `SchemaDiff` for programmatic inspection (which field changed, what type, what attribute). See [04-schema](04-schema.md).
 - [`SchemaMigrationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMigrationException.cs) — one or more entities failed during a schema migration. Carries `ComponentName` and `IReadOnlyList<MigrationFailure>` (see [§6](#6-migrationfailure--per-entity-migration-diagnostics)). Old segments remain untouched — the user can fix the migration function and re-run.
 - [`SchemaDowngradeException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaDowngradeException.cs) — the database was written by a newer application version (`PersistedRevision > RuntimeRevision`). The engine refuses to open it to prevent corruption.
+
+- [`SchemaMismatchException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMismatchException.cs) — an open with `SchemaMatch.Exact` found the registered schema (or an assembly declaring it) different from what the database holds: the build is not the one that wrote it. Carries `Differences`, one line each; nothing of the difference was written. Error code `SchemaMismatch` (3003).
+
+A fifth, [`ArchetypeSchemaException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Schema/public/ArchetypeSchemaException.cs), sits **outside** the `TyphonException` tree: it derives from `InvalidOperationException` (sealed, in `Schema/public/`). It refuses an open whose stored archetype component set cannot be opened under the declared one, and carries `ArchetypeName` and `Kind` (`ArchetypeSchemaErrorKind`). See [04-schema](04-schema.md).
 
 > **Worth calling out:** `SchemaDowngradeException` **reuses `TyphonErrorCode.SchemaValidation`** (3001), not a dedicated downgrade code. If you're routing on error code, downgrade and runtime-vs-persisted mismatches look identical at the wire level — disambiguate by the exception type.
 
@@ -197,7 +207,7 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 | 4xxx | Index | `UniqueConstraintViolation = 4001`, `ForeignKeyViolation = 4002` |
 | 5xxx | Query | (reserved) |
 | 6xxx | Resource | `ResourceExhausted = 6001`, `LockTimeout = 6003` |
-| 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004`, `BulkSessionAlreadyActive = 7005`, `BulkSessionClosed = 7006`, `BulkLoadCheckpointTimeout = 7007`, `CommitDurabilityUncertain = 7008` |
+| 7xxx | Durability | `WalBackPressureTimeout = 7001`, `WalClaimTooLarge = 7002`, `WalWriteFailure = 7003`, `WalSegmentError = 7004`, `BulkSessionAlreadyActive = 7005`, `BulkSessionClosed = 7006`, `BulkLoadCheckpointTimeout = 7007`, `CommitDurabilityUncertain = 7008`, `CommitPublishIncomplete = 7009`, `CommitPipelineStopped = 7010`, `RecoveryCheckpointFailed = 7011`, `RecoveryArchetypeNotRegistered = 7012`, `RecoveryArchetypeSetChangeRefused = 7013`; backup/restore `71xx`: `BackupStoreLocked = 7101` … `BackupArchiveDiverged = 7112` |
 | 8xxx | Runtime / Scheduler | `InvalidSystemAccess = 8001` |
 
 **Notes:**
@@ -284,7 +294,7 @@ public enum RevisionReadStatus : byte
 }
 ```
 
-Lives in `Revision/public/`, *not* `Data/Revision/`. Four values reflect the four cases that arise from MVCC visibility — see [05-revision](05-revision.md) for the visibility predicate. `Deleted` is particularly useful: a caller often wants to distinguish "never existed" from "existed but tombstoned" without comparing `BornTSN` / `DeadTSN` themselves.
+Lives in `Revision/public/`, *not* `Data/Revision/`. Four values reflect the four cases that arise from MVCC visibility — see [05-revision](05-revision.md) for the visibility predicate. `Deleted` is particularly useful: a caller often wants to distinguish "never existed" from "existed but tombstoned" without comparing `BornTSN` / `DiedTSN` themselves.
 
 ---
 
@@ -361,7 +371,7 @@ If your code path conceptually wants one of these, throw a `TyphonException` wit
 
 - [01-foundation](01-foundation.md) — `WaitContext`, `Deadline`. All `TyphonTimeoutException` instances originate at a deadline expiry detected here.
 - [02-storage](02-storage.md) — `PageCorruptionException` and `CorruptionException` are thrown from the page-cache CRC verification path.
-- [04-schema](04-schema.md) — the schema exception family (`SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`) and the `SchemaDiff` / migration model.
+- [04-schema](04-schema.md) — the schema exception family (`SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`, `SchemaMismatchException`, `ArchetypeSchemaException`) and the `SchemaDiff` / migration model.
 - [06-ecs](06-ecs.md) — `UniqueConstraintViolationException` propagates here from index inserts during `Spawn` / `OpenMut`.
 - [08-transactions](08-transactions.md) — `TransactionTimeoutException` and the conflict-handler model (the reserved `TransactionConflictException` slot in [§8](#8-reserved-tier--declared-but-not-implemented)).
 - [11-durability](11-durability.md) — `WalWriteException` (fail-fast, per ADR) and `WalClaimTooLargeException` semantics.

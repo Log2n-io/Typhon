@@ -11,20 +11,20 @@ description: 'R-Tree-backed AABB, radius, and ray filters attached directly to a
 
 ## 🎯 What it solves
 
-Game-server and simulation workloads constantly ask spatial questions — "what's in this room", "what's within aggro range", "what does this ray hit" — that a B+Tree field index cannot answer efficiently. Brute-force scanning every entity's position component to test bounds is O(n) per query and falls apart well before 10K entities at 60Hz. Spatial Query Predicates give `EcsQuery` three index-driven spatial filters (AABB overlap, radius/sphere, ray intersection) that run against a dedicated R-Tree instead of a linear scan, and compose with the rest of the query builder (archetype constraints, field predicates, opaque post-filters).
+Game-server and simulation workloads constantly ask spatial questions — "what's in this room", "what's within aggro range", "what does this ray hit" — that a B+Tree field index cannot answer efficiently. Brute-force scanning every entity's position component to test bounds is O(n) per query and falls apart well before 10K entities at 60Hz. Spatial Query Predicates give `EcsQuery` four index-driven spatial filters (AABB overlap, radius/sphere, ray intersection, frustum) that run against the spatial index instead of a linear scan, and compose with the rest of the query builder (archetype constraints, field predicates, opaque post-filters).
 
 ## ⚙️ How it works (in brief)
 
-Mark the field that defines an entity's bounds with `[SpatialIndex]`; the engine maintains an R-Tree per component table, updated as entities spawn, move, and despawn. `WhereInAABB<T>`, `WhereNearby<T>`, and `WhereRay<T>` attach one spatial predicate to the query — the tree (not a table scan) produces the candidate set, which is then narrowed by archetype mask, any `.Where()`/`.WhereField()` predicate chained onto the same query (AND semantics), and visibility. Only one spatial predicate is allowed per query; static (rarely-moving) and dynamic entities are indexed in separate trees but queried transparently together.
+Mark the field that defines an entity's bounds — an AABB or bounding-sphere type (`AABB2F`, `AABB3F`, `BSphere2F`, `BSphere3F`, …) — with `[SpatialIndex]`, and configure the engine's spatial grid (`ConfigureSpatialGrid`) before archetypes are initialized. The engine indexes each archetype's clusters per grid cell by their bounding boxes, updated as entities spawn, move, and despawn. `WhereInAABB<T>`, `WhereNearby<T>`, `WhereRay<T>`, and `WhereFrustum<T>` attach one spatial predicate to the query — the index (not a table scan) produces the candidate set, which is then narrowed by archetype mask, any `.Where()`/`.WhereField()` predicate chained onto the same query (AND semantics), and visibility. Only one spatial predicate is allowed per query; `InRealm(realm)` scopes it to one realm (realm 0 by default).
 
 ## 💻 Usage
 
 ```csharp
-[Component("Game.Position", 1)]
+[Component("Game.Position", 1, StorageMode = StorageMode.SingleVersion)]
 public struct Position
 {
     [SpatialIndex]
-    public float X, Y, Z;
+    public AABB3F Bounds;
 }
 
 using var t = dbe.CreateQuickTransaction();
@@ -48,20 +48,20 @@ var hit = t.Query<UnitArch>()
 
 | Constructor arg (`[SpatialIndex]`) | Default | Effect |
 |---|---|---|
-| `cellSize` | `0` (auto) | Bucket size for the static/bulk-loaded tree variant |
-| `Mode` | `SpatialMode.Dynamic` | `Static` skips per-tick update maintenance for rarely-moving entities |
+| `cellSize` | `0` (off) | Cell size, in world units, of a coarse-grid broadphase occupancy filter; `0` disables the filter |
+| `Mode` | `SpatialMode.Dynamic` | `Static` skips tick-fence index updates — for entities that never move |
 | `Category` | `uint.MaxValue` | Archetype-level bitmask; lets a per-cluster broadphase skip whole archetype clusters that don't overlap the query |
 
 ## ⚠️ Guarantees & limits
 
-- **One spatial predicate per query** — a second `WhereNearby`/`WhereInAABB`/`WhereRay` call throws `InvalidOperationException`; run separate queries and combine in application code.
+- **One spatial predicate per query** — a second `WhereNearby`/`WhereInAABB`/`WhereRay`/`WhereFrustum` call throws `InvalidOperationException`; run separate queries and combine in application code.
 - **Composable with `Where`/`WhereField`** — both are applied as an AND post-filter over the spatial candidate set, not a second index probe.
 - **Archetype-mask filtered** — results respect `.With<T>()`/`.Without<T>()`/`.Exclude<T>()` the same as any other query.
 - **Not supported on `foreach`** — iterating the query directly only applies the archetype scan + `.Where()`; a spatial predicate throws. Call `.Execute()` (or `.Any()`/`.Count()`) instead.
 - **Not supported with `WhereField` on `ToView()`** — a reactive view cannot combine an indexed field predicate with a spatial predicate; a spatial-only (or spatial + opaque `Where`) view falls back to full re-query (pull mode) on every `Refresh()`, not incremental delta tracking.
 - **Not supported with `ExecuteOrdered`** — spatial predicates don't carry an ordering; use `Execute()` and sort in application code if needed.
 - **Sub-microsecond at 10K entities**; ~600µs total spatial budget at 100K entities for a 60Hz tick (3.6% of frame).
-- **kNN-style "nearest N" is not exposed** at this layer — only set-membership filters (AABB/radius/ray).
+- **kNN-style "nearest N" is not exposed** at this layer — only set-membership filters (AABB/radius/ray/frustum).
 
 ## 🧪 Tests
 

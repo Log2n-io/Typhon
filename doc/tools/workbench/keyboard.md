@@ -23,7 +23,7 @@ What the palette does is scoped by the **prefix** you type:
 | Prefix | Mode | Examples |
 |--------|------|----------|
 | *(none)* | **Open / switch** a session or view (recent-first) | `Position`, `slowest tick`, `Data Browser` |
-| `>` | **Run an action** (commands) | `> Reset Layout`, `> Save as Replay`, `> Toggle Off-CPU` |
+| `>` | **Run an action** (commands) | `> Reset Layout`, `> Zoom to Full Trace`, `> Toggle View System DAG` |
 | `@` | **Go to an object** in the current session | `@ Position`, `@ 2001`, `@ Lookup#4` |
 | `#` | **Go to an object workspace-wide** (any object type) | `# Position`, `# system:Movement`, `# entity:104656996` |
 | `:` | **Jump to a time or address** | `:00:04.321`, `:tick 8412`, `:page 1024` |
@@ -52,9 +52,11 @@ Every selection and view transition is recorded in navigation history, so:
 
 ## Focus & navigation shortcuts
 
-- **Between panels:** `F6` / `Shift+F6` cycle focusable panels; `Ctrl+1`…`9` focus a panel by index.
-- **Straight to a destination:** `G`-chords — e.g. `G S` Schema, `G D` Data, `G M` Storage Map,
-  `G P` Profiler, `G Q` Queries, `G C` Call Tree, `G G` DAG.
+- **Between panels:** `F6` / `Shift+F6` cycle focusable docked panels.
+- **Straight to a destination:** press `G`, then a key within about a second — `G C` Component Inspector,
+  `G A` Archetype Inspector, `G S` Schema Explorer, `G D` Data Browser, `G M` Database File Map,
+  `G Q` Query Console (Open mode), `G W` Query Analyzer (Trace / Attach).
+- **Other:** `Ctrl+/` toggles the Resource Tree sidebar, `Alt+Shift+T` toggles light / dark theme.
 - **Within a panel:** arrow keys move the focused element; type-ahead speed-search filters lists and trees.
 - **Back out:** `Esc` steps out (close popover → clear filter → blur to panel).
 

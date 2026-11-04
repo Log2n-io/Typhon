@@ -22,7 +22,8 @@ expressed as an explicit status rather than an ambiguous null or stale value.
 
 Every transaction (and every `PointInTimeAccessor` snapshot) is stamped with a TSN at creation. A read for a
 `Versioned` component resolves against that fixed TSN: among the component's committed revisions, it picks the
-latest one at-or-before the TSN, ignoring anything still mid-commit or committed afterward. Internally this
+one with the highest commit stamp at-or-below the TSN, ignoring anything still mid-commit or committed afterward
+(a revision is stamped when its writer reaches its commit point, not when it was written). Internally this
 collapses to four outcomes — found, never created, created-but-not-yet-visible, or tombstoned — but the
 higher-level APIs you call (`QueryRead`, `Open`, `Read`/`TryRead`) flatten these into a `bool` or a thrown
 `InvalidOperationException`, since most callers don't need to distinguish "doesn't exist" from "not visible yet"
@@ -34,7 +35,7 @@ waiting for its own commit.
 
 ```csharp
 using var ro = dbe.CreateReadOnlyTransaction();          // TSN frozen at creation
-if (ro.QueryRead<Stats>(heroId.RawValue, out var stats))  // resolves the revision visible at ro.TSN
+if (ro.QueryRead<Stats>((long)heroId.RawValue, out var stats))  // resolves the revision visible at ro.TSN
 {
     Evaluate(stats);
 }
@@ -80,11 +81,13 @@ var hp = entity.Read(Hero.Stats);
   new revision over a tombstone) use the lower-level chain metadata internally — this isn't exposed as public API.
 - **`PointInTimeAccessor` reads only** — it can write `SingleVersion`/`Transient` components but throws on
   `Versioned` writes; use a `Transaction` when you need to mutate `Versioned` data.
-- Visibility is resolved purely from each revision's commit state and TSN — crash recovery guarantees that by
+- Visibility is resolved purely from each revision's commit stamp (a still-flagged revision through its writer's
+  commit card) — crash recovery guarantees that by
   the time any transaction runs, only durably-committed revisions exist in the chain, so this rule needs no
   special case for "did this survive the last crash".
 - **Correct under compaction** — resolution scans the whole chain rather than stopping at the first too-new
-  entry, because background revision GC can reorder entries physically without changing their TSNs; a
+  entry, because a chain's physical order is not its commit-stamp order (two writers can publish in either order,
+  and compaction rewrites the chain); a
   single-entry, all-committed chain (the common steady-state case) short-circuits this scan entirely, resolving
   without taking the chain's read lock.
 

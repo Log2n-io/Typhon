@@ -60,7 +60,7 @@ No tuning knobs — there is nothing to configure. OLC is the only concurrency p
 - A version-check failure retries the full descent from the root (bounded by `MaxOptimisticRestarts = 3`),
   then falls back to pessimistic latch-coupling if all attempts fail — the retry is a complete re-descent, not
   a re-read of only the failing node.
-- The same protocol covers both the B+Tree (primary and secondary indexes) and the spatial R-Tree — one
+- The same protocol covers both the B+Tree (secondary indexes) and the spatial R-Tree — one
   concurrency model for all index access in Typhon.
 - Nodes retired by a merge are kept alive until epoch reclamation confirms no reader still references them —
   no use-after-free under contention.

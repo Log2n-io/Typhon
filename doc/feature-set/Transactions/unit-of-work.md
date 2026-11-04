@@ -25,8 +25,8 @@ within it, used for crash recovery), an absolute deadline, and — for `Deferred
 by the transactions the UoW creates via `CreateTransaction()`. `uow.CreateTransaction()` draws transactions from this scope; each commits
 independently (its own atomicity/isolation), but none of them control *when* their WAL records become crash-safe —
 that is `Flush()`/`FlushAsync()`'s job, driven by the UoW's `DurabilityMode`. `Dispose()` always releases the
-`UowId` back to the registry; for `GroupCommit`/`Immediate` it also flushes for durability, while `Deferred` leaves
-that decision to the caller.
+`UowId` back to the registry; for `GroupCommit`/`Immediate` it also flushes for durability when at least one
+transaction committed, while `Deferred` leaves that decision to the caller.
 
 ## 💻 Usage
 

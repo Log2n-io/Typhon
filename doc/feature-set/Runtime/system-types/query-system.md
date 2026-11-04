@@ -85,7 +85,7 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `b.Input(() => view)` | required | View providing the entity set; mandatory for any `QuerySystem` |
+| `b.Input(() => view)` | none | View providing the entity set; required by `Parallel()` and `ChangeFilter(...)` |
 | `b.ChangeFilter(...)` | none | Reactive trigger — entity set narrows to `dirtySet ∪ Added`; OR logic across types |
 | `b.Parallel()` | off | Chunk the filtered entity set across workers |
 | `b.WritesVersioned()` | off | Switch chunk access from `ctx.Accessor` to a per-chunk `ctx.Transaction` (required to write `Versioned` data in parallel) |
@@ -95,7 +95,7 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 
 - Reactive skip: no `ChangeFilter` dirty/Added entities AND no pending consumed-queue events → skip
   (~200-300ns); a `QuerySystem` with no `ChangeFilter` and no events runs every tick its predecessors allow.
-- `Build()` rejects: no `Input` View, `Parallel()` without `Input`, `ChangeFilter` without `Input`.
+- `Build()` rejects `Parallel()` without `Input` and `ChangeFilter` without `Input`.
 - Sequential systems get one `Transaction` for the whole `Execute` call; `Parallel()` systems get either a
   per-chunk `ctx.Accessor` (default) or a per-chunk `ctx.Transaction` (`WritesVersioned()`) — chunk Transactions
   cost markedly more than `ctx.Accessor`, so only declare `WritesVersioned()` when actually writing `Versioned`
@@ -111,7 +111,7 @@ dag.QuerySystem("GameRules", ctx => { foreach (var id in ctx.Entities) { /* ... 
 ## 🧪 Tests
 
 - [ChangeFilterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChangeFilterTests.cs) — reactive skip when nothing dirty, OR logic across filtered types, `ctx.Entities == dirtySet ∪ Added`
-- [ScheduleValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build()` rejects missing `Input`, `Parallel()`/`ChangeFilter()` without `Input`
+- [ScheduleValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ScheduleValidationTests.cs) — `Build()` rejects `Parallel()`/`ChangeFilter()` without `Input`
 - [ParallelQueryTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ParallelQueryTests.cs) — `b.Parallel()` chunk dispatch, `ctx.Accessor` vs. `WritesVersioned()` → `ctx.Transaction`
 
 ## 🔗 Related

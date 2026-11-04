@@ -37,7 +37,7 @@ var idIndex   = dbe.GetPKIndexRef<Player>();
 // Hot path — pass the handles in repeatedly; no re-resolution, no allocation.
 using (var tx = dbe.CreateQuickTransaction())
 {
-    using var hits = tx.EnumerateIndex<Player, String64>(nameIndex, minKey: default, maxKey: String64.MaxValue);
+    using var hits = tx.EnumerateIndex<Player, String64>(nameIndex, minKey: "Anna", maxKey: "Marco");
     foreach (var hit in hits)
     {
         // hit.EntityPK, hit.Key, hit.Component
@@ -51,7 +51,7 @@ using (var tx = dbe.CreateQuickTransaction())
   component isn't registered, the field doesn't exist, or the field isn't `[Index]`-annotated — failures surface at
   resolution time, not on first hot-path use.
 - Resolution validates against the table's current schema; any later staleness check is a single integer compare
-  (`CapturedLayoutVersion` vs. the table's live layout version) — no dictionary lookup, no page-cache access.
+  (the layout version captured at resolution vs. the table's live one) — no dictionary lookup, no page-cache access.
 - A handle becomes stale the moment its owning table's index layout changes (e.g. an index added/removed/reordered by
   schema evolution). The next use throws rather than reading the wrong field; the only recovery is to call
   `GetIndexRef`/`GetPKIndexRef` again.

@@ -30,6 +30,7 @@ Typhon's subsystems interact by design, not anything observed at runtime.
 ```csharp
 ResourceSnapshot snapshot = resourceGraph.GetSnapshot();
 
+// Paths below are the dependency table's — see the limits: no live node carries them today.
 NodeSnapshot symptom = snapshot.GetNode("Root/DataEngine/TransactionPool");
 if (symptom?.Capacity is { Utilization: > 0.8 })
 {
@@ -52,16 +53,20 @@ NodeSnapshot strict = snapshot.FindRootCause("DataEngine/TransactionPool", highU
 - Coverage is partial by construction: a node with no entry on the left side of the table returns itself
   immediately, even if it's genuinely blocked on something architecturally — this is a curated heuristic, not a
   complete dependency graph.
-- Two of the four edges (`Backup/*`) reference paths that don't exist in the current resource tree; a lookup
-  through them simply finds nothing and the chain stops there — no exception.
+- **None of the four edges matches a node in today's resource tree**: engine-owned nodes live under
+  `Root/DataEngine/DatabaseEngine_{id}/…`, the transaction pool node is `TransactionChain` (and reports no
+  `Capacity`), the WAL nodes are `WalManager`/`WalWriter`/`StagingBufferPool`, there is no `PageCache` node,
+  the store node is `ManagedPagedMMF_{DatabaseName}`, and there is no `Backup` subsystem. Against a live engine a
+  lookup therefore finds nothing and the chain stops at the symptom — no exception. The traversal is exercised
+  against synthetic snapshots built with these paths.
 - A dependency is only followed when **both** the current node and the candidate are above
   `highUtilizationThreshold` — a saturated node whose blocker is calm (e.g. 60% with an 0.8 threshold) is
   reported as the root cause itself; the chain doesn't continue past a dependency that isn't itself under
   pressure.
 - Traversal is cycle-safe (visited-set guard) though the shipped table is acyclic; cost is O(chain length) —
   in practice 1-2 hops — with no extra `ReadMetrics()` calls, since it reads only the already-frozen snapshot.
-- Scoped to `Capacity.Utilization` only. Lock/latch contention isn't part of this surface — see
-  `IContentionTarget` for wait-time telemetry, which aggregates separately per owning component.
+- Scoped to `Capacity.Utilization` only. Lock/latch contention isn't part of this surface (or of the resource
+  graph at all) — it is visible only as profiler trace events from the `Concurrency` tracing domain.
 
 ## 🧪 Tests
 

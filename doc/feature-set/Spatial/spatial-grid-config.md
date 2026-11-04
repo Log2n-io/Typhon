@@ -36,7 +36,8 @@ dbe.ConfigureSpatialGrid(new SpatialGridConfig(
     cellSize: 32f));
 
 // Every tick, a high-priority callback system assigns tiers:
-schedule.CallbackSystem("TierAssignment", ctx =>
+var game = schedule.PublicTrack.DeclareDag("Game");
+game.CallbackSystem("TierAssignment", ctx =>
 {
     var grid = ctx.SpatialGrid;
     if (!grid.IsValid) return;
@@ -57,7 +58,7 @@ schedule.CallbackSystem("TierAssignment", ctx =>
 
 | Config field | Default | Meaning |
 |---|---|---|
-| `WorldMin` / `WorldMax` | required | World-space extent, `Vector3`. `WorldMax` is exclusive on all three axes |
+| `WorldMin` / `WorldMax` | required | World-space extent, `Vector3D` (double precision; a `Vector3` converts implicitly). `WorldMax` is exclusive on all three axes |
 | `CellSize` | required | Side length of one cell, world units. Must be `> 0`; one size for the whole grid, and the single most consequential setting here |
 | `MigrationHysteresisRatio` | `0.05` | Dead zone past a cell face, as a fraction of cell size, that an entity's centre must clear before a cell crossing is queued. Live on the migration path |
 | `ClusterTargetExtentRatio` | `0.25` | The extent a cluster is expected to stay within, as a fraction of cell size. A cluster inside it is tight enough and its entities are never examined |
@@ -97,7 +98,8 @@ The re-clustering and placement settings below `MigrationHysteresisRatio` are **
 
 - [SpatialGridTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/SpatialGridTests.cs) — grid dimension derivation, `WorldToCellKey`/`CellKeyToCoords` round-trips, `SetCellTier` single-bit validation, cell-count overflow throws, flat-vs-cubic Z behaviour
 - [VdbSpatialGridTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/VdbSpatialGridTests.cs) — differential against a dense reference oracle, neighbour lookups across absent blocks, concurrent cell creation, memory at 80 % empty, intra-block fill
-- [CheckerboardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `SetCellTierMin_OnlyPromotes`, `ResetAllTiers_BulkSetsAllCells`, `SetTierInAABB_MinSemantics`, `SpatialGridAccessor_AccessibleFromTickContext`/`_MultiObserver_Union` (promote-only tiering, multi-observer union)
+- [CheckerboardTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/CheckerboardTests.cs) — `SetCellTierMin_OnlyPromotes`, `ResetAllTiers_BulkSetsAllCells` (promote-only tiering)
+- [SpatialGridAccessorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SpatialGridAccessorTests.cs) — `AccessibleFromTickContext`, `MultiObserver_Union`, `TierAssignment_OverEmptyCells_CreatesNothing` (accessor from `TickContext`, multi-observer union, tiering creates no cells)
 
 ## 🔗 Related
 

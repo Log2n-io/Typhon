@@ -136,7 +136,7 @@ These live on `Transaction` ([08-transactions](08-transactions.md)) — they're 
 
 ### `Spawn<TArch>`
 
-[`Transactions/public/Transaction.ECS.cs:147`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
+[`Transactions/public/Transaction.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
 
 ```csharp
 EntityId id = tx.Spawn<Ant>(
@@ -154,13 +154,13 @@ So a spawn is visible to *this* transaction immediately, visible to *other* tran
 
 ### `Destroy(EntityId)`
 
-[`Transactions/public/Transaction.ECS.cs:562`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
+[`Transactions/public/Transaction.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
 
 ```csharp
 tx.Destroy(id);
 ```
 
-Marks the entity for destruction. The `EntityRecord` is stamped with a `DeadTSN`. Other transactions still see the entity until their snapshot TSN passes `DeadTSN`. Cleanup of revision storage happens lazily via the [`DeferredCleanupManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs) once no active snapshot can see the entity any more.
+Marks the entity for destruction. The `EntityRecord` is stamped with a `DiedTSN`. Other transactions still see the entity until their snapshot TSN passes `DiedTSN`. Cleanup of revision storage happens lazily via the [`DeferredCleanupManager`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/DeferredCleanupManager.cs) once no active snapshot can see the entity any more.
 
 ### `SpawnBatch<TArch>`
 
@@ -189,7 +189,7 @@ if (accessor.TryOpenMut(id, out EntityRefMut e3)) { ... }   // one resolve for a
 bool alive = accessor.IsAlive(id);                  // the existence probe
 ```
 
-- All four opens resolve the entity at the accessor's `TSN`, applying MVCC visibility (`BornTSN ≤ TSN < DeadTSN`) and `EnabledBits` overrides. `Open`/`OpenMut` throw on a miss, `TryOpen`/`TryOpenMut` return `false`.
+- All four opens resolve the entity at the accessor's `TSN`, applying MVCC visibility (`BornTSN ≤ TSN < DiedTSN`) and `EnabledBits` overrides. `Open`/`OpenMut` throw on a miss, `TryOpen`/`TryOpenMut` return `false`.
 - Access is the handle's **type**: `Open`/`TryOpen` return `EntityRef`, `OpenMut`/`TryOpenMut` return `EntityRefMut`. Writing through a read-only open does not compile.
 - The returned handles are `ref struct`s — stack-allocated, must not outlive the accessor that created them. Within that, a handle stays valid however long the transaction runs: it hands out copies, never references into a page, and finds its page again if the accessor let go of it in between (rule EP-03, #1199).
 - `OpenMut`/`TryOpenMut` on the **base** `EntityAccessor` write **SingleVersion / Transient** components only. Versioned writes need a `Transaction`, whose mutation prep (`EnsureMutable` + state transition) runs before every writable open.
@@ -393,8 +393,8 @@ The Versioned-write restriction on the base `EntityAccessor` and PTA is structur
 
 You don't need this to *use* the ECS API, but here's what's happening underneath. Detail in [05-revision](05-revision.md) and [02-storage](02-storage.md).
 
-- **`EntityMap`** — per-archetype, persistent hash map keyed by `EntityKey`. Stores `EntityRecord` (chunk IDs per slot + `BornTSN` / `DeadTSN` + `EnabledBits`). Implemented via [`PagedHashMap`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Collections/internals/PagedHashMap.cs) on top of `ComponentSegment`.
-- **`EntityRecord`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRecord.cs)) — the per-entity row in the EntityMap. The `EnabledBits`, `BornTSN`, `DeadTSN`, and the locations of each component chunk.
+- **`EntityMap`** — per-archetype, persistent hash map keyed by `EntityKey`. Stores `EntityRecord` (chunk IDs per slot + `BornTSN` / `DiedTSN` + `EnabledBits`). Implemented via [`PagedHashMap`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Foundation/Collections/internals/PagedHashMap.cs) on top of `ComponentSegment`.
+- **`EntityRecord`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRecord.cs)) — the per-entity row in the EntityMap. The `EnabledBits`, `BornTSN`, `DiedTSN`, and the locations of each component chunk.
 - **`ArchetypeMetadata`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeMetadata.cs)) — runtime descriptor: slot count, per-slot component type IDs, Versioned/Transient slot masks, cluster layout if eligible.
 - **`ArchetypeRegistry`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeRegistry.cs)) — global registry; archetypes self-register up-front via a generated `[ModuleInitializer]` barrier at assembly load (lock-guarded, thread-safe), assigning slot indices and handling parent-child slot ordering.
 - **`EnabledBitsOverrides`** ([file](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/EnabledBitsOverrides.cs)) — MVCC-aware override map for per-entity enable bit changes that haven't been committed to the `EntityRecord` yet. `ResolveEnabledBits(entityKey, baseEnabledBits, TSN)` gives the snapshot-correct view.
@@ -409,7 +409,7 @@ You don't need this to *use* the ECS API, but here's what's happening underneath
 
 The transaction commit ([08-transactions](08-transactions.md)) calls:
 
-1. **`PrepareEcsDestroys`** — finalize `DeadTSN` for entities being destroyed; clear `EnabledBits` overrides.
+1. **`PrepareEcsDestroys`** — finalize `DiedTSN` for entities being destroyed; clear `EnabledBits` overrides.
 2. **`FlushEcsPendingOperations`** — walk the spawned-entity list, allocate final `EntityRecord`s, insert into the per-archetype `EntityMap`.
 3. **`FinalizeSpawns`** — stamp `BornTSN = TSN` on all new entries.
 4. **Cluster-versioned slot commit** — for cluster-storage archetypes, the cluster slots need their per-slot revision pointer updated; this is the equivalent of revision-chain extension for the cluster layout.
@@ -418,7 +418,7 @@ After commit, the changes are visible to any new snapshot. Active snapshots with
 
 ### Epoch interaction
 
-The ECS resolve path enters an `EpochGuard` ([01-foundation §4](01-foundation.md)) on every entity read — page accessors need this protection so the page cache can't evict a page mid-read. There's an `EpochRefreshInterval = 128` constant ([`EntityAccessor.cs:32`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.cs)) — every 128 entity ops on a `Transaction`, the engine refreshes the pinned epoch and flushes the change set to release excess dirty marks ([02-storage §5](02-storage.md)). This bounds how long a single transaction can hold pages dirty.
+The ECS resolve path enters an `EpochGuard` ([01-foundation §4](01-foundation.md)) on every entity read — page accessors need this protection so the page cache can't evict a page mid-read. There's an `EpochRefreshInterval = 128` constant ([`EntityAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.cs)) — every 128 entity ops on a `Transaction`, the engine refreshes the pinned epoch and flushes the change set to release excess dirty marks ([02-storage §5](02-storage.md)). This bounds how long a single transaction can hold pages dirty.
 
 ---
 
@@ -442,7 +442,7 @@ tx.Commit();
 // uow flushes / fsyncs per DurabilityMode
 
 // Read (single thread)
-using var readTx = dbe.CreateTransaction(readOnly: true);
+using var readTx = dbe.CreateReadOnlyTransaction();
 EntityRef a = readTx.Open(ant);
 var pos = a.Read(Ant.Position);
 
@@ -459,7 +459,7 @@ foreach (var cluster in accessor.GetClusterEnumerator<Ant>())
     {
         int idx = BitOperations.TrailingZeroCount(bits);
         bits &= bits - 1;
-        ref readonly var pos = ref cluster.Get(Ant.Position, idx);   // zero-copy; valid until the next MoveNext (EP-03)
+        ref readonly var pos = ref cluster.GetReadOnly(Ant.Position, idx);   // zero-copy; valid until the next MoveNext (EP-03)
         // ...
     }
 }

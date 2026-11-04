@@ -13,7 +13,9 @@
     "doc/guide/03-transactions.md",
     "doc/guide/isolation-durability-cheatsheet.md",
     "doc/feature-set/Transactions/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Engine/Ecs/": [
@@ -32,7 +34,9 @@
     "doc/guide/01-first-app.md",
     "doc/guide/02-modeling.md",
     "doc/feature-set/Ecs/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Engine/Querying/": [
@@ -42,7 +46,9 @@
     "doc/key-concepts/secondary-index.md",
     "doc/guide/04-querying.md",
     "doc/feature-set/Querying/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Engine/Storage/": [
@@ -52,7 +58,9 @@
     "doc/key-concepts/cluster-storage.md",
     "doc/key-concepts/bulk-load.md",
     "doc/feature-set/Storage/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Engine/Durability/": [
@@ -76,7 +84,9 @@
     "doc/key-concepts/component.md",
     "doc/key-concepts/archetype.md",
     "doc/feature-set/Schema/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Engine/Revision/": [
@@ -143,7 +153,9 @@
     "doc/guide/01-first-app.md",
     "doc/guide/06-operating.md",
     "doc/feature-set/Hosting/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Engine/Subscriptions/": [
@@ -165,7 +177,9 @@
     "doc/guide/02-modeling.md",
     "doc/feature-set/Schema/",
     "doc/feature-set/Ecs/",
-    "doc/guide/using-with-ai-coding-agents.md"
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Engine/PACKAGE.md"
   ],
 
   "src/Typhon.Generators/": [
@@ -181,5 +195,25 @@
     "doc/in-depth-overview/12-observability.md",
     "doc/key-concepts/profiler.md",
     "doc/feature-set/Profiler/"
+  ],
+  "src/Typhon.Engine/Backup/": [
+    "doc/guide/backup-and-restore.md",
+    "doc/feature-set/Durability/pit-backup.md",
+    "doc/feature-set/Durability/crash-recovery/",
+    "doc/in-depth-overview/11-durability.md",
+    "doc/tools/cli/index.md"
+  ],
+  "src/Typhon.Engine/Integrity/": [
+    "doc/feature-set/Errors/storage-corruption-exceptions.md",
+    "doc/feature-set/Durability/page-checksums-seqlock.md",
+    "doc/in-depth-overview/14-errors.md",
+    "doc/tools/cli/index.md",
+    "doc/tools/workbench/panels.md"
+  ],
+  "src/Typhon.Engine/Realms/": [
+    "doc/feature-set/Subscriptions/realms.md",
+    "doc/in-depth-overview/15-subscriptions.md",
+    "doc/in-depth-overview/07-spatial.md",
+    "doc/guide/07-subscriptions.md"
   ]
 }

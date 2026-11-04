@@ -22,6 +22,7 @@ on:
       - src/**/*.csproj
       - benchmark/reports/**              # a fresh CI benchmark commit auto-rebuilds the Benchmarks tab
       - scripts/build-docs.sh
+      - scripts/gen-llms-txt.py          # llms.txt / llms-full.txt generator + validator
       - scripts/stage-api-bin.sh
       - .config/dotnet-tools.json         # pinned DocFX version
       - .github/workflows/build-docs.yml
@@ -37,6 +38,7 @@ on:
       - src/**/*.csproj
       - benchmark/reports/**
       - scripts/build-docs.sh
+      - scripts/gen-llms-txt.py
       - scripts/stage-api-bin.sh
       - .config/dotnet-tools.json
       - .github/workflows/build-docs.yml
@@ -140,12 +142,18 @@ jobs:
           # domain, not under /latest/. (build-docs.sh emitted it into doc/_site, so a
           # copy also rides along under /latest/ — harmless; some agents probe both.)
           cp doc/_site/llms.txt _publish/llms.txt
+          cp doc/_site/llms-full.txt _publish/llms-full.txt   # llms.txt links to the full corpus at the root (#1585)
           echo "doc.typhondb.io" > _publish/CNAME
           printf '<!doctype html><meta charset="utf-8"><title>Typhon Documentation</title><meta http-equiv="refresh" content="0; url=/latest/"><a href="/latest/">Typhon Documentation</a>' > _publish/index.html
           # robots.txt must sit at the HOST root (crawlers only read /robots.txt); DocFX emits
           # sitemap.xml inside the site bundle, which lands under /latest/, so point there.
           printf 'User-agent: *\nAllow: /\n\nSitemap: https://doc.typhondb.io/latest/sitemap.xml\n' > _publish/robots.txt
           touch _publish/.nojekyll
+
+      # The assembled tree is what Pages serves: prove the host-root llms files are there and that every
+      # doc-site URL in the root llms.txt (its map AND the hand-authored preamble) resolves in it (#1585).
+      - name: Verify published llms files and their links
+        run: python3 scripts/gen-llms-txt.py --verify-publish _publish
 
       # v5, not v3: upload-pages-artifact is a composite that calls upload-artifact internally, and v3 still pins the
       # Node-20 v4 of it — which is what the runner's "Node.js 20 is deprecated" annotation was pointing at, even though

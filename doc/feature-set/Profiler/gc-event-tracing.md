@@ -33,7 +33,7 @@ Nothing to call — flip the config flag and the engine wires up the listener an
 
 ```csharp
 // typhon.telemetry.json next to your executable:
-// { "Typhon": { "Telemetry": { "Enabled": true }, "Profiler": { "Enabled": true, "GcTracing": { "Enabled": true } } } }
+// { "Typhon": { "Profiler": { "Enabled": true, "GcTracing": { "Enabled": true } } } }
 
 using Typhon.Engine;
 

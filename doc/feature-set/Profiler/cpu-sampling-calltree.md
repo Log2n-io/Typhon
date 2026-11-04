@@ -32,7 +32,6 @@ with click-to-source on every frame.
 // typhon.telemetry.json next to your executable — CPU sampling is opt-in, alongside its profiler siblings:
 // {
 //   "Typhon": {
-//     "Telemetry": { "Enabled": true },
 //     "Profiler": {
 //       "Enabled": true,
 //       "Trace": "session.typhon-trace",

@@ -15,7 +15,7 @@ When a component's persisted layout differs from the running application's struc
 
 ## ⚙️ How it works (in brief)
 
-`DatabaseEngine` exposes a standard .NET event, `OnMigrationProgress`, of type `EventHandler<MigrationProgressEventArgs>`. Subscribe to it before calling `RegisterComponent`/`RegisterComponentFromAccessor`/`RegisterComponentByType`; if that registration triggers a migration (compatible stride change, or a breaking change with a registered migration function), the engine raises one event per phase as it executes, on the same thread, before the registration call returns. Each event reports the component name, the current `MigrationPhase`, entity counts, percent complete, and elapsed time. If registration doesn't trigger a migration, no events fire.
+`DatabaseEngine` exposes a standard .NET event, `OnMigrationProgress`, of type `EventHandler<MigrationProgressEventArgs>`. Subscribe to it before calling `RegisterComponentFromAccessor`/`RegisterComponentByType`; if that registration triggers a migration (compatible stride change, or a breaking change with a registered migration function), the engine raises one event per phase as it executes, on the same thread, before the registration call returns. Each event reports the component name, the current `MigrationPhase`, entity counts, percent complete, and elapsed time. If registration doesn't trigger a migration, no events fire.
 
 ## 💻 Usage
 

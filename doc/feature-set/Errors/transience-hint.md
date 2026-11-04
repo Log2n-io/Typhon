@@ -15,7 +15,7 @@ When an operation fails, the caller's next move depends entirely on *why* it fai
 
 ## ⚙️ How it works (in brief)
 
-`TyphonException` declares `virtual bool IsTransient => false`. Subclasses override it only when retrying is actually meaningful: `TyphonTimeoutException` (and everything under it — lock timeouts, transaction timeouts, page-cache and WAL back-pressure) overrides it to `true`, since a timeout means a resource was busy, not broken. `ResourceExhaustedException` likewise overrides it to `true` — pools and bounded resources drain over time. Everything else (corruption, schema mismatches, unique-constraint violations, WAL write failures) keeps the `false` default: retrying changes nothing because the cause isn't time-dependent. The flag is purely informational — Typhon never reads it internally to drive a retry loop.
+`TyphonException` declares `virtual bool IsTransient => false`. Subclasses override it only when retrying is actually meaningful: `TyphonTimeoutException` (and everything under it — lock timeouts, transaction timeouts, page-cache and WAL back-pressure) overrides it to `true`, since a timeout means a resource was busy, not broken. `ResourceExhaustedException` likewise overrides it to `true` — pools and bounded resources drain over time (its `TransactionSequenceExhaustedException` subclass sets it back to `false`: the TSN counter never goes down). `BackupStoreLockedException` is transient too (another writer holds the store's lock). Everything else (corruption, schema mismatches, unique-constraint violations, WAL write failures) keeps the `false` default: retrying changes nothing because the cause isn't time-dependent. The flag is purely informational — Typhon never reads it internally to drive a retry loop.
 
 ## 💻 Usage
 
@@ -44,7 +44,7 @@ while (true)
 | Exception | `IsTransient` | Typical retry response |
 |---|---|---|
 | `TyphonTimeoutException` (lock, transaction, page-cache/WAL back-pressure) | `true` | Retry with backoff |
-| `ResourceExhaustedException` | `true` | Retry, or wait for the resource to drain |
+| `ResourceExhaustedException` | `true` (`false` for `TransactionSequenceExhaustedException`) | Retry, or wait for the resource to drain |
 | `StorageException`, `DurabilityException`, schema/`UniqueConstraintViolationException` | `false` | Don't retry — surface or escalate |
 | `ForeignKeyViolationException` | `ParentDying` | Dying parent: retry (its destroy may abort — once it commits, the retry is refused for good); destroyed: fix the reference or roll back |
 
@@ -52,7 +52,7 @@ while (true)
 
 - **Caller-owned retry, always** — the engine never loops on a failed transaction internally; it throws once and returns control. Retrying is entirely the caller's decision and implementation.
 - **Default is non-transient** — a new exception type that forgets to override `IsTransient` fails safe (no retry suggested) rather than encouraging callers to hammer a permanent failure.
-- **Only opt-in subclasses are transient** — `TyphonTimeoutException` and `ResourceExhaustedException` are the sole overrides today; the flag is fixed per exception type, not computed from runtime state.
+- **Only opt-in subclasses are transient** — `TyphonTimeoutException`, `ResourceExhaustedException` and `BackupStoreLockedException` override it to `true`; two types compute it from their state: `ForeignKeyViolationException` (`ParentDying`) and `BackupAbortedException` (`Reason` is a CBW stall, gate timeout or WAL flush timeout).
 - **Not a substitute for idempotency analysis** — `IsTransient == true` only means "the resource might be free now," not "it's safe to blindly retry your lambda." Side effects performed before the failure point (network calls, external writes) are never undone by a transaction retry; place them after `Commit()`.
 - **Zero runtime cost** — a single virtual property read (no allocation, no dictionary lookup); the type hierarchy itself is the classification, there's no separate `ErrorCategory` enum to keep in sync.
 

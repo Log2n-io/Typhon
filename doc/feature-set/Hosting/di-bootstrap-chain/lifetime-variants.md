@@ -51,7 +51,7 @@ services
     })
     .AddScopedDatabaseEngine(engineOpts => { /* ... */ });
 
-services.AddScoped<IWalFileIO>(_ => new InMemoryWalFileIO());   // scoped: fresh backend per scope
+services.AddScoped<IWalFileIO>(_ => new InMemoryWalFileIO());   // internal seam (test assemblies only): fresh WAL backend per scope
 
 var provider = services.BuildServiceProvider();
 

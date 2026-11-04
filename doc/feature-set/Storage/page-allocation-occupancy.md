@@ -22,7 +22,7 @@ A bitmap with one bit per file page tracks allocation, organized in three levels
 Allocation itself is an internal primitive — application code never calls `AllocatePage`/`FreePages` directly; every component table, index, and segment acquires pages through it transparently as you spawn entities and write components. The surface application code actually touches is read-only introspection over what the allocator has done:
 
 ```csharp
-// Audit storage-level invariants — safe to call at any time, no data-page I/O.
+// Audit storage-level invariants — read-only, safe to call at any time on a live engine.
 var report = db.RunStorageIntegrityCheck();
 if (!report.IsHealthy)
 {

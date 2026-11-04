@@ -24,9 +24,10 @@ threshold. It then calls `ResourceSnapshot.FindRootCause`, which walks a small h
 (e.g. `TransactionPool` waits on `WALRingBuffer`, which waits on `WALSegments`) and follows it through any
 upstream node that is *also* above the high-utilization bar, returning the resource at the end of that chain. This
 is architectural knowledge, not runtime wait tracking — it identifies the likely cause, not a measured one.
-`ResourceMetricsService` drives this on a timer: it takes a snapshot, computes overall health, and — only when the
-worst-of-all status **escalates** (Healthy→Degraded, Healthy→Unhealthy, Degraded→Unhealthy) — sweeps every
-degraded/unhealthy resource and raises one `AlertRaised` event per resource. Recovery transitions never raise
+`ResourceMetricsService` drives this on a timer: it takes a snapshot, computes health with `CheckHealth()` (the
+most-utilized resource against its threshold), raises `HealthStatusChanged` on any change, and — only when that status
+**escalates** (Healthy→Degraded, Healthy→Unhealthy, Degraded→Unhealthy) — sweeps every degraded/unhealthy resource and
+raises one `AlertRaised` event per resource. Recovery transitions never raise
 alerts, which keeps a flapping resource from generating an alert storm.
 
 ## 💻 Usage
@@ -55,7 +56,7 @@ ResourceAlert alert = generator.GenerateAlert(snapshot, "Root/DataEngine/Transac
 | Option | Default | Effect |
 |---|---|---|
 | `ObservabilityBridgeOptions.Thresholds["<path>"]` | unset (falls back to `HealthThresholds.Default`) | Per-path degraded/unhealthy bar used by both the alert generator and health checker |
-| `ResourceSnapshot.FindRootCause(path, threshold)` | `threshold = 0.8` | How high an upstream node's utilization must be to be accepted as the next link in the causal chain |
+| `ResourceSnapshot.FindRootCause(path, threshold)` | `threshold = 0.8` | How high an upstream node's utilization must be to be accepted as the next link in the causal chain (`GenerateAlert` passes the symptom's degraded threshold instead) |
 | `ObservabilityBridgeOptions.SnapshotInterval` | 5s | How often `ResourceMetricsService` re-checks health and can raise a new alert wave |
 
 ## ⚠️ Guarantees & limits
@@ -70,7 +71,7 @@ ResourceAlert alert = generator.GenerateAlert(snapshot, "Root/DataEngine/Transac
   back to `HealthThresholds.Default` (80%/95%) — unlike `ResourceHealthChecker`, it does **not** apply the built-in
   60%/80% critical defaults for `WALRingBuffer`/`TransactionPool`. Set those explicitly in `Thresholds` if you want
   alert severity to match the health check's stricter bar.
-- `ResourceAlert` carries only symptom/root-cause path, utilization, severity, and timestamp — no message text or
+- `ResourceAlert` carries only a one-line `Title`, symptom/root-cause path, utilization, severity, and timestamp — no
   cascading-effects list; format the notification payload from those fields at the integration boundary.
 - Reads the same cached `ResourceSnapshot` as metrics export and health checks — alert freshness is bounded by
   `SnapshotInterval`, not real time.

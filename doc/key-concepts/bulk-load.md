@@ -12,7 +12,7 @@ The normal [transaction](xref:concept-transaction) path is tuned for OLTP: every
 
 `BeginBulkLoad` opens a session over a single [unit of work](xref:concept-unit-of-work) and transaction, configured to write **no per-row WAL records**. Internally it recycles its transaction every few thousand operations so the page cache can keep evicting; the UoW itself stays open — and MVCC-invisible to everyone else — for the whole session. `CompleteBulkLoad()` is the single barrier that makes the load durable *and* visible: commit the last transaction, force a checkpoint, and wait for a closing manifest record to reach disk.
 
-> ⚠️ **All-or-nothing at *session* granularity.** Nothing you write is durable or visible until `CompleteBulkLoad()` returns — `Dispose` without it, or a crash mid-session, discards the entire load. It is also **exclusive** (one per engine) and **thread-affine**; `Update`/`Destroy` only reach entities spawned in the same session; and `CompleteBulkLoad` blocks on a real checkpoint cycle with no latency budget. Concurrent readers are unaffected throughout — they keep seeing the pre-bulk snapshot.
+> ⚠️ **All-or-nothing at *session* granularity.** Nothing you write is durable or visible until `CompleteBulkLoad()` returns — `Dispose` without it, or a crash mid-session, discards the entire load. It is also **exclusive** (one per engine) and **thread-affine**; `Update`/`Destroy` only reach entities spawned in the same session; and `CompleteBulkLoad` blocks on a real checkpoint cycle, bounded only by `BulkLoadOptions.CheckpointTimeout` (default 5 min; past it, `BulkLoadCheckpointTimeoutException`). Concurrent readers are unaffected throughout — they keep seeing the pre-bulk snapshot.
 
 ## How it relates
 

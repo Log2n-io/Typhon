@@ -35,8 +35,8 @@ tx.Commit();
 
 ## ⚠️ Guarantees & limits
 
-- **~1.3µs per 8KB page** on SSE4.2 x64 (hardware path); software fallback is roughly 6x slower — negligible relative to I/O latency either way.
-- Detects all single-bit and double-bit errors, and the large majority of multi-bit burst errors — standard error-detection properties of CRC32C.
+- **~670 ns per 8 KiB page** as one sequential chain on SSE4.2 x64 (measured, Zen 4); splitting the page into 16 independent 512-byte chains (the per-sector page footer) measures ~500 ns, because a single chain is latency-bound on the `crc32` instruction. The software fallback is much slower — still small next to I/O latency.
+- Detects every error of up to 3 bits over an 8 KiB block (Hamming distance 4) and up to 5 bits over a 512-byte block (HD 6), plus every burst of up to 32 bits — standard error-detection properties of CRC32C.
 - **Not cryptographic** — does not protect against intentional tampering, only accidental corruption. Not a threat model concern for an embedded database engine.
 - Same algorithm and code path checksums both page headers and WAL records, so storage and durability share one integrity guarantee.
 - Hardware acceleration requires SSE4.2 (x86, ubiquitous since 2008) or ARMv8-A; older hardware silently uses the slower software table with no behavior change.

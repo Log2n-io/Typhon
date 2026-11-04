@@ -25,12 +25,12 @@ This pipeline is engine-embedded: ~230 call sites across transactions, the B+Tre
 // typhon.telemetry.json (loaded from the working directory or the assembly directory at startup)
 // {
 //   "Typhon": {
-//     "Telemetry": { "Enabled": true, "Profiler": { "Enabled": true } }
+//     "Profiler": { "Enabled": true }
 //   }
 // }
 
-// No profiler code required — TyphonRuntime.Create self-wires capture + a default exporter
-// from that config file the moment the runtime is built.
+// No profiler code required — TyphonRuntime.Create self-wires capture + a default file exporter (a capture in the
+// database bundle's profilings/ directory) from that config file the moment the runtime is built.
 var runtime = TyphonRuntime.Create(dbe, schedule =>
 {
     schedule.PublicTrack.DeclareDag("Sim").CallbackSystem("Tick", ctx => RunGameLogic(ctx));

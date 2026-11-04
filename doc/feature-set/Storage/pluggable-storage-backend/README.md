@@ -25,7 +25,7 @@ drifting. The pluggable storage backend lets one implementation serve both cases
 fully specialized copy of `LogicalSegment<TStore>`, `ChunkBasedSegment<TStore>`, `ChunkAccessor<TStore>`,
 `BTree<TKey, TStore>`, etc. per concrete backend, with zero virtual dispatch. Two backends ship in-tree:
 `PersistentStore`, a one-line forwarding wrapper around the page cache, and `TransientStore`,
-a heap-only store backed by pinned memory blocks. `typeof(TStore)` checks in hot paths (e.g. dirty tracking)
+a memory-only store backed by pinned native-memory blocks. `typeof(TStore)` checks in hot paths (e.g. dirty tracking)
 are constant-folded per specialization, so a `TransientStore` build of `ChunkAccessor` literally has no dirty-
 tracking instructions left in it — not a cheap no-op call, an absent one.
 
@@ -34,7 +34,7 @@ tracking instructions left in it — not a cheap no-op call, an absent one.
 | Sub-feature | Backs | Use it for |
 |-------------|-------|-----------|
 | [Persistent Store (page-cache-backed)](./persistent-store.md) | `StorageMode.Versioned` / `SingleVersion` | Any durable component — the default path, selected automatically |
-| [Transient Store (heap-backed)](./transient-store.md) | `StorageMode.Transient` | Scratch data with `StorageMode.Transient` — tune via `TransientOptions` |
+| [Transient Store (native-memory)](./transient-store.md) | `StorageMode.Transient` | Scratch data with `StorageMode.Transient` — tune via `TransientOptions` |
 
 ## ⚠️ Guarantees & limits
 
@@ -55,6 +55,6 @@ tracking instructions left in it — not a cheap no-op call, an absent one.
 ## 🔗 Related
 
 - Related feature: [Storage Modes](../../Ecs/storage-modes/README.md) — the component-level decision this backend split exists to serve
-- Sub-features: [Persistent Store (page-cache-backed)](./persistent-store.md), [Transient Store (heap-backed)](./transient-store.md)
+- Sub-features: [Persistent Store (page-cache-backed)](./persistent-store.md), [Transient Store (native-memory)](./transient-store.md)
 
 <!-- Deep dive: claude/design/Storage/PageCache/08-page-stores.md, claude/design/Storage/StorageModeGuide.md -->

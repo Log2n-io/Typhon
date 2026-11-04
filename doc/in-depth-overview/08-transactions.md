@@ -192,7 +192,7 @@ One instance per `DatabaseEngine`. Owns the live set of `Transaction`s, the glob
 
 ### 4.1 Structure — **singly-linked Head → Tail with `Next` pointer**
 
-Yes, singly-linked — the code has only `Transaction.Next`. New transactions are prepended at Head; the Tail is the oldest live transaction. `MinTSN = Tail.TSN` — this is the visibility horizon: no live transaction can be reading at a snapshot older than `MinTSN`, so revisions with `DeadTSN < MinTSN` are unreachable and can be cleaned up.
+Yes, singly-linked — the code has only `Transaction.Next`. New transactions are prepended at Head; the Tail is the oldest live transaction. `MinTSN = Tail.TSN` — this is the visibility horizon: no live transaction can be reading at a snapshot older than `MinTSN`, so revisions superseded before `MinTSN` are unreachable and can be cleaned up.
 
 ```
        newest                                       oldest

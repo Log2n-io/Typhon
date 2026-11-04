@@ -24,10 +24,12 @@ an application developer (or their auditor) can actually go read.
 
 Three artifacts, each covering a different failure mode. **Invariant rules** (`rules/durability.md`) are a
 curated, numbered database of pseudo-code predicates grouped by module — `LOG` (log format/append), `AP` (commit
-pipeline / apply), `CK` (checkpoint), `RB` (rebuild), `CM` (Committed discipline) — each naming the source files
+pipeline / apply), `CK` (checkpoint), `RB` (rebuild), `CM` (Committed discipline), plus `CHAIN`, `BKP` (online backup), `IR` (offline
+integrity check) and others — each naming the source files
 that enforce it and the test(s) that verify it. **TLA+ specifications** (`rules/tla/`) model the checkpoint protocol, the commit/recovery protocol, and
-Committed discipline's stage/append/publish race against checkpoint as state machines (S1–S3) and exhaustively
-check them with TLC over every crash-at-any-step interleaving within small bounds; each spec ships a
+Committed discipline's stage/append/publish race against checkpoint as state machines (S1–S3) — and, beside them,
+the commit-stamp visibility protocol (`CommitStamp.tla`, `CommitStampFamilies.tla`), online backup capture
+(`BackupCapture.tla`) and WAL archiving (`WalArchive.tla`) — and exhaustively check them with TLC over every crash-at-any-step interleaving within small bounds; each spec ships a
 deliberately-broken "mutant" variant that TLC must report as a violation, so a vacuously-green spec can't hide. **The crash-simulation sweep**
 (`WalCrashSweepTests` + the differential recovery oracle) actually runs workloads against a fault-injecting I/O
 layer, crashes at every WAL/checkpoint boundary, reopens through the real recovery path, and compares the result
@@ -71,7 +73,8 @@ var engine = serviceProvider.GetRequiredService<DatabaseEngine>();   // throws C
 - **Every `[fatal]`/`[silent]` rule has a named, live test** — the rule database and the test suite are
   cross-referenced; a rule with no verifying test is a tracked gap, not an assumption.
 - **TLA+ specs are exhaustive within their bounds, not sampled** — `CheckpointProtocol.tla` (S1),
-  `CommitRecovery.tla` (S2), and `CommittedDiscipline.tla` (S3) each check every reachable state of the modeled
+  `CommitRecovery.tla` (S2), `CommittedDiscipline.tla` (S3) and the later commit-stamp, backup-capture and
+  WAL-archive specs each check every reachable state of the modeled
   protocol (≤3 pages, ≤2 transactions, crash-at-any-step), including crash-during-recovery and re-run scenarios a
   hand-written test would rarely hit.
 - **Genuineness is checked, not assumed** — every spec ships a mutant variant with one guard deliberately broken;

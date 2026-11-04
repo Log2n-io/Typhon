@@ -11,7 +11,7 @@ description: 'One cache-aligned B+Tree node layout per key width, picked automat
 
 ## 🎯 What it solves
 
-Every indexed field — primary key or secondary index — needs an ordered, concurrent lookup structure, but indexed key types span an 8×-wide range (1-byte `byte` up to 64-byte `String64`). A single one-size-fits-all B+Tree would either waste node space on narrow keys (fewer keys per cache-line-sized node, deeper trees, more cache misses) or be unable to address wide keys at all. Typhon avoids this by giving each key-width tier its own specialized tree implementation, so a `byte`-keyed index and a `long`-keyed index both get a node layout packed for their key size, without the application ever picking one.
+Every indexed field needs an ordered, concurrent lookup structure, but indexed key types span an 8×-wide range (1-byte `byte` up to 64-byte `String64`). A single one-size-fits-all B+Tree would either waste node space on narrow keys (fewer keys per cache-line-sized node, deeper trees, more cache misses) or be unable to address wide keys at all. Typhon avoids this by giving each key-width tier its own specialized tree implementation, so a `byte`-keyed index and a `long`-keyed index both get a node layout packed for their key size, without the application ever picking one.
 
 ## ⚙️ How it works (in brief)
 
@@ -58,7 +58,7 @@ foreach (var entry in found)
 - Node capacity scales inversely with key width (38 → 29 → 19 → 4), so narrower-keyed indexes pack more entries per node and produce shallower trees for the same entry count.
 - `String64` keys are fixed at 64 bytes; there is no variable-length string index.
 - Persistent vs. transient backing follows the owning table's storage discipline (`Versioned`/`SingleVersion` = durable, `Transient` = in-memory) — not independently selectable per index.
-- Schema evolution that changes an indexed field's type invalidates previously-resolved `IndexRef`s (`CapturedLayoutVersion` check); re-resolve via `GetIndexRef`/`GetPKIndexRef`.
+- Schema evolution that changes an indexed field's type invalidates previously-resolved `IndexRef`s (layout-version check); re-resolve via `GetIndexRef`.
 
 ## 🧪 Tests
 

@@ -61,11 +61,16 @@ Type `help` for the authoritative list. The primary groups:
 | Group | Commands | Notes |
 |-------|----------|-------|
 | **Database** | `open <path>`, `close`, `info` | `open` creates the file if it doesn't exist. |
-| **Schema** | `load-schema <path>`, `reload-schema`, `schema`, `describe <component>` | Assemblies are additive; `describe` shows the field/byte layout. |
+| **Schema** | `load-schema <path>`, `reload-schema`, `schema-list`, `describe <component>`, `schema-fields`, `schema-diff`, `schema-validate`, `schema-history`, `schema-export` | Assemblies are additive; `describe` shows the field/byte layout. |
 | **Transaction** | `begin`, `commit`, `rollback` | Explicit by default (`auto-commit` is off — a safety net for interactive use). |
-| **Data (CRUD)** | `create [#id] <comp> { … }`, `read <id> <comp>`, `update <id> <comp> { … }`, `delete <id> <comp>` | Component name always required on read/delete. Requires an active transaction. |
-| **Diagnostics** | `cache-stats`, `btree`, `btree-validate`, `mvcc-stats`, `revisions`, `memory`, `transactions` | In-process engine internals; several are JSON/CI probes (`--format json`). |
+| **Data (CRUD)** | `create [#id] <comp> { … }`, `read <id> <comp>`, `update <id> <comp> { … }`, `delete <id> <comp>` | Component name always required on read/delete. Mutations require an active transaction (or `set auto-commit on`); `read` does not. |
+| **Diagnostics** | `db-stats`, `cache-stats`, `btree`, `btree-dump`, `btree-validate`, `mvcc-stats`, `revisions`, `memory`, `resources`, `transactions`, `stats-show`, `stats-rebuild` | In-process engine internals; several are JSON/CI probes (`--format json`). |
 | **GUI** | `typhon ui [database]` | Launch the [Workbench](../workbench/index.md). |
+
+Besides the REPL, `typhon` has verbs that run outside it: `typhon new <name>` (scaffold a starter project), `typhon docs [path]` (open the
+docs site), `typhon check <bundle>` (read-only integrity check, verdict in the exit code), `typhon repair <bundle> --plan|--apply`,
+`typhon backup create|list|verify|restore|log|status|compact|drill|prune`, and `typhon telemetry …` (author `typhon.telemetry.json`).
+Run `typhon <verb> --help` for each one's options.
 
 Example session:
 

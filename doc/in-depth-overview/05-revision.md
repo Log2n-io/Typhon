@@ -43,7 +43,7 @@ Why it matters for performance: the read path is **lock-free in the common singl
 
 ## 2. Revision element layout
 
-[`Ecs/public/ComponentTable.cs:89`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ComponentTable.cs)
+[`Ecs/public/ComponentTable.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ComponentTable.cs)
 
 ```csharp
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
@@ -124,7 +124,7 @@ internal static unsafe void AddCompRev(
 }
 ```
 
-The caller is `Transaction.UpdateComponent` / `Transaction.DestroyComponent` / `Transaction.ECS.cs` (the spawn path). It reads `UowId => OwningUnitOfWork?.UowId ?? 0` from the current `UnitOfWork` ([01-foundation](01-foundation.md) — `UnitOfWorkContext`, [08-transactions](08-transactions.md) §UowRegistry).
+The caller is `ComponentRevisionManager.AddCompRev`, reached from the transaction's write paths in `Transaction.ECS.cs` (first mutation, tombstone for a destroy, spawn) and from commit-time conflict resolution in `Transaction.cs`. It reads `UowId => OwningUnitOfWork?.UowId ?? 0` from the current `UnitOfWork` ([01-foundation](01-foundation.md) — `UnitOfWorkContext`, [08-transactions](08-transactions.md) §UowRegistry).
 
 At commit time the only Revision-layer mutation is **clearing the IsolationFlag** (and updating `LastCommitRevisionIndex` on the chain header) — the UowId is already there from the write. There is no second pass that walks the chain and stamps UowIds.
 
@@ -200,7 +200,7 @@ After this, the writing transaction can see its own change (it caches `CurCompCo
 
 - An uncommitted entry (`IsolationFlag = true`) is **invisible to every reader except its own writer**. The writer doesn't walk the chain to see its own writes — it uses the cached `CurCompContentChunkId` directly.
 - Cleanup **must not touch a chunk referenced by an `IsolationFlag = true` element**: that chunk's data still belongs to the writing transaction. The skip-phase logic in `CleanUpUnusedEntriesCore` explicitly tests `!enumerator.Current.IsolationFlag` before considering an entry for compaction (line 256).
-- At commit, the per-component commit step (`Transaction.CommitComponentCore`) acquires the chain lock if a conflict handler is provided, runs `DetectAndResolveConflict`, possibly calls `RelocateRevisionEntry` to push the entry past `LastCommitRevisionIndex`, then **clears `IsolationFlag`** on the entry and updates `LastCommitRevisionIndex` on the header. The element is now visible to any reader with TSN ≥ this revision's TSN.
+- At commit, the per-component commit step (`Transaction.CommitComponentCore`) acquires the chain lock if a conflict handler is provided, runs `DetectAndResolveConflict`, possibly resolves the conflict under the chain lock (`ResolveConflictUnderLock`), appending a new revision past `LastCommitRevisionIndex`, then **clears `IsolationFlag`** on the entry and updates `LastCommitRevisionIndex` on the header. The element is now visible to any reader with TSN ≥ this revision's TSN.
 
 <a href="assets/typhon-data-mvcc-write.svg">
   <img src="assets/typhon-data-mvcc-write.svg" width="1200" alt="MVCC write path">
@@ -249,7 +249,7 @@ Per-entity sorted list of `(changeTSN, oldBits)` pairs. `ResolveAt(txTsn, curren
 
 Entries are pruned when `MinTSN` advances past their `changeTSN` (no active transaction needs them anymore). The dictionary itself is removed when its history becomes empty. A high-water-mark warning fires once if `_overrideCount` exceeds 10,000 — usually a sign that a stale long-running transaction is blocking cleanup.
 
-This is structurally separate from the revision chain because EnabledBits is so much cheaper to track (16 bits per entity) that maintaining a full chain for it would be wasteful — the override dictionary is empty almost always, populated only during the window between an `EnableComponent`/`DisableComponent` commit and the moment older transactions complete.
+This is structurally separate from the revision chain because EnabledBits is so much cheaper to track (16 bits per entity) that maintaining a full chain for it would be wasteful — the override dictionary is empty almost always, populated only during the window between an `EntityRefMut.Enable<T>` / `Disable<T>` commit and the moment older transactions complete.
 
 ---
 
@@ -299,7 +299,7 @@ The static orchestrator for everything above. Not a class you instantiate — a 
 Called by:
 
 - `Transaction.ECS.cs` — `OpenMut(id).Set<T>(...)` and `Destroy(id)` paths, **at the moment of mutation**.
-- `Transaction.cs` — `DetectAndResolveConflict` and `RelocateRevisionEntry` (commit-time conflict resolution; these append *additional* entries to handle write-write races, not the original write).
+- `Transaction.cs` — `DetectAndResolveConflict` and `ResolveConflictUnderLock` (commit-time conflict resolution; these append *additional* entries to handle write-write races, not the original write).
 - *(Crash recovery does **not** go through `AddCompRev`: `RecoveryApplier` in `Durability/internals/` rebuilds committed chain roots directly via `ComponentRevisionManager.AllocCompRevStorage`.)*
 
 **Not called at commit.** The commit step (`Transaction.CommitComponentCore`) clears `IsolationFlag` on already-stamped entries and updates `LastCommitRevisionIndex` on the chain header. The TSN on the entry was set when the mutation happened; the UowId likewise. If a commit needs to *insert* additional entries (because of conflict resolution), that goes through `AddCompRev` too — but the original user-driven mutation already wrote its entry well before the commit started.

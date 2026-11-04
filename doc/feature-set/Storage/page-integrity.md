@@ -15,7 +15,7 @@ An 8 KiB page spans two 4 KB device blocks; on commodity NVMe an 8 KiB write is 
 
 ## ⚙️ How it works (in brief)
 
-Every page header carries a CRC32C checksum (`PageChecksum`) computed over the whole page except the checksum field itself, verified lazily the first time a page is touched after load. The checkpoint also needs to copy a page that a transaction might be mid-write on without blocking either side: a seqlock counter (`ModificationCounter`) is bumped odd→even around every exclusive-latched write, and the checkpoint's snapshot copy retries if the counter changed or was odd during the copy — so the copy it CRCs and persists is always self-consistent. For the structural pages that can't be derived-and-rebuilt (the root meta page, segment directory pages), a third mechanism — A/B slot pairing — keeps two physical copies and always writes to the *other* one, bumping a generation counter; the currently-valid slot is never touched, so a torn write can never destroy the only good copy.
+Every page carries CRC32C protection, verified lazily the first time a page is touched after load. A page whose segment declared sector geometry at initialisation (chunk-segment data pages with room in their metadata region) carries a per-sector footer: up to 16 `{CRC32C, generation}` pairs, one per 512-byte sector, and its header `PageChecksum` becomes a CRC over that footer — damage is localised to a sector, and the generation stamps catch a torn write whose stale sectors still checksum correctly. Other pages (including every A/B-paired page) keep one CRC32C over the whole page except the checksum field itself. Every page written also has its own logical page index stamped in the header, so the offline integrity checker can detect a misdirected write (a valid page at the wrong offset). The checkpoint also needs to copy a page that a transaction might be mid-write on without blocking either side: a seqlock counter (`ModificationCounter`) is bumped odd→even around every exclusive-latched write, and the checkpoint's snapshot copy retries if the counter changed or was odd during the copy — so the copy it CRCs and persists is always self-consistent. For the structural pages that can't be derived-and-rebuilt (the root meta page, segment directory pages), a third mechanism — A/B slot pairing — keeps two physical copies and always writes to the *other* one, bumping a generation counter; the currently-valid slot is never touched, so a torn write can never destroy the only good copy.
 
 ## 💻 Usage
 
@@ -50,14 +50,14 @@ catch (PageCorruptionException ex)
 
 | Option | Default | Effect |
 |---|---|---|
-| `ResourceOptions.PageChecksumVerification` | `OnLoad` | `OnLoad` verifies CRC on every cold page load (~0.4 µs/page, hardware CRC32C); `RecoveryOnly` skips it in normal operation and verifies only during crash recovery |
+| `ResourceOptions.PageChecksumVerification` | `OnLoad` | `OnLoad` verifies CRC on every cold page load (~0.5–0.7 µs/page, hardware CRC32C); `RecoveryOnly` skips it in normal operation and verifies only during crash recovery |
 
 A third mode, `RecoverySuspect`, exists only on the crash-recovery path — the engine switches into it automatically while replaying and restores the configured mode once recovery completes; it is not a setting application code chooses.
 
 ## ⚠️ Guarantees & limits
 
 - Every page's CRC32C is checked the first time it's accessed after a cold load (`OnLoad` mode, the default); a mismatch outside of recovery throws `PageCorruptionException` rather than silently serving torn bytes.
-- CRC32C is hardware-accelerated (SSE4.2/ARMv8 CRC32 instruction) — roughly 0.4 µs per 8 KiB page; `RecoveryOnly` mode trades that cold-load cost away when an application is willing to defer all detection to crash recovery.
+- CRC32C is hardware-accelerated (SSE4.2/ARMv8 CRC32 instruction) — roughly 0.7 µs per 8 KiB page as one chain, ~0.5 µs as 16 independent sector chains; `RecoveryOnly` mode trades that cold-load cost away when an application is willing to defer all detection to crash recovery.
 - The checkpoint never persists a torn snapshot of a page being concurrently written: the seqlock retry loop guarantees the copy it checksums and writes is from a single consistent write, not a half-old/half-new blend.
 - Derived structures (secondary indexes, occupancy bitmap) are never repaired in place on a CRC failure — they're discarded and rebuilt from primary data during recovery; this is intentionally simpler and cheaper than per-page repair.
 - The structural pages that *can't* be rebuilt (root meta, segment directories) are protected by A/B pairing instead: a torn write can corrupt only the non-current slot, so the currently-valid copy always survives. If *both* slots of a pair are CRC-invalid, the open fails loudly rather than silently picking a corrupt one — **except** on the crash path for a segment *root* page at `PairGeneration` 1: both slots invalid at generation 1 means the pair's first persist tore before completing, so the root never held a durable copy. The engine treats it as a root never written and replaces the segment from the WAL window; a root at any other generation, a map-extension page, and any page on the clean-open path still fail loudly.
@@ -67,6 +67,7 @@ A third mode, `RecoverySuspect`, exists only on the crash-recovery path — the 
 ## 🧪 Tests
 
 - [PageCrcVerificationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/PageCrcVerificationTests.cs) — `OnLoad` vs `RecoveryOnly` verification modes, `PageCorruptionException` on a genuine mismatch
+- [PageSectorFooterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Integrity/PageSectorFooterTests.cs) — per-sector footer: `ByteFlipInOneSector_CondemnsOnlyThatSector`, `StaleSectorFromAPreviousGeneration_IsCaughtEvenThoughItsChecksumPasses`
 - [SeqlockProtocolTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/SeqlockProtocolTests.cs) — `ModificationCounter` odd/even latch protocol, checkpoint snapshot consistency under concurrent writers
 - [DirectoryPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Storage/DirectoryPairTests.cs) — A/B slot pairing for segment-directory pages: torn-slot reopen selects the sibling, both-slots-corrupt fails loudly
 - [MetaPairTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/MetaPairTests.cs) — the same A/B pairing guarantees applied to the root meta page

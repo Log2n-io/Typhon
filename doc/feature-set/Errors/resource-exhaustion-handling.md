@@ -21,15 +21,11 @@ Each bounded resource is tagged with an `ExhaustionPolicy` — `FailFast`, `Wait
 ## 💻 Usage
 
 ```csharp
-var options = new DatabaseEngineOptions
-{
-    Resources = new ResourceOptions
-    {
-        MaxActiveTransactions = 200,   // FailFast beyond this
-    }
-};
+services.AddTyphon(o => o
+    .DatabaseFile("GameWorld.typhon")
+    .ConfigureEngine(e => e.Resources.MaxActiveTransactions = 200));   // FailFast beyond this
 
-using var dbe = new DatabaseEngine(options);
+var dbe = services.BuildServiceProvider().GetRequiredService<DatabaseEngine>();
 
 try
 {

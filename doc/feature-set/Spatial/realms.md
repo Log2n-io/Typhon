@@ -129,7 +129,7 @@ dag.QuerySystem("BarOrders", ctx => { /* … */ }, input: () => patrons, changeF
 - **Limits.** The realm set is fixed at declaration (ids, not a predicate): a system for "every dungeon" names the dungeons' ids up front. Tier
   assignment through `TickContext.SpatialGrid` is realm 0's grid only; other realms' cells keep their tiers. Realm ids are
   `ushort`s below `MaxRealms` (0xFFFF is "no realm"). `[RealmKey]` is one `ushort` per archetype, on a SingleVersion component, without `[Index]`.
-  The per-archetype spatial telemetry event is one per archetype, not per realm.
+  The per-archetype spatial telemetry event is one per archetype; per-realm shape comes in a separate per-realm record ([Reading Spatial Telemetry](spatial-telemetry.md)).
 
 ## 🧪 Tests
 

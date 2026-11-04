@@ -69,7 +69,9 @@ game.QuerySystem("IdleDrift", ctx =>
 - Filtering operates on cluster lists, never per-entity — a tier-filtered system's chunk partition is
   built only over its tier's clusters, with zero scanning of clusters outside the filter.
 - `Build()`-time validation rejects `SimTier.None` (would dispatch zero clusters), `CellAmortize > 0`
-  without a non-`All` tier filter, and tier filters on system types other than `QuerySystem`.
+  without a non-`All` tier filter, `CellAmortize > 0` combined with a change filter (it would drop the
+  changes of every cluster outside the current bucket), and tier filters on system types other than
+  `QuerySystem`.
 - `CellAmortize` skips whole untouched clusters between buckets — it is bucket rotation, not per-entity
   modulo, so the 59/60 you skip in a tick are never iterated, not iterated-and-ignored.
 - Multi-tier flag combinations (e.g. `SimTier.Near`, `SimTier.Active`) are merged once per rebuild and

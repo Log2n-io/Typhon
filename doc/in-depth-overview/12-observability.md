@@ -10,7 +10,7 @@ description: 'Typhon''s observability story is not "scatter Activity spans every
 
 Typhon's observability story is *not* "scatter `Activity` spans everywhere and let an OTel exporter sort it out." That model puts an unconditional method call on every hot path and bets the runtime can elide it cheaply enough. Typhon takes the other side of that bet. The hot paths emit **typed events** through a producer pipeline that the JIT can dead-code-eliminate at Tier-1 compilation — when the relevant gate is off, the call site folds to nothing, and the engine pays zero CPU for telemetry it isn't using.
 
-Two things make this possible: (1) every gate is a `public static readonly bool` initialized once at class-load from configuration, and (2) every typed event's `Begin*Event` factory has the gate check as its first instruction. That's all it takes — the JIT does the rest.
+Two things make this possible: (1) every gate is a `public static readonly bool` initialized once at class-load from configuration, and (2) every typed event's `Begin*` factory has the gate check as its first instruction. That's all it takes — the JIT does the rest.
 
 The catch: turning telemetry on/off requires a process restart (gates are baked at JIT time). That's the deal Typhon makes on purpose. You decide *at deployment time* what you want to observe; the running process pays nothing for the rest. Hosts that need dynamic toggling layer their own runtime-gated logging on top — the engine doesn't pretend to.
 
@@ -28,8 +28,8 @@ The observability surface is a single pipeline:
 
 | Layer | What it is |
 |---|---|
-| **Gate flags** | ~200 `public static readonly bool XxxActive` in [`TelemetryConfig`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryConfig.cs). JIT folds disabled branches to no-ops. |
-| **Typed events** | Engine call sites call `TyphonEvent.Begin*Event(...)` / `TyphonEvent.Emit*(...)`. Each event is a `ref struct` carrying its payload; `Dispose` publishes the record. |
+| **Gate flags** | ~240 `public static readonly bool` gates (`XxxActive`, plus a few `XxxEnabled`) in [`TelemetryConfig`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryConfig.cs). JIT folds disabled branches to no-ops. |
+| **Typed events** | Engine call sites call `TyphonEvent.Begin*(...)` / `TyphonEvent.Emit*(...)`. Each event is a `ref struct` carrying its payload; `Dispose` publishes the record. |
 | **Wire encoding** | Records land in a per-thread SPSC ring buffer (1 MB SOA). A consumer thread drains, compresses, and hands off to exporters. |
 | **Exporters** | File (`.typhon-trace`), TCP (live stream), and OTel meters for resource-graph metrics. |
 | **Workbench viewer** | TypeScript SPA reading either a trace file (via the Workbench server) or a live TCP stream (proxied through SSE). |
@@ -42,7 +42,7 @@ A note on `Activity`: `TyphonActivitySource` exists in the public surface, but t
 
 [`Observability/public/TelemetryConfig.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TelemetryConfig.cs)
 
-A static class holding ~200 `public static readonly bool XxxActive` flags. Each one resolves at class-load time from `typhon.telemetry.json` + environment variables, then never changes. The `static readonly` qualifier is load-bearing — it's what lets the JIT treat `if (TelemetryConfig.XxxActive) { ... }` as dead code when `XxxActive` is false at Tier-1 compilation.
+A static class holding ~240 `public static readonly bool` gates (`XxxActive`, plus a few `XxxEnabled`) flags. Each one resolves at class-load time from `typhon.telemetry.json` + environment variables, then never changes. The `static readonly` qualifier is load-bearing — it's what lets the JIT treat `if (TelemetryConfig.XxxActive) { ... }` as dead code when `XxxActive` is false at Tier-1 compilation.
 
 ### Naming convention — subsystem-prefixed
 
@@ -55,8 +55,8 @@ Every flag follows `<Subsystem><Detail>Active`. There are ~30 subsystem prefixes
 | Scheduler / Runtime | `SchedulerSystemCompletionActive`, `SchedulerWorkerBetweenTickActive`, `SchedulerOverloadLevelChangeActive`, `RuntimePhaseUoWFlushActive`, `RuntimeTransactionLifecycleActive`, `RuntimeWriteTickFenceTableActive`, `RuntimeThreadSchedulingActive` |
 | Storage / Memory | `StoragePageCacheActive`, `StoragePageCacheDirtyWalkActive`, `StorageSegmentGrowActive`, `MemoryAlignmentWasteActive` |
 | Data plane | `DataTransactionActive`, `DataTransactionPrepareActive`, `DataMvccChainWalkActive`, `DataIndexBTreeActive`, `DataIndexBTreeSearchActive`, `DataIndexBTreeNodeCowActive` |
-| Query / ECS | `QueryParseActive`, `QueryExecuteIterateActive`, `EcsQueryConstructActive`, `EcsViewIncrementalDrainActive`, `EcsViewDeltaBufferOverflowActive` |
-| Durability | `DurabilityWalOsWriteActive`, `DurabilityWalGroupCommitActive`, `DurabilityCheckpointWriteBatchActive`, `DurabilityRecoveryFpiActive`, `DurabilityUowStateActive` |
+| Query / ECS | `QueryParseDnfActive`, `QueryExecuteIterateActive`, `EcsQueryConstructActive`, `EcsViewIncrementalDrainActive`, `EcsViewDeltaBufferOverflowActive` |
+| Durability | `DurabilityWalOsWriteActive`, `DurabilityWalGroupCommitActive`, `DurabilityCheckpointWriteBatchActive`, `DurabilityRecoveryRedoActive`, `DurabilityUowStateActive` |
 
 The full prefix is mandatory at the call site — there is no `AccessControlActive`. It's always `ConcurrencyAccessControlActive`. Same for `StoragePageCacheActive` (not `PagedMMFActive`), `DataIndexBTreeActive` (not `BTreeActive`), `DataTransactionActive` (not `TransactionActive`).
 
@@ -132,10 +132,12 @@ Every instrumented subsystem calls one of two patterns:
 
 ```csharp
 // Span — Begin returns a ref struct, Dispose publishes
-using (TyphonEvent.BeginTransactionCommitEvent(tsn, componentCount: n)) { /* work */ }
+var scope = TyphonEvent.BeginTransactionCommit(tsn);   // optional fields are settable: scope.ComponentCount = n;
+/* work */
+scope.Dispose();
 
 // Instant — single Emit call
-TyphonEvent.EmitConcurrencyAccessControlContention(threadId);
+TyphonEvent.EmitConcurrencyAccessControlContention();
 ```
 
 Both factories start with the same prologue:
@@ -186,11 +188,11 @@ Total declared kinds: **235**.
 
 ### Per-kind suppression deny-list
 
-[`TyphonEvent.cs:68-99`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) — a `bool[256]` indexed by `TraceEventKind`. When entry is true, `BeginPrologue` short-circuits even if the gate is on. Reserved for truly extreme-frequency kinds (≥10⁵/sec on realistic workloads — `PageCacheFetch`, `DataMvccChainWalk`, `DataIndexBTreeSearch`, `EcsViewProcessEntry`, `DurabilityWalFrame`, …). Diagnostic-grade kinds (per-tick, per-UoW) are gated solely by their JSON category. Operators flip via `TyphonEvent.UnsuppressKind(kind)` for ad-hoc deep-diving.
+[`TyphonEvent.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/TyphonEvent.cs) — a `bool[256]` indexed by `TraceEventKind`. When entry is true, `BeginPrologue` short-circuits even if the gate is on. Reserved for truly extreme-frequency kinds (≥10⁵/sec on realistic workloads — `PageCacheFetch`, `DataMvccChainWalk`, `DataIndexBTreeSearch`, `EcsViewProcessEntry`, `DurabilityWalFrame`, …). Diagnostic-grade kinds (per-tick, per-UoW) are gated solely by their JSON category. Operators flip via `TyphonEvent.UnsuppressKind(kind)` for ad-hoc deep-diving.
 
 ### Per-thread ring buffer — 1 MB SOA
 
-[`ThreadSlotRegistry.cs:54`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ThreadSlotRegistry.cs)
+[`ThreadSlotRegistry.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Profiler/internals/ThreadSlotRegistry.cs)
 
 ```csharp
 private const int DefaultBufferCapacity = 1 * 1024 * 1024;  // 1 MB per slot
@@ -243,7 +245,7 @@ Every record starts with the **common header** (12 B, little-endian):
 | 3 | `u8 ThreadSlot` | Producer slot index (0..255). |
 | 4..11 | `i64 StartTimestamp` | `Stopwatch.GetTimestamp()` at Begin (span) or Emit (instant). |
 
-For span records (kind ≥ 10 with carve-outs per `TraceEventKindExtensions.IsSpan` — see [`TraceEventKind.cs:1062`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceEventKind.cs)), a **span header extension** (25 B) follows:
+For span records (kind ≥ 10 with carve-outs per `TraceEventKindExtensions.IsSpan` — see [`TraceEventKind.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceEventKind.cs)), a **span header extension** (25 B) follows:
 
 | Offset | Field | Notes |
 |---|---|---|
@@ -274,7 +276,7 @@ Init + FileTable + SourceLocationManifest are sent once during the handshake. Af
 
 ### `Chunker` version — v16
 
-[`TraceFileCache.cs:553`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileCache.cs):
+[`TraceFileCache.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileCache.cs):
 
 ```csharp
 public const ushort CurrentChunkerVersion = 16;
@@ -282,7 +284,7 @@ public const ushort CurrentChunkerVersion = 16;
 
 The chunker version stamps the Workbench-side cache. It is bumped on any change that affects how records fold into the on-disk cache: new sections, or a change in decode semantics.
 
-The trace **file** format also has its own version — [`TraceFileHeader.cs:149`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileHeader.cs):
+The trace **file** format also has its own version — [`TraceFileHeader.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileHeader.cs):
 
 ```csharp
 public const ushort CurrentVersion = 11;  // Track→DAG partitioning
@@ -353,7 +355,7 @@ The Workbench reads trace files through a **sidecar cache** (`.typhon-trace-cach
 - Cross-thread roll-ups (span trees, queue rollups, system-archetype touches).
 - Static-structure tables (schema, archetypes, indexes, resource graph) lifted out of the trace file.
 
-The cache's `ChunkerVersion` is independent of the trace-file version. Mismatched chunker versions trigger a rebuild — see `TraceFileCacheReader.cs:316` for the reject path.
+The cache's `ChunkerVersion` is independent of the trace-file version. Mismatched chunker versions trigger a rebuild — see `TraceFileCacheReader.cs` for the reject path.
 
 ### CPU sampling integration
 
@@ -408,7 +410,6 @@ Separate from the typed-event pipeline — this is **resource-graph metrics** fl
 | [`EcsMetricsExporter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) | Separate exporter for ECS-specific gauges (per-archetype entity counts, etc.). |
 | [`ResourceHealthChecker`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceHealthChecker.cs) | Implements `ITyphonHealthCheck` against `ResourceMetricsExporter`'s snapshot + threshold config. |
 | [`ResourceAlertGenerator`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/ResourceAlertGenerator.cs) | Promotes snapshot anomalies into structured alerts (Severity / SymptomPath / RootCausePath / Timestamp). |
-| [`TraceIdEnricher`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/TraceIdEnricher.cs) | Serilog enricher that copies `Activity.Current.TraceId/SpanId` into log events for log↔trace correlation. Zero allocation when no `Activity` is active. |
 
 The resource-graph snapshot is built in [13-resources](13-resources.md). This section is just the path from `IResourceGraph` → OTel meters → Prometheus/OTLP backend.
 

@@ -16,7 +16,7 @@ interest-managed replication to .NET/Unity, TypeScript and native C clients — 
 | **[Technical Overview](in-depth-overview/README.md)** | How the engine is built — 15 chapters spanning storage, MVCC, indexing, durability, runtime, errors, and replication to clients. |
 | **[Tools](tools/index.md)** | The **Workbench** GUI (`typhon ui`) and the **`typhon` CLI** — Typhon is a complete toolchain, not just a library. |
 | **[API Reference](api/index.md)** | Generated reference for the public API (engine + Profiler + Protocol + Schema.Definition). |
-| **[Demos](demos/index.md)** | **AntHill** — a persistent world larger than RAM, proving Typhon's beyond-RAM ECS thesis. |
+| **[Demos](demos/index.md)** | **AntHill** — a persistent world larger than RAM, proving Typhon's beyond-RAM ECS thesis; **Asteroid Field** — a Typhon server replicating to Unity clients. |
 | **[Benchmarks](../benchmark/reports/latest.md)** | The latest regression report, run on CI reference hardware. |
 
 ## Who is Typhon for?

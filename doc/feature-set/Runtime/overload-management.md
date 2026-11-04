@@ -13,7 +13,7 @@ description: 'Single-writer state machine that throttles systems and slows the t
 Game servers face sudden, unpredictable load spikes — a crowd converges on one point, an explosion destroys thousands of entities, a bot swarm hits the AI pipeline. Without a built-in response, an overloaded tick loop either falls further and further behind (unbounded latency) or the process falls over. Overload Management gives the Runtime a standing policy for "what to do when a tick takes too long" so the server degrades in a controlled, reversible way instead of crashing or freezing.
 
 ## ⚙️ How it works (in brief)
-Every tick, the scheduler measures the overrun ratio (actual tick duration vs. the base-rate budget) and event-queue growth, and feeds both into a single-writer state machine (`OverloadDetector`, running on the tick driver thread). Sustained overrun escalates through levels; sustained headroom de-escalates. Escalation is fast (5 consecutive overrun ticks by default), de-escalation is slow (20 consecutive under-run ticks) — this asymmetric hysteresis prevents oscillation. At `SystemThrottling` and above, low-priority systems marked shed-able stop running and normal-priority systems with a throttle divisor run less often; `Critical`/`High`-priority systems are never touched. If overrun persists, the Runtime slows the whole simulation in integer multiples of the base tick (`TickRateModulation`, up to 6x) so physics `dt` stays constant. As a last resort it fires a callback so game code can shed load itself (e.g. disconnect spectators); the Runtime never disconnects players on its own.
+Every tick, the scheduler measures the overrun ratio (actual tick duration vs. the current budget — the base-rate budget times the active tick multiplier) and event-queue growth, and feeds both into a single-writer state machine (`OverloadDetector`, running on the tick driver thread). Sustained overrun escalates through levels; sustained headroom de-escalates. Escalation is fast (5 consecutive overrun ticks by default), de-escalation is slow (20 consecutive under-run ticks) — this asymmetric hysteresis prevents oscillation. At `SystemThrottling` and above, low-priority systems marked shed-able stop running and normal-priority systems with a throttle divisor run less often; `Critical`/`High`-priority systems are never touched. If overrun persists, the Runtime slows the whole simulation in integer multiples of the base tick (`TickRateModulation`, up to 6x) so physics `dt` stays constant. As a last resort it fires a callback so game code can shed load itself (e.g. disconnect spectators); the Runtime never disconnects players on its own.
 
 ## 💻 Usage
 ```csharp
@@ -69,7 +69,7 @@ var level = runtime.CurrentOverloadLevel; // OverloadLevel.Normal / SystemThrott
 - **System throttling/shedding is level-agnostic today** — `SystemThrottling`, `ScopeReduction`, and `TickRateModulation` all apply the same `CanShed`/`ThrottledTickDivisor` rules; there is no additional effect specific to `ScopeReduction` yet.
 - **Per-system entity budgets (`EntityBudget`, `DeferralMode`) are defined but not enforced** — the types exist for the planned Level 2 scope-reduction feature; setting them today has no runtime effect.
 - **Tick-rate modulation is integer-multiple only** (1/2/3/4/6x, capped by `MinTickRateHz`) — physics `dt` per step stays constant, avoiding floating-point drift; clients must be told the active multiplier separately (this feature does not push it to clients).
-- **`OverrunThreshold`/`DeescalationRatio` are evaluated against the base-rate (1x) budget**, even while running under a higher multiplier — see the Telemetry feature for how `OverrunRatio` is computed.
+- **`OverrunThreshold`/`DeescalationRatio` are evaluated against the current multiplier-adjusted budget** (`actual / (target-at-1x × TickMultiplier)`), so a workload that fits at the throttled rate can de-escalate. The `TickTelemetry.OverrunRatio` reported to game code stays base-rate — see the Telemetry feature.
 - **Player shedding is a signal, not an action** — `TyphonRuntime.OnCriticalOverload` fires once on entering `PlayerShedding`; the Runtime takes no action on its own, all mitigation is game-defined.
 - **Single-writer state machine** — `OverloadDetector.Update` runs only on the tick driver thread once per tick; no synchronization is needed and none should be added around it.
 
@@ -79,7 +79,7 @@ var level = runtime.CurrentOverloadLevel; // OverloadLevel.Normal / SystemThrott
 
 ## 🔗 Related
 - Related feature: [Telemetry & Runtime Inspection](./telemetry-runtime-inspection.md)
-- Related feature: [Declarative System Scheduling](./declarative-system-scheduling.md)
+- Related feature: [Declarative System Scheduling](./declarative-scheduling/README.md)
 - Sibling: [Subscriptions](../Subscriptions/README.md) — a lagging session is degraded one rate class at a time before it is closed; tying replication to this overload signal is designed but not built yet.
 
 <!-- Deep dive: claude/design/Runtime/03-overload.md -->

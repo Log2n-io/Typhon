@@ -95,7 +95,7 @@ internal static class ProfilerBootstrap
             List<IProfilerExporter> exporters = null;
             try
             {
-                // File/env config overlaid with the process command line — resolved once by TelemetryConfig.
+                // typhon.telemetry.json + TYPHON__* environment variables — resolved once by TelemetryConfig.
                 var config = TelemetryConfig.ProfilerLaunch;
 
                 var ovr = serviceProvider?.GetService<ProfilerLaunchOverride>();

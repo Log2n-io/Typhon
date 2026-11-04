@@ -32,12 +32,17 @@ int armed = tx.Query<Building>()
     .Enabled<Placement>()
     .Count();
 
-// OR predicate (DNF, max 16 branches) + ordering/pagination (requires WhereField)
+// Ordering/pagination (requires WhereField on the same component)
 List<EntityId> topFactories = tx.Query<Factory>()
-    .WhereField<FactoryData>(f => f.Throughput > 50 || f.Type == FactoryType.Steel)
+    .WhereField<FactoryData>(f => f.Throughput > 50)
     .OrderByFieldDescending<FactoryData, float>(f => f.Throughput)
     .Skip(20).Take(10)
     .ExecuteOrdered();
+
+// OR predicate (DNF, max 16 branches) — views only; one-shot terminals reject OR
+using EcsView<Factory> steelOrFast = tx.Query<Factory>()
+    .WhereField<FactoryData>(f => f.Throughput > 50 || f.Type == FactoryType.Steel)
+    .ToView();
 
 // FK navigation join — "Houses whose Owner is over 30"
 HashSet<EntityId> houses = tx.Query<House>()
@@ -69,10 +74,11 @@ using EcsView<Factory> view = tx.Query<Factory>()
 - Constraints are evaluated cheapest-tier-first; a contradictory Tier 1 mask (e.g. `.With<A>().Without<A>()`) short-circuits to an empty result with zero iteration.
 - `.Enabled<T>()`/`.Disabled<T>()`: max 4 type IDs each per query — exceeding throws `InvalidOperationException`.
 - `WhereField` requires the field to carry a B+Tree index; non-indexed fields are rejected at plan-build time. `Where<T>(Func)` has no such requirement but never uses an index and never drives an incremental view.
-- OR predicates inside `WhereField` are normalized to DNF, capped at 16 branches (ANDing OR pairs multiplies branch count — five 2-way ORs already exceeds the cap).
-- `OrderByField`/`OrderByFieldDescending`/`Skip`/`Take` require a prior `WhereField` call (it identifies the component table) and an indexed field; `ExecuteOrdered()` does not support OR predicates.
+- OR predicates inside `WhereField` are normalized to DNF, capped at 16 branches (ANDing OR pairs multiplies branch count — five 2-way ORs already exceeds the cap). Only `ToView()` evaluates more than one branch: `Execute`, `Count`, `Any`, `ExecuteOrdered` and `foreach` throw on an OR predicate rather than return a partial result.
+- Chained `WhereField` calls AND together and must all target the same component — a second component throws; filter on it with `Where<T>(Func)`.
+- `OrderByField`/`OrderByFieldDescending`/`Skip`/`Take` require a prior `WhereField` call (it identifies the component table) and an indexed field; `ExecuteOrdered()` also rejects spatial predicates and a chained `.Where(lambda)`.
 - `ToView()` rejects `OrderBy`/`Skip`/`Take` (a view is unordered) and rejects combining `WhereField` with a spatial predicate or a chained `.Where(lambda)`.
-- At most one spatial predicate (`WhereNearby`/`WhereInAABB`/`WhereRay`) per query; the target component must declare `[SpatialIndex]`.
+- At most one spatial predicate (`WhereNearby`/`WhereInAABB`/`WhereRay`/`WhereFrustum`) per query; the target component must declare `[SpatialIndex]`.
 - `EcsQuery<TArchetype>` is a mutable struct that borrows the `Transaction` — it does not own it and must not outlive it. The view `ToView()` returns is the exception: it detaches its retained copy of the query from the creating transaction at construction (VIEW-01), so the view outlives that transaction and is refreshed against whichever `Transaction` you pass to `Refresh(tx)`.
 - Polymorphic queries (`Query<T>()`) match the archetype's full descendant subtree; use `QueryExact<T>()` to match only the named archetype.
 

@@ -21,8 +21,8 @@ single list with per-system flags.
 ## ⚙️ How it works (in brief)
 
 A `RuntimeSchedule` owns an ordered list of `Track`s: built-in **Engine-Pre**, **Public** (the app's
-default track), and **Engine-Post** (holds the engine's Fence DAG), with app tracks declared via
-`DeclareTrack(...)` slotting in between Public and Engine-Post. Track order is execution order — every
+default track), **Engine-Post** (holds the engine's Fence DAG), and **Engine-Subscriptions** (replication,
+always last), with app tracks declared via `DeclareTrack(...)` slotting in between Public and Engine-Post. Track order is execution order — every
 DAG in track *N* completes before any DAG in track *N+1* begins. Each `Track` holds one or more
 independent `Dag`s (`Track.DeclareDag(name)`); DAGs in the same track have no ordering relationship
 with each other. Each `Dag` declares its own ordered `Phase[]` list via `.Phases(...)` (or gets a
@@ -74,7 +74,7 @@ scheduler.Start();
   two different DAGs does not couple them.
 - App track names may not start with the reserved `Engine-` prefix, may not duplicate an existing
   track name, and may not carry the reserved `engine` tag — those mark the built-in Engine-Pre /
-  Engine-Post tracks only.
+  Engine-Post / Engine-Subscriptions tracks only.
 - `.After()` / `.Before()` and access-conflict derivation never cross a DAG boundary — `Build()`
   rejects a cross-DAG dependency edge outright.
 - The Engine-Post track (the Fence) is dispatched from the post-tick hook rather than the in-tick

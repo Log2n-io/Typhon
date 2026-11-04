@@ -128,9 +128,9 @@ public class Field
 
 ## 3. Schema persistence — the system components
 
-[`Ecs/public/DatabaseEngine.cs:17–137`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+[`Ecs/public/DatabaseEngine.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
-Schemas are persisted as **system components** — ordinary `ComponentTable` entries managed by the engine itself. Four schemas are defined; the `R1` suffix means *revision 1 of the system schema* (the schema-of-the-schema). If the system schema ever needs to change in a non-backward-compatible way, an `R2` set will be added alongside.
+Schemas are persisted as **system components** — ordinary `ComponentTable` entries managed by the engine itself. Four system components are defined — `ComponentR1`, `ArchetypeR1`, `AssemblyR1`, `SchemaHistoryR1` — plus `FieldR1`, stored inside each `ComponentR1`; the `R1` suffix means *revision 1 of the system schema* (the schema-of-the-schema). If the system schema ever needs to change in a non-backward-compatible way, an `R2` set will be added alongside.
 
 ### `ComponentR1` — one per registered user component
 
@@ -145,14 +145,14 @@ public struct ComponentR1
     public int CompSize;             // ComponentStorageSize
     public int CompOverhead;         // ComponentStorageOverhead
     public int ComponentSPI;         // root page index of ComponentSegment
-    public int VersionSPI;           // root page index of CompRevSegment (revision chain)
+    public int VersionSPI;           // root page index of the revision-table segment (0 = non-Versioned)
     // Secondary-index ownership sits on ArchetypeR1 (ClusterIndexSPI / ClusterString64IndexSPI),
     // not here.
     public ComponentCollection<FieldR1> Fields;
     public int SchemaRevision;
     public int FieldCount;
     public byte StorageMode;
-    public ushort AssemblyId;        // ArchetypeR1 row id of the declaring assembly; 0 = core engine
+    public ushort AssemblyId;        // AssemblyR1 row id of the declaring assembly; 0 = core engine
 }
 ```
 
@@ -171,6 +171,8 @@ public struct FieldR1
     public bool IsStatic;
     public bool HasIndex;
     public bool IndexAllowMultiple;
+    public bool IsRealmKey;
+    public bool IndexSparse;
     public int ArrayLength;
     public int OffsetInComponentStorage;
     public int SizeInComponentStorage;
@@ -182,6 +184,7 @@ The `FieldR1` entries for a given `ComponentR1` are stored in its `Fields` `Comp
 ### `ArchetypeR1` — one per registered archetype
 
 ```csharp
+[Component(SchemaName, 2)]
 public struct ArchetypeR1
 {
     public String64 Name;
@@ -194,6 +197,20 @@ public struct ArchetypeR1
     public int EntityMapSPI;                         // EntityMap root page (0 = rebuild)
     public int ClusterSegmentSPI;                    // cluster storage root (0 = none)
     public long NextEntityKey;                       // resume counter on reopen
+    public ushort AssemblyId;                        // AssemblyR1 row id of the declaring assembly; 0 = core engine
+    public int ClusterIndexSPI;                      // per-archetype B+Tree index root (0 = not persisted, rebuild) — revision 2
+    public int ClusterString64IndexSPI;              // per-archetype String64 index root (0 = rebuild) — revision 2
+}
+```
+
+### `AssemblyR1` — one per assembly that declares components or archetypes
+
+```csharp
+public struct AssemblyR1
+{
+    public String64 SimpleName;                      // resolution key, e.g. "AntHill.Core"
+    public int VerMajor, VerMinor, VerBuild, VerRevision;
+    public ulong PublicKeyToken;
 }
 ```
 
@@ -299,20 +316,21 @@ The `SchemaValidationMode` enum is set per registration call (default `Enforce`)
 | `Enforce` | Look for a registered migration chain; if none, throw `SchemaValidationException(diff)`. |
 | `Skip` | Bypass validation entirely. **UNSAFE** — corruption is the caller's problem. |
 
-Four exceptions live in [14-errors](14-errors.md):
+Five exceptions live in [14-errors](14-errors.md):
 
 | Exception | When |
 |---|---|
 | `SchemaValidationException` | Breaking changes with no registered migration chain (and `Enforce` mode). Carries the full `SchemaDiff`. |
 | `SchemaMigrationException` | One or more entities failed during a user-driven migration. Carries `IReadOnlyList<MigrationFailure>`. |
 | `SchemaDowngradeException` | Persisted revision > runtime revision — the DB was written by a newer app version. Refuses to open. |
+| `SchemaMismatchException` | An open with `SchemaMatch.Exact` found the registered schema different from what the database holds — the build is not the one that wrote it. Carries `Differences`. |
 | `ArchetypeSchemaException` | An archetype's stored component set cannot be opened under the declared one (see [Archetype component-set evolution](#archetype-component-set-evolution)), thrown by `InitializeArchetypes` before any byte of the archetype moves. Carries the archetype's name and an `ArchetypeSchemaErrorKind`; derives from `InvalidOperationException`. |
 
 `SchemaDowngrade` reuses the `TyphonErrorCode.SchemaValidation` error code intentionally.
 
 ### Migration progress
 
-A long migration over millions of entities is observable. `RaiseMigrationProgress` fires `MigrationProgressEventArgs` with the current `MigrationPhase` (`Analyzing` / `AllocatingSegments` / `MigratingEntities` / `RecreatingRevisionChain` / `BuildingNewIndexes` / `UpdatingMetadata` / `Flushing` / `Complete`), entity counters, and percent complete. Subscribe via `DatabaseEngine.MigrationProgress`.
+A long migration over millions of entities is observable. `RaiseMigrationProgress` fires `MigrationProgressEventArgs` with the current `MigrationPhase` (`Analyzing` / `AllocatingSegments` / `MigratingEntities` / `RecreatingRevisionChain` / `BuildingNewIndexes` / `UpdatingMetadata` / `Flushing` / `Complete`), entity counters, and percent complete. Subscribe via the `DatabaseEngine.OnMigrationProgress` event.
 
 ### Archetype component-set evolution
 
@@ -356,7 +374,7 @@ The two public entry points on `DatabaseEngine`:
 
 ### `RegisterComponentFromAccessor<T>()`
 
-[`Ecs/public/DatabaseEngine.cs:3527`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+[`Ecs/public/DatabaseEngine.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
 ```csharp
 public bool RegisterComponentFromAccessor<T>(
@@ -383,7 +401,7 @@ Returns `true` on first registration; `false` if the component was already regis
 
 ### `RegisterComponentByType(Type)`
 
-[`Ecs/public/DatabaseEngine.cs:3502`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
+[`Ecs/public/DatabaseEngine.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/DatabaseEngine.cs)
 
 The non-generic overload for runtime-discovered types — e.g. the Workbench loading a `*.schema.dll` into a collectible `AssemblyLoadContext`. Internally `MakeGenericMethod`s `RegisterComponentFromAccessor<T>` and unwraps `TargetInvocationException` via `ExceptionDispatchInfo` so `SchemaValidationException` / `SchemaDowngradeException` / `SchemaMigrationException` surface with their original stack traces, not wrapped.
 
@@ -453,7 +471,7 @@ Two static utilities open a temporary engine read-only:
 
 ## See also
 
-- [01-foundation §9](01-foundation.md) — sibling `Typhon.Schema.Definition` types (`String64`, `Variant`, `PackedDateTime`, spatial primitives, `StorageMode`)
+- [01-foundation §9](01-foundation.md) — sibling `Typhon.Schema.Definition` types (`String64`, `Variant`, `PackedDateTime48`, spatial primitives, `StorageMode`)
 - [06-ecs](06-ecs.md) — archetypes are the runtime consumers of `DBComponentDefinition`s
 - [11-durability](11-durability.md) — schema bootstrap completes before WAL recovery begins; recovery needs schema to deserialize records
-- [14-errors](14-errors.md) — `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`, `ArchetypeSchemaException`
+- [14-errors](14-errors.md) — `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`, `SchemaMismatchException`, `ArchetypeSchemaException`

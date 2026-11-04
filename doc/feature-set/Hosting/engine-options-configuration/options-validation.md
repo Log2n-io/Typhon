@@ -26,8 +26,8 @@ and are registered by the `Add*()` extension that owns each options type:
 
 | Validator | Registered by | Checks |
 |---|---|---|
-| `DatabaseEngineOptionsValidator` | `AddDatabaseEngine` | `Resources` is non-null; `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs` are all > 0; `Spatial.CellTreePromoteThreshold` >= 2, since promotion at N and fall-back at N/2 leave no gap below that and a cell on the boundary would rebuild itself in both directions on alternating inserts; and when `Wal` is present, its `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` and `GroupCommitIntervalMs` |
-| `PagedMMFOptionsValidator<TO>` | `AddPagedMMF` / `AddManagedPagedMMF` | delegates to `PagedMMFOptions.Validate(silent, out message)` — `DatabaseName`, `DatabaseDirectory`, `DatabaseCacheSize` well-formedness — and surfaces its specific rule message |
+| `DatabaseEngineOptionsValidator` | `AddDatabaseEngine` | `Resources` is non-null; `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs` are all > 0; `CheckpointDirtyPageThresholdPercent` is within 0–100; `Spatial.CellTreePromoteThreshold` >= 2, since promotion at N and fall-back at N/2 leave no gap below that and a cell on the boundary would rebuild itself in both directions on alternating inserts; and when `Wal` is present, its `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` (a positive multiple of 4096) and `GroupCommitIntervalMs`; and when `Backup` is set, `BackupOptions.Validate` against the WAL config |
+| `PagedMMFOptionsValidator<TO>` | `AddPagedMemoryMappedFile` / `AddManagedPagedMMF` (and their scoped/transient twins) | delegates to `PagedMMFOptions.Validate(silent, out message)` — `DatabaseName`, `DatabaseDirectory`, `DatabaseCacheSize` well-formedness — and surfaces its specific rule message |
 
 Failures accumulate rather than short-circuiting, so one startup reports every bad knob instead of
 making you fix them one restart at a time. A `null` `Wal` is *not* an error — the engine derives WAL
@@ -74,6 +74,7 @@ validator calls — one source of truth for storage-config rules, two entry poin
 
 ## 🧪 Tests
 
+- [OptionsValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Hosting/OptionsValidationTests.cs) — bad engine / storage knobs throw `OptionsValidationException` at DI resolution
 - [ResourceOptionsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Resources/ResourceOptionsTests.cs) — asserts the shipped `ResourceOptions` defaults are sensible, plus the `ExhaustionPolicy` / `ResourceExhaustedException` surface
 
 ## 🔗 Related

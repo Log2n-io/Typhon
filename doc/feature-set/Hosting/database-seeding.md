@@ -1,11 +1,11 @@
 ---
 uid: feature-hosting-database-seeding
 title: 'Database Seeding'
-description: 'Revision-stepped, crash-safe data seeding applied automatically at engine open.'
+description: 'Revision-stepped data seeding, each step applied once, automatically at engine open.'
 ---
 
 # Database Seeding
-> Revision-stepped, crash-safe seed steps applied automatically at engine open — a fresh database runs them all; an existing one catches up on whatever is new.
+> Revision-stepped seed steps, each applied once, automatically at engine open — a fresh database runs them all; an existing one catches up on whatever is new.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟢 Start Here · **Category:** [Hosting](./README.md)
 
