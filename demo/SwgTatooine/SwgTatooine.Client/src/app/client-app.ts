@@ -59,6 +59,7 @@ import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
 import { parseMine, type MarketMine } from '../data/market';
 import { useCraft } from '../state/craft-store';
 import { useInstallations } from '../state/installations-store';
+import { installationAt, installationMenu, type InstallationList } from '../data/installations';
 import { useWaypoints } from '../state/waypoints-store';
 import { useCharacter } from '../state/character-store';
 import { edgeArrow, WaypointPillar } from '../render/waypoint-marker';
@@ -141,6 +142,7 @@ import {
   craftingStationOf,
   craftMenuItems,
   crowdsTerminal,
+  installationPartOf,
   missionTerminalAction,
   missionTerminalOf,
   ticketMenuItems,
@@ -455,6 +457,7 @@ const CRAFTING_STATION_ASSET = 'crafting_station';
 /** What a selected crafting station is tagged. */
 const CRAFTING_STATION_LABEL = 'Crafting station';
 const CRAFTING_STATION_TAG: EntityTag = entityTag(CRAFTING_STATION_LABEL, 0, null);
+const INSTALLATION_TAG: EntityTag = entityTag('Extractor', 0, null);
 
 /** A tag before anything was tagged. */
 const NO_TAG: EntityTag = entityTag('', 0, null);
@@ -471,10 +474,27 @@ const MISSION_NAV_KIND = 1000;
 /** The first of the player's own waypoints' rows in the pane, after the missions'. */
 const WAYPOINT_NAV_KIND = 2000;
 
+/** The axis-aligned box of a part's eight world corners: what the pick's ray is tested against. */
+function boxOf(corners: Float64Array | null): { min: number[]; max: number[] } {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let c = 0; corners !== null && c < 8; c++) {
+    for (let axis = 0; axis < 3; axis++) {
+      min[axis] = Math.min(min[axis], corners[c * 3 + axis]);
+      max[axis] = Math.max(max[axis], corners[c * 3 + axis]);
+    }
+  }
+
+  return { min, max };
+}
+
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
-  /** A shuttleport's ticket terminal, a mission terminal (missions.md § 5), a bazaar terminal (bazaar.md § 6) or a crafting station. */
-  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft';
+  /**
+   * A shuttleport's ticket terminal, a mission terminal (missions.md § 5), a bazaar terminal (bazaar.md § 6), a crafting station, or one of the
+   * character's own installations (client.md C42).
+   */
+  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'installation';
   /** The shuttleport's netId, or the mission or bazaar terminal's own. */
   readonly owner: number;
   readonly use: TicketTerminal;
@@ -4052,6 +4072,8 @@ export class ClientApp {
     const mission = library?.described(MISSION_TERMINAL_ASSET) ?? null;
     const bazaar = library?.described(BAZAAR_TERMINAL_ASSET) ?? null;
     const station = library?.described(CRAFTING_STATION_ASSET) ?? null;
+    // The character's installations as last read: a marker is a part only when the list says it is this character's (client.md C42).
+    const installations = useInstallations.getState().list;
     if (
       this.partsEpoch === this.structureEpoch &&
       this.partsSet === this.assetSet &&
@@ -4059,7 +4081,8 @@ export class ClientApp {
       this.partsFrom[1] === ticket &&
       this.partsFrom[2] === mission &&
       this.partsFrom[3] === bazaar &&
-      this.partsFrom[4] === station
+      this.partsFrom[4] === station &&
+      this.partsInstallations === installations
     ) {
       return this.terminalParts;
     }
@@ -4068,10 +4091,24 @@ export class ClientApp {
     this.partsEpoch = this.structureEpoch;
     this.partsSet = this.assetSet;
     this.partsFrom = [port, ticket, mission, bazaar, station];
+    this.partsInstallations = installations;
+    this.installationOfPart.clear();
 
     const children = ticket === null ? null : new Map([[TICKET_TERMINAL_ASSET, ticket]]);
     for (let i = 0; i < this.structureCount; i++) {
       const s = this.structureSamples[i];
+      if (s.installation === true) {
+        const own = installationAt(installations, s.x, s.z);
+        if (own !== null) {
+          const id = this.assetSet === null ? null : assetForStructure(this.assetSet, s.asset);
+          const use = installationPartOf(id === null ? null : (library?.described(id) ?? null), s.x, s.y, s.z, s.yaw);
+          this.terminalParts.push({ kind: 'installation', owner: s.netId, use, ...boxOf(use.corners) });
+          this.installationOfPart.set(s.netId, own.id);
+        }
+
+        continue;
+      }
+
       const use =
         s.kind === StructureKind.Shuttleport && port !== null && children !== null
           ? ticketTerminalOf(port, children, s.x, s.y, s.z, s.yaw)
@@ -4086,15 +4123,7 @@ export class ClientApp {
         continue;
       }
 
-      const min = [Infinity, Infinity, Infinity];
-      const max = [-Infinity, -Infinity, -Infinity];
-      for (let c = 0; c < 8; c++) {
-        for (let axis = 0; axis < 3; axis++) {
-          min[axis] = Math.min(min[axis], use.corners[c * 3 + axis]);
-          max[axis] = Math.max(max[axis], use.corners[c * 3 + axis]);
-        }
-      }
-
+      const { min, max } = boxOf(use.corners);
       const kind =
         s.kind === StructureKind.Shuttleport
           ? 'ticket'
@@ -4195,6 +4224,14 @@ export class ClientApp {
     const ui = useUi.getState();
     if (ui.contextMenu?.source === 'craft') {
       const menuPart = this.terminalPart(this.craftMenuOwner);
+      if (menuPart === null || !this.canUse(menuPart)) {
+        ui.closeContextMenu();
+      }
+    }
+
+    // An installation's menu, the same way: out of its reach, or gone (picked up), it closes (client.md C42).
+    if (ui.contextMenu?.source === 'installation') {
+      const menuPart = this.terminalPart(this.installationMenuOwner);
       if (menuPart === null || !this.canUse(menuPart)) {
         ui.closeContextMenu();
       }
@@ -4412,6 +4449,13 @@ export class ClientApp {
   private partsEpoch = -1;
   private partsSet: AssetSet | null = null;
   private partsFrom: readonly (Descriptor | null)[] = [];
+  private partsInstallations: InstallationList | null = null;
+
+  /** The installation each installation part draws, by the marker's netId: what its menu's commands name. */
+  private readonly installationOfPart = new Map<number, string>();
+
+  /** The marker whose menu is open, or 0: the menu closes when the body walks out of its reach. */
+  private installationMenuOwner = 0;
 
   /** The ticket terminal of shuttleport `owner` in view, or `null`. */
   private terminalPart(owner: number): TerminalPart | null {
@@ -4442,6 +4486,10 @@ export class ClientApp {
     const part = this.pickedPart;
     if (part !== null && this.canUse(part)) {
       this.press = { x, y, startMs: performance.now(), owner: part.owner, player: 0, fired: false };
+      if (part.kind === 'installation') {
+        // Read again while the press fills: the menu says what the hopper holds now, not at the last minute's read.
+        void useInstallations.getState().refresh();
+      }
     } else if (part === null && this.canTip(netId)) {
       this.press = { x, y, startMs: performance.now(), owner: 0, player: netId, fired: false };
     }
@@ -4516,6 +4564,25 @@ export class ClientApp {
     ui.selectPart({ owner: part.owner, kind: part.kind });
     this.bazaarMenuOwner = part.kind === 'bazaar' ? part.owner : 0;
     this.craftMenuOwner = part.kind === 'craft' ? part.owner : 0;
+    this.installationMenuOwner = part.kind === 'installation' ? part.owner : 0;
+    if (part.kind === 'installation') {
+      const list = useInstallations.getState().list;
+      const own = list?.installations.find((i) => i.id === this.installationOfPart.get(part.owner)) ?? null;
+      if (own !== null && list !== null) {
+        const menu = installationMenu(own, list.upkeepPerHour);
+        ui.openContextMenu({
+          x: press.x,
+          y: press.y,
+          title: menu.title,
+          detail: menu.detail,
+          source: 'installation',
+          items: menu.items,
+        });
+      }
+
+      return false;
+    }
+
     if (part.kind === 'craft') {
       ui.openContextMenu({
         x: press.x,
@@ -4559,6 +4626,10 @@ export class ClientApp {
 
   /** What a terminal part is tagged on screen. */
   private partTag(part: TerminalPart): EntityTag {
+    if (part.kind === 'installation') {
+      return INSTALLATION_TAG;
+    }
+
     return part.kind === 'mission'
       ? MISSION_TERMINAL_TAG
       : part.kind === 'bazaar'
@@ -5859,6 +5930,7 @@ export class ClientApp {
         sample.kind = kinds[slot];
         sample.yaw = yaws === null ? 0 : yaws[slot];
         sample.asset = assets === null ? -1 : assets[slot];
+        sample.installation = name === 'InstallationMarker';
       }
     }
 

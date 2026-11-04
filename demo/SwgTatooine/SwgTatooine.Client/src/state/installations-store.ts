@@ -4,6 +4,7 @@ import {
   installationAlerts,
   NO_ALERTS,
   parseInstallations,
+  placedNotices,
   type InstallationAlerts,
   type InstallationList,
 } from '../data/installations';
@@ -101,7 +102,12 @@ export const useInstallations = create<InstallationsStore>((set, get) => {
       const mine = ++generation;
       const list = parseInstallations(await fetchJson('swg/installations'));
       if (list !== null && mine === generation) {
+        const placed = placedNotices(get().list, list);
         set({ list });
+        for (const text of placed) {
+          useChat.getState().notice(text);
+        }
+
         readAt = performance.now();
         const said = installationAlerts(alerts, list.installations);
         alerts = said.next;

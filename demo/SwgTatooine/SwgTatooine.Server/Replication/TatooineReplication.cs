@@ -1259,7 +1259,7 @@ public static partial class TatooineReplication
     /// </summary>
     public const byte InstallationBad = AckReasons.FirstApplicationReason + 60;
 
-    /// <summary><c>ACKS</c> reason: placed in a city or off a planet, or an installation out of reach (<see cref="Installations.ReachM"/>).</summary>
+    /// <summary><c>ACKS</c> reason: an installation out of reach (<see cref="Installations.ReachM"/>).</summary>
     public const byte InstallationNotHere = AckReasons.FirstApplicationReason + 61;
 
     /// <summary><c>ACKS</c> reason: the lot has an installation already.</summary>
@@ -1285,6 +1285,12 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a delete or an activation of a waypoint that is not one of the character's.</summary>
     public const byte WaypointUnknown = AckReasons.FirstApplicationReason + 68;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: an installation placed in a town — its lot's centre within <see cref="Installations.CityMarginM"/> of a city's edge — or off the
+    /// planet (Loïc, 2026-11-04: the refusal said "not here" for this and for out of reach alike, and was not understood).
+    /// </summary>
+    public const byte InstallationInTown = AckReasons.FirstApplicationReason + 69;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>

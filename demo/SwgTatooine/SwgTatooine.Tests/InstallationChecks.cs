@@ -243,7 +243,7 @@ internal sealed class InstallationChecks : ServedChecks
         Worlds.Park(sim, o.Link.Session, city.X, city.Z);
         Harness.Ticks(2);
         Place(o.Link, kits[0], ItemCatalog.Metal);
-        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationNotHere) == 1, "in a city");
+        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationInTown) == 1, "in a city");
 
         for (var i = 0; i < Installations.LotsPerCharacter; i++)
         {
@@ -283,7 +283,7 @@ internal sealed class InstallationChecks : ServedChecks
         Worlds.Park(sim, o.Link.Session, fx + 200f, fz + 200f);
         Harness.Ticks(2);
         Collect(o.Link, first);
-        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationNotHere) == 2, "out of reach");
+        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationNotHere) == 1, "out of reach");
         Worlds.Park(sim, o.Link.Session, fx, fz);
         Harness.Ticks(2);
         Collect(o.Link, first);

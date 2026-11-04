@@ -2,6 +2,7 @@ import { placement, pointToWorld, poseToWorld, type Pose } from '../assets/asset
 import type { Descriptor, InteractionDesc } from '../assets/descriptor';
 import { structureYaw } from '../assets/structure-assets';
 import type { ContextAction, ContextMenuItem } from '../state/ui-store';
+import { INSTALLATION_REACH_M } from '../data/installations';
 
 /**
  * Where a shuttleport's ticket terminal is used from: the published `shuttle_ticket` interaction of its `ticket_terminal`
@@ -135,6 +136,43 @@ export function craftingStationOf(
 ): TicketTerminal | null {
   const use = standingTerminalOf(station, CRAFT_INTERACTION, x, y, z, quarters);
   return use === null ? null : { ...use, reachX: x, reachZ: z, reachM: STATION_REACH_M };
+}
+
+/**
+ * How far inside the server's reach an installation's menu is offered, metres: the body the server measures is a tick or two behind the predicted one,
+ * and a menu offered at the very edge would send commands the server refuses as out of reach.
+ */
+export const INSTALLATION_REACH_SLACK_M = 1;
+
+/** An installation drawn without an asset, or one whose descriptor publishes no bounds, is picked as a box this wide and tall, metres. */
+export const INSTALLATION_BOX_M = 4;
+
+/**
+ * A placed installation as a part the viewer can hover and long-press (client.md C42): usable from {@link INSTALLATION_REACH_M} of its origin, less
+ * {@link INSTALLATION_REACH_SLACK_M}; picked by its asset's render box, or a {@link INSTALLATION_BOX_M} box without one. It publishes no interaction:
+ * the server's reach is about its centre, from any side.
+ */
+export function installationPartOf(
+  descriptor: Descriptor | null,
+  x: number,
+  y: number,
+  z: number,
+  quarters: number,
+): TicketTerminal {
+  const pose = placement([x, y, z], structureYaw(quarters));
+  let corners = descriptor === null ? null : cornersOf(pose, descriptor);
+  if (corners === null) {
+    const h = INSTALLATION_BOX_M / 2;
+    corners = new Float64Array(24);
+    for (let i = 0; i < 8; i++) {
+      corners[i * 3] = x + ((i & 1) === 0 ? -h : h);
+      corners[i * 3 + 1] = y + ((i & 2) === 0 ? 0 : INSTALLATION_BOX_M);
+      corners[i * 3 + 2] = z + ((i & 4) === 0 ? -h : h);
+    }
+  }
+
+  const reachM = INSTALLATION_REACH_M - INSTALLATION_REACH_SLACK_M;
+  return { x, z, radiusM: reachM, reachX: x, reachZ: z, reachM, corners };
 }
 
 /** A terminal that is a structure of its own: its interaction of `kind` placed by its own pose. */

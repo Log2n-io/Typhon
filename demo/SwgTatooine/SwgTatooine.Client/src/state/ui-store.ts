@@ -3,6 +3,7 @@ import { useChat } from './chat-store';
 import { useMissions } from './mission-store';
 import { useCraft } from './craft-store';
 import { useMarket } from './market-store';
+import { useInstallations } from './installations-store';
 
 /** One row of the navigation pane. */
 export interface NavRow {
@@ -103,7 +104,7 @@ export interface ShuttleportPrompt {
  */
 export interface PartRef {
   readonly owner: number;
-  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft';
+  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'installation';
 }
 
 /** What a context menu entry does: plain data, carried out by the store. */
@@ -116,7 +117,16 @@ export type ContextAction =
   /** Tip another player: the chat opens on `/tip `, the player selected. */
   | { readonly kind: 'tip'; readonly target: number }
   /** The crafting panel, at a station (crafting-build.md C2-C3). */
-  | { readonly kind: 'craft' };
+  | { readonly kind: 'craft' }
+  /** An installation's, in reach of it (client.md C42): its hopper collected, upkeep bought, or it picked up. */
+  | { readonly kind: 'installCollect'; readonly installation: string }
+  | { readonly kind: 'installPay'; readonly installation: string; readonly credits: number }
+  | { readonly kind: 'installPickUp'; readonly installation: string }
+  /** An item's, from its slot (client.md C42): a kit placed here, an item worn, packed into a crate, or a crate unpacked. */
+  | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
+  | { readonly kind: 'equip'; readonly item: string }
+  | { readonly kind: 'pack'; readonly item: string; readonly into: string }
+  | { readonly kind: 'unpack'; readonly item: string; readonly count: number };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -135,7 +145,9 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'player';
+  /** A line under the title: what the thing is doing now (an installation's hopper and upkeep). */
+  readonly detail?: string;
+  readonly source: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'player' | 'installation' | 'item';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -668,6 +680,27 @@ export const useUi = create<UiState>()((set, get) => ({
         break;
       case 'craft':
         useCraft.getState().openPanel();
+        break;
+      case 'installCollect':
+        useInstallations.getState().collect(action.installation);
+        break;
+      case 'installPay':
+        useInstallations.getState().pay(action.installation, action.credits);
+        break;
+      case 'installPickUp':
+        useInstallations.getState().pickUp(action.installation);
+        break;
+      case 'installPlace':
+        useInstallations.getState().place(action.item, action.family);
+        break;
+      case 'equip':
+        useMarket.getState().equip(action.item);
+        break;
+      case 'pack':
+        useMarket.getState().pack(action.item, action.into);
+        break;
+      case 'unpack':
+        useMarket.getState().unpack(action.item, action.count);
         break;
     }
   },

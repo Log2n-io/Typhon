@@ -166,6 +166,12 @@ let lastNowMs = 0;
 
 const EMPTY_SELL: SellForm = { stack: null, quantity: 1, unitPrice: 1 };
 
+/**
+ * The rows whose commands a context menu sends from the world — an installation's, a kit placed (client.md C42): their refusals are said in the chat,
+ * as no window shows them.
+ */
+const CHAT_ROWS: ReadonlySet<string> = new Set(['install']);
+
 export const useMarket = create<MarketState>((set, get) => {
   /** Sends `command` for `row`, marks the row in flight for {@link MARKET_ANSWER_MS}, clears its old refusal. */
   const send = (command: MarketCommand): boolean => {
@@ -176,7 +182,12 @@ export const useMarket = create<MarketState>((set, get) => {
 
     const sent = get().actions?.send(command) ?? false;
     if (!sent) {
-      set({ rowNotices: { ...get().rowNotices, [row]: 'Not sent — wait a moment and try again' } });
+      const text = 'Not sent — wait a moment and try again';
+      set({ rowNotices: { ...get().rowNotices, [row]: text } });
+      if (CHAT_ROWS.has(row)) {
+        useChat.getState().notice(text);
+      }
+
       return false;
     }
 
@@ -495,6 +506,11 @@ export const useMarket = create<MarketState>((set, get) => {
 
       if (row === 'waypoint') {
         refusedWaypoint?.(text);
+      }
+
+      // Sent from a menu in the world, which has no window to say it in (client.md C42).
+      if (CHAT_ROWS.has(row)) {
+        useChat.getState().notice(text);
       }
 
       set({

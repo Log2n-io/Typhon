@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { itemMenuItems } from '../data/item-menu';
 import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral, slotGrid, type InventoryItem } from '../data/items';
-import { cratesOf, packSteps } from '../data/crates';
 import { formatCredits } from '../data/wallet';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
+import { useUi } from '../state/ui-store';
 import { useWallet } from '../state/wallet-store';
 import { WindowFrame } from './WindowFrame';
 
@@ -25,6 +26,9 @@ export const INVENTORY_SLOTS = 40;
  *
  * <b>What it wears is the character window's</b> (client.md C39): a click on an item with stats in the grid puts it on — swapped with what was worn in
  * its slot — and so does dragging it onto the Equipment tab's slot. The server refuses below the Mk's combat level, and says why here.
+ *
+ * <b>Everything else is the item's own menu</b> (client.md C42): a right-click on a slot offers what that item does — a kit placed here, an item worn,
+ * packed into a crate or unpacked. The window lists; the item acts.
  */
 export function InventoryWindow() {
   const open = useWallet((s) => s.inventoryOpen);
@@ -51,6 +55,14 @@ export function InventoryWindow() {
           useMarket.getState().equip(id);
         }
       };
+
+  // The item's menu, at the pointer (client.md C42): nothing opens for an item that offers nothing.
+  const onMenu = (item: InventoryItem, x: number, y: number): void => {
+    const items = itemMenuItems(item, inventory?.items ?? []);
+    if (items.length > 0) {
+      useUi.getState().openContextMenu({ x, y, title: item.name, source: 'item', items });
+    }
+  };
 
   const cells = slotGrid(inventory?.items ?? [], inventory?.slots ?? INVENTORY_SLOTS);
   return (
@@ -86,76 +98,13 @@ export function InventoryWindow() {
               icon={icons[item.item]}
               picked={bazaarOpen && item.id === pick}
               onPick={onPick}
+              onMenu={onMenu}
             />
           ),
         )}
       </div>
       {cells.every((c) => c === null) ? <div className="hint">No items yet.</div> : null}
-      <Crates items={inventory?.items ?? NO_ITEMS} />
     </WindowFrame>
-  );
-}
-
-const NO_ITEMS: readonly InventoryItem[] = [];
-
-/**
- * Crates (crafting-catalog.md § 11.2): identical unused items packed into one slot, ten at most — a pack a click, the smallest into the fullest; a crate
- * unpacked one item, or all of it, into free slots. A crate is listed and sold whole, and unpacked before it is worn.
- */
-function Crates({ items }: { readonly items: readonly InventoryItem[] }) {
-  const pending = useMarket((s) => s.pending.includes('gear'));
-  const steps = packSteps(items);
-  const crates = cratesOf(items);
-  if (steps.length === 0 && crates.length === 0) {
-    return null;
-  }
-
-  const label = (name: string, mk: number): string => `${name}${mk > 0 ? ` Mk ${mkNumeral(mk)}` : ''}`;
-  return (
-    <div className="inventory-crates" aria-label="Crates">
-      <div className="hud-title">Crates</div>
-      {steps.map((s) => (
-        <div key={s.into} className="row">
-          <span>
-            {label(s.name, s.mk)} · {String(s.held)} identical
-          </span>
-          <button
-            type="button"
-            disabled={pending}
-            onClick={() => {
-              useMarket.getState().pack(s.item, s.into);
-            }}
-          >
-            Pack ({String(s.total)} in a crate)
-          </button>
-        </div>
-      ))}
-      {crates.map((c) => (
-        <div key={c.id} className="row">
-          <span>
-            Crate: {label(c.name, c.mk)} ×{String(c.count)}
-          </span>
-          <button
-            type="button"
-            disabled={pending}
-            onClick={() => {
-              useMarket.getState().unpack(c.id, 1);
-            }}
-          >
-            Unpack 1
-          </button>
-          <button
-            type="button"
-            disabled={pending}
-            onClick={() => {
-              useMarket.getState().unpack(c.id, c.count - 1);
-            }}
-          >
-            Unpack all
-          </button>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -171,6 +120,7 @@ export function ItemSlot({
   icon,
   picked,
   onPick,
+  onMenu,
 }: {
   readonly item: InventoryItem;
   readonly icon: string | undefined;
@@ -178,6 +128,8 @@ export function ItemSlot({
   readonly picked: boolean;
   /** Picks it for the bazaar's Sell tab with the bazaar open; wears or takes it off with it closed. */
   readonly onPick: ((id: string) => void) | null;
+  /** Opens the item's own menu at the pointer (client.md C42); none where the slot offers no menu. */
+  readonly onMenu?: (item: InventoryItem, x: number, y: number) => void;
 }) {
   // An item that is worn somewhere drags to its slot; units and parts do not drag.
   const wearable = (item.stats?.wears ?? 0) > 0 && item.slot <= 100;
@@ -217,6 +169,15 @@ export function ItemSlot({
           ? undefined
           : () => {
               onPick(item.id);
+            }
+      }
+      onContextMenu={
+        onMenu === undefined
+          ? undefined
+          : (e) => {
+              e.preventDefault();
+              setHovered(null);
+              onMenu(item, e.clientX, e.clientY);
             }
       }
     >

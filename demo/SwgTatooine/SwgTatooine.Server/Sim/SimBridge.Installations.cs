@@ -156,7 +156,7 @@ public sealed partial class SimBridge
         var (cx, cz) = Installations.CentreOf(lot);
         if (realm >= PlanetIndexes.Length || PlanetIndexes[realm].Levels.NearCity(cx, cz, Installations.CityMarginM))
         {
-            RefuseInstall(subs, in command, TatooineReplication.InstallationNotHere);
+            RefuseInstall(subs, in command, TatooineReplication.InstallationInTown);
             return;
         }
 

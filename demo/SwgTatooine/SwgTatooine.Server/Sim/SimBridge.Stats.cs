@@ -278,6 +278,7 @@ public sealed partial class SimBridge
         j.Append("\"refusedBy\":{");
         Num(j, "bad", WorkshopRefused(TatooineReplication.InstallationBad)).Append(',');
         Num(j, "notHere", WorkshopRefused(TatooineReplication.InstallationNotHere)).Append(',');
+        Num(j, "inTown", WorkshopRefused(TatooineReplication.InstallationInTown)).Append(',');
         Num(j, "lotTaken", WorkshopRefused(TatooineReplication.LotTaken)).Append(',');
         Num(j, "noLotsLeft", WorkshopRefused(TatooineReplication.NoLotsLeft)).Append(',');
         Num(j, "empty", WorkshopRefused(TatooineReplication.InstallationEmpty)).Append(',');

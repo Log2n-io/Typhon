@@ -350,7 +350,7 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   186: 'Nothing to unpack, or no room for it',
   187: 'Unpack it first',
   188: 'That is not yours, not an extractor kit, or not an amount it can take',
-  189: 'Not here: out of town on a planet, or within 30 m of it',
+  189: 'Too far from it: come within 30 m to use it',
   190: 'Someone has built on this lot already',
   191: 'All 10 of your lots are used: pick something up first',
   192: 'Its hopper is empty',
@@ -358,6 +358,7 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   194: 'A waypoint needs a name (32 characters at most), a colour, and a place on the planet — or an installation of yours not pinned yet',
   195: 'You keep 100 waypoints already: delete one first',
   196: 'No such waypoint of yours',
+  197: 'You cannot build in town: go out into the open, at least 50 m past the edge of the town',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
