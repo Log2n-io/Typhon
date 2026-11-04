@@ -41,12 +41,13 @@ public sealed class ChunkBasedSegmentStrideTests
         var options = new TransientOptions { PagesPerBlock = 1, MaxMemoryBytes = 64L * 1024 * 1024 };
         var store = new TransientStore(options, _allocator, _epochManager, parent);
 
-        // A single 4-byte int is the canonical trigger (a Versioned component with one public int).
+        // A single 4-byte int is the canonical trigger (a Versioned component with one int field).
         var ex = Assert.Catch(() => new ChunkBasedSegment<TransientStore>(_epochManager, store, stride: 4));
 
         Assert.That(ex, Is.Not.Null, "a sub-8-byte stride must be rejected");
         Assert.That(ex.Message, Does.Contain("8 bytes"), "the error must state the 8-byte minimum");
-        Assert.That(ex.Message, Does.Contain("public"),
-            "the error must point at the public-field remedy (private padding does not count) — #506 item 1");
+        Assert.That(ex.Message, Does.Contain("Versioned"), "the error must name the only storage mode that can hit it (SV/Transient carry an 8-byte key)");
+        Assert.That(ex.Message, Does.Contain("sizeof"),
+            "the error must point at the real remedy: the stride is sizeof(T), so any field, private padding included, reaches 8 bytes (SCHEMA-06)");
     }
 }
