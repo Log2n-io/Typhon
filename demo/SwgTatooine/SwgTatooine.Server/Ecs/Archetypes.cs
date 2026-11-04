@@ -181,6 +181,40 @@ public partial class ListingArch : Archetype<ListingArch>
 }
 
 /// <summary>
+/// A player installation (crafting-build.md § 10): its truth — owner, lot, rate, hopper, the time it last settled, the time its upkeep runs out. Not
+/// positioned and Versioned, as the wallet: value, written only by <c>Workshop</c>, read off the tick by the endpoints and the audits.
+/// </summary>
+[Archetype(1, "Installations")]
+public partial class InstallationArch : Archetype<InstallationArch>
+{
+    public static readonly Comp<InstallationCore> Core = Register<InstallationCore>();
+}
+
+/// <summary>
+/// A character's own waypoint (client.md C38): not positioned, not replicated, Versioned like an installation — written only by <c>Workshop</c> on its
+/// owner's commands, read off the tick by <c>GET /swg/waypoints</c>.
+/// </summary>
+[Archetype(1, "Waypoints")]
+public partial class WaypointArch : Archetype<WaypointArch>
+{
+    public static readonly Comp<WaypointCore> Core = Register<WaypointCore>();
+}
+
+/// <summary>
+/// What the world sees of an installation: where it stands, what it is and what it is doing. Static and replicated, as a structure, and a view only — rebuilt
+/// from <see cref="InstallationArch"/> when a world opens, so a lost one costs nothing.
+/// </summary>
+[Archetype(1, "Installation markers", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
+public partial class InstallationMarker : Archetype<InstallationMarker>
+{
+    [Position]
+    public static readonly Comp<InstallationPlacement> Bounds = Register<InstallationPlacement>();
+    public static readonly Comp<InstallationView> View = Register<InstallationView>();
+    public static readonly Comp<InstallationRealm> Realm = Register<InstallationRealm>();
+}
+
+/// <summary>
 /// A hostile or neutral creature: a lair's beasts, a camp's ninjas and soldiers, and the defenders of a mission's camp.
 /// Moves on the AI cadence, which is slower than the tick, and is the bulk of the moving population.
 /// </summary>

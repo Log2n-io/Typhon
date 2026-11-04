@@ -88,6 +88,17 @@ public static class ItemMoveKind
     /// </summary>
     public const byte Unpack = 21;
 
+    /// <summary>A kit placed (crafting-build.md § 10): the kit, the owner → World, destroyed as it becomes the installation. <see cref="ItemLedgerEntry.Ref"/>
+    /// is the installation's raw id.</summary>
+    public const byte Place = 22;
+
+    /// <summary>An installation's output collected: units World → its owner, minted. <see cref="ItemLedgerEntry.Ref"/> is the installation's raw id.</summary>
+    public const byte Extract = 23;
+
+    /// <summary>An installation picked up: its kit World → its owner, minted with the kit's stats. <see cref="ItemLedgerEntry.Ref"/> is the installation's
+    /// raw id.</summary>
+    public const byte Pickup = 24;
+
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
     {
@@ -110,6 +121,9 @@ public static class ItemMoveKind
         Refine => "refine",
         Pack => "pack",
         Unpack => "unpack",
+        Place => "place",
+        Extract => "extract",
+        Pickup => "pickup",
         _ => "unknown",
     };
 }

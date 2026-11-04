@@ -29,6 +29,7 @@ const LABELS: Readonly<Record<string, string>> = {
   CityNpc: 'City NPC',
   Player: 'Player',
   MissionOffer: 'Mission offer',
+  InstallationMarker: 'Installation',
 };
 
 /** An archetype as the UI names it: the catalog's name, and what to print. */

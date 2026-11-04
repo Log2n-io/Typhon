@@ -15,6 +15,8 @@ export const NAV_KINDS: readonly number[] = [
   StructureKind.Shuttleport,
   StructureKind.Bazaar,
   StructureKind.MissionTerminal,
+  // A crafting station, beside every shuttleport's bazaar (client.md C38: the pane shows what a player walks to).
+  StructureKind.CraftingStation,
 ];
 
 /** One structure the scan looks at. */
@@ -133,6 +135,8 @@ export function navLabel(target: NavTarget): string {
       return 'Bazaar';
     case StructureKind.MissionTerminal:
       return 'Mission Terminal';
+    case StructureKind.CraftingStation:
+      return 'Crafting Station';
     default:
       return 'Structure';
   }

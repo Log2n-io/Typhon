@@ -51,6 +51,9 @@ const DROP_PREFIX: Readonly<Partial<Record<string, string>>> = {
   salvage: 'Salvaged',
   // What a refine made (crafting-catalog.md § 11.1), with its fee; the units it took are not said, as a craft's inputs are not.
   refine: 'Refined',
+  // An installation's hopper collected, and its kit back at a pick-up (crafting-build.md § 10).
+  extract: 'Collected from your extractor',
+  pickup: 'Picked up',
   // Given by an operator from the back office (the dashboard's accounts page); what one takes is not said, as no other loss of items is.
   admingrant: 'Given by an operator',
 };
@@ -121,6 +124,10 @@ function creditLine(
   const who = n.other ?? 'somebody';
   if (n.kind === 'tip') {
     return n.incoming ? `${who} tipped you ${formatCredits(n.amount)}` : `You tipped ${who} ${formatCredits(n.amount)}`;
+  }
+
+  if (n.kind === 'upkeep') {
+    return `Paid ${formatCredits(n.amount)} of upkeep`;
   }
 
   if (n.kind === 'fare') {

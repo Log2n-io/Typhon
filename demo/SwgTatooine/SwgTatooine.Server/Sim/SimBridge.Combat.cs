@@ -950,6 +950,8 @@ public sealed partial class SimBridge
             // and no attacker, so it pursued nothing (gap G7).
             if (ai.Mode is AiMode.Wander or AiMode.Idle)
             {
+                // The first blow of a player's attack: the creatures round it join in (CallPack).
+                CallPack(tx, ref target, in ev);
                 ai.Mode = AiMode.Pursue;
                 ai.Target = ev.Attacker;
                 target.Set(Creature.Ai, ai);
@@ -969,6 +971,9 @@ public sealed partial class SimBridge
 
         v.Health = 0;
         target.Set(Creature.Vitals, v);
+
+        // Killed: those round it turn on the killer, whether or not they had seen the fight (a one-shot weapon has no first blow that it survives).
+        CallPack(tx, ref target, in ev);
         ai.Mode = AiMode.Dead;
         ai.Target = EntityId.Null;
         target.Set(Creature.Ai, ai);
@@ -1156,7 +1161,7 @@ public sealed partial class SimBridge
         {
             v.Health = health;
             target.Set(Player.Vitals, v);
-            ReactToAttack(ctx, tx, ref target, in ev, in v, fresh);
+            ReactToAttack(ctx, tx, ref target, in ev, in v, fresh, killed: false);
             TatooineReplication.Replicate(in target);
             return true;
         }
@@ -1192,6 +1197,7 @@ public sealed partial class SimBridge
         }
 
         incapacitated++;
+        ReactToAttack(ctx, tx, ref target, in ev, in v, fresh, killed: true);
         TatooineReplication.Replicate(in target);
         return true;
     }
@@ -1282,7 +1288,11 @@ public sealed partial class SimBridge
     /// bodies it moves.
     /// </para>
     /// </remarks>
-    private void ReactToAttack(TickContext ctx, Transaction tx, ref EntityRefMut target, in CombatEvent ev, in PlayerVitals v, bool fresh)
+    /// <param name="killed">
+    /// The blow downed it: it answers nothing, but its fall is an incident whatever came before, and the crowd round it answers (Loïc, 2026-11-03: a blaster
+    /// that downs at the first shot left everyone standing — the crowd was only ever called by a body that lived through the blow).
+    /// </param>
+    private void ReactToAttack(TickContext ctx, Transaction tx, ref EntityRefMut target, in CombatEvent ev, in PlayerVitals v, bool fresh, bool killed)
     {
         _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
         if (ev.Attacker.ArchetypeId != _playerArchetype.Value || target.Read(Player.Control).Kind != ControllerKind.Scripted
@@ -1294,7 +1304,7 @@ public sealed partial class SimBridge
         var from = attacker.Read(Player.Bounds);
         var realm = target.Read(Player.Realm).Value;
         var victim = target.Id;
-        if (!Answer(ctx, ref target, ev.Attacker, from.X, from.Z, realm, in v, decide: fresh, shout: fresh, ally: false) || !fresh)
+        if (!killed && (!Answer(ctx, ref target, ev.Attacker, from.X, from.Z, realm, in v, decide: fresh, shout: fresh, ally: false) || !fresh))
         {
             return;
         }
@@ -1338,6 +1348,67 @@ public sealed partial class SimBridge
         if (joined != 0)
         {
             Interlocked.Add(ref _crowdJoined, joined);
+        }
+    }
+
+    /// <summary>
+    /// The creatures round one a player attacks join the fight (Loïc, 2026-11-03: "they should attack you all the time"): every living one within
+    /// <see cref="TatooineData.PackRadiusM"/> that is wandering or idle turns on the attacker — passive templates too — at most
+    /// <see cref="TatooineData.PackMax"/> of them.
+    /// </summary>
+    /// <remarks>
+    /// <b>A player's blow only, and once an incident</b> — the blow that wakes the creature hit, and the one that kills it — so one radius query per fight
+    /// rather than per shot. The scripted crowd's fights at the lairs are the lairs' own business (<see cref="TatooineData.CrowdBraveShare"/>): calling packs
+    /// on those would change the crowd's balance, which nothing asked for. One already pursuing or fighting keeps its target.
+    /// </remarks>
+    private void CallPack(Transaction tx, ref EntityRefMut target, in CombatEvent ev)
+    {
+        _playerArchetype ??= Dbe.ArchetypeIdOf<Player>();
+        if (ev.Attacker.ArchetypeId != _playerArchetype.Value || !tx.TryOpen(ev.Attacker, out var attacker)
+            || attacker.Read(Player.Control).Kind == ControllerKind.Scripted)
+        {
+            return;
+        }
+
+        var at = target.Read(Creature.Bounds);
+        var realm = target.Read(Creature.Realm).Value;
+        var sphere = new BSphere2F { CenterX = at.X, CenterY = at.Z, Radius = TatooineData.PackRadiusM };
+        var joined = 0;
+        var e = Dbe.ClusterSpatialQuery<Creature>(new RealmId(realm)).Radius(in sphere);
+        try
+        {
+            while (e.MoveNext() && joined < TatooineData.PackMax)
+            {
+                var id = e.Current.Entity;
+                if (id == target.Id || !tx.TryOpenMut(id, out var mate))
+                {
+                    continue;
+                }
+
+                var ai = mate.Read(Creature.Ai);
+                if (ai.Mode is not (AiMode.Wander or AiMode.Idle) || mate.Read(Creature.Vitals).Health <= 0)
+                {
+                    continue;
+                }
+
+                ai.Mode = AiMode.Pursue;
+                ai.Target = ev.Attacker;
+                mate.Set(Creature.Ai, ai);
+                var timers = mate.Read(Creature.Timers);
+                timers.ThinkCooldown = 0;
+                mate.Set(Creature.Timers, timers);
+                TatooineReplication.Replicate(in mate);
+                joined++;
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        if (joined != 0)
+        {
+            Interlocked.Add(ref _packJoined, joined);
         }
     }
 
@@ -1484,6 +1555,7 @@ public sealed partial class SimBridge
     private long _crowdFoughtBack;
     private long _crowdFled;
     private long _crowdJoined;
+    private long _packJoined;
     private long _crowdShouts;
 
     /// <summary>Bodies of the crowd that answered a player's attack by fighting back — the one hit, or one near it.</summary>
@@ -1494,6 +1566,9 @@ public sealed partial class SimBridge
 
     /// <summary>Bodies of the crowd that joined in an attack on somebody near them.</summary>
     public long CrowdJoined => Interlocked.Read(ref _crowdJoined);
+
+    /// <summary>Creatures that joined a fight a player started on one of them (<see cref="CallPack"/>).</summary>
+    public long PackJoined => Interlocked.Read(ref _packJoined);
 
     /// <summary>What the crowd said when it was attacked or joined in.</summary>
     public long CrowdShouts => Interlocked.Read(ref _crowdShouts);

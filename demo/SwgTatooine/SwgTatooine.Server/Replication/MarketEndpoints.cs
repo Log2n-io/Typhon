@@ -539,6 +539,18 @@ public static class MarketEndpoints
             first = false;
         }
 
+        // The extractor kit (crafting-build.md § 10, O-14): no Mk, its rate and hopper as its stats.
+        ItemCatalog.TryGet(ItemCatalog.Extractor, out var kitTemplate);
+        json.Append(",{")
+            .Append("\"template\":").Append(ItemCatalog.Extractor)
+            .Append(",\"item\":\"").Append(kitTemplate.Asset).Append('"')
+            .Append(",\"name\":\"").Append(EconomyEndpoints.Escape(kitTemplate.Name ?? "")).Append('"')
+            .Append(",\"category\":\"").Append(ItemCategory.NameOf(kitTemplate.Category)).Append('"')
+            .Append(",\"mk\":0")
+            .Append(",\"price\":").Append(Installations.StandardKitPrice);
+        ItemEndpoints.Stats(json, in kitTemplate, Installations.StandardKit());
+        json.Append('}');
+
         // The Mk I bulk materials, by the unit: "priceMilli" a unit, a quantity's price its total rounded down (Equipment.StandardMaterialPrice).
         foreach (var m in Equipment.StandardMaterials)
         {

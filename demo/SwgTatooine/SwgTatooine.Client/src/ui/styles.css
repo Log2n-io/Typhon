@@ -689,71 +689,6 @@ button.active {
   color: var(--accent);
 }
 
-/* A mission terminal's list, and the journal: the terminal's at the top of the screen, the journal beside the waypoints. */
-.missions {
-  top: 70px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 600px;
-  max-width: calc(100% - 20px);
-  max-height: 60%;
-  overflow-y: auto;
-}
-
-/* Left of the bottom-right column: 270 px of content plus the panels' padding and border is 292 px wide with the inspector
-   in it (content-box), so 290 px sat on its edge. */
-.journal {
-  right: 312px;
-  bottom: 10px;
-  width: 360px;
-  max-height: 50%;
-  overflow-y: auto;
-}
-
-/* Under about 1240 px its left edge reaches the action bar's: centred near the top instead, like a terminal's list. */
-@media (max-width: 1240px) {
-  .journal {
-    top: 70px;
-    bottom: auto;
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    max-width: calc(100% - 20px);
-  }
-}
-
-/* The inventory: where the journal goes, and left of it when the journal is open too. */
-.inventory {
-  right: 312px;
-  bottom: 10px;
-  width: 300px;
-  max-height: 70%;
-  overflow-y: auto;
-}
-
-.inventory.beside-journal {
-  right: 684px;
-}
-
-/* Narrower, centred near the top as the journal is (top right is the HUD's); with the journal there, above the action bar. */
-@media (max-width: 1240px) {
-  .inventory {
-    top: 70px;
-    bottom: auto;
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    max-width: calc(100% - 20px);
-  }
-
-  .inventory.beside-journal {
-    top: auto;
-    bottom: 90px;
-    right: auto;
-    max-height: 45%;
-  }
-}
-
 .inventory-credits {
   color: #ffd27a;
   font-weight: 600;
@@ -857,6 +792,20 @@ button.active {
   text-shadow: 0 0 2px #000;
 }
 
+/* Installations (InstallationsPanel.tsx): one extractor a block, its buttons on a row. */
+.installations .installation-row,
+.installations .installation-kits {
+  margin-top: 8px;
+}
+
+.installations .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
 /* Crates (InventoryWindow.tsx): a pack or an unpack per line, under the grid. */
 .inventory-crates {
   margin-top: 8px;
@@ -872,10 +821,6 @@ button.active {
 
 /* The planet map (PlanetMap.tsx): centred, over every other window — the tooltip portal alone above it. */
 .planet-map {
-  z-index: 950;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
   padding: 6px 8px 8px;
 }
 
@@ -1513,7 +1458,7 @@ button.active {
 
 /* The context menu (ContextMenu.tsx): opened at the pointer by a long press; its left, top and width come from the component. */
 .context-menu {
-  z-index: 4;
+  z-index: 18;
   text-align: center;
 }
 
@@ -1750,46 +1695,6 @@ button.active {
   }
 }
 
-/* The bazaar (bazaar.md § 6): near the top, right of the toolbar, and clear of the inventory window (whose stacks are picked
-   from it to sell). Deliberately plain: the mission table's rows, a strip of tabs, a refusal under the row it was about. */
-/* Left 342 px: the toolbar is 300 px wide plus its padding and border, so 322 px from its left edge at 10 px — 320 px overlapped it (Loïc,
-   2026-11-02). */
-.bazaar {
-  top: 70px;
-  left: 342px;
-  width: 640px;
-  max-width: calc(100% - 352px);
-  max-height: 65%;
-  overflow-y: auto;
-}
-
-/* Narrower, both cannot sit side by side: the bazaar centred at the top, the inventory under it. */
-@media (max-width: 1300px) {
-  .bazaar {
-    left: 50%;
-    transform: translateX(-50%);
-    max-width: calc(100% - 20px);
-    max-height: 45%;
-  }
-
-  .inventory.beside-bazaar {
-    top: auto;
-    bottom: 90px;
-    right: auto;
-    left: 50%;
-    transform: translateX(-50%);
-    max-height: 38%;
-  }
-
-  /* The crafting panel stays right of the toolbar at every width: it opens at a station, where nothing is picked from the inventory beside it. */
-  .bazaar.craft {
-    left: 342px;
-    transform: none;
-    max-width: calc(100% - 352px);
-    max-height: 65%;
-  }
-}
-
 .bazaar-here {
   color: var(--muted);
 }
@@ -1935,4 +1840,278 @@ button.active {
   100% {
     opacity: 0;
   }
+}
+
+/* A game window (WindowFrame.tsx, client.md C36): placed and sized by its rect, its title bar the handle, its body the part that scrolls. */
+.window {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Its rect is its whole box, padding and border included: what is dragged and clamped is what is seen. */
+  box-sizing: border-box;
+}
+
+.window-title {
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+
+.window-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.window-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(
+    135deg,
+    transparent 55%,
+    var(--border) 55%,
+    var(--border) 65%,
+    transparent 65%,
+    transparent 75%,
+    var(--border) 75%
+  );
+  border-bottom-right-radius: 6px;
+}
+
+/* A bar's handle while the interface is unlocked (useBar). */
+.bar-grip {
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: move;
+  touch-action: none;
+  pointer-events: auto;
+  z-index: 3;
+}
+
+/* With the debug layer off the world toolbar is gone, and the HAM bar takes its corner. */
+.app.no-debug .ham {
+  left: 10px;
+}
+
+/* The map's body: the canvas, the largest square it holds, centred. */
+.planet-map .window-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.planet-map-holder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* The chat is anchored at the bottom: its corner to resize it is the top right one. */
+.chat > .window-grip {
+  top: 0;
+  bottom: auto;
+  transform: scaleY(-1);
+  border-radius: 0 6px 0 0;
+}
+
+/* The Options window's switches (OptionsWindow.tsx): one a line. */
+.options label.check {
+  display: block;
+  margin: 4px 0;
+  cursor: pointer;
+}
+
+/* The waypoint pane's title (NavPane.tsx, client.md C38): it opens the Waypoints window. */
+.nav-head {
+  display: block;
+  width: 100%;
+  margin-bottom: 3px;
+  padding: 1px 4px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.nav-head:hover {
+  color: var(--accent);
+}
+
+.nav-active {
+  font-weight: 700;
+}
+
+/* The Waypoints window (WaypointsWindow.tsx). */
+.waypoint-filter {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 10px;
+}
+
+.waypoints label.check {
+  display: block;
+  cursor: pointer;
+}
+
+.waypoint-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.18);
+}
+
+.waypoint-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waypoint-where {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.waypoint-row button {
+  min-width: 26px;
+  padding: 0 4px;
+}
+
+.waypoints form.row input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The map's long-press form (PlanetMap.tsx): a waypoint where it was held. */
+.planet-map-way {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.planet-map-way input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The active waypoint's arrow at the screen's edge (ClientApp.paintWaypoint): placed by a transform, hidden while the waypoint is in view. */
+.waypoint-edge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  font-size: 26px;
+  line-height: 26px;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* The character window's Equipment tab (CharacterWindow.tsx, client.md C39): the seven worn slots in a row of fixed-size cells — label, slot,
+   condition — wrapping on a narrow window; a slot sized like the inventory's, not by the window. */
+.character-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 8px;
+}
+
+.character-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 60px;
+  padding: 3px 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+
+.character-slot > .inventory-slot {
+  width: 52px;
+  height: 52px;
+}
+
+.character-slot.drop {
+  border-color: var(--accent);
+  background: rgba(240, 184, 74, 0.12);
+}
+
+.character-slot-label {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.character-condition {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.character-condition.tired {
+  color: #ff6b5a;
+  font-weight: 700;
+}
+
+/* The Overview's level line and the tables of both tabs. */
+.character-level {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.character-xp {
+  flex: 1;
+  height: 6px;
+}
+
+.character-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.character-table td {
+  padding: 3px 4px;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.15);
+}
+
+.character-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The game updated under this page (UpdateNotice.tsx, client.md C41): top centre, over the windows. */
+.update-notice {
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 19;
+  border-color: var(--accent);
 }

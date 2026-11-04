@@ -104,11 +104,22 @@ public sealed partial class SimBridge
         var refines = subs == null ? default : subs.Commands<RefineItems>();
         var packs = subs == null ? default : subs.Commands<PackItem>();
         var unpacks = subs == null ? default : subs.Commands<UnpackItem>();
+        var places = subs == null ? default : subs.Commands<PlaceInstallation>();
+        var collects = subs == null ? default : subs.Commands<CollectInstallation>();
+        var pays = subs == null ? default : subs.Commands<PayUpkeep>();
+        var pickups = subs == null ? default : subs.Commands<PickUpInstallation>();
+        var installing = places.Count + collects.Count + pays.Count + pickups.Count;
+        var waypointCreates = subs == null ? default : subs.Commands<CreateWaypoint>();
+        var waypointDeletes = subs == null ? default : subs.Commands<DeleteWaypoint>();
+        var waypointActives = subs == null ? default : subs.Commands<SetActiveWaypoint>();
+        var waypointing = waypointCreates.Count + waypointDeletes.Count + waypointActives.Count;
         var crafting = starts.Count + experiments.Count + enhances.Count + finishes.Count + repairs.Count + salvages.Count + refines.Count + packs.Count
-            + unpacks.Count;
+            + unpacks.Count + installing + waypointing;
         var flushDue = ctx.TickNumber % Math.Max(1, _config.TickRateHz) == 0;
-        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue) && !AdminPending)
+        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue) && !AdminPending
+            && !InstallationsDue(ctx.TickNumber))
         {
+            Interlocked.Exchange(ref _worldTickNow, ctx.WorldTick + InstallClockOffset);
             return;
         }
 
@@ -150,6 +161,11 @@ public sealed partial class SimBridge
         using (var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
         {
             EnsureItems(tx);
+            EnsureInstallations(tx);
+            if (waypointing + pickups.Count > 0)
+            {
+                EnsureWaypoints(tx);
+            }
             if (crafting > 0)
             {
                 EnsureEconomy(tx);
@@ -218,6 +234,44 @@ public sealed partial class SimBridge
                 {
                     UnpackFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
                 }
+
+                // Installations (crafting-build.md § 10): a place, then collects and payments, then pick-ups — a client that pays and picks up in one tick
+                // has its payment settled first.
+                foreach (var command in places)
+                {
+                    PlaceFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in collects)
+                {
+                    CollectFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in pays)
+                {
+                    PayFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in pickups)
+                {
+                    PickUpFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                // Waypoints (client.md C38): after the pick-ups, whose pins they delete — a pin asked for an installation picked up this tick is refused.
+                foreach (var command in waypointCreates)
+                {
+                    CreateWaypointFromCommand(tx, tick0, subs, in command);
+                }
+
+                foreach (var command in waypointDeletes)
+                {
+                    DeleteWaypointFromCommand(tx, tick0, subs, in command);
+                }
+
+                foreach (var command in waypointActives)
+                {
+                    SetActiveWaypointFromCommand(tx, tick0, subs, in command);
+                }
             }
 
             // The operators' requests (SimBridge.Admin.cs), after the players': a worn item they rewrite or take is in the gear computed below.
@@ -232,7 +286,8 @@ public sealed partial class SimBridge
             }
 
             var written = _equipsApplied.Count + _unequipsApplied.Count + _craftsApplied.Count + _repairsApplied.Count + _salvagesApplied.Count
-                + _refinesApplied.Count + _packsApplied.Count + _unpacksApplied.Count + _wearCounts.Writes + _adminApplied.Count > 0;
+                + _refinesApplied.Count + _packsApplied.Count + _unpacksApplied.Count + _installsApplied.Count + _waypointsApplied.Count + _wearCounts.Writes
+                + _adminApplied.Count > 0;
             if (written)
             {
                 FlushItemHead(tx);
@@ -266,6 +321,9 @@ public sealed partial class SimBridge
             EndRefines(subs, committed);
             EndCrates(subs, committed);
         }
+
+        EndInstallations(tick0, subs, committed, ctx.TickNumber, ctx.WorldTick);
+        EndWaypoints(subs, committed);
 
         EndItems(committed);
         EndWear(tick0, committed);

@@ -1,10 +1,12 @@
 import { create } from 'zustand';
+import { useChat } from './chat-store';
 import type { InventoryItem } from '../data/items';
 import {
   browseUrl,
   commandRow,
   DEFAULT_QUERY,
   itemWhat,
+  newReservationNotices,
   MARKET_ANSWER_MS,
   marketRefusal,
   MAX_LISTING_QTY,
@@ -131,6 +133,8 @@ export interface MarketState {
   readonly settle: (row: string) => void;
   /** Who hears that the workshop's row was refused: the crafting store, which forgets the step it waited for. */
   readonly onCraftRefused: (handler: (() => void) | null) => void;
+  /** Who hears a waypoint command refused (client.md C38): the waypoints store, which says why in chat — the commands are typed there. */
+  readonly onWaypointRefused: (handler: ((text: string) => void) | null) => void;
   /** Takes off what is worn in an equip slot, 101-107. */
   readonly unequip: (slot: number) => void;
   /** Packs an item or a crate into an identical one; takes items out of a crate (crafting-catalog.md § 11.2). Refusals show on the `'gear'` row. */
@@ -190,6 +194,7 @@ export const useMarket = create<MarketState>((set, get) => {
 
   /** Told when the workshop's row is refused — the crafting store's `forget`, set by it (the two stores import one way only). */
   let refusedCraft: (() => void) | null = null;
+  let refusedWaypoint: ((text: string) => void) | null = null;
 
   /** The last send of each row, by sequence. */
   const sendSeqOf = new Map<string, number>();
@@ -268,6 +273,10 @@ export const useMarket = create<MarketState>((set, get) => {
     setHere: (here, hereRealm = -1) => {
       if (get().here !== here || get().hereRealm !== hereRealm) {
         set({ here, hereRealm });
+        // The bazaar is used at its terminal only (client.md C40): walked away from it, the panel closes, as the crafting panel does.
+        if (here === 0 && get().open) {
+          get().close();
+        }
       }
     },
     setQuery: (change) => {
@@ -327,6 +336,11 @@ export const useMarket = create<MarketState>((set, get) => {
     setMine: (mine) => {
       for (const l of mine.listed) {
         sold.set(l.id, { what: itemWhat(l.name, l.mk, l.qty), total: l.total });
+      }
+
+      // Goods newly waiting at a bazaar are said in chat: no toolbar button counts them (client.md C40).
+      for (const text of newReservationNotices(get().mine, mine)) {
+        useChat.getState().notice(text);
       }
 
       // Every change the server makes moves this read: whatever was in flight has landed, or been refused.
@@ -438,6 +452,9 @@ export const useMarket = create<MarketState>((set, get) => {
     settle: (row) => {
       clearPending(row);
     },
+    onWaypointRefused: (handler) => {
+      refusedWaypoint = handler;
+    },
     onCraftRefused: (handler) => {
       refusedCraft = handler;
     },
@@ -474,6 +491,10 @@ export const useMarket = create<MarketState>((set, get) => {
       // The workshop's step refused is not waited for: a later inventory read must not report it done (review, 2026-11-03).
       if (row === 'craft') {
         refusedCraft?.();
+      }
+
+      if (row === 'waypoint') {
+        refusedWaypoint?.(text);
       }
 
       set({

@@ -54,7 +54,7 @@ describe('a crafting station', () => {
     const items = craftMenuItems();
     expect(items).toHaveLength(1);
     expect(items[0].action).toEqual({ kind: 'craft' });
-    expect(items[0].hint).toContain('C');
+    expect(items[0].hint).toContain('(K,');
   });
 
   it('gates the panel: away from it neither the key nor the menu opens it, at it both do, and walking away closes it', () => {

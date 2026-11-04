@@ -216,14 +216,14 @@ export function bazaarMenuItems(reserved: number): ContextMenuItem[] {
 }
 
 /**
- * The crafting station's context menu (crafting-build.md C2-C3): the crafting panel, whose key the hint names — <kbd>C</kbd> opens it too, at a
+ * The crafting station's context menu (crafting-build.md C2-C3): the crafting panel, whose key the hint names — <kbd>K</kbd> opens it too, at a
  * station (Loïc, 2026-11-02: the key alone was not to be found).
  */
 export function craftMenuItems(): ContextMenuItem[] {
   return [
     {
       label: 'Craft, repair, salvage, refine…',
-      hint: 'The crafting panel (C, at a station)',
+      hint: 'The crafting panel (K, at a station)',
       action: { kind: 'craft' },
     },
   ];

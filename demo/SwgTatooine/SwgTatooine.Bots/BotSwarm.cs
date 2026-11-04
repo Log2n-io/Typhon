@@ -125,6 +125,12 @@ public sealed class BotSwarmOptions
     /// </summary>
     public int CraftPercent { get; init; } = 30;
 
+    /// <summary>
+    /// Thinking bots that keep installations, in hundredths by index after the crafters (crafting-build.md § 10, O-7: 10 %): those that trade, each an
+    /// extractor out of its town. <c>--installers 0</c> is the A/B arm.
+    /// </summary>
+    public int InstallPercent { get; init; } = 10;
+
     /// <summary>The load test's city by name (<c>--market-rush</c>, bazaar.md § 8), or null: every thinking bot goes there and does nothing but trade.</summary>
     public string MarketRush { get; init; }
 
@@ -2600,6 +2606,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 _brain.TakesMissions = _takesMissions;
                 SetUpMarket(index, options);
                 SetUpCraft(index, options, book);
+                SetUpInstall(index, options);
                 TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
@@ -2771,8 +2778,9 @@ public sealed partial class BotSwarm : IAsyncDisposable
             PollJournal(tick);
             PollInventory(tick);
             PollMine(tick);
+            PollInstallations(tick);
             var missions = _missions;
-            world = WithCraft(WithMarket(world)) with
+            world = WithInstall(WithCraft(WithMarket(world))) with
             {
                 MissionsHeld = missions.Held,
                 HasMissionLair = missions.LairKnown,
@@ -2947,6 +2955,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 case IntentKind.Craft:
                     // At a crafting station: the craft under way read off the driver, then sent below at the commands' rate (BotSwarm.Craft.cs).
                     BeginCraft();
+                    break;
+
+                case IntentKind.Tend:
+                    // At an installation, or the lot it chose for one: what is due there, sent off the driver (BotSwarm.Install.cs).
+                    BeginTend(world.X, world.Z);
                     break;
 
                 case IntentKind.AbandonMission when Client.Plan.CommandByName(AbandonMissionCommand) != null:

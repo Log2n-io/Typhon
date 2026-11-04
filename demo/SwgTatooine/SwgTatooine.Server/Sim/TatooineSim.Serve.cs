@@ -167,6 +167,10 @@ public sealed partial class TatooineSim
             AssetShapes = shapes,
         };
 
+        // The installations' clock for their endpoint (crafting-build.md § 10), as soon as there is a bridge: what it computes a hopper at.
+        var bridge = _bridge;
+        InstallationEndpoints.Clock = () => (bridge.WorldTickNow, bridge.TicksPerHour);
+
         // The cities' buildings, as the crowd's walks round them read them (SimBridge.Routes.cs): once, now the world is built or reopened.
         _bridge.PlanCityWalks();
 

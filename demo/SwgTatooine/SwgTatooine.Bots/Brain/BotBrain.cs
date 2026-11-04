@@ -30,6 +30,9 @@ public enum Goal
 
     /// <summary>Doing the mission it holds: out to its lair, its defenders, then the lair (lair-objectives.md B-3).</summary>
     Questing,
+
+    /// <summary>Out to its installations, or to a wild lot to place one: walking there, then tending it (crafting-build.md § 10).</summary>
+    Tending,
 }
 
 /// <summary>
@@ -324,6 +327,7 @@ public sealed partial class BotBrain
         _cities = cities;
         _assets = assets;
         _rng = seed == 0 ? 0x9E3779B9u : seed;   // xorshift is dead at zero, and a caller numbering bots from 0 would hand it one
+        _wildAngle = (_rng % 6283u) / 1000d;      // which way out of town its installations go: its own, fixed by its seed
         _rate = ticksPerSecond > 0d ? ticksPerSecond : 1d;
         _idleTicks = Ticks(IdleSeconds);
         _patienceTicks = Ticks(ShuttlePatienceSeconds);
@@ -366,6 +370,18 @@ public sealed partial class BotBrain
 
     /// <summary>The craft errand is tried at most this often, seconds: a station it cannot walk to is not searched again every decision.</summary>
     public const int CraftRetrySeconds = 60;
+
+    /// <summary>How far an installation errand goes, metres: its own installations, or a lot just out of its city.</summary>
+    public const double TendReachM = 3_000;
+
+    /// <summary>How long after an installation errand it may start another, seconds.</summary>
+    public const int TendRetrySeconds = 120;
+
+    /// <summary>How long it stands at an installation while its commands go out, seconds.</summary>
+    public const int TendSeconds = 6;
+
+    /// <summary>How close counts as at an installation, metres: well within the server's 30.</summary>
+    public const double TendAtM = 12;
 
     /// <summary>Whether it stands at a bazaar's terminal using it: the only time a market command can be taken (the server's 6 m).</summary>
     /// <remarks>
@@ -560,6 +576,11 @@ public sealed partial class BotBrain
     /// <summary>When the craft errand may be chosen again.</summary>
     private long _craftAt;
 
+    // The installation errand: when it may start the next, the point it walks to, whether it has asked the swarm to tend there.
+    private long _tendAt;
+    private (float X, float Z) _tendPoint;
+    private bool _tendAsked;
+
     /// <summary>Decides what to do this tick.</summary>
     /// <param name="world">What the bot was sent.</param>
     /// <param name="tick">The fleet's tick, which is what the timed goals count in.</param>
@@ -636,6 +657,8 @@ public sealed partial class BotBrain
                 return Enter(in world, tick);
             case Goal.Questing:
                 return Quest(in world, tick);
+            case Goal.Tending:
+                return Tend(in world, tick);
             case Goal.Idling:
                 if (tick < _until)
                 {
@@ -683,9 +706,11 @@ public sealed partial class BotBrain
 
         var here = RegionAt(world.X, world.Z);
 
-        // Nearly full, or goods waiting for it: its city's bazaar, before the desk — a quest taken now would lose its drops (the remarks).
+        // Nearly full, goods waiting for it, an input or an extractor kit to buy: its city's bazaar, before the desk — a quest taken now would lose its
+        // drops (the remarks).
         // A bazaar out of errand reach — the bot is back from a quest's lair, kilometres out — is no try: it goes when back in reach, not 120 s later.
-        if (Trades && _assets != null && tick >= _marketAt && (world.InventoryStacks >= MarketStacks || world.Reserved > 0 || world.InputWanted)
+        if (Trades && _assets != null && tick >= _marketAt
+            && (world.InventoryStacks >= MarketStacks || world.Reserved > 0 || world.InputWanted || world.KitWanted)
             && Bazaar(in world, here) is { } bazaar && Routing.Distance(world.X, world.Z, bazaar.At.X, bazaar.At.Z) <= ErrandReachM)
         {
             _marketAt = tick + Ticks(MarketRetrySeconds);
@@ -704,6 +729,17 @@ public sealed partial class BotBrain
             if (StartVisitAt(in world, tick, Routing.CraftingStationKind, GoalWhy.CraftChosen, station))
             {
                 return Visit(in world, tick);
+            }
+        }
+
+        // An installation owner with one to tend, or a kit to place (crafting-build.md § 10): out to it, before the desk — a hopper full or an upkeep
+        // run out makes nothing.
+        if (world.TendDue && tick >= _tendAt && Routing.Distance(world.X, world.Z, world.TendX, world.TendZ) <= TendReachM)
+        {
+            _tendAt = tick + Ticks(TendRetrySeconds);
+            if (StartTend(in world, tick))
+            {
+                return Tend(in world, tick);
             }
         }
 
@@ -1219,6 +1255,74 @@ public sealed partial class BotBrain
         Become(Goal.Travelling, GoalWhy.ShuttlePatienceOut, tick);
         return Travel(in world, tick);
     }
+
+    /// <summary>The walk to an installation, or to a wild lot: planned to its point; false when no walk there is found.</summary>
+    private bool StartTend(in Perceived world, long tick)
+    {
+        _tendPoint = (world.TendX, world.TendZ);
+        _tendAsked = false;
+        if (!PlanWalk(in world, _tendPoint, [], tick))
+        {
+            return false;
+        }
+
+        _leg.FinalReach = (float)TendAtM;
+        Become(Goal.Tending, GoalWhy.TendChosen, tick);
+        return true;
+    }
+
+    /// <summary>
+    /// Walks to the installation's point; there, asks the swarm once to tend it (place, collect, pay: <see cref="IntentKind.Tend"/>), and stands while its
+    /// commands go out — then back to the day's loop.
+    /// </summary>
+    private Intent Tend(in Perceived world, long tick)
+    {
+        if (_tendAsked)
+        {
+            if (tick < _until || world.Tending)
+            {
+                return Intent.None;
+            }
+
+            Become(Goal.Choosing, GoalWhy.TendDone, tick);
+            return Choose(in world, tick);
+        }
+
+        var step = Follow(in world, tick, out var end);
+        if (end == LegEnd.Stuck && Routing.Distance(world.X, world.Z, _tendPoint.X, _tendPoint.Z) <= TendAtM * 2)
+        {
+            end = LegEnd.Done;
+        }
+
+        switch (end)
+        {
+            case LegEnd.Going:
+                return step;
+            case LegEnd.Done:
+                _tendAsked = true;
+                _until = tick + Ticks(TendSeconds);
+                TendsAsked++;
+                return Intent.Tend;
+            default:
+                Become(Goal.Idling, GoalWhy.TendFailed, tick);
+                _until = tick + Ticks(2);
+                return Intent.Move(0f, 0);
+        }
+    }
+
+    /// <summary>A point on the lot grid just out of its home city — or the city it is in — for its next installation, turning by a step an attempt.</summary>
+    public (float X, float Z) WildLot(int attempt)
+    {
+        var city = HomeRegion != 0 ? _cities[HomeRegion - 1] : _cities.Length > 0 ? _cities[0] : default;
+        var angle = _wildAngle + (attempt * 0.7);
+        var d = city.Radius + 300 + (attempt * 64);
+        return ((float)(city.X + (Math.Cos(angle) * d)), (float)(city.Z + (Math.Sin(angle) * d)));
+    }
+
+    private readonly double _wildAngle;
+
+    /// <summary>Installation errands started.</summary>
+    public long TendsAsked { get; private set; }
 
     /// <summary>Starts an errand to the nearest mission terminal or bazaar it knows, if there is one within reach.</summary>
     /// <param name="world">What the bot was sent.</param>

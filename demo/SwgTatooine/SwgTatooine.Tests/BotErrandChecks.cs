@@ -1520,6 +1520,22 @@ public sealed class BotErrandChecks
         });
     }
 
+    /// <summary>
+    /// crafting-build.md § 10: an installation owner with room, nothing reserved and no craft still goes to the bazaar when it has nothing placed and no
+    /// kit — the only place it buys one. Without it no owner ever went (live, 2026-11-03: 50 owners, 0 kits in ten minutes).
+    /// </summary>
+    [Test]
+    public void AnOwnerWithNoKit_GoesToTheBazaar_BeforeTheDesk()
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.Decide(sim.View() with { KitWanted = true }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not the bazaar");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1));
+        });
+    }
+
     /// <summary>A bot full enough to be losing drops says so: <see cref="GoalWhy.MarketFull"/>, the telemetry's measure of too little headroom.</summary>
     [TestCase(BotBrain.MarketFullStacks, GoalWhy.MarketFull)]
     [TestCase(BotBrain.MarketFullStacks - 1, GoalWhy.MarketChosen)]

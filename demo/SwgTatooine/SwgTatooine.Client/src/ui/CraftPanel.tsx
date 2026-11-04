@@ -7,6 +7,7 @@ import { refineFee, refineOptions, type RefineOption } from '../data/refine';
 import { useCraft } from '../state/craft-store';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
+import { WindowFrame } from './WindowFrame';
 
 /** The segments an armour piece's slot takes: padded or composite (crafting-catalog.md § 13.6). */
 const PADDED_SEGMENT = 29;
@@ -19,7 +20,7 @@ const NO_ITEMS: readonly InventoryItem[] = [];
 const ADDONS: Readonly<Record<string, number>> = { weapon: 16, armor: 17, potion: 19 };
 
 /**
- * The crafting panel (crafting-build.md C2, crafting-catalog.md § 3.4), at a station: its context menu, or <kbd>C</kbd> beside it. Before a craft: a schematic, its inputs picked slot by
+ * The crafting panel (crafting-build.md C2, crafting-catalog.md § 3.4), at a station: its context menu, or <kbd>K</kbd> beside it. Before a craft: a schematic, its inputs picked slot by
  * slot from the inventory, and each line's <b>ceiling</b> computed as the server will (`data/craft.ts`) — so poor inputs show before the first click.
  * During one: each line's value and ceiling, a point at a time, an optional add-on, and the finish. The server rolls; the panel shows.
  */
@@ -34,13 +35,15 @@ export function CraftPanel() {
   }
 
   return (
-    <div className="panel bazaar craft" role="dialog" aria-label="Crafting">
-      <div className="missions-head">
-        <span className="hud-title">Crafting</span>
-        <button type="button" className="missions-close" onClick={close} aria-label="Close">
-          ✕
-        </button>
-      </div>
+    <WindowFrame
+      id="craft"
+      title="Crafting"
+      onClose={close}
+      ariaLabel="Crafting"
+      className="bazaar craft"
+      minW={420}
+      initial={() => ({ x: 20, y: 70, w: 662, h: 0 })}
+    >
       <CraftStatus />
       {notice === undefined ? null : (
         <div className="hint" role="alert">
@@ -56,7 +59,7 @@ export function CraftPanel() {
       )}
       <Upkeep />
       <Refine />
-    </div>
+    </WindowFrame>
   );
 }
 

@@ -4,6 +4,7 @@ import { App } from './ui/App';
 import './ui/styles.css';
 import { useTerrain } from './state/terrain-store';
 import { sharedTerrain } from './terrain/terrain-provider';
+import { useBuild } from './state/build-store';
 
 const root = document.getElementById('root');
 if (root === null) {
@@ -24,6 +25,12 @@ void sharedTerrain({
   },
 }).then((loaded) => {
   useTerrain.getState().setLoaded(loaded.baked, loaded.fromCache, loaded.loadMs);
+});
+
+// A part of this build the server no longer has — a redeploy replaced its hashed chunks while this page was open (client.md C41): say so, once.
+window.addEventListener('vite:preloadError', (event) => {
+  event.preventDefault();
+  useBuild.getState().markStale();
 });
 
 createRoot(root).render(

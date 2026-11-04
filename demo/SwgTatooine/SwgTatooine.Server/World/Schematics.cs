@@ -95,6 +95,9 @@ public enum SchematicKind : byte
     Armor,
     Potion,
     Kit,
+
+    /// <summary>An installation's kit (crafting-catalog.md § 13.9): placed on a lot, its lines its own (an extractor's rate and hopper).</summary>
+    Structure,
 }
 
 /// <summary>A schematic (crafting-catalog.md § 13): its output, its slots, its lines and its experimentation points (§ 3.4: 2 on a part, 6 on an item).</summary>
@@ -111,7 +114,8 @@ public sealed record Schematic(ushort Id, string Name, SchematicKind Kind, ushor
 /// <remarks>
 /// <para><b>Ids are the output template's</b>, but for the two segments and the stocks, whose output templates are their own, and the armour pieces, whose
 /// one schematic makes the padded or the composite piece by the segments it is given (§ 13.6).</para>
-/// <para><b>The carbine waits for its stance</b> (O-4), and the swoop, the structures and their modules for C5-C6: their schematics are not here yet.</para>
+/// <para><b>The carbine waits for its stance</b> (O-4), and the swoop, the factory, the houses and their Wall and Assembly modules for C5b-C6: their
+/// schematics are not here yet.</para>
 /// </remarks>
 public static class Schematics
 {
@@ -146,10 +150,14 @@ public static class Schematics
     public const ushort Hardener = 33;
     public const ushort Vital = 34;
     public const ushort Vial = 35;
+    public const ushort StructuralModule = 36;
+    public const ushort StorageModule = 38;
+    public const ushort ExtractionUnit = 39;
 
     /// <summary>The armour schematics' ids, one per piece: 44-49, the padded templates' — the segments choose padded or composite.</summary>
     public const ushort ArmorFirst = ItemCatalog.PaddedHelmet;
 
+    private const ushort Ore = ItemCatalog.Ore;
     private const ushort Metal = ItemCatalog.Metal;
     private const ushort Crystal = ItemCatalog.Crystal;
     private const ushort Gas = ItemCatalog.Gas;
@@ -212,6 +220,9 @@ public static class Schematics
             Part(Hardener, "Hardener Compound", [Q(Bone, 6), B(Chemical, 4)], T(0, tg, .5), T(0, en, .5)),
             Part(Vital, "Vital Compound", [Q(Gland, 4), Q(Hide, 4), B(Water, 10)], T(0, en, .6), T(1, du, .4)),
             Part(Vial, "Vial", [Q(Crystal, 4), Q(Chemical, 4)], T(0, du, .5), T(1, du, .5)),
+            Part(StructuralModule, "Structural Module", [Q(Metal, 10), B(Ore, 40)], T(0, tg, 1)),
+            Part(StorageModule, "Storage Module", [Q(Metal, 15), B(Fiber, 10)], T(0, tg, .5), T(0, du, .5)),
+            Part(ExtractionUnit, "Extraction Unit", [Q(Metal, 20), P(PowerCell)], T(0, tg, .5), T(1, g, .5)),
 
             // § 13.2: the three Mk I cores, from bulk: a stack at Mk I, grade .20 like a looted Mk I.
             new(ItemCatalog.CoreRanged, "Ranged Weapon Core", SchematicKind.Core, ItemCatalog.CoreRanged, [B(Metal, 10), B(Crystal, 5)], [], 0),
@@ -254,6 +265,15 @@ public static class Schematics
             Potion(59, "Haste Tonic", Stimulant, Chemical, 5, 5, 20, 60, 180),
             Potion(60, "Ironhide Tonic", Hardener, Chemical, 5, 5, 25, 60, 240),
             Potion(61, "Vigor Tonic", Vital, Water, 10, 5, 25, 120, 480),
+
+            // § 13.9: the extractor — rate 4-15 units a minute (240-900 an hour) from its extraction unit and frames, hopper 300-2 000 from its storage.
+            new(ItemCatalog.Extractor, "Extractor", SchematicKind.Structure, ItemCatalog.Extractor,
+                [P(ExtractionUnit), P(StorageModule, 2), P(StructuralModule, 2), B(Ore, 150)],
+                [
+                    new Line("rate", 240, 900, false, [T(0, g, .7), T(2, g, .3)]),
+                    new Line("hopper", 300, 2000, false, [T(1, g, 1)]),
+                ],
+                ItemPoints),
 
             // § 13.10: kits, bulk only.
             new(62, "Weapon Repair Kit", SchematicKind.Kit, 62, [B(Metal, 10), B(Chemical, 5)], [], 0),

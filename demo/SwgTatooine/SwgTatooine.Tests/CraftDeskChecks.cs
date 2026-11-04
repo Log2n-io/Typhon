@@ -293,6 +293,75 @@ internal sealed class CraftDeskChecks : ServedChecks
         AuditsOk(sim, "after the blaster");
     }
 
+    /// <summary>
+    /// A crafted extractor kit (crafting-catalog.md § 13.9, O-14): an extraction unit, two storage and two structural modules and Ore ×150 make one kit
+    /// whose rate and hopper are the pure craft's, at Mk 0 like the vendor's — no fee, a structure has no market value.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void AnExtractorKit_FromItsModules_IsThePureCraft()
+    {
+        using var sim = Start();
+        var c = LogIn(sim, 0x9531, 1);
+        Stage(sim, c, ItemCatalog.Ore, 1, 150);
+        var unit = StagePart(sim, c, Schematics.ExtractionUnit, 700);
+        var bins = new[] { StagePart(sim, c, Schematics.StorageModule, 500), StagePart(sim, c, Schematics.StorageModule, 700) };
+        var frames = new[] { StagePart(sim, c, Schematics.StructuralModule, 400), StagePart(sim, c, Schematics.StructuralModule, 600) };
+        Harness.Ticks(1);
+        var balance = Ledgers.Balance(sim, c.Character);
+
+        StartCraft(c.Link, ItemCatalog.Extractor, [0], [unit.RawValue, bins[0].RawValue, bins[1].RawValue, frames[0].RawValue, frames[1].RawValue]);
+        SessionHarness.Until(() => sim.Bridge.CraftsStarted == 1, "the craft started");
+        Harness.Ticks(1);
+        sim.Bridge.TryCraftOf(c.Key, out var state);
+        var spent = 0;
+        foreach (var line in new byte[] { 0, 0, 0, 0, 1, 1 })
+        {
+            Experiment(c.Link, line);
+            spent++;
+            Breathe();
+            SessionHarness.Until(() => sim.Bridge.CraftPoints == spent, "the point");
+        }
+
+        Finish(c.Link, ItemCatalog.Extractor);
+        SessionHarness.Until(() => sim.Bridge.CraftsFinished == 1, "the finish");
+        Harness.Ticks(2);
+
+        Schematics.TryGet(ItemCatalog.Extractor, out var s);
+        var v = new double[2];
+        Crafting.Run(
+            s,
+            [
+                new(Schematics.ExtractionUnit, 0, .7, 0, 0),
+                new(Schematics.StorageModule, 0, .6, 0, 0),
+                new(Schematics.StructuralModule, 0, .5, 0, 0),
+                new(ItemCatalog.Ore, 1, 0, 0, 0),
+            ],
+            c.Key,
+            state.Serial,
+            [4, 2],
+            0,
+            v);
+        var made = Items.Stacks(sim, c.Character).Single(x => x.Stack.Template == ItemCatalog.Extractor);
+        var stats = StatsOf(sim, made.Id);
+        Assert.Multiple(() =>
+        {
+            Assert.That((stats.Stat0, stats.Stat1), Is.EqualTo(((int)Math.Round(v[0]), (int)Math.Round(v[1]))), "rate an hour, hopper");
+            Assert.That(stats.Stat0, Is.InRange(240, 900));
+            Assert.That(stats.Stat1, Is.InRange(300, 2000));
+            Assert.That(made.Stack.Mk, Is.Zero, "a kit has no band");
+            Assert.That(stats.LifeMilli, Is.InRange((short)900, (short)1100));
+            Assert.That((stats.Flags & ItemFlags.Pristine) != 0, Is.True);
+            Assert.That(Ledgers.Rows(sim).Any(r => r.Kind == TransferKind.Bench), Is.False, "no fee");
+            Assert.That(Ledgers.Balance(sim, c.Character), Is.EqualTo(balance));
+            Assert.That(
+                Items.Stacks(sim, c.Character).Any(x => x.Stack.Template is Schematics.StorageModule or Schematics.StructuralModule),
+                Is.False,
+                "the modules consumed");
+        });
+        AuditsOk(sim, "after the extractor");
+    }
+
     /// <summary>The refusals: away from a station, a second craft, inputs not held, a point with none left, a finish of another schematic or of none.</summary>
     [Test]
     [CancelAfter(180_000)]

@@ -1131,6 +1131,13 @@ export class TyphonSource implements DataSource {
       'RefineItems',
       'PackItem',
       'UnpackItem',
+      'PlaceInstallation',
+      'CollectInstallation',
+      'PayUpkeep',
+      'PickUpInstallation',
+      'CreateWaypoint',
+      'DeleteWaypoint',
+      'SetActiveWaypoint',
     ]) {
       const command = plan.commandByName(name);
       if (command !== null) {

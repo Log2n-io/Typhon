@@ -45,6 +45,9 @@ export interface ItemStats {
   readonly grade?: number;
   /** A potion's potency and duration (ms). */
   readonly potency?: number;
+  /** A structure's kit (crafting-build.md § 10): units a running hour, and its hopper. */
+  readonly rate?: number;
+  readonly hopper?: number;
   readonly durationMs?: number;
   /** The equip slot it is worn in, 101-107; 0 for a part or a potion. */
   readonly wears?: number;
@@ -77,6 +80,36 @@ export const EQUIP_SLOTS: readonly { readonly slot: number; readonly label: stri
   { slot: 106, label: 'Hands' },
   { slot: 107, label: 'Feet' },
 ];
+
+/** Each armour slot's share of the set, per mille, Head to Feet (102-107): the server's `EquipSlot.SharePerMille`. */
+export const ARMOR_SHARE_PER_MILLE: readonly number[] = [130, 330, 220, 200, 60, 60];
+
+/** The most armour mitigates, per mille: the server's `Equipment.MitigationCapPerMille`. */
+export const MITIGATION_CAP_PER_MILLE = 750;
+
+/**
+ * What the worn armour mitigates, per mille, as the server computes it (`SimBridge.ComputeGear`): each unbroken piece's protection by its slot's share,
+ * summed, capped.
+ */
+export function mitigation(worn: ReadonlyMap<number, InventoryItem>): {
+  readonly kinetic: number;
+  readonly energy: number;
+} {
+  let kinetic = 0;
+  let energy = 0;
+  for (let i = 0; i < ARMOR_SHARE_PER_MILLE.length; i++) {
+    const stats = worn.get(102 + i)?.stats;
+    if (stats !== undefined && stats.broken !== true) {
+      kinetic += ARMOR_SHARE_PER_MILLE[i] * (stats.kinetic ?? 0);
+      energy += ARMOR_SHARE_PER_MILLE[i] * (stats.energy ?? 0);
+    }
+  }
+
+  return {
+    kinetic: Math.min(MITIGATION_CAP_PER_MILLE, Math.floor(kinetic / 1000)),
+    energy: Math.min(MITIGATION_CAP_PER_MILLE, Math.floor(energy / 1000)),
+  };
+}
 
 /** Whether a slot is one of the equip slots, out of the grid. */
 export function isEquipSlot(slot: number): boolean {

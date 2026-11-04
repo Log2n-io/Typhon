@@ -1449,13 +1449,16 @@ public sealed partial class SimBridge
             return;
         }
 
-        if (!Equipment.TryStandard(v.Template, out var issue))
+        // The extractor kit (crafting-build.md § 10, O-14): standard issue too, its stats and price the installations' rules.
+        var kit = v.Template == ItemCatalog.Extractor;
+        var issue = default(StandardIssue);
+        if (!kit && !Equipment.TryStandard(v.Template, out issue))
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketBadListing);
             return;
         }
 
-        var price = Equipment.StandardPrice(v.Template);
+        var price = kit ? Installations.StandardKitPrice : Equipment.StandardPrice(v.Template);
         if (v.Price != price)
         {
             RefuseMarket(subs, in command, TatooineReplication.MarketSold);
@@ -1475,9 +1478,9 @@ public sealed partial class SimBridge
         }
 
         _marketWritten = true;
-        var stats = StandardStats(in issue);
+        var stats = kit ? Installations.StandardKit() : StandardStats(in issue);
         var creditSeq = _head.LastSeq + 1;
-        if (MintInstance(tx, buyer, v.Template, 1, in stats, ItemMoveKind.Standard, creditSeq, worldTick).IsNull
+        if (MintInstance(tx, buyer, v.Template, kit ? (byte)0 : (byte)1, in stats, ItemMoveKind.Standard, creditSeq, worldTick).IsNull
             || !Transfer(tx, buyer, EconomyLedger.World, price, TransferKind.Standard, v.Template, worldTick))
         {
             _marketAbort = true;

@@ -58,6 +58,11 @@ import type { MockInventory } from '../data/mock/inventory';
 import { MOCK_BAZAAR_REGION, type MockMarket } from '../data/mock/market';
 import { parseMine, type MarketMine } from '../data/market';
 import { useCraft } from '../state/craft-store';
+import { useInstallations } from '../state/installations-store';
+import { useWaypoints } from '../state/waypoints-store';
+import { useCharacter } from '../state/character-store';
+import { edgeArrow, WaypointPillar } from '../render/waypoint-marker';
+import { colorOf, GROUP_COLORS, groupOf } from '../data/waypoints';
 import { useMarket } from '../state/market-store';
 import { RevisionReader } from '../data/revision-reader';
 import { useItems } from '../state/items-store';
@@ -415,6 +420,9 @@ const SHUTTLE_SEARCH_FRAMES = 8;
  */
 const STRUCTURE_ARCHETYPE = 'WorldObject';
 
+/** The archetypes drawn as placed assets: the world's structures, and the players' installations (crafting-build.md § 10). */
+const STATIC_ARCHETYPES = [STRUCTURE_ARCHETYPE, 'InstallationMarker'] as const;
+
 /** How far behind a structure's surface a body still counts as picked, metres: one standing against a wall, or at a terminal. */
 const PICK_SURFACE_SLACK_M = 0.6;
 
@@ -459,6 +467,9 @@ const OFFER_AT_TERMINAL_M = 1.5;
 
 /** The navigation pane's kinds for held missions, past every `StructureKind`: one per held mission, in the journal's order. */
 const MISSION_NAV_KIND = 1000;
+
+/** The first of the player's own waypoints' rows in the pane, after the missions'. */
+const WAYPOINT_NAV_KIND = 2000;
 
 /** A shuttleport's ticket terminal, as a part the viewer can hover, select and long-press: its port and its box. */
 interface TerminalPart {
@@ -559,6 +570,10 @@ export class ClientApp {
   private readonly attacks: AttackLines;
   /** The fights as they look: swings, bolts, hit reactions and damage numbers, played at render time. */
   private readonly fx: CombatFx;
+  /** The active waypoint's pillar, and the arrow at the screen's edge when it is out of view (client.md C38, U5). */
+  private readonly waypointPillar: WaypointPillar;
+  private waypointEdge: HTMLElement | null = null;
+  private readonly waypointScreen = { x: 0, y: 0, w: 0 };
   /** The damage of every blow, over the body it landed on, in the scene. */
   private readonly damage: DamageText;
   /** The event sink the source is handed: the debug lines and the effects, each told of every blow. */
@@ -842,6 +857,7 @@ export class ClientApp {
     // Every blow the server streams, played at render time: the attacker's swing — the crowd's, or this session's avatar's —
     // a bolt for a shot, and on impact the target's hit reaction and its damage over its head.
     this.fx = new CombatFx(this.scene);
+    this.waypointPillar = new WaypointPillar(this.scene);
     this.damage = new DamageText(this.scene);
     this.fx.hooks = {
       strike: (netId) => {
@@ -1389,6 +1405,7 @@ export class ClientApp {
     this.pressRing.dispose();
     this.attacks.dispose();
     this.fx.dispose();
+    this.waypointPillar.dispose();
     this.damage.dispose();
     for (const layer of this.layers) {
       layer.dispose();
@@ -1479,6 +1496,9 @@ export class ClientApp {
     this.itemsVersion = -1;
     useItems.getState().reset();
     useCraft.getState().reset();
+    useInstallations.getState().reset();
+    useWaypoints.getState().reset();
+    useCharacter.getState().reset();
     this.mine.clear();
     this.mineVersion = -1;
     useMarket.getState().reset();
@@ -1914,11 +1934,31 @@ export class ClientApp {
       });
     });
 
+    // The player's own waypoints (client.md C38), after the missions, the active one first: read once a session can, then after each own command.
+    const waypoints = useWaypoints.getState();
+    waypoints.ensure();
+    useInstallations.getState().watch();
+    const own = [...(waypoints.list ?? [])].sort((a, b) => Number(b.active) - Number(a.active));
+    own.forEach((w, i) => {
+      this.navTargets.push({
+        kind: WAYPOINT_NAV_KIND + i,
+        x: w.x,
+        z: w.z,
+        distance: Math.hypot(w.x - this.navFromX, w.z - this.navFromZ),
+        held: true,
+      });
+    });
+
     // Republished only when what it shows changed: a metre of distance or a different target. Five store writes a second
     // would re-render the pane five times a second for nothing.
     let key = '';
     for (const t of this.navTargets) {
       key += `${t.kind}:${Number.isFinite(t.distance) ? Math.round(t.distance) : -1}:${Math.round(t.x)},${Math.round(t.z)};`;
+    }
+
+    // A rename, a colour or the active one changed with nothing moved: the pane shows those too.
+    for (const w of own) {
+      key += `${w.id}:${w.name}:${String(w.color)}:${w.active ? 1 : 0};`;
     }
 
     if (key !== this.navKey) {
@@ -1927,14 +1967,37 @@ export class ClientApp {
       const rows: NavRow[] = this.navTargets.map((t) => {
         // A click walks to where the thing is used from: a shuttleport's ticket terminal, not its pad.
         const at = t.kind === StructureKind.Shuttleport ? this.ticketStandPoint(t.x, t.z) : null;
-        const mission = t.kind >= MISSION_NAV_KIND ? held.journal[t.kind - MISSION_NAV_KIND] : undefined;
+        const waypoint = t.kind >= WAYPOINT_NAV_KIND ? own[t.kind - WAYPOINT_NAV_KIND] : undefined;
+        const mission =
+          t.kind >= MISSION_NAV_KIND && t.kind < WAYPOINT_NAV_KIND
+            ? held.journal[t.kind - MISSION_NAV_KIND]
+            : undefined;
         const name = mission === undefined ? '' : missionTitle(mission.name);
+        const distanceM = Number.isFinite(t.distance) ? Math.round(t.distance) : Infinity;
+        if (waypoint !== undefined) {
+          return {
+            kind: t.kind,
+            label: waypoint.name,
+            distanceM,
+            x: t.x,
+            z: t.z,
+            group: groupOf(waypoint),
+            color: colorOf(waypoint),
+            waypointId: waypoint.id,
+            active: waypoint.active,
+          };
+        }
+
         return {
           kind: t.kind,
           label: mission === undefined ? navLabel(t) : mission.lair === null ? `${name} (lair moving)` : name,
-          distanceM: Number.isFinite(t.distance) ? Math.round(t.distance) : Infinity,
+          distanceM,
           x: at?.x ?? t.x,
           z: at?.z ?? t.z,
+          group: mission === undefined ? 'city' : 'mission',
+          color: mission === undefined ? GROUP_COLORS.city : GROUP_COLORS.mission,
+          waypointId: null,
+          active: false,
         };
       });
       ui.setNav(rows, scanMs, this.structureCount);
@@ -1949,7 +2012,8 @@ export class ClientApp {
    */
   private updateMapPlayer(nowMs: number, yaw: number): void {
     const map = useMap.getState();
-    if (!map.open || nowMs - this.mapAtMs < MAP_INTERVAL_MS) {
+    // Kept while the map is closed too: `/way` with no place puts a waypoint where the character stands (client.md C38).
+    if (nowMs - this.mapAtMs < MAP_INTERVAL_MS) {
       return;
     }
 
@@ -1967,8 +2031,62 @@ export class ClientApp {
     );
   }
 
+  /**
+   * The active waypoint in the world, every frame (client.md C38, U5): its pillar on the ground at it, and — out of view — the arrow at the screen's
+   * edge the way to turn. Only for a player on the planet, where the waypoints are.
+   */
+  private paintWaypoint(matrix: ArrayLike<number>): void {
+    const source = this.source;
+    const onPlanet = source !== null && source.canPlay && source.selfNetId !== 0 && this.profile.kind === 'planet';
+    const active = onPlanet ? (useWaypoints.getState().list?.find((w) => w.active) ?? null) : null;
+    if (this.waypointEdge === null || !this.waypointEdge.isConnected) {
+      this.waypointEdge = document.querySelector<HTMLElement>('.waypoint-edge');
+    }
+
+    if (active === null) {
+      this.waypointPillar.update(null, this.origin.x, this.origin.z);
+      if (this.waypointEdge !== null) {
+        this.waypointEdge.style.display = 'none';
+      }
+
+      return;
+    }
+
+    const colour = colorOf(active);
+    const groundY = this.profile.ground.heightAt(active.x, active.z);
+    this.waypointPillar.update({ x: active.x, z: active.z, groundY, colour }, this.origin.x, this.origin.z);
+    const edge = this.waypointEdge;
+    if (edge === null) {
+      return;
+    }
+
+    const s = projectToScreen(
+      matrix,
+      active.x - this.origin.x,
+      groundY + 2,
+      active.z - this.origin.z,
+      this.cssSize.width,
+      this.cssSize.height,
+      this.waypointScreen,
+    );
+    const turn = relativeBearing(this.navFromX, this.navFromZ, active.x, active.z, this.lastYaw);
+    const at = edgeArrow(s.x, s.y, s.w, this.cssSize.width, this.cssSize.height, turn);
+    if (at === null) {
+      edge.style.display = 'none';
+      return;
+    }
+
+    edge.style.display = 'block';
+    edge.style.color = colour;
+    edge.style.transform = `translate(${at.x.toFixed(0)}px, ${at.y.toFixed(0)}px) translate(-50%, -50%) rotate(${at.angle.toFixed(3)}rad)`;
+    edge.title = active.name;
+  }
+
   /** Turns the pane's arrows to the camera, every frame: up is straight ahead (see `relativeBearing`). */
+  private lastYaw = 0;
+
   private paintNav(yaw: number): void {
+    this.lastYaw = yaw;
     if (!this.navShown) {
       return;
     }
@@ -3693,6 +3811,7 @@ export class ClientApp {
     // Speech over its speakers, labels shown or not: what is said is the game's, not a debugging overlay.
     this.bubbleMatrix = matrix;
     this.bubbles.update(this.cssSize.width, this.cssSize.height, now, this.speakerAnchor);
+    this.paintWaypoint(matrix);
 
     this.frameJs[this.frameJsNext] = performance.now() - now;
     this.frameJsNext = (this.frameJsNext + 1) % FRAME_SAMPLES;
@@ -5683,17 +5802,27 @@ export class ClientApp {
     // BY NAME, never by the schema's index. The live catalog decides the order its archetypes arrive in, and it is not
     // this schema's: `Archetype.WorldObject` is 0 here while the server's catalog put `CityNpc` there. Reading the
     // store at a constant index drew every city NPC as a building and asked a creature store for a `kind` field it does
-    // not have — C10's lesson, which the layers already follow and this did not.
-    const archetype = this.archetypes.indexOf('WorldObject');
+    // not have — C10's lesson, which the layers already follow and this did not. The players' installations
+    // (crafting-build.md § 10) carry the same fields and are drawn the same way, from their own store.
+    const samples = this.structureSamples;
+    let taken = 0;
+    for (const name of STATIC_ARCHETYPES) {
+      taken = this.sampleStatic(name, eyeX, eyeZ, taken);
+    }
+
+    this.structureCount = taken;
+    return layer.update(samples, taken, this.assetView);
+  }
+
+  /** One store's structures within range, into {@link structureSamples} from `taken`; how many are taken after it. */
+  private sampleStatic(name: string, eyeX: number, eyeZ: number, taken: number): number {
+    const archetype = this.archetypes.indexOf(name);
     if (archetype < 0) {
-      // Still told, with nothing: a frame that skipped the call would leave the placed instances standing AND stop
-      // reporting them as hidden, so every one of them would be drawn twice.
-      return layer.update(this.structureSamples, 0, this.assetView);
+      return taken;
     }
 
     const store = this.world.archetypeStore(archetype);
     const samples = this.structureSamples;
-    let taken = 0;
     const kindField = store.fieldIndex('kind');
     const yawField = store.fieldIndex('yaw');
     const assetField = store.fieldIndex('asset');
@@ -5733,8 +5862,7 @@ export class ClientApp {
       }
     }
 
-    this.structureCount = taken;
-    return layer.update(samples, taken, this.assetView);
+    return taken;
   }
 
   /** Reused each frame: the structures in range, which is tens of entries and must not allocate. */

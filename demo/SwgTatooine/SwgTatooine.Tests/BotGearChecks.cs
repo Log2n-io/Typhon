@@ -19,7 +19,11 @@ internal sealed class BotGearChecks
     {
         Assert.Multiple(() =>
         {
-            Assert.That(Offers, Has.Count.EqualTo(Equipment.Standard.Length + Equipment.StandardMaterials.Length), "the items and the Mk I materials");
+            Assert.That(
+                Offers,
+                Has.Count.EqualTo(Equipment.Standard.Length + Equipment.StandardMaterials.Length + 1),
+                "the items, the Mk I materials and the extractor kit");
+            Assert.That(Offers.Find(o => o.Template == ItemCatalog.Extractor).Price, Is.EqualTo(Installations.StandardKitPrice));
             Assert.That(Offers.Find(o => o.Template == ItemCatalog.Blaster).Wears, Is.EqualTo(EquipSlot.Weapon));
             Assert.That(Offers.Find(o => o.Template == ItemCatalog.PaddedHelmet + 4).Price, Is.EqualTo(Equipment.StandardPrice(ItemCatalog.PaddedHelmet + 4)));
         });

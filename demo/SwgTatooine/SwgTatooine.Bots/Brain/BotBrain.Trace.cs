@@ -65,6 +65,15 @@ public enum GoalWhy : byte
 
     /// <summary>The craft sent: back to the day's loop.</summary>
     CraftDone,
+
+    /// <summary>An installation to tend, or a kit to place (crafting-build.md § 10): out to it.</summary>
+    TendChosen,
+
+    /// <summary>Its installation commands sent: back to the day's loop.</summary>
+    TendDone,
+
+    /// <summary>No way to its installation's point.</summary>
+    TendFailed,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>
@@ -125,6 +134,9 @@ public enum Activity
 
     /// <summary>Going to a crafting station and crafting, or repairing, at it: a visit of <see cref="Routing.CraftingStationKind"/>.</summary>
     Crafting,
+
+    /// <summary>Out at its installations (crafting-build.md § 10).</summary>
+    Tending,
 }
 
 /// <summary>
@@ -180,7 +192,7 @@ public sealed partial class BotBrain
     public Activity Activity => _activity;
 
     /// <summary>A goal's activity: a visit by what it visits, any other goal by its value.</summary>
-    public static Activity ActivityOf(Goal goal, int visitKind) => goal != Goal.Visiting
+    public static Activity ActivityOf(Goal goal, int visitKind) => goal == Goal.Tending ? Activity.Tending : goal != Goal.Visiting
         ? (Activity)goal
         : visitKind switch
         {

@@ -265,6 +265,39 @@ public sealed partial class SimBridge
         Rate(j, "tipsRefusedPerMin", r10[SeriesTipsRefused], r60[SeriesTipsRefused], 60d);
         AppendCreditsByKind(j, r10, r60);
 
+        // Installations (SimBridge.Installations.cs, crafting-build.md § 10): how many stand, placed and picked up, what they made and what they cost.
+        j.Append("},\"installations\":{");
+        Num(j, "standing", InstallationCount).Append(',');
+        Num(j, "placed", InstallationsPlaced).Append(',');
+        Num(j, "pickedUp", InstallationsPickedUp).Append(',');
+        Num(j, "collects", InstallationCollects).Append(',');
+        Num(j, "extracted", UnitsExtracted).Append(',');
+        Num(j, "upkeepPaid", UpkeepPaid).Append(',');
+        Num(j, "lotsPerCharacter", Installations.LotsPerCharacter).Append(',');
+        // Why a place, a collect, a payment or a pick-up was refused: the Workshop's counts of the installations' own reasons (§ 10, C5a-1).
+        j.Append("\"refusedBy\":{");
+        Num(j, "bad", WorkshopRefused(TatooineReplication.InstallationBad)).Append(',');
+        Num(j, "notHere", WorkshopRefused(TatooineReplication.InstallationNotHere)).Append(',');
+        Num(j, "lotTaken", WorkshopRefused(TatooineReplication.LotTaken)).Append(',');
+        Num(j, "noLotsLeft", WorkshopRefused(TatooineReplication.NoLotsLeft)).Append(',');
+        Num(j, "empty", WorkshopRefused(TatooineReplication.InstallationEmpty)).Append(',');
+        Num(j, "notEmpty", WorkshopRefused(TatooineReplication.InstallationNotEmpty));
+        j.Append('}');
+
+        // Waypoints (SimBridge.Waypoints.cs, client.md C38): made and deleted since start.
+        j.Append("},\"waypoints\":{");
+        Num(j, "created", WaypointsCreated).Append(',');
+        Num(j, "deleted", WaypointsDeleted);
+
+        // Who answers a player's attack (SimBridge.Combat.cs, V33 and 2026-11-03): the crowd's bodies that fought back, fled and joined, the creatures
+        // that joined a fight started on one of them.
+        j.Append("},\"reactions\":{");
+        Num(j, "crowdFoughtBack", CrowdFoughtBack).Append(',');
+        Num(j, "crowdFled", CrowdFled).Append(',');
+        Num(j, "crowdJoined", CrowdJoined).Append(',');
+        Num(j, "crowdShouts", CrowdShouts).Append(',');
+        Num(j, "packJoined", PackJoined);
+
         // The shuttle fare (SimBridge.Fares.cs): what a ticket costs, how many were bought and flown, and how often — whether anybody travels.
         j.Append("},\"travel\":{");
         Num(j, "fare", TatooineData.ShuttleFare).Append(',');

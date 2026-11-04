@@ -1,3 +1,4 @@
+import { isStaleChunkError, useBuild } from '../state/build-store';
 import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh';
 import type { TransformNode } from '@babylonjs/core/Meshes/transformNode';
 import { placement } from '../assets/asset-frame';
@@ -544,6 +545,10 @@ export class StaticAssets {
         // One asset failing is not a reason for the street to stop drawing: the renderer's own shape stands in its
         // place, and the id is named so the failure is diagnosable rather than merely visible.
         console.error(`assets: ${id} not placed`, error);
+        // Placed by nobody because this page's build is older than the server's (C41): only a reload brings the code it needs.
+        if (isStaleChunkError(error)) {
+          useBuild.getState().markStale();
+        }
       });
   }
 }

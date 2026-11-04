@@ -212,7 +212,10 @@ internal sealed class MarketDeskChecks : ServedChecks
 
     private string State(TatooineSim sim, params Trader[] traders)
     {
-        var parts = new List<string> { $"credits {Ledgers.Rows(sim).Count}", $"items {Items.Rows(sim).Count}" };
+        // A newcomer's own opening grant is not the traders' state: a first login answered a tick late has its wallet opened by then.
+        var keys = traders.Select(t => t.Key).ToHashSet();
+        var credits = Ledgers.Rows(sim).Count(r => r.Kind != TransferKind.Grant || keys.Contains(r.To));
+        var parts = new List<string> { $"credits {credits}", $"items {Items.Rows(sim).Count}" };
         foreach (var (id, l) in Market.Listings(sim).OrderBy(kv => kv.Key))
         {
             parts.Add($"{id}:{l.State}/{l.Collector}/{l.Quantity}/{l.LastSeq}");

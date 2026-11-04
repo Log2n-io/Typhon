@@ -95,6 +95,15 @@ public static class TatooineData
     /// <summary>[EST] The most bodies that join one attack: a fight, not a riot — and a bound on what one blow writes.</summary>
     public const int CrowdAllyMax = 6;
 
+    /// <summary>
+    /// [EST] How far round a creature a player attacks the others join in, metres (Loïc, 2026-11-03, the radius left to Claude): the aggressive templates'
+    /// aggro bubble, so a group that could see the fight is in it.
+    /// </summary>
+    public const float PackRadiusM = AggroRadiusM;
+
+    /// <summary>[EST] The most creatures that join one fight: a lair's guard, not every beast in the dunes — and a bound on what one blow writes.</summary>
+    public const int PackMax = 8;
+
     /// <summary>[EST] How far from a city's edge a body running from an attacker still makes for the city rather than straight away, metres.</summary>
     public const float CrowdFleeToCityM = 400f;
 

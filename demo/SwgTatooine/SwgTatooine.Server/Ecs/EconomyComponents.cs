@@ -63,8 +63,14 @@ public static class TransferKind
     /// </summary>
     public const byte Refine = 14;
 
+    /// <summary>
+    /// An installation's upkeep, prepaid (crafting-catalog.md § 15.4, O-14): the owner → World, bought as running time. <see cref="LedgerEntry.Ref"/> is the
+    /// installation's raw id.
+    /// </summary>
+    public const byte Upkeep = 15;
+
     /// <summary>The first kind past the last one: what a per-kind counter is sized by.</summary>
-    public const byte Count = 15;
+    public const byte Count = 16;
 
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
@@ -83,6 +89,7 @@ public static class TransferKind
         AdminGrant => "admingrant",
         AdminTake => "admintake",
         Refine => "refine",
+        Upkeep => "upkeep",
         _ => "unknown",
     };
 }

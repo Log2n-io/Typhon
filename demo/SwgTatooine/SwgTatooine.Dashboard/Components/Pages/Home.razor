@@ -245,6 +245,26 @@
     </section>
 
     <section class="card">
+        <h2>Installations</h2>
+        @if (st?["installations"] is null)
+        {
+            <p class="muted">this server publishes no installations</p>
+        }
+        else
+        {
+            <div class="kpis">
+                @Kpi("standing now", F(N(st, "installations", "standing"), 0))
+                @Kpi("placed since start", F(N(st, "installations", "placed"), 0))
+                @Kpi("picked up since start", F(N(st, "installations", "pickedUp"), 0))
+                @Kpi("collects since start", F(N(st, "installations", "collects"), 0))
+                @Kpi("units extracted", F(N(st, "installations", "extracted"), 0))
+                @Kpi("upkeep paid", $"{F(N(st, "installations", "upkeepPaid"), 0)} cr")
+                @Kpi("lots a character", F(N(st, "installations", "lotsPerCharacter"), 0))
+            </div>
+        }
+    </section>
+
+    <section class="card">
         <h2>Decay and repair</h2>
         @if (st?["decay"] is null)
         {

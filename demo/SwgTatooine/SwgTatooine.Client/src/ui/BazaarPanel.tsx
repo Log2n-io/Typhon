@@ -22,6 +22,7 @@ import { CITIES } from '../data/world-data';
 import { useItems } from '../state/items-store';
 import { collectableHere, useMarket } from '../state/market-store';
 import { useWallet } from '../state/wallet-store';
+import { WindowFrame } from './WindowFrame';
 
 /**
  * The bazaar (bazaar.md § 6): the board of a city or of all, the stack being sold, this character's listings and the goods
@@ -61,19 +62,25 @@ export function BazaarPanel() {
   );
 
   return (
-    <div className="panel bazaar" role="dialog" aria-label="Bazaar">
-      <div className="missions-head">
-        <span className="hud-title">Bazaar</span>
-        <span className="bazaar-here" data-testid="bazaar-here">
-          {here > 0 ? cityName(here) : 'not at a terminal'}
-        </span>
-        <span className="inventory-credits" data-testid="bazaar-credits">
-          {credits === null ? '…' : formatCredits(credits)}
-        </span>
-        <button type="button" className="missions-close" onClick={close} aria-label="Close">
-          ✕
-        </button>
-      </div>
+    <WindowFrame
+      id="bazaar"
+      title="Bazaar"
+      extra={
+        <>
+          <span className="bazaar-here" data-testid="bazaar-here">
+            {here > 0 ? cityName(here) : 'not at a terminal'}
+          </span>
+          <span className="inventory-credits" data-testid="bazaar-credits">
+            {credits === null ? '…' : formatCredits(credits)}
+          </span>
+        </>
+      }
+      onClose={close}
+      ariaLabel="Bazaar"
+      className="bazaar"
+      minW={420}
+      initial={() => ({ x: 20, y: 70, w: 662, h: 0 })}
+    >
       <div className="bazaar-tabs" role="tablist">
         {tabButton('browse', 'Browse')}
         {tabButton('sell', 'Sell')}
@@ -86,7 +93,7 @@ export function BazaarPanel() {
       {tab === 'mine' ? <MineTab /> : null}
       {tab === 'reserved' ? <ReservedTab /> : null}
       {tab === 'issue' ? <IssueTab /> : null}
-    </div>
+    </WindowFrame>
   );
 }
 

@@ -14,6 +14,14 @@ export interface NavRow {
   /** Where it is (a click walks there), planet metres. */
   readonly x: number;
   readonly z: number;
+  /** What it is, for its colour and the pane's filter (client.md C38): a city's structure, a mission, or one of the player's own waypoints. */
+  readonly group: 'city' | 'mission' | 'structure' | 'custom';
+  /** Its colour, CSS. */
+  readonly color: string;
+  /** The player's own waypoint it is, or `null` for a derived one. */
+  readonly waypointId: string | null;
+  /** Whether it is the player's active waypoint. */
+  readonly active: boolean;
 }
 
 /**

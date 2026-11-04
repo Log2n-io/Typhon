@@ -280,7 +280,7 @@ internal sealed class DemoStatsChecks : ServedChecks
                 byName.EnumerateObject().Select(p => p.Name),
                 Is.EqualTo(new[]
                 {
-                    "grant", "mission", "tip", "sale", "tax", "listfee", "vendor", "standard", "fare", "bench", "repair", "refine",
+                    "grant", "mission", "tip", "sale", "tax", "listfee", "vendor", "standard", "fare", "bench", "repair", "refine", "upkeep",
                     "admingrant", "admintake",
                 }));
             Assert.That(byName.GetProperty("vendor").GetInt64(), Is.EqualTo(145));

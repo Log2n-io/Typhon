@@ -10,16 +10,27 @@ export interface MapPlayer {
 /**
  * The planet map (Loïc, 2026-11-02): whether it is open, and the player's marker on it.
  *
- * The marker is published by the frame loop (`ClientApp.updateMapPlayer`) only while the map is open, a few times a second: the map is
- * the only reader, and a store write per frame for a closed window would re-render nothing but still cost the loop. `null` when the
- * session has no avatar on the planet — a god camera, or a player inside a building or a dungeon.
+ * The marker is published by the frame loop (`ClientApp.updateMapPlayer`) a few times a second, and only when it moved ({@link samePlace}):
+ * the map draws it, and `/way` with no place puts a waypoint there (client.md C38). `null` when the session has no avatar on the planet — a
+ * god camera, or a player inside a building or a dungeon.
  */
+export interface MapFocus {
+  readonly x: number;
+  readonly z: number;
+  /** A new ask each time, so showing the same place twice centres it twice. */
+  readonly seq: number;
+}
+
 export interface MapState {
   readonly open: boolean;
   readonly player: MapPlayer | null;
   readonly toggle: () => void;
   readonly close: () => void;
   readonly setPlayer: (player: MapPlayer | null) => void;
+  /** A place the map was asked to show: a waypoint's "Show on map" (C38). */
+  readonly focus: MapFocus | null;
+  /** Opens the map centred on a place. */
+  readonly showAt: (x: number, z: number) => void;
 }
 
 /** How far the player moves, metres, or turns, radians, before its marker is published again: a standing player redraws nothing. */
@@ -48,5 +59,9 @@ export const useMap = create<MapState>((set, get) => ({
     if (!samePlace(get().player, player)) {
       set({ player });
     }
+  },
+  focus: null,
+  showAt: (x, z) => {
+    set({ open: true, focus: { x, z, seq: (get().focus?.seq ?? 0) + 1 } });
   },
 }));

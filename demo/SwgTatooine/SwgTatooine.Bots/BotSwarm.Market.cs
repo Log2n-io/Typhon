@@ -386,6 +386,13 @@ public sealed partial class BotSwarm
                 plan.Add(issue);
             }
 
+            // An installation owner with nothing to place and nothing placed buys the vendor's extractor kit (crafting-build.md § 10).
+            if (region != 0 && InstallPlan.BuysKit(Installs, _installs.Count, KitHeld() != 0, await Wallet().ConfigureAwait(false)))
+            {
+                plan.Add(MarketCommand.Standard(InstallPlan.Kit, InstallPlan.KitPrice));
+                Interlocked.Increment(ref KitsBought);
+            }
+
             return plan;
         }
 

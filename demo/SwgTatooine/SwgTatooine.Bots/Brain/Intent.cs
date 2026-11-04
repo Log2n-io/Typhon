@@ -50,6 +50,9 @@ public enum IntentKind
     /// finish — as the crafting panel sends it.
     /// </summary>
     Craft,
+
+    /// <summary>Tend the installation it stands at, or place one there (crafting-build.md § 10): the swarm sends what its last read says is due.</summary>
+    Tend,
 }
 
 /// <summary>One decision.</summary>
@@ -114,6 +117,9 @@ public readonly record struct Intent(IntentKind Kind, float Heading, byte SpeedC
 
     /// <summary>Craft at the station it stands at.</summary>
     public static Intent Craft => new(IntentKind.Craft, 0f, 0, 0, 0);
+
+    /// <summary>Tend the installation it stands at, or place one.</summary>
+    public static Intent Tend => new(IntentKind.Tend, 0f, 0, 0, 0);
 
     /// <summary>Queue for a shuttle to a region's city.</summary>
     /// <param name="region">The destination, as a city plus one.</param>

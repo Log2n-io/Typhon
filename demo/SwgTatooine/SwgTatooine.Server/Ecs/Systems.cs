@@ -715,7 +715,14 @@ internal sealed class WorkshopSystem : CallbackSystem
         .Reads<PlayerLook>()
 
         // An operator's level and XP (SimBridge.Admin.cs), through its side transaction; the body is brought to them by Progression, in the Report phase.
-        .SideWrites<CharacterProgress>();
+        .SideWrites<CharacterProgress>()
+
+        // Installations (SimBridge.Installations.cs): their truth through its side transaction, their markers through the tick's, after it commits.
+        .SideWrites<InstallationCore>()
+        .SideWrites<WaypointCore>()
+        .Writes<InstallationPlacement>()
+        .Writes<InstallationView>()
+        .Writes<InstallationRealm>();
 
     protected override void Execute(TickContext ctx) => _bridge.WorkshopTick(ctx);
 }

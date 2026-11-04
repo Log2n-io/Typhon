@@ -299,6 +299,10 @@ public static class ItemEndpoints
         {
             json.Append("\"potency\":").Append(s.Stat0).Append(",\"durationMs\":").Append(s.Stat1).Append(',');
         }
+        else if (t.Category == ItemCategory.Structure)
+        {
+            json.Append("\"rate\":").Append(s.Stat0).Append(",\"hopper\":").Append(s.Stat1).Append(',');
+        }
 
         json.Append("\"wears\":").Append(Equipment.SlotOf(t.Id))
             .Append(",\"condition\":").Append(s.Condition)
@@ -790,6 +794,26 @@ public static class ItemEndpoints
                     && (r.Template is not (ItemCatalog.KitWeaponRepair or ItemCatalog.KitArmorRepair) || r.Count != 1 || r.Ref == 0))
                 {
                     result.Violation($"seq {r.Seq}: a repair row must consume one repair kit naming the item, not {r.Count} of template {r.Template}");
+                }
+
+                break;
+            case ItemMoveKind.Place:
+            case ItemMoveKind.Pickup:
+                // A kit becomes its installation, and back (crafting-build.md § 10): one, between a character and World, naming the installation.
+                if (isListing(r.From) || isListing(r.To) || (r.From == ItemLedger.World) == (r.To == ItemLedger.World) || r.Ref == 0 || r.Count != 1
+                    || t.Category != ItemCategory.Structure || (r.Kind == ItemMoveKind.Place) != (r.To == ItemLedger.World))
+                {
+                    result.Violation(
+                        $"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must move one kit between a character and World, naming its installation, "
+                        + $"not {r.Count} of {r.Template} from {r.From} to {r.To}");
+                }
+
+                break;
+            case ItemMoveKind.Extract:
+                // An installation's output: Mk I units of a bulk family, minted to a character, naming the installation (Q4: extractors make Mk I only).
+                if (r.From != ItemLedger.World || r.To == ItemLedger.World || isListing(r.To) || r.Ref == 0 || r.Mk != 1 || !Installations.Extracts(r.Template))
+                {
+                    result.Violation($"seq {r.Seq}: an extract row must mint Mk I bulk units to a character, naming its installation, not {r.From} to {r.To}");
                 }
 
                 break;

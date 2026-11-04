@@ -577,6 +577,13 @@ public sealed partial class SimBridge
                 r.Stat1 = s.Lines.Length > 1 ? (int)Math.Round(v[1]) : 0;
                 r.MaxCondition = Schematics.DosesOf(state.Output);
                 break;
+            case SchematicKind.Structure:
+                // An installation kit: its rate an hour and its hopper (Installations), its life factor carried to what it places.
+                r.Stat0 = (int)Math.Round(v[0]);
+                r.Stat1 = (int)Math.Round(v[1]);
+                r.LifeMilli = life;
+                r.Flags = ItemFlags.Pristine;
+                break;
             default:
                 // A part: its grade, per mille.
                 r.Stat0 = (int)Math.Round(v[0]);

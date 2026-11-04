@@ -344,6 +344,47 @@ internal sealed class CrowdReactionChecks : ServedChecks
         });
     }
 
+    /// <summary>
+    /// A blow that downs the body at once still calls the crowd round it (Loïc, 2026-11-03: a one-shot blaster left everyone standing): the brave
+    /// neighbour fights the attacker, the timid one scatters.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void TheCrowdRoundABodyDownedAtOneBlow_StillJoinsIn()
+    {
+        using var sim = Start();
+        var quarry = CrowdBody(sim, fightsBack: true);
+        var brave = CrowdBody(sim, fightsBack: true, quarry);
+        var timid = CrowdBody(sim, fightsBack: false, quarry, brave);
+        var (x, z) = OpenGround(sim);
+        var (link, body) = LogIn(sim, x, z);
+        var placed = Place(sim, quarry, x + 10f, z, PlayerActivity.Travelling);
+        Place(sim, brave, x + 14f, z + 4f, PlayerActivity.Travelling);
+        Place(sim, timid, x + 14f, z - 4f, PlayerActivity.Travelling);
+        SessionHarness.UntilNamed(link.Session, quarry, "the quarry to reach the attacker's view", placed);
+        sim.WriteInTick(tx =>
+        {
+            var p = tx.OpenMut(quarry);
+            var v = p.Read(Player.Vitals);
+            v.Health = 1;
+            p.Set(Player.Vitals, v);
+        });
+        Harness.Ticks(3);
+
+        Attack(sim, link, quarry);
+        SessionHarness.Until(() => Read(sim, quarry).Down != Downed.Up, "the quarry downed at the first blow");
+        SessionHarness.Until(() => sim.Bridge.CrowdJoined >= 2, "the crowd round the fallen quarry to join in");
+        var b = Read(sim, brave);
+        var t = Read(sim, timid);
+        Assert.Multiple(() =>
+        {
+            Assert.That(b.Target, Is.EqualTo(body), "the brave neighbour did not take on the attacker");
+            Assert.That(b.Activity, Is.EqualTo(PlayerActivity.Combat));
+            Assert.That(t.Target.IsNull, Is.True, "the timid neighbour fights");
+            Assert.That(t.DestZ, Is.LessThan(z + 1000f), "the timid neighbour did not scatter");
+        });
+    }
+
     // ── Where it runs ───────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A body attacked just outside a city, the city ahead of it, runs into the city — halfway in from the edge — not into the desert.</summary>

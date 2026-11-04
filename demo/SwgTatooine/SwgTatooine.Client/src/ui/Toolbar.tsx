@@ -1,11 +1,10 @@
-import { TERRAIN_MAX_PX, TERRAIN_TARGET_FPS } from '../app/terrain-detail';
 import { DATA_ARCHETYPES, DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
 import { RealmPanel } from './RealmPanel';
 import { CITIES, POIS } from '../data/world-data';
-import { useSessionStore } from '../state/session-store';
 import { useStats } from '../state/stats-store';
 import { useUi, type Population } from '../state/ui-store';
 import { sourceKindFrom } from './Viewport';
+import { AccountSection, PlayerRadius, TerrainSection } from './Settings';
 
 const POPULATIONS: Population[] = [1, 4, 16];
 
@@ -64,15 +63,11 @@ function cameraButtonTitle(
 export function Toolbar() {
   const ui = useUi();
 
-  // A session that can play has a sphere to widen; one that cannot is a god camera with a region. Read as locals because
-  // the View section tests both and the names are what make that section readable.
+  // A session that can play has a sphere to widen (PlayerRadius); one that cannot is a god camera with a region.
   const playing = ui.playing;
-  const range = ui.playerRadiusRange;
 
   // Narrowly selected, like the stats below: the session store changes on a login and a kick and nothing else, but the
   // toolbar re-renders often enough that subscribing to the whole store would be a needless dependency.
-  const accountName = useSessionStore((s) => s.grant?.name ?? null);
-  const logOut = useSessionStore((s) => s.logOut);
 
   // Selected NARROWLY. Stats are published four times a second and the whole snapshot changes each time, so subscribing
   // to it re-rendered the toolbar — and the radius slider under the user's thumb — at that rate. These three change only
@@ -89,12 +84,6 @@ export function Toolbar() {
   const realmScene = useStats((s) => s.stats?.realm?.scene) ?? null;
   const realmSlot = useStats((s) => s.stats?.realm?.slot) ?? 0;
   // Narrowly selected: these two change only when the tolerance or the viewport does, not four times a second.
-  const terrainFinestM = useStats((s) => s.stats?.terrainFinestM);
-  const terrainNodes = useStats((s) => s.stats?.terrainNodes);
-  const terrainTriangles = useStats((s) => s.stats?.terrainTriangles);
-  const terrainCapped = useStats((s) => s.stats?.terrainCapped);
-  const terrainAutoPx = useStats((s) => s.stats?.terrainAutoPx ?? null);
-  const terrainCappedFps = useStats((s) => s.stats?.terrainCappedFps ?? null);
   const archetypes = (layers === undefined ? DEFAULT_ARCHETYPE_INFOS : layers.map((l) => l.archetype)).filter(
     (info) => !DATA_ARCHETYPES.has(info.name),
   );
@@ -102,19 +91,8 @@ export function Toolbar() {
     <div className="panel toolbar">
       <div className="toolbar-title">Typhon · Live World</div>
 
-      {/* Who this tab is, and the way out (A8). Shown only for a logged-in session: the god camera is anonymous and has
-          nothing to log out of, which is the one tool that has to work on a box nobody has an account on. */}
-      {accountName !== null && (
-        <section>
-          <h3>Account</h3>
-          <div className="session-row">
-            <span className="session-name">{accountName}</span>
-            <button type="button" onClick={logOut}>
-              Log out
-            </button>
-          </div>
-        </section>
-      )}
+      {/* Who this tab is, and the way out (A8); the same section as the Options window's. */}
+      <AccountSection />
 
       <section>
         <h3>{LIVE ? `World (${sourceName ?? 'connecting…'})` : 'World (mock server)'}</h3>
@@ -263,29 +241,8 @@ export function Toolbar() {
             distinct from the camera's far plane, which is 40 km and never the limit. A player's session is a sphere the
             server widens in place; a god camera's is a region. Only one of the two is ever in play, so only one slider
             is shown, and the player's takes precedence because a session that can play is being played. */}
-        {playing && range !== null ? (
-          <label className="slider">
-            Served radius {ui.playerRadius ?? range.def} m
-            <input
-              type="range"
-              // Both ends are the server's (`/typhon/demo.json`): its profile's own radius, and the ceiling the
-              // replication grid's window bound allows. Neither is a figure this client invents.
-              min={range.min}
-              max={range.max}
-              // A step the range chooses rather than a constant: the ceiling is five replication cells, so it moved from
-              // 320 m to 1 280 m when the demo matched its replication cell to its spatial one, and 16 m steps over a
-              // 1 km range is 68 drag positions of pointless precision. A 64th of the range, rounded to 8 m.
-              step={Math.max(8, Math.round((range.max - range.min) / 64 / 8) * 8)}
-              value={ui.playerRadius ?? range.def}
-              onChange={(e) => {
-                ui.setPlayerRadius(Number(e.target.value));
-              }}
-            />
-          </label>
-        ) : playing ? (
-          <div className="hint">
-            This server does not say what view radius a player may ask for, so the slider is off.
-          </div>
+        {playing ? (
+          <PlayerRadius />
         ) : ui.maxViewRadius === 0 ? (
           <div className="hint">
             This server serves its camera the whole world, so there is no view radius to set (it was started without{' '}
@@ -348,34 +305,7 @@ export function Toolbar() {
         )}
       </section>
 
-      <section>
-        <h3>Terrain</h3>
-        <label className="slider">
-          {/* The slider shows the tolerance the terrain is drawn at — the governor's when it has coarsened above the
-              viewer's setting — and dragging it sets the viewer's setting, which resets the governor to it. */}
-          Detail {(terrainAutoPx ?? ui.terrainPixelError).toFixed(1)} px error
-          {terrainAutoPx !== null
-            ? ` (auto: under ${String(TERRAIN_TARGET_FPS)} fps; your setting ${ui.terrainPixelError.toFixed(1)})`
-            : terrainCappedFps !== null
-              ? ` (kept: the frame rate is capped at ${terrainCappedFps.toFixed(0)} fps, which coarser ground does not raise)`
-              : ''}
-          <input
-            type="range"
-            min={0.25}
-            max={TERRAIN_MAX_PX}
-            step={0.25}
-            value={terrainAutoPx ?? ui.terrainPixelError}
-            onChange={(e) => {
-              ui.setTerrainPixelError(Number(e.target.value));
-            }}
-          />
-        </label>
-        <div className="hint">
-          currently {terrainNodes ?? 0} nodes down to <code>{terrainFinestM ?? '—'} m</code>, over{' '}
-          {(terrainTriangles ?? 0).toLocaleString()} tri
-          {terrainCapped === true ? ' ⚠ node budget binding — finer settings add no detail' : ''}
-        </div>
-      </section>
+      <TerrainSection />
 
       {/* Only with a server that serves the far tier (`--god-region`): without one there is nothing to toggle. */}
       {heatChannels.length > 0 && (

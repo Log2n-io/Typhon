@@ -17,6 +17,9 @@ public static class ItemCategory
     /// <summary>A weapon: an item with stats (crafting-build.md § 2.1), equipped in slot 101.</summary>
     public const byte Weapon = 9;
 
+    /// <summary>A structure's kit (crafting-catalog.md § 5.5): an item with stats, placed on a lot as an installation.</summary>
+    public const byte Structure = 10;
+
     /// <summary>The name the catalogue and the client use.</summary>
     public static string NameOf(byte category) => category switch
     {
@@ -29,6 +32,7 @@ public static class ItemCategory
         Kit => "kit",
         Container => "container",
         Weapon => "weapon",
+        Structure => "structure",
         _ => "unknown",
     };
 }
@@ -115,6 +119,7 @@ public static class ItemCatalog
         new(67, "vibroknuckler", "Vibro Knuckler", ItemCategory.Weapon, true, false),
         new(68, "sword_vibroblade", "Vibroblade", ItemCategory.Weapon, true, false),
         new(69, "blaster_dl44", "DL-44 Blaster", ItemCategory.Weapon, true, false),
+        new(70, "resource_extractor", "Extractor", ItemCategory.Structure, false, false),
     ];
 
     public const ushort Ore = 1;
@@ -146,6 +151,9 @@ public static class ItemCatalog
     public const ushort Knuckler = 67;
     public const ushort Sword = 68;
     public const ushort Blaster = 69;
+
+    /// <summary>The extractor's kit (crafting-catalog.md § 5.5).</summary>
+    public const ushort Extractor = 70;
 
     /// <summary>Every template, id 1 first: <c>Templates[id - 1]</c>.</summary>
     public static ReadOnlySpan<ItemTemplate> Templates => All;
@@ -187,7 +195,7 @@ public static class ItemCatalog
     /// </summary>
     public static bool HasStats(ushort template)
         => TryGet(template, out var t)
-            && (t.Category is ItemCategory.Weapon or ItemCategory.Armor or ItemCategory.Potion
+            && (t.Category is ItemCategory.Weapon or ItemCategory.Armor or ItemCategory.Potion or ItemCategory.Structure
                 || (t.Category == ItemCategory.Part && Schematics.TryGet(template, out var s) && s.MakesInstance));
 }
 

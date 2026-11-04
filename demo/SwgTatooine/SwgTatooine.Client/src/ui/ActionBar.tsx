@@ -6,6 +6,7 @@ import { SpeedClass } from '../data/source';
 import { useItems } from '../state/items-store';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
+import { useBar } from './WindowFrame';
 
 /**
  * The HAM pools, top left beside the toolbar.
@@ -18,6 +19,7 @@ import { useUi } from '../state/ui-store';
 export function HamBar() {
   const playing = useUi((s) => s.playing);
   const vitals = useStats((s) => s.stats?.vitals ?? null);
+  const bar = useBar('ham');
   if (!playing) {
     return null;
   }
@@ -27,7 +29,8 @@ export function HamBar() {
   const xpByte = (vitals?.xpFraction ?? Number.NaN) * 255;
   const xp = xpPercent(xpByte);
   return (
-    <div className="gamebar ham" title="Health">
+    <div className="gamebar ham" title="Health" style={bar.style}>
+      {bar.grip}
       <span className="ham-level" title={levelTitle(level, xpByte)}>
         {Number.isFinite(level) && level > 0 ? `CL ${level}` : 'CL —'}
       </span>
@@ -57,6 +60,7 @@ const UNARMED_SLOT = 2;
 
 export function ActionBar() {
   const playing = useUi((s) => s.playing);
+  const bar = useBar('action');
   const icons = useUi((s) => s.actionIcons);
   const stance = useUi((s) => s.stance);
   const used = useUi((s) => s.slotUsed);
@@ -73,7 +77,8 @@ export function ActionBar() {
   const armed = (asset: string, key: number) => weapon === null || key === UNARMED_SLOT || asset === weapon;
 
   return (
-    <div className="gamebar actionbar">
+    <div className="gamebar actionbar" style={bar.style}>
+      {bar.grip}
       <div className="slots">
         {ACTION_SLOTS.map((slot) => {
           const on = slot.kind === 'mount' ? riding : stance === slot.key;

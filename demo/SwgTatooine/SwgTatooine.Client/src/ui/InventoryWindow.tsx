@@ -1,22 +1,13 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import {
-  EQUIP_SLOTS,
-  equipped,
-  ITEM_ICON_PX,
-  itemInitials,
-  itemTooltip,
-  mkNumeral,
-  slotGrid,
-  type InventoryItem,
-} from '../data/items';
+import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral, slotGrid, type InventoryItem } from '../data/items';
 import { cratesOf, packSteps } from '../data/crates';
 import { formatCredits } from '../data/wallet';
 import { useItems } from '../state/items-store';
 import { useMarket } from '../state/market-store';
-import { useMissions } from '../state/mission-store';
 import { useWallet } from '../state/wallet-store';
+import { WindowFrame } from './WindowFrame';
 
 /** The item grid's slots before the first read; the server's answer carries its own (`slots`). */
 export const INVENTORY_SLOTS = 40;
@@ -32,14 +23,13 @@ export const INVENTORY_SLOTS = 40;
  * <b>With the bazaar open</b> (bazaar.md § 6), a click on a stack picks it for the Sell tab. Units in a listing are not in
  * the grid: they left the inventory when it was listed.
  *
- * <b>What it wears</b> (crafting-build.md § 2.2) sits on the strip above the grid, one slot per piece: a click there takes it off, and a click on an
- * item with stats in the grid puts it on — swapped with what was worn in its slot. The server refuses below the Mk's combat level, and says why here.
+ * <b>What it wears is the character window's</b> (client.md C39): a click on an item with stats in the grid puts it on — swapped with what was worn in
+ * its slot — and so does dragging it onto the Equipment tab's slot. The server refuses below the Mk's combat level, and says why here.
  */
 export function InventoryWindow() {
   const open = useWallet((s) => s.inventoryOpen);
   const wallet = useWallet((s) => s.wallet);
   const close = useWallet((s) => s.closeInventory);
-  const journalOpen = useMissions((s) => s.journalOpen);
   const inventory = useItems((s) => s.snapshot);
   const icons = useItems((s) => s.icons);
   const bazaarOpen = useMarket((s) => s.open);
@@ -61,49 +51,25 @@ export function InventoryWindow() {
           useMarket.getState().equip(id);
         }
       };
-  const worn = equipped(inventory?.items ?? []);
 
   const cells = slotGrid(inventory?.items ?? [], inventory?.slots ?? INVENTORY_SLOTS);
   return (
-    <div
-      className={`panel inventory${journalOpen ? ' beside-journal' : ''}${bazaarOpen ? ' beside-bazaar' : ''}`}
-      role="dialog"
-      aria-label="Inventory"
+    <WindowFrame
+      id="inventory"
+      title="Inventory"
+      extra={
+        <>
+          <span className="inventory-credits" data-testid="inventory-credits">
+            {wallet === null ? '…' : formatCredits(wallet.credits)}
+          </span>
+        </>
+      }
+      onClose={close}
+      ariaLabel="Inventory"
+      className="inventory"
+      minW={260}
+      initial={(vw, vh) => ({ x: vw - 634, y: Math.round(vh * 0.25), w: 322, h: 0 })}
     >
-      <div className="missions-head">
-        <span className="hud-title">Inventory</span>
-        <span className="inventory-credits" data-testid="inventory-credits">
-          {wallet === null ? '…' : formatCredits(wallet.credits)}
-        </span>
-        <button type="button" className="missions-close" onClick={close} aria-label="Close">
-          ✕
-        </button>
-      </div>
-      <div className="inventory-equip" aria-label="Equipped">
-        {EQUIP_SLOTS.map(({ slot, label }) => {
-          const item = worn.get(slot);
-          return item === undefined ? (
-            <div
-              key={slot}
-              className="inventory-slot equip-empty"
-              title={label}
-              data-testid={`equip-slot-${String(slot)}`}
-            >
-              <span className="inventory-initials">{label[0]}</span>
-            </div>
-          ) : (
-            <ItemSlot
-              key={slot}
-              item={item}
-              icon={icons[item.item]}
-              picked={false}
-              onPick={() => {
-                useMarket.getState().unequip(slot);
-              }}
-            />
-          );
-        })}
-      </div>
       {gearNotice === undefined ? null : (
         <div className="hint" role="alert">
           {gearNotice}
@@ -126,7 +92,7 @@ export function InventoryWindow() {
       </div>
       {cells.every((c) => c === null) ? <div className="hint">No items yet.</div> : null}
       <Crates items={inventory?.items ?? NO_ITEMS} />
-    </div>
+    </WindowFrame>
   );
 }
 
@@ -197,7 +163,10 @@ function Crates({ items }: { readonly items: readonly InventoryItem[] }) {
  * One stack: its icon at the catalogue's 32 px (never scaled; the name's initials without one), its Mk as a numeral coloured
  * like the model's Mk material (ASSET_FORMAT.md § 5.11), its count when more than one, and on hover its name, Mk and count.
  */
-function ItemSlot({
+/** The drag's data type: an item's raw id, dropped on an equip slot to wear it (client.md C39). */
+export const ITEM_DRAG_TYPE = 'application/x-swg-item';
+
+export function ItemSlot({
   item,
   icon,
   picked,
@@ -210,6 +179,8 @@ function ItemSlot({
   /** Picks it for the bazaar's Sell tab with the bazaar open; wears or takes it off with it closed. */
   readonly onPick: ((id: string) => void) | null;
 }) {
+  // An item that is worn somewhere drags to its slot; units and parts do not drag.
+  const wearable = (item.stats?.wears ?? 0) > 0 && item.slot <= 100;
   const tip = itemTooltip(item);
   const mk = mkNumeral(item.mk);
   const [hovered, setHovered] = useState<DOMRect | null>(null);
@@ -225,6 +196,16 @@ function ItemSlot({
       data-testid={`inventory-slot-${String(item.slot)}`}
       data-item={item.item}
       aria-label={tip}
+      draggable={wearable}
+      onDragStart={
+        wearable
+          ? (e) => {
+              e.dataTransfer.setData(ITEM_DRAG_TYPE, item.id);
+              e.dataTransfer.effectAllowed = 'move';
+              setHovered(null);
+            }
+          : undefined
+      }
       onMouseEnter={(e) => {
         setHovered(e.currentTarget.getBoundingClientRect());
       }}

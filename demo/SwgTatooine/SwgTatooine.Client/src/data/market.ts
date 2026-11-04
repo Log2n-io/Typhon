@@ -248,6 +248,21 @@ export function feeLine(total: number): string {
 }
 
 /** A listing's goods as a line says them: `Hide Mk II ×20`, `Armor Core Mk III`. */
+/**
+ * What chat says of goods newly waiting for the player at a bazaar (client.md C40): each reservation of `after` that `before` did not hold — bought
+ * there, or a listing come back — with where to collect it. The bazaar has no toolbar button to count them on any more. `before` null: the first read
+ * of a session, which says what has been waiting since.
+ */
+export function newReservationNotices(before: MarketMine | null, after: MarketMine): string[] {
+  const known = new Set((before?.reserved ?? []).map((r) => r.id));
+  return after.reserved
+    .filter((r) => !known.has(r.id))
+    .map(
+      (r) =>
+        `${itemWhat(r.name, r.mk, r.qty)} ${r.state === 'sold' ? 'bought' : 'back from its listing'}, waiting at the ${r.cityName} bazaar: collect it at a terminal there`,
+    );
+}
+
 export function itemWhat(name: string, mk: number, qty: number): string {
   const numeral = ['', 'I', 'II', 'III', 'IV', 'V'][mk] ?? '';
   return `${name}${numeral === '' ? '' : ` Mk ${numeral}`}${qty > 1 ? ` ×${String(qty)}` : ''}`;
@@ -334,6 +349,15 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   185: 'Those cannot be packed together: identical, unused, ten to a crate',
   186: 'Nothing to unpack, or no room for it',
   187: 'Unpack it first',
+  188: 'That is not yours, not an extractor kit, or not an amount it can take',
+  189: 'Not here: out of town on a planet, or within 30 m of it',
+  190: 'Someone has built on this lot already',
+  191: 'All 10 of your lots are used: pick something up first',
+  192: 'Its hopper is empty',
+  193: 'Collect its hopper first',
+  194: 'A waypoint needs a name (32 characters at most), a colour, and a place on the planet — or an installation of yours not pinned yet',
+  195: 'You keep 100 waypoints already: delete one first',
+  196: 'No such waypoint of yours',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -421,12 +445,28 @@ export type MarketCommand =
   /** Pack an item or a crate into an identical one (crafting-catalog.md § 11.2), anywhere. */
   | { readonly kind: 'pack'; readonly item: string; readonly into: string }
   /** Take `count` items out of a crate, each into a free slot. */
-  | { readonly kind: 'unpack'; readonly item: string; readonly count: number };
+  | { readonly kind: 'unpack'; readonly item: string; readonly count: number }
+  /** Installations (crafting-build.md § 10): a kit placed on the lot the body stands in, drawing `family`; a hopper collected; upkeep paid; one picked up. */
+  | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
+  | { readonly kind: 'installCollect'; readonly installation: string }
+  | { readonly kind: 'installPay'; readonly installation: string; readonly credits: number }
+  | { readonly kind: 'installPickUp'; readonly installation: string }
+  /** Waypoints (client.md C38): one of the player's own made — at a point, or pinning an installation — deleted, or made the active one ('0': none). */
+  | {
+      readonly kind: 'waypointCreate';
+      readonly name: string;
+      readonly x: number;
+      readonly z: number;
+      readonly color: number;
+      readonly installation: string;
+    }
+  | { readonly kind: 'waypointDelete'; readonly waypoint: string }
+  | { readonly kind: 'waypointActivate'; readonly waypoint: string };
 
 /** The command's name in the server's catalog, and its fields as the codec names them. `null` for a malformed one. */
 export function marketWire(
   command: MarketCommand,
-): { readonly name: string; readonly values: Readonly<Record<string, number | bigint>> } | null {
+): { readonly name: string; readonly values: Readonly<Record<string, number | bigint | string>> } | null {
   switch (command.kind) {
     case 'list':
       return {
@@ -495,6 +535,29 @@ export function marketWire(
       return { name: 'PackItem', values: { item: itemOf(command.item), into: itemOf(command.into) } };
     case 'unpack':
       return { name: 'UnpackItem', values: { item: itemOf(command.item), count: command.count } };
+    case 'installPlace':
+      return { name: 'PlaceInstallation', values: { item: itemOf(command.item), family: command.family } };
+    case 'installCollect':
+      return { name: 'CollectInstallation', values: { installation: itemOf(command.installation) } };
+    case 'installPay':
+      return { name: 'PayUpkeep', values: { installation: itemOf(command.installation), credits: command.credits } };
+    case 'installPickUp':
+      return { name: 'PickUpInstallation', values: { installation: itemOf(command.installation) } };
+    case 'waypointCreate':
+      return {
+        name: 'CreateWaypoint',
+        values: {
+          name: command.name,
+          x: command.x,
+          z: command.z,
+          color: command.color,
+          installation: itemOf(command.installation),
+        },
+      };
+    case 'waypointDelete':
+      return { name: 'DeleteWaypoint', values: { waypoint: itemOf(command.waypoint) } };
+    case 'waypointActivate':
+      return { name: 'SetActiveWaypoint', values: { waypoint: itemOf(command.waypoint) } };
   }
 }
 
@@ -514,6 +577,15 @@ export function commandRow(command: MarketCommand): string {
     case 'pack':
     case 'unpack':
       return 'gear';
+    case 'installPlace':
+    case 'installCollect':
+    case 'installPay':
+    case 'installPickUp':
+      return 'install';
+    case 'waypointCreate':
+    case 'waypointDelete':
+    case 'waypointActivate':
+      return 'waypoint';
     case 'craftStart':
     case 'craftPoint':
     case 'craftEnhance':

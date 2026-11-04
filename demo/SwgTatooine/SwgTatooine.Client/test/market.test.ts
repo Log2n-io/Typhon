@@ -112,14 +112,11 @@ describe('the fees', () => {
 });
 
 describe('a refusal', () => {
-  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, and NotInWorld reused", () => {
+  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, the installations' 188-193, the waypoints' 194-196, and NotInWorld reused", () => {
     expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([
       142,
       ...Array.from({ length: 32 }, (_, i) => 151 + i),
-      184,
-      185,
-      186,
-      187,
+      ...Array.from({ length: 13 }, (_, i) => 184 + i),
     ]);
     expect(marketRefusal(184)).toContain('refine');
     expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
@@ -387,7 +384,7 @@ describe('a bazaar terminal', () => {
     expect(collectableHere({ city: 1, realm: 0 }, here, 0)).toBe(false);
   });
 
-  it('is toggled by B', () => {
+  it('has no key: it is opened from its terminal only (client.md C40)', () => {
     const key = {
       key: 'b',
       repeat: false,
@@ -397,7 +394,7 @@ describe('a bazaar terminal', () => {
       metaKey: false,
       target: null,
     };
-    expect(panelKey(key as unknown as KeyboardEvent)).toBe('bazaar');
+    expect(panelKey(key as unknown as KeyboardEvent)).toBeNull();
   });
 });
 
@@ -465,6 +462,17 @@ describe('the market store', () => {
     expect(useMarket.getState().page?.listings.map((l) => l.id)).toEqual(['1', '2']);
     useMarket.getState().openPanel('browse', 'all');
     expect(useMarket.getState().query.city).toBe(0);
+  });
+
+  it('closes when the body walks away from its terminal (client.md C40)', () => {
+    harness();
+    useMarket.getState().setHere(3);
+    useMarket.getState().openPanel('browse', 'here');
+    expect(useMarket.getState().open).toBe(true);
+    useMarket.getState().setHere(4);
+    expect(useMarket.getState().open).toBe(true);
+    useMarket.getState().setHere(0);
+    expect(useMarket.getState().open).toBe(false);
   });
 
   it('sends a buy at the price shown, its row waiting, a second click sending nothing', () => {
@@ -857,5 +865,41 @@ describe("the server's answers", () => {
     expect(parseWallet(goldenWalletBuyer)).toEqual({ open: true, credits: 940 });
     announceNotices([credits('sale', 60, false, 'player_8f01')]);
     expect(useChat.getState().lines.map((l) => l.text)).toEqual(['Bought Hide Mk III ×3 from player_8f01 for 60 cr']);
+  });
+});
+
+describe('goods waiting at a bazaar (client.md C40)', () => {
+  it('are said in chat once each, a first read saying what has been waiting', async () => {
+    const { newReservationNotices } = await import('../src/data/market');
+    const goods = (id: string, state: 'sold' | 'returned') => ({
+      id,
+      city: 3,
+      cityName: 'Tallow',
+      realm: 0,
+      item: 'mat_hide',
+      name: 'Hide',
+      category: 'material',
+      template: 8,
+      mk: 2,
+      qty: 4,
+      unit: 10,
+      total: 40,
+      seller: 'x',
+      sellerName: 'x',
+      buyer: 'y',
+      ageS: 0,
+      state,
+      closedTick: 1,
+    });
+    const caps = { listings: 20, reserved: 20 };
+    const first = { listed: [], reserved: [goods('1', 'sold')], caps };
+    expect(newReservationNotices(null, first as never)).toEqual([
+      'Hide Mk II ×4 bought, waiting at the Tallow bazaar: collect it at a terminal there',
+    ]);
+    const second = { listed: [], reserved: [goods('1', 'sold'), goods('2', 'returned')], caps };
+    const said = newReservationNotices(first, second);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain('back from its listing');
+    expect(newReservationNotices(second as never, second as never)).toEqual([]);
   });
 });

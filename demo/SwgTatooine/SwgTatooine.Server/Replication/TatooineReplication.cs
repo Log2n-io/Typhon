@@ -506,6 +506,72 @@ public struct PackItem
     public ulong Into;
 }
 
+/// <summary>
+/// "Place this here" (crafting-build.md § 10): an extractor kit from the grid, on the 64 m lot the character stands in, outside the cities, drawing
+/// <see cref="Family"/>.
+/// </summary>
+public struct PlaceInstallation
+{
+    /// <summary>The kit's raw id.</summary>
+    public ulong Item;
+
+    /// <summary>The material it draws: one of the bulk families.</summary>
+    public ushort Family;
+}
+
+/// <summary>"Collect": the hopper of one of the character's installations, within reach, into its inventory — what fits.</summary>
+public struct CollectInstallation
+{
+    /// <summary>The installation's raw id (<c>GET /swg/installations</c>).</summary>
+    public ulong Installation;
+}
+
+/// <summary>"Pay its upkeep": <see cref="Credits"/> from the wallet into one of the character's installations, within reach, bought as running time.</summary>
+public struct PayUpkeep
+{
+    public ulong Installation;
+
+    public uint Credits;
+}
+
+/// <summary>"Pick it up": one of the character's installations, within reach and its hopper empty, back into its kit; its lot freed.</summary>
+public struct PickUpInstallation
+{
+    public ulong Installation;
+}
+
+/// <summary>
+/// "A waypoint": one of the character's own (client.md C38), named, at a point of the realm its body is in — or on one of its installations, which it then
+/// follows (its pin).
+/// </summary>
+public struct CreateWaypoint
+{
+    /// <summary>1 to <see cref="Waypoints.NameMaxBytes"/> UTF-8 bytes.</summary>
+    public Utf8Text256 Name;
+
+    public float X;
+
+    public float Z;
+
+    /// <summary><c>0xRRGGBB</c>, or 0 for its kind's colour.</summary>
+    public uint Color;
+
+    /// <summary>The installation it pins (its raw id), or 0 for a point.</summary>
+    public ulong Installation;
+}
+
+/// <summary>"Forget it": one of the character's own waypoints deleted.</summary>
+public struct DeleteWaypoint
+{
+    public ulong Waypoint;
+}
+
+/// <summary>"Show me this one": one of the character's own waypoints made its active one, or none (0).</summary>
+public struct SetActiveWaypoint
+{
+    public ulong Waypoint;
+}
+
 /// <summary>"Take these out": <see cref="Count"/> items unpacked from a crate in the grid, each into a free slot; one left in it at least.</summary>
 public struct UnpackItem
 {
@@ -1186,6 +1252,39 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: an equip, a salvage or a craft input of a crate: it is unpacked first.</summary>
     public const byte ItemCrated = AckReasons.FirstApplicationReason + 59;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: an installation command naming no installation of the character's, a kit that is not one, a family an extractor does not draw,
+    /// or an upkeep payment of nothing or past what may be prepaid (crafting-build.md § 10).
+    /// </summary>
+    public const byte InstallationBad = AckReasons.FirstApplicationReason + 60;
+
+    /// <summary><c>ACKS</c> reason: placed in a city or off a planet, or an installation out of reach (<see cref="Installations.ReachM"/>).</summary>
+    public const byte InstallationNotHere = AckReasons.FirstApplicationReason + 61;
+
+    /// <summary><c>ACKS</c> reason: the lot has an installation already.</summary>
+    public const byte LotTaken = AckReasons.FirstApplicationReason + 62;
+
+    /// <summary><c>ACKS</c> reason: the character's lots are all used (<see cref="Installations.LotsPerCharacter"/>).</summary>
+    public const byte NoLotsLeft = AckReasons.FirstApplicationReason + 63;
+
+    /// <summary><c>ACKS</c> reason: a collect from an empty hopper.</summary>
+    public const byte InstallationEmpty = AckReasons.FirstApplicationReason + 64;
+
+    /// <summary><c>ACKS</c> reason: a pick-up of an installation whose hopper holds units: they are collected first.</summary>
+    public const byte InstallationNotEmpty = AckReasons.FirstApplicationReason + 65;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a waypoint with no name or one too long, a colour that is not one, a point off the planet, an installation not the character's or
+    /// pinned already (client.md C38).
+    /// </summary>
+    public const byte WaypointBad = AckReasons.FirstApplicationReason + 66;
+
+    /// <summary><c>ACKS</c> reason: the character keeps <see cref="Waypoints.MaxPerCharacter"/> waypoints already.</summary>
+    public const byte WaypointsFull = AckReasons.FirstApplicationReason + 67;
+
+    /// <summary><c>ACKS</c> reason: a delete or an activation of a waypoint that is not one of the character's.</summary>
+    public const byte WaypointUnknown = AckReasons.FirstApplicationReason + 68;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1883,6 +1982,7 @@ public static partial class TatooineReplication
         subs.Archetype<CreatureLair>();
         subs.Archetype<WorldObject>();
         subs.Archetype<MissionOffer>();
+        subs.Archetype<InstallationMarker>();
 
         // The god camera through a World observer, the players through a disc with no band: the anchor's slack is its hysteresis for observer motion
         // (push-model.md § 4.5).
@@ -1898,7 +1998,8 @@ public static partial class TatooineReplication
                     .Of<CityNpc>()
                     .Of<Player>()
                     .Of<CreatureLair>()
-                    .Of<WorldObject>();
+                    .Of<WorldObject>()
+                    .Of<InstallationMarker>();
                 p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
 
                 // Inside a building, the whole realm: an interior is ONE 64 m cell, so a World observer is the room and a hull or a near budget would be
@@ -1921,7 +2022,8 @@ public static partial class TatooineReplication
                     .Of<CityNpc>()
                     .Of<Player>()
                     .Of<CreatureLair>()
-                    .Of<WorldObject>();
+                    .Of<WorldObject>()
+                    .Of<InstallationMarker>();
                 p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
                 p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
                 p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
@@ -1940,7 +2042,8 @@ public static partial class TatooineReplication
                     .Of<CityNpc>()
                     .Of<Player>()
                     .Of<CreatureLair>()
-                    .Of<WorldObject>();
+                    .Of<WorldObject>()
+                    .Of<InstallationMarker>();
 
                 // As above: the whole room, because the room is one cell. This profile is already a World over the planet, so indoors it is the same shape
                 // at a different scale — which is exactly what 12-realms § 1.4's variants are for.
@@ -1960,7 +2063,8 @@ public static partial class TatooineReplication
                     .Of<CityNpc>()
                     .Of<Player>()
                     .Of<CreatureLair>()
-                    .Of<WorldObject>();
+                    .Of<WorldObject>()
+                    .Of<InstallationMarker>();
                 p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
                 p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
             });
@@ -2009,6 +2113,9 @@ public static partial class TatooineReplication
                 // The lairs, drawn: a creature with no nest beside it reads as a stray. Static, sent once on enter, so its cost is the crescent query the
                 // note above describes, paid by watched riders only.
                 .Of<CreatureLair>()
+
+                // The installations players placed (crafting-build.md § 10): sparse and static, the same cost.
+                .Of<InstallationMarker>()
                 .Groups(CitySet, CityReachM);
 
             // Free here, unlike on the sphere above: a World observer fills once per realm from a cursor and has no crescent to sweep.
@@ -2035,6 +2142,9 @@ public static partial class TatooineReplication
                 // anything the session was never shown. Bots are served this profile too (PlayerProfileName); only a measurement run's PlayerProfile
                 // leaves lairs out.
                 .Of<CreatureLair>()
+
+                // The installations players placed (crafting-build.md § 10): a person walks up to its own to collect.
+                .Of<InstallationMarker>()
 
                 // Parity: a browser is served the same city set a bot is, because every capability a bot has has to be reachable from the client.
                 .Groups(CitySet, CityReachM);
@@ -2268,6 +2378,44 @@ public static partial class TatooineReplication
             .Roles(SessionRole.Player)
             .Field(m => m.Item, Codec.U64, "item")
             .Field(m => m.Count, Codec.U8, "count"));
+
+        // Installations (crafting-build.md § 10): queued, applied by the Workshop at the tip's rate.
+        subs.Command<PlaceInstallation>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item")
+            .Field(m => m.Family, Codec.VarUInt, "family"));
+        subs.Command<CollectInstallation>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Installation, Codec.U64, "installation"));
+        subs.Command<PayUpkeep>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Installation, Codec.U64, "installation")
+            .Field(m => m.Credits, Codec.VarUInt, "credits"));
+        subs.Command<PickUpInstallation>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Installation, Codec.U64, "installation"));
+
+        // Waypoints (client.md C38): queued, applied by the Workshop; a person makes a few a minute.
+        subs.Command<CreateWaypoint>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Name, Codec.Str(Waypoints.NameMaxBytes), "name")
+            .Field(m => m.X, Codec.F32, "x")
+            .Field(m => m.Z, Codec.F32, "z")
+            .Field(m => m.Color, Codec.VarUInt, "color")
+            .Field(m => m.Installation, Codec.U64, "installation"));
+        subs.Command<DeleteWaypoint>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Waypoint, Codec.U64, "waypoint"));
+        subs.Command<SetActiveWaypoint>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Waypoint, Codec.U64, "waypoint"));
 
         // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
         // rate 04-protocol § 4 gives it and roughly what a person types.
