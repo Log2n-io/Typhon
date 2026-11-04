@@ -627,6 +627,13 @@ public sealed partial class BotBrain
             _until = tick + Ticks(2);
         }
 
+        // Attacked: fight back or run, whatever the goal was (BotBrain.Defence.cs) — before the swoop, so a wish to mount for a journey cannot hold up a
+        // body being bitten. Fighting back on a swoop wishes it off, and the next tick's swoop step takes it off.
+        if (Defend(in world, tick) is { } defend)
+        {
+            return defend;
+        }
+
         // The swoop, before the goal: getting on or off is a command of its own, and the goal's movement waits a tick for it.
         if (MountIntent(in world, tick) is { } mount)
         {
@@ -866,6 +873,12 @@ public sealed partial class BotBrain
     /// <returns>The command.</returns>
     private Intent Hunt(in Perceived world, long tick)
     {
+        // Fighting back an attacker: that one, not the nearest, and at any level.
+        if (HuntAttacker(in world, tick) is { } back)
+        {
+            return back;
+        }
+
         // A fight that has not ended in this long will not: something it cannot hurt, or cannot reach. Leave that one be and get on with the day —
         // the first live run had two bots naming the same target from the same spot for all three minutes.
         if (world.NearestCreature != 0 && tick >= _huntUntil)

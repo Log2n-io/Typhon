@@ -1188,6 +1188,22 @@ public sealed partial class BotSwarm : IAsyncDisposable
         return sum;
     }
 
+    /// <summary>What the brains did when attacked, summed over the fleet (BotBrain.Defence.cs): attackers rolled for, fought back, runs, runs that escaped.</summary>
+    public (long Attacked, long Fought, long Fled, long Escaped) Defence()
+    {
+        (long Attacked, long Fought, long Fled, long Escaped) sum = default;
+        foreach (var bot in Bots)
+        {
+            if (bot != null)
+            {
+                var d = bot.Defence();
+                sum = (sum.Attacked + d.Attacked, sum.Fought + d.Fought, sum.Fled + d.Fled, sum.Escaped + d.Escaped);
+            }
+        }
+
+        return sum;
+    }
+
     private readonly Dictionary<ushort, int> _disconnects = [];
     private readonly Lock _reportLock = new();
     private int _faults;
@@ -2552,6 +2568,10 @@ public sealed partial class BotSwarm : IAsyncDisposable
             _brain == null
                 ? default
                 : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned, _brain.PortsLeft, _brain.InPort ? 1 : 0);
+
+        /// <summary>What this bot's brain did when attacked: attackers rolled for, fought back, runs, runs that escaped.</summary>
+        public (long Attacked, long Fought, long Fled, long Escaped) Defence() =>
+            _brain == null ? default : (_brain.Attacked, _brain.FoughtBack, _brain.Fled, _brain.Escaped);
 
         /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
         private readonly BotBrain _brain;

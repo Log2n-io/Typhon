@@ -387,7 +387,15 @@ while (!stopping.IsCancellationRequested)
         + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms"
         + Home()
         + Errands()
+        + Defence()
         + Trade());
+}
+
+// Attacked: how many attackers were rolled for, fought back, run from, and shaken off (BotBrain.Defence.cs).
+string Defence()
+{
+    var d = swarm.Defence();
+    return d.Attacked == 0 ? string.Empty : $"  attacked {d.Attacked} fought {d.Fought} fled {d.Fled} escaped {d.Escaped}";
 }
 
 // The bots that live in the home city, and how many stand in it now: the concentration, watched as it builds.
@@ -658,6 +666,9 @@ if (brain)
     Console.WriteLine(
         $"errands: {errands.Mounts} swoop mount/dismount ask(s), {errands.Doors} door crossing(s), {errands.Used} terminal(s) used, "
         + $"{errands.Paths} walk(s) searched round buildings, {errands.Ports} walk(s) out of a shuttleport's plaza");
+    var defence = swarm.Defence();
+    Console.WriteLine(
+        $"attacked: {defence.Attacked} attacker(s) rolled for, {defence.Fought} fought back, {defence.Fled} run(s), {defence.Escaped} of them shaken off");
     if (options.Dashboard != null)
     {
         var reports = swarm.Reports;

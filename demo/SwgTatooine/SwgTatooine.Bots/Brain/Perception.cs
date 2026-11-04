@@ -41,6 +41,8 @@ public sealed class Perception
     private int _distanceField = -1;
     private int _offerLevelField = -1;
     private int _creatureLevelField = -1;
+    private int _creatureTargetField = -1;
+    private int _hpField = -1;
     private int _kindField = -1;
     private int _regionField = -1;
     private int _assetField = -1;
@@ -87,6 +89,7 @@ public sealed class Perception
             _mountedField = FieldOf(store, ownArchetype, "mounted");
             _stanceField = FieldOf(store, ownArchetype, "stance");
             _levelField = FieldOf(store, ownArchetype, "level");
+            _hpField = FieldOf(store, ownArchetype, "hp");
         }
 
         var mounted = _mountedField >= 0 && store.Archetypes[ownArchetype].Numbers[_mountedField] is { } m && m[ownSlot] == 1;
@@ -105,10 +108,11 @@ public sealed class Perception
             Mounted = mounted,
             Stance = _stanceField >= 0 && store.Archetypes[ownArchetype].Numbers[_stanceField] is { } st ? (int)st[ownSlot] : 0,
             Level = level,
+            Health = _hpField >= 0 && store.Archetypes[ownArchetype].Numbers[_hpField] is { } hp ? (float)hp[ownSlot] : 0f,
             Structures = _view,
         };
 
-        world = NearestCreature(store, _creatures, x, z, world);
+        world = NearestCreature(store, _creatures, store.Self.NetId, x, z, world);
         return Facilities(store, x, z, world, facilities);
     }
 
@@ -282,7 +286,7 @@ public sealed class Perception
     /// shielded lair.
     /// </para>
     /// </remarks>
-    private Perceived NearestCreature(WorldStore store, int archetype, float x, float z, Perceived world)
+    private Perceived NearestCreature(WorldStore store, int archetype, uint self, float x, float z, Perceived world)
     {
         if (archetype < 0)
         {
@@ -291,11 +295,19 @@ public sealed class Perception
 
         var set = store.Archetypes[archetype];
         var levels = _creatureLevelField >= 0 ? set.Numbers[_creatureLevelField] : null;
+        var targets = _creatureTargetField >= 0 ? set.Numbers[_creatureTargetField] : null;
         var best = double.MaxValue;
         var bestNetId = 0u;
         var bestX = 0f;
         var bestZ = 0f;
         var bestLevel = 0;
+
+        // The nearest creature on this body, in the same walk: its `target` is the body's netId (an entity reference travels as one).
+        var nearestOnMe = double.MaxValue;
+        var onMe = 0u;
+        var onMeX = 0f;
+        var onMeZ = 0f;
+        var onMeLevel = 0;
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
@@ -311,6 +323,15 @@ public sealed class Perception
                 bestZ = pz;
                 bestLevel = levels != null ? (int)levels[slot] : 0;
             }
+
+            if (targets != null && targets[slot] == self && distance < nearestOnMe)
+            {
+                nearestOnMe = distance;
+                onMe = set.NetIds[slot];
+                onMeX = px;
+                onMeZ = pz;
+                onMeLevel = levels != null ? (int)levels[slot] : 0;
+            }
         }
 
         if (bestNetId == 0)
@@ -325,6 +346,11 @@ public sealed class Perception
             NearestCreatureZ = bestZ,
             NearestCreatureM = (float)best,
             NearestCreatureLevel = bestLevel,
+            Attacker = onMe,
+            AttackerX = onMeX,
+            AttackerZ = onMeZ,
+            AttackerM = onMe == 0 ? 0f : (float)nearestOnMe,
+            AttackerLevel = onMeLevel,
         };
     }
 
@@ -463,6 +489,7 @@ public sealed class Perception
         _distanceField = FieldOf(store, _offers, "distanceM");
         _offerLevelField = FieldOf(store, _offers, "level");
         _creatureLevelField = FieldOf(store, _creatures, "level");
+        _creatureTargetField = FieldOf(store, _creatures, "target");
 
         // Both fields are resolved against the archetype they are read from, which is the bug this line replaced: the
         // first version resolved a field index against `Player` and then indexed it into whatever archetype held the

@@ -74,6 +74,15 @@ public enum GoalWhy : byte
 
     /// <summary>No way to its installation's point.</summary>
     TendFailed,
+
+    /// <summary>Attacked, and the roll said fight: a hunt on the attacker, whatever its level (BotBrain.Defence.cs).</summary>
+    AttackedFought,
+
+    /// <summary>Attacked, and the roll — or its health — said run.</summary>
+    AttackedFled,
+
+    /// <summary>The run shook the attacker off: decide again.</summary>
+    Escaped,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>

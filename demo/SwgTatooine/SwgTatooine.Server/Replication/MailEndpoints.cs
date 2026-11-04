@@ -183,18 +183,26 @@ public static class MailEndpoints
             .ToString();
     }
 
-    /// <summary>A mail's text: the UTF-8 bytes of its collection, in order; empty for none.</summary>
+    /// <summary>
+    /// A mail's text: the UTF-8 bytes of its collection, in order; empty for none. Read through the read-only enumerator: the accessor is the write path — it
+    /// opens a chunk accessor on the transaction's change set and commits it when disposed — and a read has nothing to commit.
+    /// </summary>
     private static string TextOf(Transaction tx, MailCore mail)
     {
-        using var bytes = tx.CreateComponentCollectionAccessor(ref mail.Text);
-        if (bytes.ElementCount == 0)
+        Span<byte> utf8 = stackalloc byte[Mail.TextMaxBytes];
+        var n = 0;
+        foreach (ref readonly var b in tx.GetReadOnlyCollectionEnumerator(ref mail.Text))
         {
-            return string.Empty;
+            // Never past what a text may hold (Mail.CleanText): a longer one is cut rather than overrun.
+            if (n == utf8.Length)
+            {
+                break;
+            }
+
+            utf8[n++] = b;
         }
 
-        var utf8 = new byte[bytes.ElementCount];
-        bytes.GetAllElements(utf8);
-        return Encoding.UTF8.GetString(utf8);
+        return n == 0 ? string.Empty : Encoding.UTF8.GetString(utf8[..n]);
     }
 
     /// <summary>How long ago, seconds of world time, a mail sent at <paramref name="sentTick"/> was: what the client says it by.</summary>

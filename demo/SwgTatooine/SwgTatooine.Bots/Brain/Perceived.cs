@@ -58,6 +58,25 @@ public readonly struct Perceived
     /// <summary>That creature's level, 1-50 (content-levels.md), whatever it is; 0 from a server that does not send one.</summary>
     public int NearestCreatureLevel { get; init; }
 
+    /// <summary>The nearest creature whose replicated <c>target</c> is this body — what is chasing it or biting it — or 0.</summary>
+    /// <remarks>Read in the same pass as <see cref="NearestCreature"/>: one more field load per creature in view, no query of its own.</remarks>
+    public uint Attacker { get; init; }
+
+    /// <summary>Where the attacker is, east.</summary>
+    public float AttackerX { get; init; }
+
+    /// <summary>Where the attacker is, north.</summary>
+    public float AttackerZ { get; init; }
+
+    /// <summary>How far the attacker is, metres.</summary>
+    public float AttackerM { get; init; }
+
+    /// <summary>The attacker's level, 1-50; 0 from a server that does not send one.</summary>
+    public int AttackerLevel { get; init; }
+
+    /// <summary>The body's health, a share of its maximum (its replicated <c>hp</c>, 0-1); 0 when the server sends none.</summary>
+    public float Health { get; init; }
+
     /// <summary>Whether a <c>BoardShuttle</c> this bot sent was refused in the frame just applied.</summary>
     /// <remarks>
     /// <b>The server's answer, read rather than guessed at.</b> A boarding is the one decision here the server can
