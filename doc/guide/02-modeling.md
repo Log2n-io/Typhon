@@ -112,7 +112,9 @@ A single archetype freely mixes modes — `Character` has all three — because 
 
 ### Fields
 
-Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
+Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), out-of-line text handles (`String1024` — a 4-byte handle for up to 1 023 bytes of UTF-8 stored outside the cluster), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
+
+> **`String1024` text is not set through `Set`.** The handle in the component value names engine-owned text. To write or clear text, use `entity.SetText(comp, ref copy, ref field, "hello")` / `entity.ClearText(comp, ref copy, ref field)` — where `copy` is a local copy of the component you read from `entity.Read(comp)` and `field` is a `ref` to the `String1024` field in that copy. `ClusterRef.GetSpan` on a component with a `String1024` field throws in every build to prevent handle misuse.
 
 > **Two component rules that catch newcomers:**
 >

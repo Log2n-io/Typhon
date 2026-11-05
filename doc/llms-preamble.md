@@ -46,7 +46,7 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
   components of a non-spatial archetype may be written; anything else races the tick fence and corrupts silently.
 - **Replication is explicit**: with the default `PushDetection.Explicit`, a system that changes a replicated entity must call
   `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`); otherwise no client is ever sent the change.
-- **Never write an `[Index]`ed SingleVersion/Transient component through a span** (`ClusterRef.GetSpan`/`Get`) — it throws;
-  write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
+- **Never write an `[Index]`ed SingleVersion/Transient component, or any component with a `String1024` field, through a span** (`ClusterRef.GetSpan`/`Get`) — both throw;
+  write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`, and use `entity.SetText(comp, ref copy, ref field, text)` / `entity.ClearText(…)` for text. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
 
 The whole conceptual core is also available as one file at https://doc.typhondb.io/llms-full.txt.
