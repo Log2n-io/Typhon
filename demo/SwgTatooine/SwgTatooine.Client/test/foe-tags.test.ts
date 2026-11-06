@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { FOE_TAG_FADE_FROM_M, FOE_TAG_MAX, FOE_TAG_RANGE_M, foeTagOpacity, hostilityOf, NearestPicker } from '../src/data/foe-tags';
+import {
+  FOE_TAG_FADE_FROM_M,
+  FOE_TAG_MAX,
+  FOE_TAG_RANGE_M,
+  foeTagOpacity,
+  hostilityOf,
+  NearestPicker,
+} from '../src/data/foe-tags';
 
 describe('a potential enemy', () => {
   it('is aggressive with an aggro radius, passive without one or with the field absent', () => {

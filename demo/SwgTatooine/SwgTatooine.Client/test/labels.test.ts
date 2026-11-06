@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { entityTag, type EntityTag } from '../src/data/content-level';
 import { HOSTILITY_MARK, type Hostility } from '../src/data/foe-tags';
-import { BAR_STACK_PX, Labels, pileOn, STACK_GAP_PX, TAG_STACK_PX, type FoeTag, type HealthBar } from '../src/render/labels';
+import {
+  BAR_STACK_PX,
+  Labels,
+  pileOn,
+  STACK_GAP_PX,
+  TAG_STACK_PX,
+  type FoeTag,
+  type HealthBar,
+} from '../src/render/labels';
 
 /** The tags over what is selected and what is hovered (Loïc, 2026-10-26): the same label, said the same way. */
 
@@ -200,7 +208,7 @@ describe('a health bar', () => {
   });
 });
 
-describe('the potential enemies\' tags', () => {
+describe("the potential enemies' tags", () => {
   let parent: FakeElement;
 
   beforeEach(() => {

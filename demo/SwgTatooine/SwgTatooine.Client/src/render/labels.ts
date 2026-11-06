@@ -229,7 +229,14 @@ export class Labels {
         const label = this.create('', 'label label-selection label-foe', 0, 0, 0);
         const mark = document.createElement('span');
         label.element.append(mark);
-        this.foes.push({ label, mark, nodes: Labels.createTag(label.element), hostility: null, engaged: false, alpha: 32 });
+        this.foes.push({
+          label,
+          mark,
+          nodes: Labels.createTag(label.element),
+          hostility: null,
+          engaged: false,
+          alpha: 32,
+        });
       }
 
       const foe = this.foes[i];
@@ -242,7 +249,9 @@ export class Labels {
 
       if (foe.engaged !== t.engaged) {
         foe.engaged = t.engaged;
-        foe.label.element.className = t.engaged ? 'label label-selection label-foe engaged' : 'label label-selection label-foe';
+        foe.label.element.className = t.engaged
+          ? 'label label-selection label-foe engaged'
+          : 'label label-selection label-foe';
       }
 
       const alpha = Math.round(Math.max(0, Math.min(1, t.opacity)) * 32);

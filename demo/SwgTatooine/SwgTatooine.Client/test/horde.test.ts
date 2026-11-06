@@ -84,7 +84,9 @@ describe('the horde (horde.md § 6)', () => {
     expect(fromDirection({ x: 0, z: 0, fortX: -400, fortZ: -400 })).toBe('south-west');
     expect(hordeLine(status({ phase: 'won' }), 0)).toBe('Whitestone held: the horde is beaten');
     // The siege (horde.md § 10): both pools said, as percentages — 1 + 254ths on the wire, 0 none.
-    expect(hordeLine(status({ phase: 'active', raiders: 12, help: 128, present: 4, hallHp: 128, fortHp: 255 }), 0)).toBe(
+    expect(
+      hordeLine(status({ phase: 'active', raiders: 12, help: 128, present: 4, hallHp: 128, fortHp: 255 }), 0),
+    ).toBe(
       'Raid on Whitestone from the east: 12 raiders — help needed 50 % (4 defending) — town hall 50 %, fortress 100 %',
     );
     expect(siegePercent(0)).toBeNull();
@@ -172,7 +174,17 @@ describe('the horde store (horde.md § 6)', () => {
     // A reconnect's rally, the waypoint already listed: none made again; the event over: it is deleted.
     useMarket.getState().settle('waypoint');
     sent.length = 0;
-    const made = { id: '77', name: FORTRESS_WAYPOINT_NAME, kind: 1, color: NAMED_COLORS.red, x: -670, z: -3863, realm: 0, installation: '0', active: false };
+    const made = {
+      id: '77',
+      name: FORTRESS_WAYPOINT_NAME,
+      kind: 1,
+      color: NAMED_COLORS.red,
+      x: -670,
+      z: -3863,
+      realm: 0,
+      installation: '0',
+      active: false,
+    };
     useWaypoints.setState({ list: [made] });
     useHorde.getState().reset();
     useHorde.getState().heard(status());

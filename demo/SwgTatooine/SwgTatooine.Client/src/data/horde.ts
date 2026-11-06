@@ -128,7 +128,10 @@ export function hordeLine(status: HordeStatus, nowMs: number): string {
     case 'active': {
       const hall = siegePercent(status.hallHp);
       const fort = siegePercent(status.fortHp);
-      const siege = hall === null && fort === null ? '' : ` — town hall ${String(hall ?? 100)} %, fortress ${String(fort ?? 100)} %`;
+      const siege =
+        hall === null && fort === null
+          ? ''
+          : ` — town hall ${String(hall ?? 100)} %, fortress ${String(fort ?? 100)} %`;
       return `Raid on ${where} from the ${fromDirection(status)}: ${String(status.raiders)} raiders — help needed ${String(helpPercent(status))} % (${String(status.present)} defending)${siege}`;
     }
     case 'won':

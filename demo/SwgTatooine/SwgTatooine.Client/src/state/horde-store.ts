@@ -80,7 +80,8 @@ export const useHorde = create<HordeState>((set, get) => ({
     const before = get().rally;
     set({ rally });
     const status = get().status;
-    const fortress = status !== null && status.event === rally.event && (status.fortX !== 0 || status.fortZ !== 0) ? status : null;
+    const fortress =
+      status !== null && status.event === rally.event && (status.fortX !== 0 || status.fortZ !== 0) ? status : null;
     if (rally.state === 1 && (before === null || before.event !== rally.event || before.state !== 1)) {
       useChat.getState().notice('You answered the call: the rally point is on your guide.', 'system');
       // A waypoint to the fortress the raiders march from, once: not again on a reconnect's rally if the list already holds it.
