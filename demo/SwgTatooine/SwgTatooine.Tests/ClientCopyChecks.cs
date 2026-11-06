@@ -59,7 +59,11 @@ internal sealed class ClientCopyChecks
             Assert.That(Constant(waypoints, "WAYPOINTS_MAX"), Is.EqualTo(Waypoints.MaxPerCharacter));
             Assert.That(Constant(waypoints, "KIND_CUSTOM"), Is.EqualTo(WaypointKind.Custom));
             Assert.That(Constant(waypoints, "KIND_INSTALLATION"), Is.EqualTo(WaypointKind.Installation));
-            foreach (var reason in new[] { TatooineReplication.WaypointBad, TatooineReplication.WaypointsFull, TatooineReplication.WaypointUnknown })
+            foreach (var reason in new[]
+                     {
+                         TatooineReplication.WaypointBad, TatooineReplication.WaypointsFull, TatooineReplication.WaypointUnknown,
+                         TatooineReplication.InstallationNotHere, TatooineReplication.InstallationInTown,
+                     })
             {
                 Assert.That(market, Does.Contain($"  {reason}: '"), $"the client names no refusal {reason}");
             }

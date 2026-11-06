@@ -105,11 +105,14 @@ internal sealed class BotGearChecks
         });
     }
 
-    /// <summary>§ 6, Surplus: past the listing cap, an item it will not use goes to the vendor — only while the grid is over its floor.</summary>
+    /// <summary>
+    /// § 6, Surplus: past the listing cap, an item it will not use goes to the vendor — only while the grid is over its floor, and (the night of
+    /// 2026-11-04) only when the board is glutted with it: one that sells waits for a slot.
+    /// </summary>
     [Test]
     public void SurplusPastTheListingCap_GoesToTheVendor_OnlyOverTheFloor()
     {
-        var prices = MarketPrices.None.With("sword_vibroblade", 2, 1_000d);
+        var prices = new MarketPrices().With("sword_vibroblade", 2, 1_000d).WithBoard("sword_vibroblade", 2, CraftPlan.SaturatedListings, 900);
         var gear = new List<GearItem> { new(2, ItemCatalog.Sword, 3, EquipSlot.Weapon, 0, "sword_vibroblade", 2) };
         var rng = 3u;
         Assert.Multiple(() =>
@@ -117,6 +120,8 @@ internal sealed class BotGearChecks
             Assert.That(MarketPlan.Surplus(gear, prices, MarketPlan.MaxListed, 1, ref rng), Is.Empty, "under the floor it waits for a listing slot");
             var vendored = MarketPlan.Surplus(gear, prices, MarketPlan.MaxListed, 1, ref rng, vendorRest: true);
             Assert.That(vendored.ConvertAll(c => (c.Step, c.Item, c.Quantity)), Is.EqualTo(new[] { (MarketStep.Vendor, 2UL, 1) }));
+            var selling = new MarketPrices().With("sword_vibroblade", 2, 1_000d).WithBoard("sword_vibroblade", 2, 3, 900);
+            Assert.That(MarketPlan.Surplus(gear, selling, MarketPlan.MaxListed, 1, ref rng, vendorRest: true), Is.Empty, "one that sells, dumped on the vendor");
         });
     }
 
@@ -145,11 +150,11 @@ internal sealed class BotGearChecks
     }
 
     /// <summary>
-    /// § 6, Gear: what a bot looks for on the board — its weapon below its band first, then an armour slot it has nothing for (the padded piece), then
-    /// one whose best is below its band; nothing when all of it is of its band.
+    /// § 6, Gear: what a bot looks for on the board first — a slot it has nothing for (the padded piece), then the slot below its band that gains the most:
+    /// the weapon on equal terms, else the heaviest armour piece; nothing when all of it is of its band.
     /// </summary>
     [Test]
-    public void ABot_LooksForItsWeaponBelowItsBand_ThenAnEmptySlot_ThenOneBelowIt()
+    public void ABot_LooksForAnEmptySlot_ThenTheLargestGainBelowItsBand()
     {
         var worn = new List<GearItem> { new(1, ItemCatalog.Blaster, EquipSlot.Weapon, EquipSlot.Weapon, 0, "blaster_dl44", 1) };
         for (var slot = EquipSlot.Head; slot <= EquipSlot.Feet; slot++)
@@ -162,7 +167,8 @@ internal sealed class BotGearChecks
             Assert.That(MarketPlan.GearWanted(worn, Offers, 1), Is.Null, "all of band I");
             Assert.That(MarketPlan.GearWanted(worn, Offers, 2), Is.EqualTo(("blaster_dl44", EquipSlot.Weapon, 1)), "the weapon first");
             var armed = worn.ConvertAll(g => g.Wears == EquipSlot.Weapon ? g with { Mk = 2 } : g);
-            Assert.That(MarketPlan.GearWanted(armed, Offers, 2), Is.EqualTo(("armor_padded_x" + EquipSlot.Head, EquipSlot.Head, 1)), "then the first below");
+            Assert.That(MarketPlan.GearWanted(armed, Offers, 2), Is.EqualTo(("armor_padded_x" + EquipSlot.Torso, EquipSlot.Torso, 1)),
+                "then the heaviest piece below: the torso, a third of the set");
             var bare = armed.FindAll(g => g.Wears != EquipSlot.Feet);
             Assert.That(MarketPlan.GearWanted(bare, Offers, 2)?.Item, Is.EqualTo("armor_padded_boots"), "an empty slot before one below the band");
         });
@@ -222,25 +228,29 @@ internal sealed class BotGearChecks
     }
 
     /// <summary>
-    /// § 6, Gear, as of Loïc's 2026-11-03 rule (decay finishes its job): a worn item is replaced once it is <b>broken</b> with no kit to repair it — its
-    /// slot is wanted as if empty, and a sound piece is put on over it, even of the same Mk. Worn down but still working, or past its repairs, it is worn
-    /// on: to the repair, or to the wear that destroys it.
+    /// § 6, Gear, as of Loïc's 2026-11-04 rule (replace under a threshold, superseding 2026-11-03's "worn to the end"): a worn item is replaced once it is
+    /// <b>worn down</b> — broken, or under 20 % — and not to be repaired (past its repairs, or no kit): its slot is wanted as if empty, and a sound piece
+    /// is put on over it, even of the same Mk. Above the threshold, or a repair left and a kit held, it is worn on. A broken worn piece gives way to a
+    /// sound one whatever the kits: it does nothing.
     /// </summary>
     [Test]
-    public void ABot_ReplacesWhatIsBrokenAndBeyondItsKits_AndWearsTheRestToTheEnd()
+    public void ABot_ReplacesWhatIsWornDownAndBeyondItsKits_AndWearsTheRestOn()
     {
         var spent = Worn(1, 101, 1, 0, 1000, broken: true);
         var spare = new GearItem(9, ItemCatalog.Blaster, 4, 101, 0, "blaster_dl44", 1) { Condition = 1000, MaxCondition = 1000 };
         Assert.Multiple(() =>
         {
             Assert.That(MarketPlan.Spent(spent, []), Is.True);
-            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 100, 1000, repairs: 2), []), Is.False, "past its repairs, worn until the wear destroys it");
-            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 100, 1000), []), Is.False, "worn down, no kit: still worn, not swapped at 20 %");
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 100, 1000, repairs: 2), [Kits(MarketPlan.KitWeapon, 1)]), Is.True, "past its repairs: replaced");
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 100, 1000), []), Is.True, "under 20 %, no kit: replaced");
+            Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 300, 1000), []), Is.False, "above the threshold: worn on");
             Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 0, 1000, broken: true), [Kits(MarketPlan.KitWeapon, 1)]), Is.False, "a repair left, a kit held");
             Assert.That(MarketPlan.Spent(Worn(1, 101, 1, 0, 1000, broken: true), []), Is.True, "a repair left but no kit");
             Assert.That(MarketPlan.GearWanted([spent], null, 1, []), Is.EqualTo(("blaster_dl44", 101, 0)), "the same piece, any Mk of its band");
             Assert.That(MarketPlan.NextToWear([spent, spare], 1, ItemCatalog.Blaster, []), Is.EqualTo(9UL), "a sound spare over the spent one");
-            Assert.That(MarketPlan.NextToWear([spent, spare], 1, ItemCatalog.Blaster), Is.Zero, "the premise: without the held stacks, no replacement");
+            Assert.That(MarketPlan.NextToWear([spent, spare], 1, ItemCatalog.Blaster), Is.EqualTo(9UL), "broken: the spare, even without the held stacks");
+            var down = Worn(1, 101, 1, 100, 1000);
+            Assert.That(MarketPlan.NextToWear([down, spare], 1, ItemCatalog.Blaster), Is.Zero, "the premise: worn down but working, the kits decide");
             var downSpare = spare with { Broken = true, Condition = 0 };
             Assert.That(MarketPlan.NextToWear([Worn(1, 101, 1, 900, 1000), downSpare], 3, ItemCatalog.Blaster), Is.Zero, "never a worn-down spare");
         });
@@ -296,7 +306,7 @@ internal sealed class BotGearChecks
             {
                 new GearItem(5, ItemCatalog.Blaster, EquipSlot.Weapon, EquipSlot.Weapon, 0, "blaster_dl44", 1)
                 {
-                    Condition = 0, MaxCondition = 1000, Repairs = 1, Broken = true,
+                    Condition = 0, MaxCondition = 1000, Repairs = 1, Broken = true, Power = 81 * 1000 / 1021,
                 },
             }));
         });

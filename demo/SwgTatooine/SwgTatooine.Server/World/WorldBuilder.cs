@@ -65,7 +65,10 @@ public static class WorldBuilder
         SpawnPointsOfInterest(dbe, map, config, census, ref rng, index, plan);
         SpawnWilderness(dbe, config, census, ref rng, index);
         SpawnPlayerStructures(dbe, map, config, census, ref rng, plan);
-        SpawnPlayers(dbe, map, config, census, ref rng, index, plan);
+        if (config.Crowd)
+        {
+            SpawnPlayers(dbe, map, config, census, ref rng, index, plan);
+        }
 
         census.Crowded = plan.Crowded;
         return census;
@@ -1090,6 +1093,15 @@ public static class WorldBuilder
     internal const float LairHalfM = 4f;
 
     /// <summary>
+    /// What makes a creature a horde's raider (horde.md § 2): the target it marches on, and a leash long enough to reach back to its fortress. Default
+    /// (<see cref="Active"/> false) for every other creature.
+    /// </summary>
+    internal readonly record struct MarchOrder(float HomeX, float HomeZ, float Leash, byte Kind = SimBridge.RaiderMarches, int HealthPct = 0, int HitPct = 0)
+    {
+        public bool Active => Leash > 0f;
+    }
+
+    /// <summary>
     /// How far from the lair's centre its creatures are born, metres: the published <c>creature_nest</c>'s four <c>creature.N</c> spawn markers stand
     /// 3.4 m out, on the diagonals.
     /// </summary>
@@ -1144,6 +1156,51 @@ public static class WorldBuilder
         return lairId;
     }
 
+    /// <summary>The spawn points a raider is born at round its fortress's gate: the first three rings of a lair's.</summary>
+    internal const int RaiderSpawnPoints = 12;
+
+    /// <summary>
+    /// A horde's raid lair (horde.md § 2): a lair at its fortress's gate that owns the raiders of one template, spawned empty — the horde fills it wave by
+    /// wave. Never a site's (<see cref="Lair.Site"/> 0), so the lair director never retires it; the horde destroys it, and its raiders with it, at the end.
+    /// </summary>
+    internal static EntityId SpawnHordeLair(Transaction tx, int template, int level, float x, float z, SimConfig config, TerrainField terrain, ushort realm)
+    {
+        level = ContentLevels.Clamp(level);
+        var lairBounds = default(LairPlacement);
+        lairBounds.SetAt(x, z, terrain.GroundAt(x, z), LairHalfM);
+        var lair = new Lair
+        {
+            CreatureTemplate = template,
+            SpawnRadius = CreatureTemplates.LairSpawnRadius[template] * config.ContentScale,
+            Level = level,
+        };
+        var health = ContentLevels.LairHealth(level, template);
+        return tx.Spawn<CreatureLair>(
+            CreatureLair.Bounds.Set(in lairBounds),
+            CreatureLair.Spawner.Set(in lair),
+            CreatureLair.Vitals.Set(new LairVitals { Health = health, MaxHealth = health }),
+            CreatureLair.Realm.Set(new LairRealm(realm)));
+    }
+
+    /// <summary>A horde's fortress (horde.md § 2): a structure placed while the world runs, facing <paramref name="yaw"/> (quarter turns).</summary>
+    internal static EntityId SpawnFortress(Transaction tx, float x, float z, int yaw, TerrainField terrain, ushort realm)
+    {
+        var bounds = default(StructurePlacement);
+        bounds.SetAt(x, z, terrain.GroundAt(x, z), StructureFootprint.HalfExtentM(StructureKind.HordeFortress));
+        var rng = new Rng(1);
+        var s = new Structure
+        {
+            Kind = StructureKind.HordeFortress,
+            Yaw = yaw & 3,
+            Asset = StructureAssets.Pick(StructureKind.HordeFortress, ref rng),
+        };
+        return tx.Spawn<WorldObject>(
+            WorldObject.Bounds.Set(in bounds),
+            WorldObject.Struct.Set(in s),
+            WorldObject.Region.Set(new StructureRegion(0)),
+            WorldObject.Realm.Set(new StructureRealm(realm)));
+    }
+
     /// <summary>Create one creature belonging to a lair.</summary>
     /// <param name="slot">
     /// Which place round the lair it is born at: the four spawn markers, then a second ring outside them, each with a little jitter so a lair's creatures
@@ -1157,9 +1214,17 @@ public static class WorldBuilder
     /// </param>
     /// <param name="level">Its lair's level: what its health and its hit are computed from (content-levels.md § 3).</param>
     internal static EntityId SpawnCreature(Transaction tx, ref Rng rng, EntityId lairId, int template, int level,
-        float lairX, float lairZ, int slot, SimConfig config, TerrainField terrain, ushort realm)
+        float lairX, float lairZ, int slot, SimConfig config, TerrainField terrain, ushort realm, in MarchOrder march = default)
     {
         level = ContentLevels.Clamp(level);
+
+        // A raider is born at its fortress's gate, in the first rings of spawn points whatever its number: the lair's rings grow with the slot, and a wave
+        // of a hundred would ring the gate a hundred metres out.
+        if (march.Active)
+        {
+            slot %= RaiderSpawnPoints;
+        }
+
         // Jittered along the ring and OUTWARD only: inward would put a body in the nest's own collider (2.15 m) or the camp's tent.
         var ring = (slot / 4) + 1;
         var angle = (MathF.PI * 0.25f) + ((slot % 4) * MathF.PI * 0.5f) + ((ring - 1) * MathF.PI * 0.25f) + rng.NextRange(-0.25f, 0.25f);
@@ -1176,7 +1241,7 @@ public static class WorldBuilder
         // active member is enough to keep a cluster dirty, and nothing ever sleeps. Measured: half the creatures ambient, drawn per creature, produced
         // ZERO dormant clusters. The hash is of the lair's own position, so it is stable across arms without threading extra state through the call.
         var lairHash = (uint)(BitConverter.SingleToInt32Bits(lairX) * 0x9E3779B1) ^ (uint)(BitConverter.SingleToInt32Bits(lairZ) * 0x85EBCA77);
-        var ambient = config.IdleCreatureFraction > 0d
+        var ambient = !march.Active && config.IdleCreatureFraction > 0d
             && (lairHash % 1000u) < (uint)(config.IdleCreatureFraction * 1000d);
 
         var ai = new CreatureBrain
@@ -1191,17 +1256,46 @@ public static class WorldBuilder
             Level = (byte)level,
         };
 
+        // A raider (horde.md § 2): home is the target it marches on, and the leash reaches back past its fortress, so a chase off the route is not a return.
+        if (march.Active)
+        {
+            ai.HomeX = march.HomeX;
+            ai.HomeZ = march.HomeZ;
+            ai.LeashRadius = march.Leash;
+            ai.March = march.Kind;
+
+            // Killing comes first (Loïc, 2026-11-04): a raider turns on whoever comes within its notice, far wider than a wild creature's 24 m.
+            // Within the chase's own reach, or a scaled world's raider would turn on someone and give it up on its next thought (review, 2026-11-04).
+            ai.AggroRadius = MathF.Max(ai.AggroRadius, MathF.Min(SimBridge.RaiderNoticeM, TatooineData.MaxChaseRangeM * config.ContentScale * 0.8f));
+
+            // Armed, a camp's people: half a blaster, the rest a blade or their fists. A beast has its teeth.
+            if (CreatureTemplates.IsCamp(template))
+            {
+                var arms = rng.NextFloat();
+                ai.Stance = arms < 0.5f ? Stances.Pistol : arms < 0.8f ? Stances.OneHanded : Stances.Unarmed;
+            }
+        }
+
         // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms, which at this tick rate is four to ten
         // ticks — the AI is deliberately not a per-tick cost. In its own component, because nothing on the wire reads it (see CreatureTimers).
         var timers = new CreatureTimers { ThinkCooldown = rng.NextInt(1, AiTicksMax(config)), AttackCooldown = rng.NextInt(0, 8) };
         var move = new CreatureMotion { SpeedMps = CreatureTemplates.SpeedMps[template] };
         var foe = CreatureTemplates.IsCamp(template);
         var health = ContentLevels.CreatureHealth(level, foe);
+        var hit = ContentLevels.CreatureHit(level, foe);
+
+        // A raider of a stronger raid (horde.md § 10): its event's health and hit, against a creature of its level; 0 is as it is.
+        if (march.Active)
+        {
+            health = SimBridge.Scaled(health, march.HealthPct);
+            hit = SimBridge.Scaled(hit, march.HitPct);
+        }
+
         var vitals = new CreatureVitals
         {
             Health = health,
             MaxHealth = health,
-            AttackDamage = ContentLevels.CreatureHit(level, foe),
+            AttackDamage = hit,
         };
         return tx.Spawn<Creature>(
             Creature.Bounds.Set(in bounds),

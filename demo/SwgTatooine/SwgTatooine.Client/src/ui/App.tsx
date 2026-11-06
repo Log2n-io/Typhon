@@ -5,6 +5,7 @@ import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
 import { InventoryWindow } from './InventoryWindow';
+import { MailWindow } from './MailWindow';
 import { BazaarPanel } from './BazaarPanel';
 import { CraftPanel } from './CraftPanel';
 import { NavPane } from './NavPane';
@@ -26,6 +27,7 @@ import { useUi } from '../state/ui-store';
 import { useWindows } from '../state/windows-store';
 import { OptionsWindow } from './OptionsWindow';
 import { WaypointsWindow } from './WaypointsWindow';
+import { HordeBar } from './HordeBar';
 import { useBar } from './WindowFrame';
 
 /**
@@ -88,6 +90,7 @@ export function App() {
       <ActionBar />
       <HamBar />
       <DownNotice />
+      <HordeBar />
       <ShuttlePrompt />
       <ContextMenu />
       {/* One column at the bottom right, top to bottom: each sits above the next whatever its height — the waypoint pane grows
@@ -100,6 +103,7 @@ export function App() {
       <MissionTerminal />
       <MissionJournalPanel />
       <InventoryWindow />
+      <MailWindow />
       <BazaarPanel />
       <CraftPanel />
       <CharacterWindow />

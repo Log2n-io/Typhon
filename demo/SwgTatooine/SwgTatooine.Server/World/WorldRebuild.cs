@@ -77,7 +77,7 @@ public static class WorldRebuild
         RebuildLairs(tx, index, census, realm);
         RebuildCreatures(tx, census, realm);
         RebuildNpcs(tx, census, realm);
-        RebuildPlayers(tx, index, census, realm);
+        RebuildPlayers(tx, index, census, realm, map.Config.Crowd);
         tx.Commit();
 
         // Interior NPCs count toward the planet that owns their buildings, which is what PopulateInteriors does on the build path — so a reopened run's census
@@ -292,25 +292,21 @@ public static class WorldRebuild
     }
 
     /// <summary>
-    /// The players, and the one piece of per-entity repair a reopen needs: a possessed player has no session any more.
+    /// The players, and the one piece of per-entity repair a reopen needs: a session's avatar saved with the world has no session any more.
     /// </summary>
     /// <remarks>
-    /// <b>Possession does not survive a restart and must not appear to.</b> <c>PlayerControl.Kind</c> and <c>PlayerSession.Controller</c> are ordinary
-    /// persisted components, so a world saved while a client was connected reopens with a player marked as that client's — and the client is gone. Nothing would
-    /// ever clear it: <c>PlayerThink</c> skips anything not <c>Scripted</c>, so the player would stand still for the life of the process while the simulation
-    /// politely waited for intents from a session that does not exist. Handing them back is the only correct answer, and doing it here is what makes the count
-    /// this method returns the count of players the simulation will actually drive.
+    /// <para>
+    /// <b>An avatar does not survive a restart.</b> Since A5 a session is given a freshly spawned body on every connect and its body is destroyed when it goes,
+    /// so one found on disk is an orphan of a session the process no longer has. It used to be handed back to the crowd — a rule written when a client
+    /// possessed a crowd body — and every restart under load grew the crowd by every session connected at the save: 32 911 bodies by 2026-11-04 on a
+    /// <c>--pop 5</c> world built with 1 600. Destroyed instead.
+    /// </para>
+    /// <para>Without the crowd (<see cref="SimConfig.Crowd"/>), the crowd's own bodies go too.</para>
     /// </remarks>
-    private static void RebuildPlayers(Transaction tx, WorldIndex index, WorldCensus census, ushort realm)
+    private static void RebuildPlayers(Transaction tx, WorldIndex index, WorldCensus census, ushort realm, bool crowd)
     {
-        // Collected on the read walk and released afterwards, rather than written through the cluster span in place.
-        //
-        // A mutable cluster span outside system dispatch fails on `ChunkAccessor must be created inside an epoch scope`: the scope a system body runs under is
-        // the scheduler's, and a plain transaction walking clusters to READ has no equivalent. It is a real constraint rather than an inconvenience — the write
-        // would be to pages nothing is holding open. Per-entity OpenMut is the supported path and costs nothing here, because the list is the players a client
-        // happened to be driving when the world was saved: usually none, never many.
-        var possessed = new List<EntityId>();
-
+        var dropped = new List<EntityId>();
+        var avatars = 0;
         foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
         {
             if (cluster.Realm.Value != realm)
@@ -323,45 +319,27 @@ public static class WorldRebuild
             {
                 var slot = BitOperations.TrailingZeroCount(bits);
                 var id = cluster.GetEntityId(slot);
-                index.Players.Add(id);
-                census.Players++;
-                if (controls[slot].Kind != ControllerKind.Scripted)
+                var scripted = controls[slot].Kind == ControllerKind.Scripted;
+                if (scripted && crowd)
                 {
-                    possessed.Add(id);
+                    index.Players.Add(id);
+                    census.Players++;
+                    continue;
                 }
+
+                avatars += scripted ? 0 : 1;
+                dropped.Add(id);
             }
         }
 
-        foreach (var id in possessed)
+        foreach (var id in dropped)
         {
-            if (!tx.TryOpenMut(id, out var player))
-            {
-                continue;
-            }
-
-            var control = player.Read(Player.Control);
-            control.Kind = ControllerKind.Scripted;
-            player.Set(Player.Control, control);
-
-            // Off its swoop too: Mounted is persisted, and nothing the crowd does clears it but a door — a body saved riding came back as a crowd
-            // member drawn on a swoop for good.
-            var state = player.Read(Player.State);
-            if (state.Mounted != 0 || state.Stance != Stances.None)
-            {
-                state.Mounted = 0;
-                state.Stance = Stances.None;
-                player.Set(Player.State, state);
-            }
-            var session = player.Read(Player.Session);
-            session.Controller = 0u;
-            session.Target = EntityId.Null;
-            player.Set(Player.Session, session);
+            tx.Destroy(id);
         }
 
-        if (possessed.Count != 0)
+        if (dropped.Count != 0)
         {
-            Console.WriteLine($"  .. {possessed.Count} player(s) were possessed when this world was last saved; their sessions are gone, so they are back on "
-                + "the simulation's own activity mix");
+            Console.WriteLine($"  .. {avatars} saved avatar(s) of gone sessions destroyed{(crowd ? "" : $", and {dropped.Count - avatars} crowd bodies (--no-crowd)")}");
         }
     }
 }

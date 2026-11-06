@@ -5,13 +5,15 @@ using System.Text.Json;
 namespace SwgTatooine.Bots;
 
 /// <summary>What a bot's inventory last said (inventory-loot.md § 7): its stacks, and how far its lost notes were read.</summary>
-/// <param name="Stacks">Stacks held.</param>
+/// <param name="Stacks">The grid's entries, units counted in lots of <see cref="MarketPlan.LotSize"/>.</param>
 /// <param name="LastLost">The highest lost note number met.</param>
+/// <param name="Slots">The grid's slots in use: what a drop needs a free one of.</param>
+/// <param name="Capacity">The grid's slots, as the answer said (<c>slots</c>); <see cref="MarketPlan.GridSlots"/> when it did not.</param>
 /// <remarks>
 /// <b>No ledger rows.</b> The answer carries none: the ledger is the operators' audit trail, never read by a game client (Loïc, 2026-10-29). Drops and
 /// bazaar buys reach the bot as the server's notices (<see cref="BotEvents"/>).
 /// </remarks>
-public sealed record InventoryView(int Stacks, int LastLost)
+public sealed record InventoryView(int Stacks, int LastLost, int Slots = 0, int Capacity = MarketPlan.GridSlots)
 {
     public static InventoryView None { get; } = new(0, 0);
 
@@ -44,11 +46,15 @@ public sealed record InventoryView(int Stacks, int LastLost)
 
         var items = root.GetProperty("items");
         var grid = 0;
+        var slots = 0;
         foreach (var s in items.EnumerateArray())
         {
             var item = s.GetProperty("item").GetString();
             var slot = s.GetProperty("slot").GetInt32();
-            grid += slot <= 100 ? 1 : 0;
+            // Counted in lots (MarketPlan.LotSize): the floors a bot trades by were set when a stack held 99.
+            var units = s.TryGetProperty("count", out var n0) ? n0.GetInt32() : 1;
+            grid += slot <= 100 ? MarketPlan.Lots(units, s.TryGetProperty("stats", out _)) : 0;
+            slots += slot <= 100 ? 1 : 0;
             if (s.TryGetProperty("stats", out var stats))
             {
                 // An item with stats: the bot's gear, never the bazaar's goods.
@@ -67,6 +73,7 @@ public sealed record InventoryView(int Stacks, int LastLost)
                     Broken = stats.TryGetProperty("broken", out var b) && b.ValueKind == JsonValueKind.True,
                     Count = s.TryGetProperty("count", out var n) ? n.GetInt32() : 1,
                     PackKey = s.TryGetProperty("packKey", out var p) ? p.GetString() : null,
+                    Power = MarketJson.PowerOf(stats),
                 });
                 continue;
             }
@@ -76,9 +83,10 @@ public sealed record InventoryView(int Stacks, int LastLost)
                 item,
                 MarketCatalog.CategoryOf(s.TryGetProperty("category", out var c) ? c.GetString() : null),
                 s.GetProperty("mk").GetInt32(),
-                s.GetProperty("count").GetInt32()));
+                s.GetProperty("count").GetInt32()) { Id = s.TryGetProperty("id", out var id) ? MarketJson.Id(id) : 0 });
         }
 
-        return new InventoryView(grid, lastLost);
+        var capacity = root.TryGetProperty("slots", out var cap) && cap.ValueKind == JsonValueKind.Number ? cap.GetInt32() : MarketPlan.GridSlots;
+        return new InventoryView(grid, lastLost, slots, capacity);
     }
 }

@@ -168,5 +168,8 @@ public sealed partial class SimBridge
         }
 
         j.Append("],\"packs\":").Append(Packs.ToString(inv)).Append(",\"unpacked\":").Append(Unpacked.ToString(inv));
+        j.Append(",\"grid\":{\"moves\":").Append(GridMoves.ToString(inv)).Append(",\"splits\":").Append(GridSplits.ToString(inv))
+            .Append(",\"merges\":").Append(GridMerges.ToString(inv)).Append(",\"swaps\":").Append(GridSwaps.ToString(inv))
+            .Append(",\"discards\":").Append(GridDiscards.ToString(inv)).Append('}');
     }
 }

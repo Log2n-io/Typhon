@@ -13,7 +13,7 @@ export const REVISION_TIMEOUT_MS = 10_000;
 /** How a request is made: `fetch`'s shape, narrowed to what a reader uses, so a test or the mock can answer it. */
 export type RevisionFetch = (
   url: string,
-  init: { headers: Record<string, string>; signal?: AbortSignal },
+  init: { headers: Record<string, string>; signal?: AbortSignal; method?: string; body?: string },
 ) => Promise<{ ok: boolean; status?: number; json(): Promise<unknown> }>;
 
 /**

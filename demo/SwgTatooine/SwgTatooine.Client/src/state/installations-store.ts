@@ -1,12 +1,6 @@
 import { create } from 'zustand';
 
-import {
-  installationAlerts,
-  NO_ALERTS,
-  parseInstallations,
-  type InstallationAlerts,
-  type InstallationList,
-} from '../data/installations';
+import { parseInstallations, placedNotices, type InstallationList } from '../data/installations';
 import { useChat } from './chat-store';
 import { useMarket } from './market-store';
 
@@ -25,18 +19,7 @@ export interface InstallationsStore {
   readonly pay: (id: string, credits: number) => void;
   readonly pickUp: (id: string) => void;
   readonly reset: () => void;
-  /**
-   * Reads them every {@link ALERT_READ_MS} while nothing else does, so a full hopper or an upkeep running out is said even with the window shut (client.md
-   * C39): called by the frame loop.
-   */
-  readonly watch: () => void;
 }
-
-/** How often the installations are read for their notices with the window shut, ms. */
-export const ALERT_READ_MS = 60_000;
-
-let alerts: InstallationAlerts = NO_ALERTS;
-let readAt = Number.NEGATIVE_INFINITY;
 
 /** How often the list is read again while the window is open, ms. */
 export const INSTALLATIONS_REFRESH_MS = 5_000;
@@ -101,23 +84,13 @@ export const useInstallations = create<InstallationsStore>((set, get) => {
       const mine = ++generation;
       const list = parseInstallations(await fetchJson('swg/installations'));
       if (list !== null && mine === generation) {
+        const placed = placedNotices(get().list, list);
         set({ list });
-        readAt = performance.now();
-        const said = installationAlerts(alerts, list.installations);
-        alerts = said.next;
-        for (const text of said.notices) {
-          useChat.getState().notice(text);
+        // A full hopper, an upkeep running out, a stop: the server mails them (mail.md § 5), so they reach a player away from it, or offline.
+        for (const text of placed) {
+          useChat.getState().notice(text, 'structures');
         }
       }
-    },
-    watch: () => {
-      const now = performance.now();
-      if (get().open || useMarket.getState().actions === null || now - readAt < ALERT_READ_MS) {
-        return;
-      }
-
-      readAt = now;
-      void get().refresh();
     },
     place: (kit, family) => {
       if (useMarket.getState().sendCommand({ kind: 'installPlace', item: kit, family })) {
@@ -142,8 +115,6 @@ export const useInstallations = create<InstallationsStore>((set, get) => {
     reset: () => {
       stopTimer();
       generation++;
-      alerts = NO_ALERTS;
-      readAt = Number.NEGATIVE_INFINITY;
       set({ open: false, list: null });
     },
   };

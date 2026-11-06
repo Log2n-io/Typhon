@@ -59,6 +59,7 @@ export function ContextMenu() {
       style={{ left, ...vertical, width: MENU_WIDTH_PX }}
     >
       <div className="hud-title">{menu.title}</div>
+      {menu.detail === undefined ? null : <div className="hint">{menu.detail}</div>}
       <div className="context-items">
         {menu.items.map((item) => (
           <button

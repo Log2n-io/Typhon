@@ -130,6 +130,6 @@ internal static class MessageText
     }
 
     /// <summary>The name to put in a refusal, so it says what to use rather than only what is wrong.</summary>
-    public static string KnownTypes => nameof(Utf8Text256);
+    public static string KnownTypes => nameof(Utf8Text256) + " or " + nameof(Utf8Text64);
 
 }

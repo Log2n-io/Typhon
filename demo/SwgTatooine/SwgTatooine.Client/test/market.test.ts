@@ -9,7 +9,7 @@ import {
   type TicketTerminal,
 } from '../src/app/ticket-terminal';
 import { panelKey } from '../src/app/panel-keys';
-import { parseInventory, type InventoryItem } from '../src/data/items';
+import { parseInventory, STACK_MAX, type InventoryItem } from '../src/data/items';
 import type { PlayerNotice } from '../src/data/notices';
 import {
   browseUrl,
@@ -29,10 +29,12 @@ import {
   parseMine,
   parsePrices,
   itemVendorPayout,
+  listingItem,
   vendorPayout,
   type MarketCommand,
   type MarketListing,
 } from '../src/data/market';
+import { previewLines } from '../src/data/inventory-grid';
 import { MockInventory, MOCK_DROP_MS } from '../src/data/mock/inventory';
 import { CONTESTED_NAME, MOCK_BAZAAR_REGION, MOCK_CREDITS, MOCK_SALE_MS, MockMarket } from '../src/data/mock/market';
 import { parseWallet } from '../src/data/wallet';
@@ -112,12 +114,16 @@ describe('the fees', () => {
 });
 
 describe('a refusal', () => {
-  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, the installations' 188-193, the waypoints' 194-196, and NotInWorld reused", () => {
+  it("reads every reason of § 3.1, 151-163 in order, the workshop 164-182 and the refine's 184, the installations' 188-193, the waypoints' 194-196, building in town's 197, the inventory window's 198-199, the mail's 200-203, a potion's 208-210, and NotInWorld reused", () => {
     expect(Object.keys(MARKET_REASONS).map(Number)).toEqual([
       142,
       ...Array.from({ length: 32 }, (_, i) => 151 + i),
-      ...Array.from({ length: 13 }, (_, i) => 184 + i),
+      ...Array.from({ length: 20 }, (_, i) => 184 + i),
+      208,
+      209,
+      210,
     ]);
+    expect(marketRefusal(209)).toContain('15 s');
     expect(marketRefusal(184)).toContain('refine');
     expect(marketRefusal(MarketReason.EquipLevel)).toContain('combat level');
     expect(marketRefusal(MarketReason.StanceNoWeapon)).toContain('weapon');
@@ -210,6 +216,74 @@ describe('the answers', () => {
     expect(page?.listings[0]).toMatchObject({ cityName: CITIES[0].name, realm: -1 });
     expect(parseBrowse({ listings: {} })).toBeNull();
     expect(parseBrowse(null)).toBeNull();
+  });
+
+  it("keep a listed item's stats, and show it in the preview as the inventory shows the same item (client.md C43)", () => {
+    const stats = {
+      damage: 81,
+      delayMs: 1020,
+      rangeDm: 300,
+      wears: 101,
+      condition: 900,
+      maxCondition: 1000,
+      lifeMilli: 1000,
+      repairs: 1,
+      crafter: '0',
+    };
+    const page = parseBrowse({
+      total: 2,
+      listings: [
+        {
+          id: '8',
+          city: 1,
+          template: 40,
+          item: 'wpn_dl44',
+          name: 'DL-44',
+          category: 'weapon',
+          mk: 3,
+          qty: 1,
+          unit: 500,
+          stats,
+        },
+        {
+          id: '9',
+          city: 1,
+          item: 'mat_hide',
+          name: 'Hide',
+          category: 'material',
+          mk: 2,
+          qty: 20,
+          unit: 3,
+          stats: { damage: 1 },
+        },
+      ],
+    });
+    const [gear, units] = page?.listings ?? [];
+    expect(gear.stats).toEqual(stats);
+    // A malformed stats block is no stats: the row stays, as units.
+    expect(units.stats).toBeUndefined();
+    const owned = {
+      id: '8',
+      slot: 3,
+      item: 'wpn_dl44',
+      name: 'DL-44',
+      category: 'weapon',
+      template: 40,
+      mk: 3,
+      count: 1,
+      stats,
+    };
+    expect(previewLines(listingItem(gear))).toEqual(previewLines(owned));
+    expect(listingItem(units)).toEqual({
+      id: '9',
+      slot: 0,
+      item: 'mat_hide',
+      name: 'Hide',
+      category: 'material',
+      template: 0,
+      mk: 2,
+      count: 20,
+    });
   });
 
   it('read /mine: listed with its fee and ticks, reserved with their state, the caps, the city as this client names it', () => {
@@ -733,7 +807,7 @@ describe("the mock's desk", () => {
       MarketReason.NoItems,
     );
     // Over a stack's worth is malformed before it is short (§ 3.1's check order).
-    expect(m.desk.apply({ kind: 'vendor', template: stack.template, mk: stack.mk, quantity: 100 })).toBe(
+    expect(m.desk.apply({ kind: 'vendor', template: stack.template, mk: stack.mk, quantity: STACK_MAX + 1 })).toBe(
       MarketReason.BadListing,
     );
     expect(m.desk.apply({ kind: 'vendor', template: 99, mk: 1, quantity: 1 })).toBe(MarketReason.BadListing);

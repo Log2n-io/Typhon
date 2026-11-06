@@ -86,6 +86,31 @@ public sealed class AdminLink
         }
     }
 
+    /// <summary>The running (or last) horde with its live metrics (horde.md § 8), or null when there has been none.</summary>
+    public Task<JsonNode> Horde() => Get("admin/horde");
+
+    /// <summary>Starts a horde with its knobs (horde.md § 7), or ends the running one: whether it was applied, and what or why.</summary>
+    public async Task<(bool Ok, string Message)> Horde(JsonObject knobs)
+    {
+        try
+        {
+            using var content = new StringContent((knobs ?? new JsonObject()).ToJsonString(), Encoding.UTF8, "application/json");
+            using var response = await _http.PostAsync(knobs == null ? "admin/horde/end" : "admin/horde", content).ConfigureAwait(false);
+            var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                return (false, "the game server refused the key: is SWG_ADMIN_KEY the same on both?");
+            }
+
+            var answer = text.Length > 0 && text[0] == '{' ? JsonNode.Parse(text) : null;
+            return ((bool?)answer?["ok"] ?? false, (string)answer?["message"] ?? $"HTTP {(int)response.StatusCode}");
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            return (false, "the game server did not answer: " + e.Message);
+        }
+    }
+
     private async Task<JsonNode> Get(string path)
     {
         using var response = await _http.GetAsync(path).ConfigureAwait(false);

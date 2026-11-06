@@ -21,12 +21,13 @@ public static class CratePlan
     /// </summary>
     /// <param name="gear">Its items with stats, as the inventory read gave them.</param>
     /// <param name="wear">The item it is about to wear (<see cref="MarketPlan.NextToWear"/>); 0 for none.</param>
-    public static List<(ulong Item, ulong Into)> Packs(IReadOnlyList<GearItem> gear, ulong wear = 0)
+    public static List<(ulong Item, ulong Into)> Packs(IReadOnlyList<GearItem> gear, ulong wear = 0, ulong spare = 0)
     {
         var groups = new Dictionary<string, List<GearItem>>();
         foreach (var g in gear)
         {
-            if (g.PackKey == null || g.Worn || g.Wears == 0 || g.Id == wear || g.Count >= Capacity)
+            // Nor its spare weapon (GearPlan.Spare): a crate is never worn, and the spare packed with a twin was gone (review, 2026-11-04).
+            if (g.PackKey == null || g.Worn || g.Wears == 0 || g.Id == wear || (spare != 0 && g.Id == spare) || g.Count >= Capacity)
             {
                 continue;
             }

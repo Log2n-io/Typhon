@@ -691,6 +691,8 @@ public sealed partial class TatooineSim
 
         // The bodies of the holders the mission desk paid XP to, for Progression to bring up to it (character-level.md § 5): a few a minute.
         _bridge.ProgressQueue = dag.CreateEventQueue<ProgressRefresh>("Progress", 256);
+        // Every session could drink in one tick: 1 024, past which a heal is dropped and counted (SimBridge.HealsDropped).
+        _bridge.HealQueue = dag.CreateEventQueue<HealEvent>("Heal", 1024);
 
         if (_config.Shuttles)
         {
@@ -758,6 +760,7 @@ public sealed partial class TatooineSim
         dag.Add(new EconomySystem(_bridge));
         dag.Add(new LairLifeSystem(_bridge));
         dag.Add(new MissionDeskSystem(_bridge));
+        dag.Add(new HordeSystem(_bridge));
         dag.Add(new LedgerSystem(_bridge));
         dag.Add(new LootSystem(_bridge));
         dag.Add(new MarketSystem(_bridge));
@@ -770,7 +773,11 @@ public sealed partial class TatooineSim
         dag.Consumes("Progression", _bridge.KillXpQueue)
             .Produces("Missions", _bridge.ProgressQueue)
             .Produces("Workshop", _bridge.ProgressQueue)
-            .Consumes("Progression", _bridge.ProgressQueue);
+            .Consumes("Progression", _bridge.ProgressQueue)
+
+            // A potion drunk (SimBridge.Potions.cs): the Workshop spends the dose, Progression — a writer of vitals, after the economy — heals.
+            .Produces("Workshop", _bridge.HealQueue)
+            .Consumes("Progression", _bridge.HealQueue);
         // Produced, and read by a system that does NOT declare `Consumes`: the runtime skips a declared consumer on every tick its queues are empty
         // (TyphonRuntime's ReactiveSkip), and both of these have work of their own on such ticks — the lair director's pass, the desk's takes and its
         // pass. So the lair director ran its 2 Hz pass only on a pass tick that also brought a corpse, and the desk never ran at all with the crowd off

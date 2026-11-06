@@ -10,18 +10,20 @@
 # Height band: characters walk on the ground or on walkable tops; nothing flies. A primitive is kept only
 # where it can touch a character: from its base up to (floor + BAND), floor being the walkable surface it
 # stands on. Roofs, domes, decks and lintels above the band are not emitted.
+# An asset may take a taller band (make_root band=): the Horde fortress covers its whole height, so a click on its
+# upper walls and towers picks it (the client picks structures against these colliders).
 BAND = 2.0
 
 M_COL = bpy.data.materials.get("COL_Proxy") or simple_mat("COL_Proxy")[0]
 STATS = globals().get("STATS", {})
 
 
-def make_root(name, asset_id, origin, display_offset):
+def make_root(name, asset_id, origin, display_offset, band=BAND):
     e = bpy.data.objects.new(name, None)
     e.empty_display_type = 'PLAIN_AXES'; e.empty_display_size = 2.0
     e.location = Vector(origin) + Vector(display_offset)
     e["col_for"] = asset_id
-    e["col_band_m"] = BAND
+    e["col_band_m"] = band
     col.objects.link(e)
     STATS[asset_id] = {"box": 0, "cylinder": 0, "capsule": 0, "sphere": 0}
     return e
@@ -65,8 +67,8 @@ def prim(root, name, shape, loc, rot=(0.0, 0.0, 0.0), **d):
 
 
 def box(root, name, x0, x1, y0, y1, z0, z1, floor, rot_z=0.0, pivot=(0.0, 0.0)):
-    """Axis box in local coords, clipped to the band; optionally rotated about Z around pivot."""
-    top = min(z1, floor + BAND)
+    """Axis box in local coords, clipped to the root's band; optionally rotated about Z around pivot."""
+    top = min(z1, floor + root["col_band_m"])
     if z0 >= top:
         return None
     c = Vector(((x0 + x1) / 2, (y0 + y1) / 2, (z0 + top) / 2))
@@ -100,13 +102,13 @@ def entry_ramp(root, name, cx, y_top, rise, width):
 
 
 def cyl(root, name, cx, cy, z0, z1, r, floor):
-    top = min(z1, floor + BAND)
+    top = min(z1, floor + root["col_band_m"])
     if z0 >= top:
         return None
     return prim(root, name, "cylinder", (cx, cy, (z0 + top) / 2), r=r, hh=(top - z0) / 2)
 
 
 def capsule(root, name, cx, cy, z0, z1, r, floor):
-    top = min(z1, floor + BAND)
+    top = min(z1, floor + root["col_band_m"])
     hh = max((top - z0) / 2 - r, 0.0)
     return prim(root, name, "capsule", (cx, cy, (z0 + top) / 2), r=r, hh=hh)

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net.Http;
@@ -64,6 +65,9 @@ public sealed class DashboardFeed : BackgroundService
 
     /// <summary>The game server read.</summary>
     public Uri Server { get; }
+
+    /// <summary>Ten minutes of per-system tick costs, from <c>GET /typhon/systems/ticks</c>: the "Server health" timeline.</summary>
+    public SystemTimeline Timeline { get; } = new();
 
     /// <summary>Raised after each read; handlers run on the poller's thread.</summary>
     public event Action Changed;
@@ -137,6 +141,8 @@ public sealed class DashboardFeed : BackgroundService
             _lastOutBytes = outBytes;
             _lastOutAt = now;
 
+            await ReadSystemTicksAsync(health, ct).ConfigureAwait(false);
+
             Record("tx/s", Number(stats, "economy", "transfersPerSec", "10s"));
             Record("drops/min", Number(stats, "items", "dropsPerMin", "10s"));
             Record("crafts/min", Number(stats, "craft", "finishedPerMin", "10s"));
@@ -159,6 +165,59 @@ public sealed class DashboardFeed : BackgroundService
         }
 
         Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// The per-system ticks since the timeline's newest (<c>GET /typhon/systems/ticks</c>), into <see cref="Timeline"/>: read into a pooled buffer and parsed
+    /// in place, so a poll allocates nothing of its own. A server behind the timeline's newest tick restarted: the timeline starts again. A server without the
+    /// endpoint (an older build answers 404) leaves the timeline empty and the rest of the page as it was.
+    /// </summary>
+    private async Task ReadSystemTicksAsync(JsonNode health, CancellationToken ct)
+    {
+        var target = Number(health, "tickMs", "target");
+        var ticksPerSecond = double.IsFinite(target) && target > 0 ? (int)Math.Max(1, Math.Round(1000d / target)) : 10;
+        var serverTick = Number(health, "tick");
+        if (double.IsFinite(serverTick) && serverTick < Timeline.LastTick)
+        {
+            Timeline.Clear();
+        }
+
+        var names = Timeline.NeedsNames;
+        var path = string.Create(CultureInfo.InvariantCulture, $"typhon/systems/ticks?after={Timeline.LastTick}{(names ? "&names=1" : "")}");
+        using var response = await _http.GetAsync(path, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        var length = (int)(response.Content.Headers.ContentLength ?? 0);
+        if (length <= 0 || length > 64 * 1024 * 1024)
+        {
+            return;
+        }
+
+        var buffer = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
+            await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var read = 0;
+            while (read < length)
+            {
+                var n = await body.ReadAsync(buffer.AsMemory(read, length - read), ct).ConfigureAwait(false);
+                if (n == 0)
+                {
+                    break;
+                }
+
+                read += n;
+            }
+
+            Timeline.Ingest(buffer.AsSpan(0, read), ticksPerSecond, names);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     /// <summary>

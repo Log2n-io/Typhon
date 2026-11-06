@@ -9,8 +9,12 @@ namespace SwgTatooine.Server;
 /// From <c>balance_model.py</c>'s <c>mat_value(b)</c> and <c>core_value(b)</c> (claude/design/SwgTatooine/design/balance/balance_model.py): a material unit
 /// rounded to 100 milli-credits, a core to the credit. <b>An add-on is valued as a core [EST]</b> — the model has no add-on value, as it has no add-on drop
 /// rate (inventory-loot § 4). A weapon is <c>item_values(b)</c>'s typical carbine of its band, whatever its class; an armour piece, the typical set's value
-/// by the piece's share (<see cref="EquipSlot.SharePerMille"/>). Parts, potions, kits and the crate have none yet: nothing makes them, and the vendor
-/// refuses them. Pinned by <c>MarketValueChecks</c> against the model's own numbers.
+/// by the piece's share (<see cref="EquipSlot.SharePerMille"/>). <b>A repair kit</b> has no Mk and one value, <see cref="KitMilli"/> (Loïc, 2026-11-04:
+/// crafters make and sell what the market lacks): about six times its inputs (Metal ×10 and Chemical ×5, or Hide ×10 and Fiber ×10, ≈ 25-40 cr), and a
+/// sixth of the Mk I weapon a repair saves. <b>A stim</b> (Loïc, 2026-11-05: potions crafted, sold and drunk) has no Mk either, and one value,
+/// <see cref="StimMilli"/>: four times its Mk I inputs' worth — 34 material units: the restorative compound's 16, the vial's 8, the water's 10 — as a kit is
+/// about six times its own. The other potions, the parts and the crate have none yet: the vendor refuses them. Pinned by <c>MarketValueChecks</c>
+/// against the model's own numbers.
 /// </para>
 /// </remarks>
 public static class MarketValues
@@ -21,10 +25,31 @@ public static class MarketValues
     private static readonly long[] WeaponMilli = [0, 906_000, 1_795_000, 3_457_000, 6_498_000, 11_977_000];
     private static readonly long[] ArmorSetMilli = [0, 6_340_000, 13_255_000, 26_232_000, 50_056_000, 93_070_000];
 
+    /// <summary>A repair kit's value, milli-credits: every kit, which has no Mk.</summary>
+    public const long KitMilli = 150_000;
+
+    /// <summary>A stim's value, milli-credits: every stim, which has no Mk — 34 Mk I material units, four times over.</summary>
+    public const long StimMilli = 34 * 4 * 1_700;
+
     /// <summary>One unit's market value, milli-credits; 0 for an item without one (the vendor refuses it).</summary>
     public static long MilliOf(ushort template, byte mk)
     {
-        if (!ItemCatalog.TryGet(template, out var t) || !ItemCatalog.MkFits(in t, mk) || mk is < 1 or > 5)
+        if (!ItemCatalog.TryGet(template, out var t) || !ItemCatalog.MkFits(in t, mk))
+        {
+            return 0;
+        }
+
+        if (t.Category == ItemCategory.Kit)
+        {
+            return KitMilli;
+        }
+
+        if (template == ItemCatalog.Stim)
+        {
+            return StimMilli;
+        }
+
+        if (mk is < 1 or > 5)
         {
             return 0;
         }

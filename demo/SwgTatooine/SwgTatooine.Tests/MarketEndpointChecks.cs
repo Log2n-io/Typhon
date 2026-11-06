@@ -35,6 +35,10 @@ internal sealed class MarketEndpointChecks : ServedChecks
     private static readonly ushort[] Tradeable =
     [
         ItemCatalog.Hide, ItemCatalog.Bone, ItemCatalog.Metal, ItemCatalog.Venom, ItemCatalog.CoreArmor, ItemCatalog.CoreMelee, ItemCatalog.AddonArmor,
+
+        // Past 63 too: the board's sort key was signed, a template of 64 or more sorted before every other, and a browse naming the DL-44 (69) or a kit
+        // found nothing (the night of 2026-11-04) — a set of templates under 20 could never show it.
+        ItemCatalog.PaddedHelmet, ItemCatalog.KitWeaponRepair, ItemCatalog.Blaster,
     ];
 
     /// <summary>A board of <paramref name="n"/> listings over <paramref name="cities"/> cities of one planet, deterministic for a seed.</summary>
@@ -449,7 +453,7 @@ internal sealed class MarketEndpointChecks : ServedChecks
             {
                 ContentHttpResult c => (c.StatusCode ?? 200, c.ResponseContent),
                 IStatusCodeHttpResult s => (s.StatusCode ?? 0, null),
-                var other => throw new AssertionException($"unexpected result {other}"),
+                var written => (200, Answers.Written(written, context)),
             };
         }
 
@@ -475,6 +479,49 @@ internal sealed class MarketEndpointChecks : ServedChecks
             Assert.That(Rev(sim, a.Body, false), Is.GreaterThan(aItems), "the seller's items revision did not move at the sale");
             Assert.That(Rev(sim, a.Body, true), Is.GreaterThan(aWallet), "the seller's wallet revision did not move");
             Assert.That(Rev(sim, b.Body, true), Is.GreaterThan(bWallet), "the buyer's wallet revision did not move");
+        });
+    }
+    /// <summary>
+    /// The desk's sort with its kept scratch (2026-11-05, allocations): boards of shrinking sizes, sorted in place one after the other through the same key
+    /// and index arrays, end in the order a plain sort by (template, Mk, unit price, listed tick) gives — the permutation walked cycle by cycle, no copy.
+    /// </summary>
+    [Test]
+    public void TheBoardsSort_WithKeptScratch_IsThePlainSort()
+    {
+        var random = new Random(11);
+        ulong[] keys = null;
+        int[] order = null;
+        foreach (var n in new[] { 5_000, 37, 1, 0, 1_200, 2 })
+        {
+            var rows = new ListingView[n];
+            for (var i = 0; i < n; i++)
+            {
+                rows[i] = new ListingView(1_000 + i, Tradeable[random.Next(Tradeable.Length)], (byte)random.Next(1, 5), 1, random.Next(1, 300),
+                    7, "seller", random.Next(10_000), 1, 0);
+            }
+
+            var plain = rows.OrderBy(r => r.Template).ThenBy(r => r.Mk).ThenBy(r => r.UnitPrice).ThenBy(r => r.ListedTick)
+                .Select(r => (r.Template, r.Mk, r.UnitPrice, r.ListedTick)).ToArray();
+            MarketCityView.SortBoard(rows, ref keys, ref order);
+            Assert.That(rows.Select(r => (r.Template, r.Mk, r.UnitPrice, r.ListedTick)), Is.EqualTo(plain), $"a board of {n}");
+            Assert.That(rows.Select(r => r.Id).Distinct().Count(), Is.EqualTo(n), "every row once");
+        }
+    }
+
+    /// <summary>The prices answer is encoded once per snapshot and is the JSON itself.</summary>
+    [Test]
+    public void ThePricesAnswer_IsEncodedOncePerSnapshot()
+    {
+        var board = Board(200, 3, 9, sorted: true);
+        var context = new DefaultHttpContext();
+        var first = Answers.Written(MarketEndpoints.GetPricesForChecks(board, context), context);
+        var cached = board.PricesUtf8;
+        var again = Answers.Written(MarketEndpoints.GetPricesForChecks(board, new DefaultHttpContext()), new DefaultHttpContext());
+        Assert.Multiple(() =>
+        {
+            Assert.That(first, Is.EqualTo(MarketEndpoints.PricesJson(board)));
+            Assert.That(again, Is.EqualTo(first));
+            Assert.That(board.PricesUtf8, Is.SameAs(cached), "not encoded again");
         });
     }
 }

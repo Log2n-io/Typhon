@@ -1,3 +1,4 @@
+import { HOSTILITY_MARK, type Hostility } from '../data/foe-tags';
 import type { EntityTag } from '../data/content-level';
 import { CITIES, POIS } from '../data/world-data';
 import type { GroundSampler } from '../terrain/ground-sampler';
@@ -71,6 +72,29 @@ export function pileOn(stack: Map<number, number>, netId: number, frameTop: numb
   return bottom;
 }
 
+/** A potential enemy's tag (`data/foe-tags.ts`): where its bottom centre goes on screen, what it says, and how the creature behaves. */
+export interface FoeTag {
+  sx: number;
+  sy: number;
+  tag: EntityTag;
+  hostility: Hostility;
+  /** Hunting this session's avatar now: the tag is drawn alarmed. */
+  engaged: boolean;
+  /** 0–1: the tag fades with distance (`foeTagOpacity`). */
+  opacity: number;
+}
+
+/** One pooled foe tag: its label, its mark and its name nodes, each written only when it changes. */
+interface FoeLabel {
+  readonly label: Label;
+  readonly mark: HTMLSpanElement;
+  readonly nodes: TagNodes;
+  hostility: Hostility | null;
+  engaged: boolean;
+  /** The opacity last written, in 32nds: a style is written only when it changes visibly. */
+  alpha: number;
+}
+
 interface Bar {
   readonly element: HTMLDivElement;
   readonly fill: HTMLDivElement;
@@ -97,6 +121,8 @@ export class Labels {
   private readonly hoverTag: TagNodes;
   /** The health bars, pooled: one element per bar ever shown at once, hidden when unused. */
   private readonly bars: Bar[] = [];
+  /** The potential enemies' tags, pooled the same way. */
+  private readonly foes: FoeLabel[] = [];
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };
 
   constructor(parent: HTMLElement) {
@@ -196,6 +222,53 @@ export class Labels {
     this.place(this.hover, false, 0, 0);
   }
 
+  /** Draws the first `count` foe tags, each at its own screen point, and hides the rest of the pool. */
+  updateFoeTags(tags: readonly FoeTag[], count: number): void {
+    for (let i = 0; i < count; i++) {
+      if (i >= this.foes.length) {
+        const label = this.create('', 'label label-selection label-foe', 0, 0, 0);
+        const mark = document.createElement('span');
+        label.element.append(mark);
+        this.foes.push({
+          label,
+          mark,
+          nodes: Labels.createTag(label.element),
+          hostility: null,
+          engaged: false,
+          alpha: 32,
+        });
+      }
+
+      const foe = this.foes[i];
+      const t = tags[i];
+      if (foe.hostility !== t.hostility) {
+        foe.hostility = t.hostility;
+        foe.mark.className = `foe-mark foe-${t.hostility}`;
+        foe.mark.textContent = `${HOSTILITY_MARK[t.hostility]} `;
+      }
+
+      if (foe.engaged !== t.engaged) {
+        foe.engaged = t.engaged;
+        foe.label.element.className = t.engaged
+          ? 'label label-selection label-foe engaged'
+          : 'label label-selection label-foe';
+      }
+
+      const alpha = Math.round(Math.max(0, Math.min(1, t.opacity)) * 32);
+      if (alpha !== foe.alpha) {
+        foe.alpha = alpha;
+        foe.label.element.style.opacity = String(alpha / 32);
+      }
+
+      Labels.writeTag(foe.nodes, t.tag);
+      this.place(foe.label, alpha > 0, t.sx, t.sy - SELECTION_OFFSET_PX);
+    }
+
+    for (let i = count; i < this.foes.length; i++) {
+      this.place(this.foes[i].label, false, 0, 0);
+    }
+  }
+
   /**
    * Draws a health bar over each of the first `count` bodies — the enemies fighting this session's avatar — and hides the
    * rest of the pool.
@@ -268,6 +341,7 @@ export class Labels {
 
     this.hideSelection();
     this.hideHover();
+    this.updateFoeTags([], 0);
     for (const bar of this.bars) {
       this.placeBar(bar, false, 0, 0);
     }

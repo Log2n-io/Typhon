@@ -93,6 +93,7 @@ STRUCTURE_COLORS[StructureKind.Interior] = [0.42, 0.36, 0.3];
 STRUCTURE_COLORS[StructureKind.Bazaar] = [0.85, 0.65, 0.25];
 STRUCTURE_COLORS[StructureKind.MissionTerminal] = [0.35, 0.8, 0.45];
 STRUCTURE_COLORS[StructureKind.TownHall] = [0.84, 0.76, 0.6];
+STRUCTURE_COLORS[StructureKind.HordeFortress] = [0.55, 0.47, 0.36];
 
 const STRUCTURE_SIZES: [number, number, number][] = [];
 STRUCTURE_SIZES[StructureKind.Building] = [18, 9, 18];
@@ -110,6 +111,8 @@ STRUCTURE_SIZES[StructureKind.Harvester] = [6.8, 7.2, 6.8];
 STRUCTURE_SIZES[StructureKind.CampObject] = [4, 3, 4];
 // The server's 35.6 m reservation round the hall's origin, which is not its middle: the far-field stand-in is that square.
 STRUCTURE_SIZES[StructureKind.TownHall] = [35.6, 14, 35.6];
+// The published `tat_horde_fortress` render bounds (31.1 × 32.75 × 28.3 m): what the selection frame is drawn round.
+STRUCTURE_SIZES[StructureKind.HordeFortress] = [31.1, 32.75, 28.3];
 // A floor, not a block: the viewer stands INSIDE a room, so its stand-in — seen only while the asset is not placed — must
 // not wall the camera in. 28 m, the town hall's room's reach.
 STRUCTURE_SIZES[StructureKind.Interior] = [28, 0.05, 28];

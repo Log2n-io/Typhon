@@ -84,6 +84,17 @@ public static class ContentLevels
     public static int CreatureHit(int level, bool foe) => (foe ? FoeHit : BeastHit)[Clamp(level)];
 
     /// <summary>
+    /// How much stronger an on-level player is than an on-level beast, health × damage: the beast lasts 8 s against the player, the player 75 s against the
+    /// beast, so 75 / 8.
+    /// </summary>
+    public const double PlayerEdge = TtkDieS / TtkKillS;
+
+    /// <summary>
+    /// A player's strength in a mass fight (Lanchester's square law: health × damage), at a level: an on-level beast's × <see cref="PlayerEdge"/>.
+    /// </summary>
+    public static double PlayerStrength(int level) => (double)CreatureHealth(level, false) * CreatureHit(level, false) * PlayerEdge;
+
+    /// <summary>
     /// A lair's hit points: three of its occupants' — 24 s of on-level hitting once its guards are down, so it outlasts any foe it holds (Loïc,
     /// 2026-10-24) without becoming a long fight against a prop.
     /// </summary>

@@ -3,6 +3,8 @@ import { useChat } from './chat-store';
 import { useMissions } from './mission-store';
 import { useCraft } from './craft-store';
 import { useMarket } from './market-store';
+import { useInstallations } from './installations-store';
+import { useItems } from './items-store';
 
 /** One row of the navigation pane. */
 export interface NavRow {
@@ -38,11 +40,13 @@ export interface CameraRequest {
   readonly seq: number;
 }
 
+import { freeSlots, type PromptMode } from '../data/inventory-grid';
 import type { BazaarTab } from '../data/market';
 import type { RealmDirectory } from '../data/server-config';
 import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
 import { NOT_TRAVELLING, type TravelState } from '../app/travel';
 import { ACTION_SLOTS, NO_STANCE, stanceAfter } from '../app/action-bar';
+import { STIM_COOLDOWN_MS, stimToDrink } from '../data/potions';
 import { beginWatch, type WatchState, type WatchTarget } from '../app/watch-link';
 
 /** A pending ask to look at another realm. The sequence makes a repeat of the same realm a new ask. */
@@ -103,7 +107,7 @@ export interface ShuttleportPrompt {
  */
 export interface PartRef {
   readonly owner: number;
-  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft';
+  readonly kind: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'installation';
 }
 
 /** What a context menu entry does: plain data, carried out by the store. */
@@ -116,7 +120,19 @@ export type ContextAction =
   /** Tip another player: the chat opens on `/tip `, the player selected. */
   | { readonly kind: 'tip'; readonly target: number }
   /** The crafting panel, at a station (crafting-build.md C2-C3). */
-  | { readonly kind: 'craft' };
+  | { readonly kind: 'craft' }
+  /** An installation's, in reach of it (client.md C42): its hopper collected, upkeep bought, or it picked up. */
+  | { readonly kind: 'installCollect'; readonly installation: string }
+  | { readonly kind: 'installPay'; readonly installation: string; readonly credits: number }
+  | { readonly kind: 'installPickUp'; readonly installation: string }
+  /** An item's, from its slot (client.md C42): a kit placed here, an item worn, packed into a crate, or a crate unpacked. */
+  | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
+  | { readonly kind: 'equip'; readonly item: string }
+  | { readonly kind: 'consume'; readonly item: string }
+  | { readonly kind: 'pack'; readonly item: string; readonly into: string }
+  | { readonly kind: 'unpack'; readonly item: string; readonly count: number }
+  /** The inventory window's count prompt on an item (client.md C43): a split, an unpack of some, or a throw-away to confirm. */
+  | { readonly kind: 'itemPrompt'; readonly item: string; readonly mode: PromptMode };
 
 export interface ContextMenuItem {
   readonly label: string;
@@ -135,7 +151,9 @@ export interface ContextMenuState {
   readonly x: number;
   readonly y: number;
   readonly title: string;
-  readonly source: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'player';
+  /** A line under the title: what the thing is doing now (an installation's hopper and upkeep). */
+  readonly detail?: string;
+  readonly source: 'ticket' | 'mission' | 'bazaar' | 'craft' | 'player' | 'installation' | 'item';
   readonly items: readonly ContextMenuItem[];
 }
 
@@ -175,7 +193,15 @@ export interface UiState {
    * channel is addressed by name and an unlisted one is off.
    */
   readonly heatmap: NameFlags;
+  /** The ground's grid, a debug view; off by default (Loïc, 2026-11-05). */
   readonly showGrid: boolean;
+  /**
+   * The ground rings round a selection — 24 m aggro red, 75 m weapon yellow, 192 m sphere blue — a debug view like the grid (Loïc, 2026-11-04). Off by
+   * default.
+   */
+  readonly showRings: boolean;
+  /** The third-person zoom unlocked, out to 2 km behind the body: a debug setting (Loïc, 2026-11-05). Off by default. */
+  readonly unlockZoom: boolean;
   /** Draw the `DEBUG` block the server sends: replication grid, delivered cells, session shape (CLI3D-03). */
   readonly showDebug: boolean;
   /**
@@ -314,6 +340,8 @@ export interface UiState {
   readonly setPlayerRadiusRange: (range: { min: number; max: number; def?: number } | null) => void;
   readonly toggleHeatmap: (name: string) => void;
   readonly setShowGrid: (on: boolean) => void;
+  readonly setShowRings: (on: boolean) => void;
+  readonly setUnlockZoom: (on: boolean) => void;
   readonly setShowDebug: (on: boolean) => void;
   /** Sets the terrain's screen-space error budget, in pixels. */
   readonly setTerrainPixelError: (pixels: number) => void;
@@ -345,6 +373,10 @@ export interface UiState {
   readonly mountRequest: { readonly seq: number } | null;
   /** The last slot used, by key or click, for the slot's press flash. */
   readonly slotUsed: { readonly key: number; readonly seq: number } | null;
+  /** When the next stim may be drunk, `performance.now()` ms: the heal's landing plus the cooldown; 0 before the first. */
+  readonly stimReadyAt: number;
+  /** This player's stim healed it, at `nowMs`: the slot's cooldown starts. */
+  readonly drankStim: (nowMs: number) => void;
   /**
    * Uses a slot of the action bar: toggles an attack slot's stance, or asks for the swoop and drops the stance. `fromKey`
    * says the 1 key already toggled the mount itself, so only the flash and the stance are owed.
@@ -390,7 +422,9 @@ export const useUi = create<UiState>()((set, get) => ({
   playerRadius: null,
   playerRadiusRange: null,
   heatmap: { Creature: true },
-  showGrid: true,
+  showGrid: false,
+  showRings: false,
+  unlockZoom: false,
   showDebug: false,
   terrainPixelError: 8,
   shadows: true,
@@ -498,6 +532,12 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   setShowGrid: (showGrid) => {
     set({ showGrid });
+  },
+  setUnlockZoom: (unlockZoom) => {
+    set({ unlockZoom });
+  },
+  setShowRings: (showRings) => {
+    set({ showRings });
   },
   setShowDebug: (showDebug) => {
     set({ showDebug });
@@ -624,10 +664,23 @@ export const useUi = create<UiState>()((set, get) => ({
   },
   mountRequest: null,
   slotUsed: null,
+  stimReadyAt: 0,
+  drankStim: (nowMs) => {
+    set({ stimReadyAt: nowMs + STIM_COOLDOWN_MS });
+  },
   pressSlot: (key, fromKey) => {
     const slot = ACTION_SLOTS.find((s) => s.key === key);
     if (slot === undefined) {
       return;
+    }
+
+    // A stim: the one with the fewest doses left, sent now — not within the cooldown the last heal started, which the server would refuse.
+    const inventory = useItems.getState().snapshot;
+    if (slot.kind === 'consume' && inventory !== null && get().stimReadyAt <= performance.now()) {
+      const stim = stimToDrink(inventory.items, freeSlots(inventory.items, inventory.slots).length);
+      if (stim !== null) {
+        useMarket.getState().consume(stim);
+      }
     }
 
     set((s) => ({
@@ -668,6 +721,33 @@ export const useUi = create<UiState>()((set, get) => ({
         break;
       case 'craft':
         useCraft.getState().openPanel();
+        break;
+      case 'installCollect':
+        useInstallations.getState().collect(action.installation);
+        break;
+      case 'installPay':
+        useInstallations.getState().pay(action.installation, action.credits);
+        break;
+      case 'installPickUp':
+        useInstallations.getState().pickUp(action.installation);
+        break;
+      case 'installPlace':
+        useInstallations.getState().place(action.item, action.family);
+        break;
+      case 'equip':
+        useMarket.getState().equip(action.item);
+        break;
+      case 'consume':
+        useMarket.getState().consume(action.item);
+        break;
+      case 'pack':
+        useMarket.getState().pack(action.item, action.into);
+        break;
+      case 'unpack':
+        useMarket.getState().unpack(action.item, action.count);
+        break;
+      case 'itemPrompt':
+        useItems.getState().openPrompt({ mode: action.mode, item: action.item, slot: 0 });
         break;
     }
   },

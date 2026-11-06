@@ -216,4 +216,31 @@ for i, t in enumerate((0.33, 0.66)):
 box(R, "Generator", -2.95, -0.35, 1.8, 2.7, P, 3.72, floor=P)
 box(R, "Tank", -3.1, -1.5, -2.47, -1.53, P, 1.32, floor=P)
 
+# =============== Horde fortress (th_fortress.py; asset origin = the middle of its footprint on the ground) ===============
+# FULL HEIGHT, not the 2 m band (Loïc, 2026-11-05): the client picks structures against these colliders, and a fortress
+# clicked on its upper walls or towers must be the one selected. Movement is unchanged: every collider still starts at
+# the foundation, and the parts that rise out of reach (gate arch, keep, watchtower) block nothing a body can get to.
+# The curtain walls at their battered foot, the corner towers with their roofs, the gate towers, the shut doors at the
+# back of the gate passage and the arch over it, the stake rows along the wall foot, the keep's two tiers and the
+# watchtower. The spawns stand outside the gate, clear of all of it.
+_kz1, _kz2 = 20.0, 25.0                                                 # th_fortress.py KZ1, KZ2 (keep tiers' tops)
+R = make_root("COL_HordeFortress", "tat_horde_fortress",
+              bpy.data.objects["ASSET_HordeFortress"].matrix_world.translation, (0, 45, 0), band=30.0)
+_xo, _yf, _yb, _t, _bat, _gx = 12.5, -10.5, 11.0, 2.2, 0.9, 2.5          # th_fortress.py XO, YF, YB, T, BAT, GX
+for i, sx in enumerate((-1, 1)):
+    box(R, f"WallFront.{i}", *sorted((sx * _gx, sx * _xo)), _yf - 0.85, _yf + _t, -FOUNDATION_D, 11.3, floor=0.0)
+    box(R, f"WallSide.{i}", *sorted((sx * (_xo - _t), sx * (_xo + 0.85))), _yf, _yb, -FOUNDATION_D, 11.3, floor=0.0)
+    box(R, f"GateTower.{i}", *sorted((sx * _gx, sx * (_gx + 3.5))), -13.5, -8.5, -FOUNDATION_D, 18.6, floor=0.0)
+    box(R, f"StakesFront.{i}", *sorted((sx * 6.3, sx * 9.3)), -13.25, _yf - 0.85, -FOUNDATION_D, 1.9, floor=0.0)
+    box(R, f"StakesSide.{i}", *sorted((sx * (_xo + 0.85), sx * (_xo + 2.75))), _yf + 3.3, _yb - 3.3, -FOUNDATION_D, 1.9,
+        floor=0.0)
+box(R, "WallBack", -_xo, _xo, _yb - _t, _yb + 0.85, -FOUNDATION_D, 11.3, floor=0.0)
+for i, (x, y) in enumerate([(-_xo, _yf), (_xo, _yf), (_xo, _yb), (-_xo, _yb)]):
+    cyl(R, f"Tower.{i}", x, y, -FOUNDATION_D, 20.0, 3.0, floor=0.0)    # parapet, merlons and roof cone to 20 m
+box(R, "Doors", -_gx, _gx, -10.05, -9.1, -FOUNDATION_D, 7.5, floor=0.0)
+box(R, "GateArch", -_gx, _gx, -13.0, _yf + _t, 7.5, 14.0, floor=0.0)   # over the passage, above any head
+box(R, "Keep", -8.0, 8.0, -6.0, 9.0, -FOUNDATION_D, _kz1 + 1.6, floor=0.0)      # battered: its foot is 1 m wider a side
+box(R, "KeepUpper", -4.5, 4.5, -2.5, 6.0, _kz1, _kz2 + 1.3, floor=0.0)
+cyl(R, "Watchtower", 0.0, 1.75, _kz2, 29.8, 1.7, floor=0.0)
+
 result = STATS

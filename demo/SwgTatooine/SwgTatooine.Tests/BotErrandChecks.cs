@@ -182,6 +182,7 @@ public sealed class BotErrandChecks
             MissionLairX = Lair?.X ?? 0f,
             MissionLairZ = Lair?.Z ?? 0f,
             InventoryStacks = Stacks,
+            InventorySlots = Stacks,
             Reserved = Reserved,
             NearestCreature = Creature?.Id ?? 0u,
             NearestCreatureX = Creature?.X ?? 0f,
@@ -1275,18 +1276,19 @@ public sealed class BotErrandChecks
     private static List<(float X, float Z)> DeskVisits(BotBrain brain, Sim sim, long ticks, Func<Sim, bool> held = null, Action<long> each = null)
     {
         var targets = new List<(float X, float Z)>();
-        var was = brain.Goal;
+        var serial = brain.VisitSerial;
         for (var tick = 1L; tick < ticks; tick++)
         {
             sim.Held = held?.Invoke(sim) ?? false;
             sim.Apply(brain.Decide(sim.View(), tick));
-            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            // A new visit by its serial: two visits can follow within one tick (MarketDone then DeskChosen), which a goal change does not show.
+            if (brain.VisitSerial != serial)
             {
+                serial = brain.VisitSerial;
                 targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
                 each?.Invoke(tick);
             }
 
-            was = brain.Goal;
         }
 
         return targets;
@@ -1491,7 +1493,7 @@ public sealed class BotErrandChecks
     /// before the desk; a bot with room, nothing reserved, or a run that does not trade goes to the desk as it always did.
     /// </summary>
     [TestCase(BotBrain.MarketStacks, 0, true, true)]
-    [TestCase(30, 0, true, true)]
+    [TestCase(BotBrain.MarketStacks + 5, 0, true, true)]
     [TestCase(0, 1, true, true)]
     [TestCase(BotBrain.MarketStacks - 1, 0, true, false)]
     [TestCase(30, 0, false, false)]
@@ -1504,6 +1506,28 @@ public sealed class BotErrandChecks
             Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the premise: an errand first");
             Assert.That(brain.VisitTarget, Is.EqualTo(toMarket ? (Here.X + 40f, Here.Z) : (Here.X - 60f, Here.Z)), "not the bazaar, or not the desk");
             Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen] + brain.Counters.Why[(int)GoalWhy.MarketFull], Is.EqualTo(toMarket ? 1 : 0));
+        });
+    }
+
+    /// <summary>
+    /// crafting-build.md § 6.1 (Loïc, 2026-11-05: "they must buy remotely and go pick it up"): gear waiting for it in another city sends it there, before
+    /// the desk — and, there, to that city's bazaar, which alone collects it.
+    /// </summary>
+    [Test]
+    public void GearBoughtElsewhere_IsFetched_ThereAndAtThatCitysBazaar()
+    {
+        var (away, sim) = Trader(2, 0);
+        away.Decide(sim.View() with { PickupRegion = 2 }, 1);
+        var visitor = new BotBrain(BotMap.Cities, 7u, 4d, Content(), homeRegion: 2) { Trades = true };
+        visitor.Facilities.Observe(1, Routing.BazaarKind, Here.X + 40f, Here.Z, TerminalAsset + 1, 0);
+        visitor.Facilities.Observe(1, Routing.MissionTerminalKind, Here.X - 60f, Here.Z, TerminalAsset + 1, 0);
+        visitor.Decide(sim.View() with { PickupRegion = 1 }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That((away.Goal, away.TargetRegion), Is.EqualTo((Goal.Travelling, 2)), "to the city its goods wait in");
+            Assert.That(away.Counters.Why[(int)GoalWhy.PickupChosen], Is.EqualTo(1));
+            Assert.That((visitor.Goal, visitor.VisitTarget), Is.EqualTo((Goal.Visiting, (Here.X + 40f, Here.Z))), "there: its bazaar, not home");
+            Assert.That(visitor.Counters.Why[(int)GoalWhy.PickupChosen], Is.EqualTo(1));
         });
     }
 
@@ -1533,6 +1557,143 @@ public sealed class BotErrandChecks
         {
             Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not the bazaar");
             Assert.That(brain.Counters.Why[(int)GoalWhy.MarketChosen], Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// GearPlan (Loïc, 2026-11-04): a bot whose assessment found its gear wanting — or down to its fist with a weapon to buy — goes to its city's bazaar
+    /// before the desk, and says why (<see cref="GoalWhy.GearChosen"/>); nothing wanting, the desk as before.
+    /// </summary>
+    [TestCase(true, false, true)]
+    [TestCase(false, true, true)]
+    [TestCase(false, false, false)]
+    public void GearFoundWanting_GoesToTheBazaar_BeforeTheDesk(bool due, bool urgent, bool toMarket)
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.Decide(sim.View() with { GearDue = due, GearUrgent = urgent, Unarmed = urgent }, 1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.VisitTarget, Is.EqualTo(toMarket ? (Here.X + 40f, Here.Z) : (Here.X - 60f, Here.Z)), "not the bazaar, or not the desk");
+            Assert.That(brain.Counters.Why[(int)GoalWhy.GearChosen], Is.EqualTo(toMarket ? 1 : 0));
+        });
+    }
+
+    /// <summary>
+    /// Down to its fist with a weapon to buy, a bot in the middle of a hunt leaves it for its city's bazaar (the night of 2026-11-04: 1 800 bots unarmed,
+    /// rearming only as their quests ended); with a weapon, the hunt goes on.
+    /// </summary>
+    [Test]
+    public void AnUnarmedHunter_LeavesTheHunt_ForTheBazaar()
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.TakesMissions = false;   // no desk: the creature in view is its day
+        sim.Creature = (9u, Here.X + 10f, Here.Z);
+        for (var t = 1; t < 20 && brain.Goal != Goal.Hunting; t++)
+        {
+            sim.Apply(brain.Decide(sim.View(), t));
+        }
+
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "the premise: it hunts");
+        brain.Decide(sim.View() with { Unarmed = true }, 30);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Hunting), "on its fist with nothing to buy, the hunt goes on");
+        brain.Decide(sim.View() with { Unarmed = true, GearUrgent = true }, 31);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "it hunted on with its fist");
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not its city's bazaar");
+        });
+    }
+
+    /// <summary>
+    /// A defender down to its fist leaves the fight for its city's bazaar — the one it stands in, not its home's — buys there, and the call takes it back
+    /// (Loïc, 2026-11-04); armed, it stays at the fight.
+    /// </summary>
+    [Test]
+    public void ADefenderWithoutAWeapon_ArmsAtTheBazaar_ThenRejoins()
+    {
+        var (brain, sim) = Trader(2, 0);
+        brain.HearRally(77, Here.X + 100f, Here.Z, 1, 1);
+        brain.Decide(sim.View() with { GearUrgent = true, Unarmed = true }, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "it stayed in the fight with its fist");
+            Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "not its city's bazaar");
+            Assert.That(brain.GearRuns, Is.EqualTo(1));
+        });
+
+        // On its way: the call does not pull it back while the errand runs.
+        brain.Decide(sim.View() with { GearUrgent = true, Unarmed = true }, 3);
+        Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the call took it off its errand");
+
+        // A bite cuts the run short (Defend's flight ends the visit); free again, it takes the run up at once, not a retry later (review, 2026-11-04).
+        var bitten = sim.View() with
+        {
+            GearUrgent = true,
+            Unarmed = true,
+            Attacker = 9u,
+            AttackerX = sim.X + 8f,
+            AttackerZ = sim.Z,
+            AttackerM = 8f,
+            AttackerLevel = 28,
+            NearestCreature = 9u,
+            NearestCreatureX = sim.X + 8f,
+            NearestCreatureZ = sim.Z,
+            NearestCreatureM = 8f,
+            NearestCreatureLevel = 28,
+        };
+        brain.Decide(in bitten, 4);
+        Assert.That(brain.Goal, Is.Not.EqualTo(Goal.Visiting), "the premise: the bite ended the visit");
+        for (var t = 5; t < 40 && brain.Goal != Goal.Visiting; t++)
+        {
+            brain.Decide(sim.View() with { GearUrgent = true, Unarmed = true }, t);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(brain.Goal, Is.EqualTo(Goal.Visiting), "the run was not taken up again");
+            Assert.That(brain.GearRuns, Is.EqualTo(2));
+        });
+
+        var (armed, armedSim) = Trader(2, 0);
+        armed.HearRally(77, Here.X + 100f, Here.Z, 1, 1);
+        armed.Decide(armedSim.View(), 2);
+        Assert.That(armed.Goal, Is.Not.EqualTo(Goal.Visiting), "armed, it went shopping in the middle of a raid");
+    }
+
+    /// <summary>
+    /// A defender out at the gather point in the desert — no city round it — arms at the raided city's bazaar; one with nothing to pay holds the gather
+    /// point rather than punch in a pack (review, 2026-11-04).
+    /// </summary>
+    [Test]
+    public void ADefenderInTheDesert_ArmsAtTheRaidedCity_ABrokeOneHoldsThePoint()
+    {
+        var (brain, sim) = Trader(2, 0);
+        var (rx, rz) = (Here.X + Here.Radius + 300f, Here.Z);
+        brain.HearRally(77, rx, rz, 1, 1);
+        sim.X = rx;
+        sim.Z = rz + 10f;
+        brain.Decide(sim.View() with { GearUrgent = true, Unarmed = true }, 2);
+        Assert.That(brain.VisitTarget, Is.EqualTo((Here.X + 40f, Here.Z)), "no city round it: no bazaar to arm at");
+
+        var (broke, brokeSim) = Trader(2, 0);
+        broke.HearRally(77, rx, rz, 1, 1);
+        brokeSim.X = rx;
+        brokeSim.Z = rz + 10f;
+        var raider = brokeSim.View() with
+        {
+            Unarmed = true,
+            NearestCreature = 9u,
+            NearestCreatureX = rx + 20f,
+            NearestCreatureZ = rz + 10f,
+            NearestCreatureM = 20f,
+            NearestCreatureLevel = 28,
+            NearestCreatureRaider = true,
+        };
+        var intent = broke.Decide(in raider, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(broke.Goal, Is.Not.EqualTo(Goal.Hunting), "a fist hunted a raider");
+            Assert.That(intent.NetId, Is.Not.EqualTo(9u));
         });
     }
 
@@ -1588,7 +1749,7 @@ public sealed class BotErrandChecks
         var targets = new List<(float X, float Z)>();
         var doneAt = -1L;
         var atBazaar = new List<long>();
-        var was = brain.Goal;
+        var serial = brain.VisitSerial;
         for (var tick = 1L; tick < 600 && targets.Count < 2; tick++)
         {
             var intent = brain.Decide(sim.View(), tick);
@@ -1609,12 +1770,13 @@ public sealed class BotErrandChecks
                 doneAt = tick;
             }
 
-            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            // A new visit by its serial: two visits can follow within one tick (MarketDone then DeskChosen), which a goal change does not show.
+            if (brain.VisitSerial != serial)
             {
+                serial = brain.VisitSerial;
                 targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
             }
 
-            was = brain.Goal;
         }
 
         Assert.Multiple(() =>
@@ -1827,7 +1989,7 @@ public sealed class BotErrandChecks
         var crafts = new List<long>();
         var sent = new List<double>();
         var targets = new List<(float X, float Z)>();
-        var was = brain.Goal;
+        var serial = brain.VisitSerial;
         for (var tick = 1L; tick < 900 && targets.Count < 2; tick++)
         {
             var intent = brain.Decide(sim.View() with { CraftReady = ready, Crafting = sender.Busy }, tick);
@@ -1846,12 +2008,13 @@ public sealed class BotErrandChecks
                 sent.Add(Routing.Distance(sim.X, sim.Z, Here.X, Here.Z + 30f));
             }
 
-            if (brain.Goal == Goal.Visiting && was != Goal.Visiting)
+            // A new visit by its serial: two visits can follow within one tick (MarketDone then DeskChosen), which a goal change does not show.
+            if (brain.VisitSerial != serial)
             {
+                serial = brain.VisitSerial;
                 targets.Add((brain.VisitTarget.X - Here.X, brain.VisitTarget.Z - Here.Z));
             }
 
-            was = brain.Goal;
         }
 
         Assert.Multiple(() =>
@@ -1863,6 +2026,59 @@ public sealed class BotErrandChecks
             Assert.That(sent.Count == 0 ? 0d : sent.Max(), Is.LessThanOrEqualTo(StationReachM), "a command was sent from beyond the station's reach");
             Assert.That(sender.Dropped, Is.Zero);
             Assert.That(brain.Counters.Why[(int)GoalWhy.CraftDone], Is.EqualTo(1));
+        });
+    }
+
+    /// <summary>
+    /// A crafter with its next craft in hand crafts on at the station — one craft after another, every one sent from within its reach — and leaves when it
+    /// has none (the night of 2026-11-04: one craft a visit, and a blaster is five); never more than <see cref="BotBrain.CraftChain"/> a visit.
+    /// </summary>
+    [TestCase(3, 3)]
+    [TestCase(50, BotBrain.CraftChain)]
+    public void ACrafter_ChainsItsCrafts_AtTheStation(int inHand, int expected)
+    {
+        var (brain, sim) = Crafter();
+        var sender = new PlanSender<int>();
+        var left = inHand;
+        var crafts = 0;
+        var far = 0d;
+        var serial = brain.VisitSerial;
+        var visits = 0;
+        for (var tick = 1L; tick < 3_000 && visits < 2; tick++)
+        {
+            // The visit's end, and not the next one: standing at the station, the next visit can start — and craft — in the call that ends this one.
+            var done = brain.Counters.Why[(int)GoalWhy.CraftDone];
+            var intent = brain.Decide(sim.View() with { CraftReady = left > 0 && !sender.Busy, Crafting = sender.Busy }, tick);
+            if (brain.Counters.Why[(int)GoalWhy.CraftDone] > done)
+            {
+                break;
+            }
+
+            sim.Apply(intent);
+            if (intent.Kind == IntentKind.Craft)
+            {
+                crafts++;
+                left--;
+                sender.Offer(brain.VisitSerial, [.. Enumerable.Range(0, 9)]);
+            }
+
+            if (sender.Next(brain.AtStation, brain.VisitSerial, tick, 6) is { })
+            {
+                far = Math.Max(far, Routing.Distance(sim.X, sim.Z, Here.X, Here.Z + 30f));
+            }
+
+            if (brain.VisitSerial != serial)
+            {
+                serial = brain.VisitSerial;
+                visits++;
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(crafts, Is.EqualTo(expected), "not every craft in hand in one visit, or past the chain's cap");
+            Assert.That(far, Is.LessThanOrEqualTo(6d), "a craft's command sent from beyond the station's reach");
+            Assert.That(sender.Dropped, Is.Zero);
         });
     }
 

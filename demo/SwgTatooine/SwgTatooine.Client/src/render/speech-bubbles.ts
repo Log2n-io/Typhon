@@ -28,6 +28,12 @@ export const BUBBLE_FADE_MS = 400;
 /** Past this many metres from the camera a bubble is not drawn. Speech is heard within 50 m; this is that, and some. */
 export const BUBBLE_RANGE_M = 70;
 
+/** The most bubbles on screen at once, nearest first (Loïc, 2026-11-04: "too much text"): a crowd says more than anyone reads. */
+export const BUBBLE_MAX_SHOWN = 4;
+
+/** A bubble whose anchor is this close, in CSS pixels, to a nearer one already shown is not shown: stacked bubbles are unreadable. */
+export const BUBBLE_GAP_PX = { x: 140, y: 34 } as const;
+
 /** How long `text` is shown for. */
 export function bubbleLifetimeMs(text: string): number {
   return Math.min(BUBBLE_MAX_MS, BUBBLE_MIN_MS + text.length * BUBBLE_MS_PER_CHAR);
@@ -146,6 +152,40 @@ export class SpeechBubbles {
       }
     }
 
+    // Where each would go, first; then the nearest few that do not sit on one another.
+    const candidates: { speech: Speech; x: number; y: number; depth: number }[] = [];
+    for (const speech of this.log.active) {
+      const a = this.anchor;
+      if (
+        anchorOf(speech.netId, a) &&
+        a.depth > 0 &&
+        a.depth < BUBBLE_RANGE_M &&
+        a.x > -200 &&
+        a.x < width + 200 &&
+        a.y > -100 &&
+        a.y < height + 300
+      ) {
+        candidates.push({ speech, x: a.x, y: a.y, depth: a.depth });
+      }
+    }
+
+    candidates.sort((p, q) => p.depth - q.depth);
+    const chosen = new Map<number, { x: number; y: number }>();
+    for (const c of candidates) {
+      if (chosen.size >= BUBBLE_MAX_SHOWN) {
+        break;
+      }
+
+      let clear = true;
+      for (const at of chosen.values()) {
+        clear &&= Math.abs(at.x - c.x) >= BUBBLE_GAP_PX.x || Math.abs(at.y - c.y) >= BUBBLE_GAP_PX.y;
+      }
+
+      if (clear) {
+        chosen.set(c.speech.netId, { x: c.x, y: c.y });
+      }
+    }
+
     for (const speech of this.log.active) {
       let bubble = this.bubbles.get(speech.netId);
       if (bubble === undefined) {
@@ -162,18 +202,11 @@ export class SpeechBubbles {
         bubble.element.textContent = speech.text;
       }
 
-      const a = this.anchor;
-      // Not drawn, too far to read, or well off screen: hidden rather than placed for nothing.
-      const shown =
-        anchorOf(speech.netId, a) &&
-        a.depth > 0 &&
-        a.depth < BUBBLE_RANGE_M &&
-        a.x > -200 &&
-        a.x < width + 200 &&
-        a.y > -100 &&
-        a.y < height + 300;
-      if (shown) {
-        this.place(bubble, a.x, a.y, SpeechLog.opacityAt(speech, nowMs));
+      // Not drawn, too far to read, well off screen, past the nearest few or on top of one of them: hidden rather than placed for nothing.
+      const at = chosen.get(speech.netId);
+      const shown = at !== undefined;
+      if (at !== undefined) {
+        this.place(bubble, at.x, at.y, SpeechLog.opacityAt(speech, nowMs));
       }
 
       if (shown !== bubble.shown) {

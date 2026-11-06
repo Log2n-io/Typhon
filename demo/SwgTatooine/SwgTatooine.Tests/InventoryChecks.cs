@@ -416,15 +416,16 @@ internal sealed class InventoryChecks : ServedChecks
 
     // ── IL-5: stacking and the full inventory ───────────────────────────────────────────────────────────────────────
 
-    /// <summary>IL-5: 97 and 4 more of the same template and Mk make 99 and 2 in the lowest free slot: two rows, ToAfter 99 and 2.</summary>
+    /// <summary>IL-5: a stack two short of <see cref="ItemLedger.StackMax"/> and 4 more of the same template and Mk make a full stack and 2 in the lowest free
+    /// slot: two rows, ToAfter StackMax and 2.</summary>
     [Test]
     [CancelAfter(120_000)]
-    public void ADrop_StacksUpTo99_ThenOpensASlot()
+    public void ADrop_StacksUpToStackMax_ThenOpensASlot()
     {
         using var sim = Start();
         var (x, z) = OpenGround(sim);
         var p = LogIn(sim, 0x7405, x, z);
-        Mint(sim, p.Character, 3, (ItemCatalog.Metal, 1, 5), (ItemCatalog.Hide, 2, 97), (ItemCatalog.Bone, 1, 5));
+        Mint(sim, p.Character, 3, (ItemCatalog.Metal, 1, 5), (ItemCatalog.Hide, 2, ItemLedger.StackMax - 2), (ItemCatalog.Bone, 1, 5));
         var hide = Items.Stacks(sim, p.Character).Single(s => s.Stack.Template == ItemCatalog.Hide);
 
         // A hole at slot 1: the metal given back to World, so the next new stack opens there.
@@ -463,8 +464,12 @@ internal sealed class InventoryChecks : ServedChecks
         var (x, z) = OpenGround(sim);
         var p = LogIn(sim, 0x7406, x, z);
 
-        // A frog drops glands only, at Mk I to III for a level-0 frog: three gland stacks at 97, and full stacks of everything else to the last slot.
-        var lines = new List<(ushort, byte, int)> { (ItemCatalog.Gland, 1, 97), (ItemCatalog.Gland, 2, 97), (ItemCatalog.Gland, 3, 97) };
+        // A frog drops glands only, at Mk I to III for a level-0 frog: three gland stacks two short of full, and full stacks of everything else to the last
+        // slot.
+        var lines = new List<(ushort, byte, int)>
+        {
+            (ItemCatalog.Gland, 1, ItemLedger.StackMax - 2), (ItemCatalog.Gland, 2, ItemLedger.StackMax - 2), (ItemCatalog.Gland, 3, ItemLedger.StackMax - 2),
+        };
         foreach (var t in ItemCatalog.Templates)
         {
             for (byte mk = 1; mk <= 3 && lines.Count < ItemLedger.Slots; mk++)
@@ -489,7 +494,7 @@ internal sealed class InventoryChecks : ServedChecks
         var lostPartial = sim.Bridge.ItemsLost;
         var json = ItemEndpoints.InventoryJson(sim.Dbe, p.Character);
 
-        // Nothing fits now — every gland stack topped up to 99, whatever Mk the first drop had — the whole drop lost, no row.
+        // Nothing fits now — every gland stack topped up to full, whatever Mk the first drop had — the whole drop lost, no row.
         for (byte mk = 1; mk <= 3; mk++)
         {
             sim.Bridge.StageTransfer(ItemLedger.World, (long)p.Character.RawValue, ItemCatalog.Gland, mk, 2, ItemMoveKind.Kill, 1);
@@ -760,7 +765,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(ledger, Does.Contain($"\"item\":\"mat_hide\",\"mk\":2,\"fromStack\":\"0\",\"toStack\":\"{stack}\"}}"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
             Assert.That(inventory, Is.EqualTo(
-                $"{{\"open\":true,\"slots\":40,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
+                $"{{\"open\":true,\"slots\":{ItemLedger.Slots},\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
                 + "\"count\":7}],\"lost\":[]}"), "the inventory carries ledger rows: the client never reads them");
         });
     }
@@ -881,7 +886,7 @@ internal sealed class InventoryChecks : ServedChecks
             {
                 ContentHttpResult c => (c.StatusCode ?? 200, c.ResponseContent),
                 IStatusCodeHttpResult s => (s.StatusCode ?? 0, null),
-                var other => throw new AssertionException($"unexpected result {other}"),
+                var written => (200, Answers.Written(written, context)),
             };
         }
 
@@ -894,7 +899,8 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x740F))).Body, Is.EqualTo(ItemEndpoints.Empty), "an account with no character");
             Assert.That(mine.Status, Is.EqualTo(200));
             Assert.That(mine.Body, Does.Contain("\"item\":\"mat_venom\""), "the bearer's own stack is missing");
-            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":40,\"items\":[],\"lost\":[]}"), "another's items, or not open");
+            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":" + ItemLedger.Slots + ",\"items\":[],\"lost\":[]}"),
+                "another's items, or not open");
         });
     }
 

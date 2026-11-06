@@ -102,6 +102,82 @@ class SessionChurnLeakTests : TestBase<SessionChurnLeakTests>
         });
     }
 
+    /// <summary>A frame budget a few slabs wide: the blocks a hundred generations of sessions would keep if a close gave none back are several times it.</summary>
+    private const long SmallFrameBudget = 256L * 1024;
+
+    private FrameHarness SmallPoolHarness(string name)
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Populate(dbe);
+        var harness = FrameHarness.Create(dbe, Declare, name, new SubscriptionsOptions
+        {
+            FramePoolBudgetBytes = SmallFrameBudget,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(2000),
+        });
+        harness.RunTick(1);
+        return harness;
+    }
+
+    /// <summary>
+    /// SUB-40: a closed session's frame blocks go back to the pool when its slot is recycled. Before it, every close kept up to two blocks for good, and
+    /// 4 000 sessions closing together left the pool refusing every session after them (the live server, 2026-11-05) — invisible here at the default
+    /// budget, whose 256 MiB outlast ten thousand cycles: so a budget a hundred generations would exhaust several times over.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-40")]
+    public void ClosedSessionsGiveTheirFrameBlocksBack_ThroughMoreChurnThanTheBudgetHolds()
+    {
+        using var harness = SmallPoolHarness(nameof(ClosedSessionsGiveTheirFrameBlocksBack_ThroughMoreChurnThanTheBudgetHolds));
+        var pool = harness.Assembler.Pool;
+        var tick = Cycle(harness, 2L, Concurrent);
+        var rents = pool.RentCount;
+        for (var i = 0; i < 100; i++)
+        {
+            tick = Cycle(harness, tick, Concurrent);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(pool.RentCount, Is.GreaterThan(rents), "the premise: the generations were served frames out of the pool");
+            Assert.That(pool.RentedCount, Is.Zero, "every session is closed and recycled, so no block is still lent");
+            Assert.That(pool.BudgetSkipCount, Is.Zero, "a close that kept its blocks would have run the budget dry within these generations");
+            Assert.That(harness.Assembler.SkipsBy(FrameSkipCause.PoolRefused), Is.Zero);
+        });
+    }
+
+    /// <summary>SUB-40: a slot whose send is still in flight keeps its blocks — the bytes may be on the socket — and gives them back once the send ends.</summary>
+    [Test]
+    [VerifiesRule("SUB-40")]
+    public void ASendInFlight_KeepsItsBlocksUntilItEnds()
+    {
+        using var harness = SmallPoolHarness(nameof(ASendInFlight_KeepsItsBlocksUntilItEnds));
+        var pool = harness.Assembler.Pool;
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(120d, 100d, 0d));
+        harness.RunTick(2);
+        harness.Deliver(session);
+        harness.RunTick(3);
+        harness.Deliver(session);
+        var held = pool.RentedCount;
+
+        Assert.That(harness.Sessions.BeginSend(session), Is.True, "the premise: a send under way");
+        harness.Sessions.Close(session, SessionCloseReason.ClientLeft, 1000);
+        harness.Forget(session);
+        harness.Sessions.BeginTick();
+        harness.Sessions.BeginTick();
+        harness.Sessions.BeginTick();
+        var whileSending = pool.RentedCount;
+        harness.Sessions.EndSend(session);
+        harness.Sessions.BeginTick();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(held, Is.GreaterThan(0), "the premise: the session held a block");
+            Assert.That(whileSending, Is.EqualTo(held), "a block was given back while a send could still be reading it");
+            Assert.That(pool.RentedCount, Is.Zero, "the send ended: its slot recycled, its blocks back");
+        });
+    }
+
     /// <summary>Opens, drives and closes one generation of sessions, leaving the table as it found it.</summary>
     /// <param name="harness">The harness.</param>
     /// <param name="tick">The tick to start from.</param>

@@ -52,6 +52,8 @@ export interface StructureSample {
   yaw: number;
   /** The replicated asset index; see `assetForStructure`. */
   asset: number;
+  /** A player's installation (crafting-build.md § 10), drawn like a structure from its own store; a world structure otherwise. */
+  installation?: boolean;
 }
 
 /**

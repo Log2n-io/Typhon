@@ -144,6 +144,9 @@ public static class TatooineData
     /// </summary>
     public const float RegenQuietSec = 5f;
 
+    /// <summary>Seconds between two stims (crafting-catalog.md § 5.4: the stim and the regen draught share a 15 s cooldown).</summary>
+    public const float StimCooldownSec = 15f;
+
     /// <summary>[CORE3, from the printed manual] Spatial <c>/say</c> carries 50 m.</summary>
     public const float SayRangeM = 50f;
 

@@ -5,7 +5,7 @@ The contract between the asset pipeline (`scripts/th_export.py`, `scripts/th_cha
 and everything that reads `build/assets/`: SwgTatooine.Server (`AssetOrigin`, `AssetColliders`), SwgTatooine.Client and
 the asset testbench.
 
-**Format revision 13** (2026-11-03). Every change to what is published gets a revision and an entry in the
+**Format revision 15** (2026-11-05). Every change to what is published gets a revision and an entry in the
 [changelog](#changelog) **before** it is published. A consumer that knows revision N reads the entries after N and
 nothing else.
 
@@ -125,8 +125,9 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
 - Typed primitives only, deduplicated in `shapes`; each collider references one by index and places it.
 - Cylinder and capsule axes are the shape's local +Y; a capsule's `half_height` excludes the end caps.
 - A tilted slab (ramp, steps) is a rotated box: its walkable top is the box's local +Y face, not its AABB top.
-- `band_m`: colliders exist only up to this height above the floor they stand on (2 m). `null` on characters and
-  creatures.
+- `band_m`: colliders exist only up to this height above the floor they stand on: 2 m (the walking band), or the
+  asset's whole height when it is picked by its colliders high up (`tat_horde_fortress`: 30 m). Every collider still
+  starts at its foot, so movement reads both the same way. `null` on characters and creatures.
 - Characters: one capsule, feet at y = 0.
 - Creatures: one box `Body`, axis-aligned in the asset frame: the bounds of every frame of the idle clip. A flier's
   box covers the bob of its hover, which its idle clip holds (the origin stays on the ground).
@@ -156,6 +157,9 @@ the revision is unambiguous. A file named in a catalogue exists before that cata
   releases appear. Which creatures, how many and how often is gameplay, not asset data.
 - `soldier_camp`, `ninja_hideout`: `creature.0` to `creature.3`, the nest's ids, on the ground inside the camp, facing
   out from its centre, each body square clear of the colliders: where its humanoid enemies appear.
+- `tat_horde_fortress` (kind `building`, no portal): `creature.0` to `creature.9`, on the ground on an arc 8 m from
+  the gate (in front of it, +Z), facing out, each body square at least 2 m clear of the colliders: where the Horde
+  event's raider waves appear.
 
 ### 5.5 Interactions
 
@@ -338,6 +342,17 @@ footprint, `y` 0 = the ground it rests on, lying or standing as when dropped; fr
 
 Newest first. *Additive*: readers may ignore it. *Semantic*: a value's meaning or a rule changed, same fields.
 *Breaking*: `schema` changes. Each entry names the first catalogue carrying it and what a reader has to do.
+
+### Revision 15: 2026-11-05, catalogue `19` (semantic)
+- `band_m` (5.2) may exceed 2 m: `tat_horde_fortress` (rev 2) publishes `band_m` 30 and colliders up to the real height
+  of its walls (11.3 m), gate towers (18.6), corner towers (20), gate arch (7.5-14), keep (21.6 and 26.3) and
+  watchtower (29.8), so a click on its upper parts picks it. Its footprint and render are unchanged.
+- Reader: nothing. A reader that took every collider top to be at most 2 m above its floor must drop that assumption.
+
+### Revision 14: 2026-11-04, catalogue `18` (additive)
+- Spawns on a building (5.4): `tat_horde_fortress` (new, rev 1, kind `building`, no portal, no interior; made by
+  `scripts/th_fortress.py`) carries `creature.0`-`9` outside its gate.
+- Reader: to start a wave there, read its `spawns` as on the lairs. Otherwise nothing.
 
 ### Revision 13: 2026-11-03, catalogue `16`, icons in `15` and `17` (additive)
 - `item.mk` (5.11) on the 12 armour pieces (`armor_padded_*`, `armor_composite_*`, rev 2, icons rev 2): a trim (seams,

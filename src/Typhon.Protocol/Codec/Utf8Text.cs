@@ -188,3 +188,157 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
     /// <returns>Whether they differ.</returns>
     public static bool operator !=(Utf8Text256 left, Utf8Text256 right) => !left.Equals(right);
 }
+
+/// <summary>The 64-byte inline buffer of a <see cref="Utf8Text64"/>.</summary>
+/// <remarks>
+/// An inline array on .NET 8 and later; on netstandard2.1, whose runtime has none, a struct of the same size read through
+/// <see cref="MemoryMarshal"/> (a managed reference, GC-tracked — no pointer). The layout, 64 bytes, is the same on both.
+/// </remarks>
+#if NET8_0_OR_GREATER
+[InlineArray(Utf8Text64.Capacity)]
+#else
+[StructLayout(LayoutKind.Sequential, Size = Utf8Text64.Capacity)]
+#endif
+public struct Utf8Buffer64
+{
+    private byte _element0;
+
+    [UnscopedRef]
+    internal Span<byte> AsSpan() =>
+#if NET8_0_OR_GREATER
+        this;
+#else
+        MemoryMarshal.CreateSpan(ref _element0, Utf8Text64.Capacity);
+#endif
+
+    [UnscopedRef]
+    internal readonly ReadOnlySpan<byte> AsReadOnlySpan() =>
+#if NET8_0_OR_GREATER
+        this;
+#else
+        MemoryMarshal.CreateReadOnlySpan(ref Unsafe.AsRef(in _element0), Utf8Text64.Capacity);
+#endif
+}
+
+/// <summary>A UTF-8 string of at most 64 bytes, carried inside a message struct. See <see cref="IInlineUtf8Text"/>.</summary>
+/// <remarks>For a name beside a text in one command: two <see cref="Utf8Text256"/> are 516 bytes, past the 512 a command may decode into
+/// (<c>CommandRegistry</c>), and a player's name is 32 bytes at most. A /tell is the first to need it.</remarks>
+public struct Utf8Text64 : IInlineUtf8Text, IEquatable<Utf8Text64>
+{
+    /// <summary>The largest number of UTF-8 bytes this type holds.</summary>
+    public const int Capacity = 64;
+
+    /// <summary>
+    /// The encoder <see cref="From"/> uses: it THROWS on a lone surrogate rather than emitting U+FFFD for it.
+    /// </summary>
+    /// <remarks>The same encoder <c>WireReader</c> decodes with, so the two ends agree on what this protocol calls text.</remarks>
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    private ushort _length;
+    private Utf8Buffer64 _bytes;
+
+    /// <inheritdoc/>
+    readonly int IInlineUtf8Text.Capacity => Capacity;
+
+    /// <summary>The number of UTF-8 bytes in use.</summary>
+    public readonly int Length => _length;
+
+    /// <summary>Whether it holds no bytes. An empty text is a value, not an absence: it travels as a zero-length string.</summary>
+    public readonly bool IsEmpty => _length == 0;
+
+    /// <summary>The bytes in use, which alias this value — never outlive it, and never keep it across a copy.</summary>
+    [UnscopedRef]
+    public readonly ReadOnlySpan<byte> Utf8 => _bytes.AsReadOnlySpan()[.._length];
+
+    /// <summary>The text of <paramref name="value"/>, encoded as UTF-8.</summary>
+    /// <param name="value">The text; <see langword="null"/> is empty.</param>
+    /// <returns>The value.</returns>
+    /// <exception cref="ArgumentException">Its UTF-8 encoding is longer than <see cref="Capacity"/>.</exception>
+    /// <remarks>
+    /// <b>It refuses rather than truncating.</b> Cutting a string to fit can split a multi-byte character, and a silent
+    /// truncation reaches whoever reads it as a shorter message rather than as an error — discovered, if ever, by a
+    /// player. A caller that means to shorten says so itself.
+    /// </remarks>
+    public static Utf8Text64 From(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return default;
+        }
+
+        // STRICT, not the replacement fallback `Encoding.UTF8` carries. A lone surrogate — a string cut between the two
+        // halves of an astral character, which is what slicing a JavaScript string by length produces — encodes to the
+        // three bytes of U+FFFD under the default encoder and travels as a replacement character nobody asked for. That
+        // is precisely the silent corruption the remarks above refuse to commit one level up, so it is refused here too.
+        int needed;
+        try
+        {
+            needed = StrictUtf8.GetByteCount(value);
+        }
+        catch (EncoderFallbackException e)
+        {
+            throw new ArgumentException(
+                "'" + nameof(value) + "' is not valid text: it holds an unpaired surrogate, which has no UTF-8 encoding. " +
+                "A string cut between the halves of an astral character is the usual cause.",
+                nameof(value),
+                e);
+        }
+
+        if (needed > Capacity)
+        {
+            throw new ArgumentException($"'{nameof(value)}' is {needed} UTF-8 bytes, past this type's capacity of {Capacity}.", nameof(value));
+        }
+
+        var text = default(Utf8Text64);
+        StrictUtf8.GetBytes(value, text._bytes.AsSpan()[..needed]);
+        text._length = (ushort)needed;
+        return text;
+    }
+
+    /// <summary>The UTF-8 bytes of <paramref name="utf8"/>, copied in.</summary>
+    /// <param name="utf8">Valid UTF-8; validity is the caller's to guarantee, and the wire reader checks it before this is reached.</param>
+    /// <returns>The value.</returns>
+    /// <exception cref="ArgumentException">It is longer than <see cref="Capacity"/>.</exception>
+    public static Utf8Text64 FromUtf8(ReadOnlySpan<byte> utf8)
+    {
+        if (utf8.Length > Capacity)
+        {
+            throw new ArgumentException($"'{nameof(utf8)}' is {utf8.Length} bytes, past this type's capacity of {Capacity}.", nameof(utf8));
+        }
+
+        var text = default(Utf8Text64);
+        utf8.CopyTo(text._bytes.AsSpan());
+        text._length = (ushort)utf8.Length;
+        return text;
+    }
+
+    /// <summary>The text, decoded. Allocates; <see cref="Utf8"/> is the allocation-free read.</summary>
+    /// <returns>The text.</returns>
+    public override readonly string ToString() => Encoding.UTF8.GetString(Utf8);
+
+    /// <inheritdoc/>
+    public readonly bool Equals(Utf8Text64 other) => Utf8.SequenceEqual(other.Utf8);
+
+    /// <inheritdoc/>
+    public override readonly bool Equals(object obj) => obj is Utf8Text64 other && Equals(other);
+
+    /// <inheritdoc/>
+    public override readonly int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.AddBytes(Utf8);
+        return hash.ToHashCode();
+    }
+
+    /// <summary>Whether two values hold the same bytes.</summary>
+    /// <param name="left">One.</param>
+    /// <param name="right">The other.</param>
+    /// <returns>Whether they are equal.</returns>
+    public static bool operator ==(Utf8Text64 left, Utf8Text64 right) => left.Equals(right);
+
+    /// <summary>Whether two values hold different bytes.</summary>
+    /// <param name="left">One.</param>
+    /// <param name="right">The other.</param>
+    /// <returns>Whether they differ.</returns>
+    public static bool operator !=(Utf8Text64 left, Utf8Text64 right) => !left.Equals(right);
+}

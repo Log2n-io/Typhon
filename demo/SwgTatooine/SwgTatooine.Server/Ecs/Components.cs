@@ -901,6 +901,22 @@ public struct CreatureBrain
     /// <remarks>In the brain rather than in <see cref="CreatureVitals"/>: both combat directions already read this span, and it fits the padding before
     /// <see cref="Target"/>, where vitals would grow from 12 to 16 bytes.</remarks>
     [Field, OnEnter(CodecKind.U8, Name = "level", Saturate = true)] public byte Level;
+
+    /// <summary>
+    /// A horde's raider (horde.md § 2, § 10): 1 marches — its home is the target, along the event's route, its leash reaching back to the fortress; 2 holds
+    /// the garrison — its home is the fortress's gate, and it defends the fortress. 0 for every other creature.
+    /// </summary>
+    /// <remarks>The last byte of the padding before <see cref="Target"/>: the brain keeps its size. On the wire once, on enter, as <c>raider</c>: a bot
+    /// fights a raider at any level when it defends, and the town's people tell one from the desert's.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "raider", Saturate = true)] public byte March;
+
+    /// <summary>
+    /// What a raider fights with (Loïc, 2026-11-04: "some should have a blaster"), as a player's <see cref="Stances"/>: a pistol shoots from
+    /// <see cref="SimBridge.CreatureBlasterRangeM"/>, a blade or fists from melee reach. 0 for every creature that is not an armed raider. On the wire once,
+    /// on enter: the client draws it in the hand and swings its clip on each blow.
+    /// </summary>
+    /// <remarks>In the brain's tail padding: it keeps its 40 bytes.</remarks>
+    [Field, OnEnter(CodecKind.U8, Name = "stance", Saturate = true)] public byte Stance;
 }
 
 /// <summary>The lair a creature belongs to: written once, at spawn, and never again.</summary>
@@ -1561,6 +1577,12 @@ public static class StructureKind
     /// A city's town hall: one per city, across the way from its shuttleport's gate with its door facing it, and a room behind the door like a house's.
     /// </summary>
     public const int TownHall = 11;
+
+    /// <summary>
+    /// A horde's fortress (horde.md § 2): spawned in the desert near the city it raids, for the event's life, and removed with it. The raiders come out of
+    /// its gate. No interior.
+    /// </summary>
+    public const int HordeFortress = 12;
 }
 
 /// <summary>Where one side of a door stands: the published door box, turned and placed. Never moves.</summary>

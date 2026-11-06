@@ -1,3 +1,7 @@
+import type { ContextMenuItem } from '../state/ui-store';
+import type { InventoryItem } from './items';
+import { CITIES } from './world-data';
+
 /**
  * A character's installations (crafting-build.md § 10, C5a), as `GET /swg/installations` lists them: where each stands, what it draws, its rate and
  * hopper, what it holds now, its state and how long its upkeep lasts; and the lots used of the character's 10.
@@ -112,44 +116,119 @@ export function withinReach(i: Installation, x: number, z: number): boolean {
   return dx * dx + dz * dz <= INSTALLATION_REACH_M * INSTALLATION_REACH_M;
 }
 
-/** Upkeep left under this, seconds, is said once (client.md C39): an hour to pay before it stops. */
-export const UPKEEP_WARN_SECONDS = 3600;
+/** The upkeep a menu entry buys, hours. */
+export const PAY_HOURS = [1, 8] as const;
 
-/** The installations already said to be full, and to be running out of upkeep: each said once until it is not any more. */
-export interface InstallationAlerts {
-  readonly full: ReadonlySet<string>;
-  readonly low: ReadonlySet<string>;
-}
+/** How far an installation's marker may stand from where the list says it is and still be that installation, metres: one per 64 m lot. */
+export const MARKER_MATCH_M = 2;
 
-export const NO_ALERTS: InstallationAlerts = { full: new Set(), low: new Set() };
+/** The compass point of a bearing from north, clockwise, in eighths. */
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
 
 /**
- * What a new reading of the installations says (client.md C39): each that has just filled its hopper, each whose upkeep has just gone under an hour —
- * once, until it is emptied or paid again — and what is remembered for the next reading.
+ * Where a structure stands, as a person reads it (client.md C42): its distance and direction from the nearest city's centre — `2.3 km NE of Mos
+ * Eisley` — and its coordinates.
  */
-export function installationAlerts(
-  before: InstallationAlerts,
-  list: readonly Installation[],
-): { readonly notices: readonly string[]; readonly next: InstallationAlerts } {
-  const notices: string[] = [];
-  const full = new Set<string>();
-  const low = new Set<string>();
-  for (const i of list) {
-    const where = `${String(Math.round(i.x))}, ${String(Math.round(i.z))}`;
-    if (i.hopper > 0 && i.held >= i.hopper) {
-      full.add(i.id);
-      if (!before.full.has(i.id)) {
-        notices.push(`Your ${i.familyName} extractor at ${where} is full: collect it, or it makes nothing more`);
-      }
-    }
-
-    if (i.paidSeconds > 0 && i.paidSeconds < UPKEEP_WARN_SECONDS) {
-      low.add(i.id);
-      if (!before.low.has(i.id)) {
-        notices.push(`Your ${i.familyName} extractor at ${where} has ${paidText(i.paidSeconds)} of upkeep left`);
-      }
+export function locationText(x: number, z: number): string {
+  let city = CITIES[0];
+  let best = Infinity;
+  for (const c of CITIES) {
+    const d = Math.hypot(c.x - x, c.z - z);
+    if (d < best) {
+      city = c;
+      best = d;
     }
   }
 
-  return { notices, next: { full, low } };
+  const point = COMPASS[(Math.round(Math.atan2(x - city.x, z - city.z) / (Math.PI / 4)) + 8) % 8];
+  const far = best >= 1000 ? `${(best / 1000).toFixed(1)} km` : `${String(Math.round(best))} m`;
+  return `${far} ${point} of ${city.name} · ${String(Math.round(x))}, ${String(Math.round(z))}`;
+}
+
+/** What a structure is called in its list and its menu: `Extractor · Ore`. */
+export function installationName(i: Installation): string {
+  return `Extractor · ${i.familyName}`;
+}
+
+/** The character's own installation a marker at (`x`, `z`) draws, or `null`: another player's, or one the list has not read yet. */
+export function installationAt(list: InstallationList | null, x: number, z: number): Installation | null {
+  for (const i of list?.installations ?? []) {
+    if (Math.hypot(i.x - x, i.z - z) <= MARKER_MATCH_M) {
+      return i;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * An installation's context menu (client.md C42): what it holds and how long it runs under its name; Collect when it holds anything, the upkeep
+ * {@link PAY_HOURS} buy, and Pick up when it is empty — the server takes each within {@link INSTALLATION_REACH_M} of it, and the menu is only offered
+ * there.
+ */
+export function installationMenu(
+  i: Installation,
+  upkeepPerHour: number,
+): { readonly title: string; readonly detail: string; readonly items: ContextMenuItem[] } {
+  const items: ContextMenuItem[] = [];
+  if (i.held > 0) {
+    items.push({
+      label: `Collect ${String(i.held)} ${i.familyName}`,
+      hint: 'Its hopper into your inventory, as Mk I units; what does not fit stays in it',
+      action: { kind: 'installCollect', installation: i.id },
+    });
+  }
+
+  for (const h of PAY_HOURS) {
+    const credits = h * upkeepPerHour;
+    items.push({
+      label: `Pay ${String(h)} h · ${credits.toLocaleString('en-US')} cr`,
+      hint: 'Running time bought ahead; it makes nothing while unpaid',
+      action: { kind: 'installPay', installation: i.id, credits },
+    });
+  }
+
+  if (i.held === 0) {
+    items.push({
+      label: 'Pick up',
+      hint: 'Back into its kit, in your inventory; what upkeep is left is not refunded',
+      action: { kind: 'installPickUp', installation: i.id },
+    });
+  }
+
+  return {
+    title: installationName(i),
+    detail: `${String(i.held)} / ${String(i.hopper)} · ${stateText(i.state)} · upkeep ${paidText(i.paidSeconds)}`,
+    items,
+  };
+}
+
+/**
+ * What chat says of installations a new reading has that the last did not (client.md C42): one placed from a kit's menu says nothing in a window, and
+ * a placement the server took is otherwise silent. `before` null: the session's first reading, which announces nothing.
+ */
+export function placedNotices(before: InstallationList | null, after: InstallationList): string[] {
+  if (before === null) {
+    return [];
+  }
+
+  const known = new Set(before.installations.map((i) => i.id));
+  return after.installations
+    .filter((i) => !known.has(i.id))
+    .map(
+      (i) => `${installationName(i)} placed, ${locationText(i.x, i.z)}: hold on it to pay its upkeep, and it starts`,
+    );
+}
+
+/** The kit menu's entries (client.md C42): placing it here, one entry per family it can draw. Empty for anything that is not a kit. */
+export function kitMenuItems(item: InventoryItem): ContextMenuItem[] {
+  if (item.template !== EXTRACTOR_TEMPLATE || item.slot > 100 || item.count > 1) {
+    return [];
+  }
+
+  return EXTRACTOR_FAMILIES.map((f) => ({
+    label: `Place here · ${f.name}`,
+    hint: 'On the 64 m lot you stand in, out of town; it makes nothing until its upkeep is paid',
+    action: { kind: 'installPlace', item: item.id, family: f.template },
+  }));
 }

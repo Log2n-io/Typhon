@@ -32,6 +32,9 @@ const MAX_PITCH = (85 * Math.PI) / 180;
 /** Over-the-shoulder distance bounds. 0 is first person. */
 export const MAX_EYE_DISTANCE_M = 30;
 
+/** How far back the eye may go with the zoom unlocked, a debug setting (Loïc, 2026-11-05): about the player's largest served radius and more. */
+export const UNLOCKED_EYE_DISTANCE_M = 2000;
+
 /**
  * Where a player's camera starts: behind and a little above the avatar (A10).
  *
@@ -133,6 +136,9 @@ export class EyeCamera {
   /** How far back the eye may be asked to stand, metres: 7 in a room, where more is only ever a wall. */
   maxDistanceM = MAX_EYE_DISTANCE_M;
 
+  /** How far back the wheel may take the eye, metres: {@link MAX_EYE_DISTANCE_M}, or {@link UNLOCKED_EYE_DISTANCE_M} with the zoom unlocked. */
+  zoomLimitM = MAX_EYE_DISTANCE_M;
+
   /** The eye-to-head distance actually used last frame, after walls pulled it in — what the body's fade reads. */
   effectiveDistance = 0;
 
@@ -181,7 +187,7 @@ export class EyeCamera {
   /**
    * Sets the distance the camera settles at, in metres, clamped to the rig's bounds.
    *
-   * @param metres 0 for first person, up to {@link MAX_EYE_DISTANCE_M}.
+   * @param metres 0 for first person, up to {@link zoomLimitM}.
    *
    * @remarks
    * The GOAL rather than the current distance, so this glides like every other change to the rig rather than cutting. Its
@@ -197,7 +203,7 @@ export class EyeCamera {
   rigid = false;
 
   setDistance(metres: number): void {
-    this.goalDistance = clamp(metres, 0, MAX_EYE_DISTANCE_M);
+    this.goalDistance = clamp(metres, 0, this.zoomLimitM);
   }
 
   /** Free-look. Yaw is unbounded and wraps naturally; pitch stops short of vertical. */
@@ -213,7 +219,7 @@ export class EyeCamera {
     // the street was viewed from.
     const goal = Math.min(this.goalDistance, this.maxDistanceM);
     const from = goal === 0 ? (factor > 1 ? 1.5 : 0) : goal * factor;
-    this.goalDistance = clamp(from, 0, MAX_EYE_DISTANCE_M);
+    this.goalDistance = clamp(from, 0, this.zoomLimitM);
   }
 
   /** Snaps the view back behind the subject, the way a follow camera does when the player stops turning it. */
@@ -292,6 +298,17 @@ export class EyeCamera {
     const dx = -Math.sin(this.yaw) * cp;
     const dz = -Math.cos(this.yaw) * cp;
     const dy = Math.sin(pitch);
+
+    // Past the default range (the zoom unlocked, a debug setting) nothing along the ray pulls the eye in: at hundreds of metres every hill and wall
+    // between it and the body did, and the view jumped (Loïc, 2026-11-05). Only the eye itself is kept out of the ground under it.
+    if (distance > MAX_EYE_DISTANCE_M) {
+      this.held = distance;
+      this.effectiveDistance = distance;
+      this.eyeX = this.anchorX + dx * distance;
+      this.eyeZ = this.anchorZ + dz * distance;
+      this.eyeY = Math.max(head + dy * distance, this.ground.heightAt(this.eyeX, this.eyeZ) + GROUND_CLEARANCE_M);
+      return;
+    }
 
     // Walk out along that ray and stop before the ground. Without this the eye goes **inside the terrain**: 30 m back at
     // level pitch is inside any mesa, and looking up while pulled back put it `30 · sin(85°)` metres BELOW the subject's

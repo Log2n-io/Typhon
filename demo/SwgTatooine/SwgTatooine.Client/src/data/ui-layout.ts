@@ -1,3 +1,4 @@
+import { DEFAULT_TABS, parseTabs, type ChatTab } from './chat-tabs';
 /**
  * The interface's layout (client.md C36): where each game window stands and how big it is, how far each bar was moved from where it is drawn,
  * whether the bars are locked, and whether the debug layer shows.
@@ -32,11 +33,31 @@ export interface UiLayout {
   readonly debug: boolean;
   /** What the waypoint pane leaves out (client.md C38): `city:<StructureKind>`, `mission`, `structure` (the player's pins), `custom`. */
   readonly navHidden: readonly string[];
+  /** The chat's tabs (client.md C44): a name and the categories each shows. */
+  readonly chatTabs: readonly ChatTab[];
+  /**
+   * Whether the inventory's preview panel is open (client.md C43). Kept with the window's rect it widened: kept apart, a reload showed the wide rect
+   * without the panel, and the next toggle widened it again.
+   */
+  readonly inventoryPreview: boolean;
+  /** Whether the bazaar's preview panel is open, kept with the window's rect as the inventory's is; open by default (Loïc, 2026-11-05). */
+  readonly bazaarPreview: boolean;
 }
 
 /** The layout of a first visit: nothing moved, the bars locked, the debug layer shown only to a session with no player (the god camera). */
 export function defaultLayout(playing: boolean): UiLayout {
-  return { windows: {}, bars: {}, chatW: 0, chatH: 0, locked: true, debug: !playing, navHidden: [] };
+  return {
+    windows: {},
+    bars: {},
+    chatW: 0,
+    chatH: 0,
+    locked: true,
+    debug: !playing,
+    navHidden: [],
+    chatTabs: DEFAULT_TABS,
+    inventoryPreview: false,
+    bazaarPreview: true,
+  };
 }
 
 /** How much of a window must stay on screen: its title bar, so it can always be dragged back. */
@@ -126,6 +147,9 @@ export function parseLayout(raw: string | null, fallback: UiLayout): UiLayout {
     navHidden: Array.isArray(v.navHidden)
       ? (v.navHidden as unknown[]).filter((k): k is string => typeof k === 'string')
       : fallback.navHidden,
+    chatTabs: v.chatTabs === undefined ? fallback.chatTabs : parseTabs(v.chatTabs),
+    inventoryPreview: typeof v.inventoryPreview === 'boolean' ? v.inventoryPreview : fallback.inventoryPreview,
+    bazaarPreview: typeof v.bazaarPreview === 'boolean' ? v.bazaarPreview : fallback.bazaarPreview,
   };
 }
 

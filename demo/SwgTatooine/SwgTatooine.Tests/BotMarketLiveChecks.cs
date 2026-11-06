@@ -126,6 +126,7 @@ internal sealed class BotMarketLiveChecks : ServedChecks
         var world = bot.Eyes.Read(bot.Store, bot.Brain.Facilities) with
         {
             InventoryStacks = bot.Inventory.Stacks,
+            InventorySlots = bot.Inventory.Slots,
             Reserved = bot.Mine.Reserved,
             Trading = bot.Sender.Busy,
         };
@@ -202,7 +203,7 @@ internal sealed class BotMarketLiveChecks : ServedChecks
             sim.Bridge.StageTransfer(ItemLedger.World, b.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
             sim.Bridge.StageTransfer(ItemLedger.World, b.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
             var n = 2;
-            for (var template = ItemCatalog.Metal; template <= ItemCatalog.Venom && n < Full; template++)
+            for (var template = ItemCatalog.Ore; template <= ItemCatalog.Venom && n < Full; template++)
             {
                 for (byte mk = 1; mk <= 4 && n < Full; mk++, n++)
                 {

@@ -17,7 +17,7 @@ namespace Typhon.Subscriptions.AspNetCore;
 
 /// <summary>
 /// The browser's door: <c>AddTyphonSubscriptions</c>, <c>MapTyphonSubscriptions</c>, <c>MapTyphonCatalog</c> — and the operator's,
-/// <c>MapTyphonStats</c>.
+/// <c>MapTyphonStats</c> and <c>MapTyphonSystemTicks</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -207,6 +207,27 @@ public static class TyphonSubscriptionsEndpoints
             writer.WriteNumber("poolRefused"u8, stats.FramesSkipped.PoolRefused);
             writer.WriteNumber("owedReset"u8, stats.FramesSkipped.OwedReset);
             writer.WriteEndObject();
+
+            // The pool those frames are lent from: what a "poolRefused" climbing with one session connected comes down to (2026-11-05).
+            var pool = stats.FramePool;
+            writer.WriteStartObject("framePool"u8);
+            writer.WriteNumber("budgetBytes"u8, pool.BudgetBytes);
+            writer.WriteNumber("committedBytes"u8, pool.CommittedBytes);
+            writer.WriteNumber("blocks"u8, pool.Blocks);
+            writer.WriteNumber("rented"u8, pool.Rented);
+            writer.WriteNumber("budgetSkips"u8, pool.BudgetSkips);
+            writer.WriteNumber("slabsReleased"u8, pool.SlabsReleased);
+            writer.WriteStartArray("classes"u8);
+            for (var c = 0; c < (pool.ClassBlocks?.Length ?? 0); c++)
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("blocks"u8, pool.ClassBlocks[c]);
+                writer.WriteNumber("free"u8, pool.ClassFree[c]);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            writer.WriteEndObject();
             writer.WriteEndObject();
 
             writer.WriteStartArray("systems"u8);
@@ -267,6 +288,68 @@ public static class TyphonSubscriptionsEndpoints
             writer.WriteEndObject();
             await writer.FlushAsync(http.RequestAborted).ConfigureAwait(false);
         }).WithDisplayName("Typhon stats");
+    }
+
+    /// <summary>
+    /// Maps the per-system tick feed: every tick the telemetry ring holds after <c>?after=</c>, each system's CPU, wall time, effective cores and workers
+    /// touched, in the binary layout of <see cref="SystemTicksFeed"/> — what a timeline of which system cost what is drawn from. <c>?names=1</c> adds the
+    /// systems' names.
+    /// </summary>
+    /// <param name="endpoints">The host's endpoint builder.</param>
+    /// <param name="pattern">The route. Defaults to <c>/typhon/systems/ticks</c>.</param>
+    /// <returns>The endpoint, for chaining conventions.</returns>
+    /// <remarks>
+    /// Binary for the reason <see cref="SystemTicksFeed"/> gives; written from a pooled buffer straight into the response, so a poll allocates nothing of its
+    /// own past the framework's. No authentication, like <see cref="MapTyphonStats"/>: it names every system. <c>503</c> before the runtime is registered.
+    /// </remarks>
+    public static IEndpointConventionBuilder MapTyphonSystemTicks(this IEndpointRouteBuilder endpoints, string pattern = "/typhon/systems/ticks")
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+
+        return endpoints.MapGet(pattern, static async (HttpContext http) =>
+        {
+            var runtime = http.RequestServices.GetService<TyphonRuntime>();
+            if (runtime == null)
+            {
+                http.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+
+            var query = http.Request.Query;
+            var after = long.TryParse(query["after"], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var a)
+                ? a
+                : -1;
+            var withNames = query["names"] == "1";
+            var scheduler = runtime.Scheduler;
+            var ring = runtime.Telemetry;
+            var systems = scheduler.AllSystemCount;
+            var names = ArrayPool<string>.Shared.Rent(Math.Max(1, systems));
+            byte[] buffer = null;
+            try
+            {
+                for (var i = 0; i < systems; i++)
+                {
+                    names[i] = scheduler.Systems[i]?.Name ?? string.Empty;
+                }
+
+                var span = names.AsSpan(0, systems);
+                buffer = ArrayPool<byte>.Shared.Rent(SystemTicksFeed.MaxBytes(span, SystemTicksFeed.TicksAfter(ring, after) + 1, withNames));
+                var length = SystemTicksFeed.Write(buffer, ring, span, scheduler.WorkerCount, after, withNames);
+                http.Response.ContentType = "application/octet-stream";
+                http.Response.Headers.CacheControl = "no-store";
+                http.Response.ContentLength = length;
+                await http.Response.Body.WriteAsync(buffer.AsMemory(0, length)).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (buffer != null)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+
+                ArrayPool<string>.Shared.Return(names, clearArray: true);
+            }
+        }).WithDisplayName("Typhon system ticks");
     }
 
     private static async Task HandleAsync(HttpContext http)

@@ -1,3 +1,4 @@
+import { DEFAULT_TABS } from '../src/data/chat-tabs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   clampOffset,
@@ -120,7 +121,31 @@ describe('a stored layout', () => {
       locked: true,
       debug: true,
       navHidden: [],
+      chatTabs: DEFAULT_TABS,
+      inventoryPreview: false,
+      bazaarPreview: true,
     });
+  });
+
+  it('keeps the inventory preview with the rect it widened, and closes it with a reset (client.md C43)', () => {
+    const windows = useWindows.getState();
+    windows.setInventoryPreview(true, { x: 10, y: 20, w: 602, h: 0 });
+    expect(useWindows.getState().layout.inventoryPreview).toBe(true);
+    expect(useWindows.getState().layout.windows.inventory).toEqual({ x: 10, y: 20, w: 602, h: 0 });
+    expect(parseLayout(JSON.stringify(useWindows.getState().layout), defaultLayout(true)).inventoryPreview).toBe(true);
+    useWindows.getState().resetLayout();
+    expect(useWindows.getState().layout.inventoryPreview).toBe(false);
+    expect(useWindows.getState().layout.windows.inventory).toBeUndefined();
+  });
+
+  it("opens the bazaar's preview by default, and a reset opens it again (Loïc, 2026-11-05)", () => {
+    const windows = useWindows.getState();
+    windows.setBazaarPreview(false, { x: 20, y: 70, w: 662, h: 0 });
+    expect(useWindows.getState().layout.bazaarPreview).toBe(false);
+    expect(useWindows.getState().layout.windows.bazaar).toEqual({ x: 20, y: 70, w: 662, h: 0 });
+    useWindows.getState().resetLayout();
+    expect(useWindows.getState().layout.bazaarPreview).toBe(true);
+    expect(useWindows.getState().layout.windows.bazaar).toBeUndefined();
   });
 
   it('is not kept when storage refuses, and reads as the fallback', () => {

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { useChat } from './chat-store';
+import type { ChatCategory } from '../data/chat-tabs';
 import type { InventoryItem } from '../data/items';
 import {
   browseUrl,
@@ -124,6 +125,8 @@ export interface MarketState {
   readonly buyStandard: (template: number, price: number, quantity?: number) => void;
   /** Wears an item with stats (crafting-build.md § 2.2); its refusal shows on the `'gear'` row. */
   readonly equip: (itemId: string) => void;
+  /** Drinks a dose of a potion in the grid (crafting-catalog.md § 5.4), or one out of its crate. */
+  readonly consume: (itemId: string) => void;
   /** Sends a command as the panels' buttons do: held while one of its row is in flight, its refusal shown on its row. False when not sent. */
   readonly sendCommand: (command: MarketCommand) => boolean;
   /**
@@ -140,6 +143,11 @@ export interface MarketState {
   /** Packs an item or a crate into an identical one; takes items out of a crate (crafting-catalog.md § 11.2). Refusals show on the `'gear'` row. */
   readonly pack: (item: string, into: string) => void;
   readonly unpack: (item: string, count: number) => void;
+  /** Moves `count` of a stack into grid slot `slot` (0: the lowest free), and throws `count` of one away (inventory-loot.md § 10). Refusals on `'gear'`. */
+  readonly move: (item: string, slot: number, count: number) => void;
+  readonly discard: (item: string, count: number) => void;
+  /** Stacks the same units and orders the grid by type, name and mark (the inventory window's "Sort & stack"). Refusals on `'gear'`. */
+  readonly sort: () => void;
   /** The server refused `command` with `reason`. */
   readonly refused: (reason: number, command: MarketCommand) => void;
   /**
@@ -166,18 +174,47 @@ let lastNowMs = 0;
 
 const EMPTY_SELL: SellForm = { stack: null, quantity: 1, unitPrice: 1 };
 
+/**
+ * The rows whose commands a context menu sends from the world — an installation's, a kit placed (client.md C42): their refusals are said in the chat,
+ * as no window shows them.
+ */
+const CHAT_ROWS: ReadonlyMap<string, ChatCategory> = new Map<string, ChatCategory>([
+  ['install', 'structures'],
+  // A /tell's refusal, and a mail command's (mail.md § 6): sent from the chat or the mail window, said in the Tells category.
+  ['tell', 'tells'],
+  ['mail', 'tells'],
+]);
+
+/**
+ * The rows a command does not hold in flight: a mail's read or delete is idempotent and the window answers them at once, and a /tell is held by the server's
+ * own rate — guarded, a second one inside the answer's 5 s, or a delete straight after a read, was dropped without a word (review, 2026-11-04).
+ */
+const UNHELD_ROWS: ReadonlySet<string> = new Set(['mail', 'tell']);
+
 export const useMarket = create<MarketState>((set, get) => {
   /** Sends `command` for `row`, marks the row in flight for {@link MARKET_ANSWER_MS}, clears its old refusal. */
   const send = (command: MarketCommand): boolean => {
     const row = commandRow(command);
-    if (get().pending.includes(row)) {
+    const held = !UNHELD_ROWS.has(row);
+    if (held && get().pending.includes(row)) {
       return false;
     }
 
     const sent = get().actions?.send(command) ?? false;
     if (!sent) {
-      set({ rowNotices: { ...get().rowNotices, [row]: 'Not sent — wait a moment and try again' } });
+      const text = 'Not sent — wait a moment and try again';
+      set({ rowNotices: { ...get().rowNotices, [row]: text } });
+      const category = CHAT_ROWS.get(row);
+      if (category !== undefined) {
+        useChat.getState().notice(text, category);
+      }
+
       return false;
+    }
+
+    if (!held) {
+      set({ rowNotices: omit(get().rowNotices, row) });
+      return true;
     }
 
     set({ pending: [...get().pending, row], rowNotices: omit(get().rowNotices, row) });
@@ -340,7 +377,7 @@ export const useMarket = create<MarketState>((set, get) => {
 
       // Goods newly waiting at a bazaar are said in chat: no toolbar button counts them (client.md C40).
       for (const text of newReservationNotices(get().mine, mine)) {
-        useChat.getState().notice(text);
+        useChat.getState().notice(text, 'economy');
       }
 
       // Every change the server makes moves this read: whatever was in flight has landed, or been refused.
@@ -461,6 +498,9 @@ export const useMarket = create<MarketState>((set, get) => {
     equip: (itemId) => {
       send({ kind: 'equip', item: itemId });
     },
+    consume: (itemId) => {
+      send({ kind: 'consume', item: itemId });
+    },
     unequip: (slot) => {
       send({ kind: 'unequip', slot });
     },
@@ -469,6 +509,15 @@ export const useMarket = create<MarketState>((set, get) => {
     },
     unpack: (item, count) => {
       send({ kind: 'unpack', item, count });
+    },
+    move: (item, slot, count) => {
+      send({ kind: 'move', item, slot, count });
+    },
+    discard: (item, count) => {
+      send({ kind: 'discard', item, count });
+    },
+    sort: () => {
+      send({ kind: 'sort' });
     },
     refused: (reason, command) => {
       const row = commandRow(command);
@@ -495,6 +544,12 @@ export const useMarket = create<MarketState>((set, get) => {
 
       if (row === 'waypoint') {
         refusedWaypoint?.(text);
+      }
+
+      // Sent from a menu in the world, which has no window to say it in (client.md C42).
+      const category = CHAT_ROWS.get(row);
+      if (category !== undefined) {
+        useChat.getState().notice(text, category);
       }
 
       set({

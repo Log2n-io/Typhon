@@ -21,7 +21,7 @@ public static class DamageType
 }
 
 /// <summary>
-/// Where an equipped item sits (crafting-build.md § 2.2): <see cref="ItemStack.Slot"/> 101-107, out of the 1-40 grid. The weapon, then the six armour pieces.
+/// Where an equipped item sits (crafting-build.md § 2.2): <see cref="ItemStack.Slot"/> 101-107, out of the 1-50 grid. The weapon, then the six armour pieces.
 /// </summary>
 public static class EquipSlot
 {
@@ -203,7 +203,10 @@ public static class Equipment
 
     /// <summary>What the vendor asks for a standard-issue item, credits: twice its Mk I market value (§ 15.3); 0 for one it does not sell.</summary>
     public static long StandardPrice(ushort template)
-        => TryStandard(template, out _) ? MarketValues.MilliOf(template, 1) * TatooineData.VendorSellsPerMille / 1000 / 1000 : 0;
+        => TryStandard(template, out _) ? MarketValues.MilliOf(template, StandardMk(template)) * TatooineData.VendorSellsPerMille / 1000 / 1000 : 0;
+
+    /// <summary>The Mk standard issue is sold at: I, or none for an item without a Mk (the stim).</summary>
+    public static byte StandardMk(ushort template) => ItemCatalog.TryGet(template, out var t) && !t.HasMk ? (byte)0 : (byte)1;
 
     /// <summary>
     /// The bulk materials the vendor sells at Mk I (Loïc, 2026-11-02): the ones no low-level creature drops — Metal, Crystal, Gas and Chemical only from
@@ -219,6 +222,9 @@ public static class Equipment
     /// <summary>One unit's vendor price in milli-credits: twice its Mk I value (§ 15.3); 0 for a material it does not sell.</summary>
     public static long StandardMaterialMilli(ushort template)
         => IsStandardMaterial(template) ? MarketValues.MilliOf(template, 1) * TatooineData.VendorSellsPerMille / 1000 : 0;
+
+    /// <summary>The most units of a material one standard-issue sale makes: the vendor's lot (1-99, the command's byte), not a stack.</summary>
+    public const int StandardMaterialMax = 99;
 
     /// <summary>What <paramref name="quantity"/> units cost, whole credits, rounded down; 0 for none or a material it does not sell.</summary>
     public static long StandardMaterialPrice(ushort template, int quantity) => StandardMaterialMilli(template) * Math.Max(0, quantity) / 1000;
@@ -242,7 +248,13 @@ public static class Equipment
         new(ItemCatalog.CompositeHelmet + 3, 100, 120, 0, 13_091),
         new(ItemCatalog.CompositeHelmet + 4, 100, 120, 0, 3_927),
         new(ItemCatalog.CompositeHelmet + 5, 100, 120, 0, 3_927),
+
+        // A stim (Loïc, 2026-11-05): a typical Mk I craft's potency, its three doses — so the first heal does not wait for the first potion crafter.
+        new(ItemCatalog.Stim, StimMkIPotency, 0, 0, 3),
     ];
+
+    /// <summary>A typical Mk I stim's heal, hit points (CraftingChecks pins it to the craft): what the vendor's and the welcome pack's heal.</summary>
+    public const int StimMkIPotency = 204;
 }
 
 /// <summary>One standard-issue item: its template, three stat lines (<see cref="Equipment"/>'s meaning for its category) and its condition when new.</summary>

@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { entityTag, type EntityTag } from '../src/data/content-level';
-import { BAR_STACK_PX, Labels, pileOn, STACK_GAP_PX, TAG_STACK_PX, type HealthBar } from '../src/render/labels';
+import { HOSTILITY_MARK, type Hostility } from '../src/data/foe-tags';
+import {
+  BAR_STACK_PX,
+  Labels,
+  pileOn,
+  STACK_GAP_PX,
+  TAG_STACK_PX,
+  type FoeTag,
+  type HealthBar,
+} from '../src/render/labels';
 
 /** The tags over what is selected and what is hovered (Loïc, 2026-10-26): the same label, said the same way. */
 
@@ -196,5 +205,59 @@ describe('a health bar', () => {
     const shown = all[all.length - 1];
     expect(shown.style.display).toBe('block');
     expect(shown.style.transform).toBe('translate(120px, 80px)');
+  });
+});
+
+describe("the potential enemies' tags", () => {
+  let parent: FakeElement;
+
+  beforeEach(() => {
+    vi.stubGlobal('document', fakeDocument);
+    parent = fakeElement();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const foe = (name: string, hostility: Hostility, engaged = false, opacity = 1): FoeTag => ({
+    sx: 100,
+    sy: 80,
+    tag: entityTag(name, 38, 10),
+    hostility,
+    engaged,
+    opacity,
+  });
+
+  it('fades as told, and is not drawn at all once faded out', () => {
+    const labels = new Labels(parent as unknown as HTMLElement);
+    labels.updateFoeTags([foe('Ninja', 'aggressive', false, 0.5), foe('Rat', 'aggressive', false, 0)], 2);
+    const [half, gone] = parent.children[0].children.slice(-2);
+    expect(half.style.opacity).toBe('0.5');
+    expect(half.style.display).toBe('block');
+    expect(gone.style.display).toBe('none');
+  });
+
+  it('says the name, the CL in its con colour, and the hostility mark; alarmed while engaged', () => {
+    const labels = new Labels(parent as unknown as HTMLElement);
+    labels.updateFoeTags([foe('Ninja', 'aggressive', true), foe('Rockhopper', 'passive')], 2);
+    const all = parent.children[0].children;
+    const [ninja, hopper] = all.slice(-2);
+    expect(shownText(ninja)).toBe(`${HOSTILITY_MARK.aggressive} Ninja (CL 38)`);
+    expect(shownText(hopper)).toBe(`${HOSTILITY_MARK.passive} Rockhopper (CL 38)`);
+    expect((ninja.nodes[0] as FakeElement).className).toBe('foe-mark foe-aggressive');
+    expect(ninja.className).toContain('engaged');
+    expect(hopper.className).not.toContain('engaged');
+    expect(((ninja.nodes[2] as FakeElement).nodes[1] as FakeElement).className).toBe('con-red');
+  });
+
+  it('hides the pool past the count, and with every label', () => {
+    const labels = new Labels(parent as unknown as HTMLElement);
+    labels.updateFoeTags([foe('Ninja', 'aggressive'), foe('Rat', 'aggressive')], 2);
+    labels.updateFoeTags([foe('Ninja', 'aggressive')], 1);
+    const [a, b] = parent.children[0].children.slice(-2);
+    expect([a.style.display, b.style.display]).toEqual(['block', 'none']);
+    labels.hideAll();
+    expect(a.style.display).toBe('none');
   });
 });

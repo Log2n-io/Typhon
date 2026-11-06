@@ -37,16 +37,17 @@ internal sealed class EquipmentChecks
     }
 
     [Test]
-    public void StandardIssue_IsWeaponsAndBothArmourSets_ButNoCarbine()
+    public void StandardIssue_IsWeaponsAndBothArmourSets_AndTheStim_ButNoCarbine()
     {
         Assert.Multiple(() =>
         {
-            Assert.That(Equipment.Standard.Length, Is.EqualTo(3 + 12));
+            Assert.That(Equipment.Standard.Length, Is.EqualTo(3 + 12 + 1));
             foreach (var s in Equipment.Standard)
             {
-                Assert.That(Equipment.SlotOf(s.Template), Is.Not.Zero, $"template {s.Template} is worn somewhere");
+                Assert.That(Equipment.SlotOf(s.Template) != 0 || s.Template == ItemCatalog.Stim, Is.True, $"template {s.Template} is worn somewhere");
                 Assert.That(s.MaxCondition, Is.Positive, $"template {s.Template} has a condition");
-                Assert.That(ItemCatalog.TryGet(s.Template, out var t) && ItemCatalog.MkFits(in t, 1), Is.True, $"template {s.Template} takes Mk I");
+                Assert.That(ItemCatalog.TryGet(s.Template, out var t) && ItemCatalog.MkFits(in t, Equipment.StandardMk(s.Template)), Is.True,
+                    $"template {s.Template} takes Mk I, or none");
             }
 
             Assert.That(ItemCatalog.IdOf("weapon_carbine"), Is.Zero, "the carbine waits for its stance (O-4)");

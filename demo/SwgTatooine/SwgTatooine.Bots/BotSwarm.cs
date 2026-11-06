@@ -131,6 +131,12 @@ public sealed class BotSwarmOptions
     /// </summary>
     public int InstallPercent { get; init; } = 10;
 
+    /// <summary>Percent of the trading bots that write mail and /tells to the fleet (mail.md § 7); every bot reads and acts on its own mail.</summary>
+    public int MailPercent { get; init; } = 2;
+
+    /// <summary>A bot's character name by index — its account's — for the mail and /tells bots write each other; null without an accounts file.</summary>
+    public Func<int, string> NameFor { get; init; }
+
     /// <summary>The load test's city by name (<c>--market-rush</c>, bazaar.md § 8), or null: every thinking bot goes there and does nothing but trade.</summary>
     public string MarketRush { get; init; }
 
@@ -354,6 +360,9 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
     /// <summary><c>Stances.Pistol</c> on the server.</summary>
     private const double PistolStance = 3.0;
+
+    /// <summary>The fist's stance (<c>Stances.Unarmed</c>): the one a body with no sound weapon strikes in.</summary>
+    private const double UnarmedStance = 1.0;
 
     /// <summary>
     /// The public content a thinking bot walks a city by — walls, doors, terminals — read once per fleet from the server's HTTP surface, as a browser
@@ -1176,6 +1185,42 @@ public sealed partial class BotSwarm : IAsyncDisposable
             {
                 var e = bot.Errands();
                 sum = (sum.Mounts + e.Mounts, sum.Doors + e.Doors, sum.Used + e.Used, sum.Paths + e.Paths, sum.Ports + e.Ports, sum.InPort + e.InPort);
+            }
+        }
+
+        return sum;
+    }
+
+    /// <summary>What the brains did when attacked, summed over the fleet (BotBrain.Defence.cs): attackers rolled for, fought back, runs, runs that escaped.</summary>
+    public (long Attacked, long Fought, long Fled, long Escaped) Defence()
+    {
+        (long Attacked, long Fought, long Fled, long Escaped) sum = default;
+        foreach (var bot in Bots)
+        {
+            if (bot != null)
+            {
+                var d = bot.Defence();
+                sum = (sum.Attacked + d.Attacked, sum.Fought + d.Fought, sum.Fled + d.Fled, sum.Escaped + d.Escaped);
+            }
+        }
+
+        return sum;
+    }
+
+    /// <summary>
+    /// How the fleet's fights ended and why its runs started, summed (BotBrain.Defence.cs): fights won, then runs by <see cref="BotBrain.RunCause"/> —
+    /// the odds at the first bite, a fight that turned, a stalled fight, hurt and losing, unarmed, the backstop.
+    /// </summary>
+    public (long Won, long Odds, long Losing, long Stalled, long Hurt, long Unarmed, long Backstop) DefenceDetail()
+    {
+        (long Won, long Odds, long Losing, long Stalled, long Hurt, long Unarmed, long Backstop) sum = default;
+        foreach (var bot in Bots)
+        {
+            if (bot?.Brain is { } b)
+            {
+                sum = (sum.Won + b.FightsWon, sum.Odds + b.RunsBy(BotBrain.RunCause.Odds), sum.Losing + b.RunsBy(BotBrain.RunCause.Losing),
+                    sum.Stalled + b.RunsBy(BotBrain.RunCause.Stalled), sum.Hurt + b.RunsBy(BotBrain.RunCause.Hurt),
+                    sum.Unarmed + b.RunsBy(BotBrain.RunCause.Unarmed), sum.Backstop + b.RunsBy(BotBrain.RunCause.Backstop));
             }
         }
 
@@ -2547,6 +2592,10 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 ? default
                 : (_brain.MountsAsked, _brain.DoorsCrossed, _brain.FacilitiesUsed, _brain.PathsPlanned, _brain.PortsLeft, _brain.InPort ? 1 : 0);
 
+        /// <summary>What this bot's brain did when attacked: attackers rolled for, fought back, runs, runs that escaped.</summary>
+        public (long Attacked, long Fought, long Fled, long Escaped) Defence() =>
+            _brain == null ? default : (_brain.Attacked, _brain.FoughtBack, _brain.Fled, _brain.Escaped);
+
         /// <summary>This bot's own decision loop and the eye that feeds it; null unless the run is thinking.</summary>
         private readonly BotBrain _brain;
 
@@ -2607,6 +2656,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 SetUpMarket(index, options);
                 SetUpCraft(index, options, book);
                 SetUpInstall(index, options);
+                SetUpMail(index, options);
                 TraceIfSampled(index, options);
             }
             _heading = (float)((index * golden) % (Math.PI * 2));
@@ -2779,8 +2829,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
             PollInventory(tick);
             PollMine(tick);
             PollInstallations(tick);
+            PollMail(tick);
+            PollHorde(tick, world.X, world.Z);
+            PollGear();
             var missions = _missions;
-            world = WithInstall(WithCraft(WithMarket(world))) with
+            world = WithGear(WithInstall(WithCraft(WithMarket(world)))) with
             {
                 MissionsHeld = missions.Held,
                 HasMissionLair = missions.LairKnown,
@@ -2795,6 +2848,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
 
             var before = _brain.Goal;
             var intent = _brain.Decide(in world, tick);
+            PollStim(in world);
             if (_brain.HomeRegion != 0 && world.HasBody)
             {
                 Volatile.Write(ref AtHome, world.Realm == 0 ? _brain.RegionAt(world.X, world.Z) == _brain.HomeRegion : AtHome);
@@ -2836,11 +2890,14 @@ public sealed partial class BotSwarm : IAsyncDisposable
             // and the bot then named its target for minutes without a shot fired (2026-10-26). So the stance is read, not remembered: drawn whenever the bot
             // is about to attack without it. A server without the command is one where a target alone is a fight.
             // Not while still mounted — the swoop puts it away again — and once per two seconds, the time its replication takes to come back.
-            if (intent.Kind == IntentKind.Attack && world.Stance != (int)PistolStance && !world.Mounted && tick - _stanceAskedAt >= 8
+            // Down to its fist (a broken blaster, or none), the unarmed stance: the pistol's is refused without a pistol, and a fist strikes in no other
+            // (Loïc, 2026-11-04: bots whose blasters broke stood in the fight doing nothing).
+            var stance = world.Unarmed ? UnarmedStance : PistolStance;
+            if (intent.Kind == IntentKind.Attack && world.Stance != (int)stance && !world.Mounted && tick - _stanceAskedAt >= 8
                 && Client.Plan.CommandByName(SetStanceCommand) != null)
             {
                 _stanceAskedAt = tick;
-                await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(PistolStance) }, ct)
+                await Client.SendCommandAsync(SetStanceCommand, new RecordValues { ["stance"] = FieldValue.Of(stance) }, ct)
                     .ConfigureAwait(false);
                 IntentsSent++;
             }
@@ -3031,6 +3088,11 @@ public sealed partial class BotSwarm : IAsyncDisposable
                 _journalPrimed = true;
                 Interlocked.Add(ref MissionsTaken, taken);
                 Interlocked.Add(ref MissionsCompleted, completed);
+                if (completed > 0)
+                {
+                    AssessSoon();
+                }
+
                 _missions = view;
                 ok = true;
             }
@@ -3120,6 +3182,7 @@ public sealed partial class BotSwarm : IAsyncDisposable
                     gear);
                 SawInventory(held);
                 _gear = gear;
+                SawGear(gear, held);
                 SawCraftInputs(held, gear);
                 _itemsPrimed = true;
                 _inventory = view;

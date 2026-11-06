@@ -93,7 +93,7 @@ public sealed partial class SimBridge
 
     /// <summary>Whether the Workshop has installation work without a command: the markers to build after a start, a state sweep due.</summary>
     private bool InstallationsDue(long tick)
-        => !_markersBuilt || (_installations.Count > 0 && tick - _installationsSweptAt >= (long)_config.TickRateHz * StateSweepSeconds);
+        => !_markersBuilt || (_installations.Count > 0 && tick - _installationsSweptAt >= SweepTicks);
 
     /// <summary>The installations, read on the first use after a start or a failed commit.</summary>
     private void EnsureInstallations(Transaction tx)
@@ -156,7 +156,7 @@ public sealed partial class SimBridge
         var (cx, cz) = Installations.CentreOf(lot);
         if (realm >= PlanetIndexes.Length || PlanetIndexes[realm].Levels.NearCity(cx, cz, Installations.CityMarginM))
         {
-            RefuseInstall(subs, in command, TatooineReplication.InstallationNotHere);
+            RefuseInstall(subs, in command, TatooineReplication.InstallationInTown);
             return;
         }
 
@@ -372,6 +372,7 @@ public sealed partial class SimBridge
         _pendingInstall.Writes++;
         DeletePinsOf(tx, key);
         _installations.Remove(key);
+        _alertMailed.Remove(key);
         _installationOnLot.Remove(c.Lot);
         _lotsUsed[owner] = Math.Max(0, LotsOf(owner) - LotsTaken(c.Kind));
         if (_markerOf.TryGetValue(key, out var marker))
@@ -452,13 +453,16 @@ public sealed partial class SimBridge
             Redraw(tick0, key, worldTick);
         }
 
-        if (_installations.Count > 0 && tick - _installationsSweptAt >= (long)_config.TickRateHz * StateSweepSeconds)
+        if (_installations.Count > 0 && tick - _installationsSweptAt >= SweepTicks)
         {
             _installationsSweptAt = tick;
             foreach (var key in _installations.Keys)
             {
                 Redraw(tick0, key, worldTick);
+                MailIfAlerted(key, worldTick);
             }
+
+            _alertsSeeded = true;
         }
 
         Volatile.Write(ref _installationCount, _installations.Count);
@@ -548,6 +552,61 @@ public sealed partial class SimBridge
             TatooineReplication.Replicate(in e);
             _markerState[key] = state;
         }
+    }
+
+    // The sweep's period in ticks: StateSweepSeconds, or shorter for a check (SetInstallationSweepTicksForChecks).
+    private long _sweepTicksForChecks;
+
+    private long SweepTicks => _sweepTicksForChecks > 0 ? _sweepTicksForChecks : (long)_config.TickRateHz * StateSweepSeconds;
+
+    /// <summary>Shortens the state sweep — and so the installations' mail — to <paramref name="ticks"/>, for a check that cannot wait ten seconds.</summary>
+    internal void SetInstallationSweepTicksForChecks(long ticks) => _sweepTicksForChecks = ticks;
+
+    // What each installation last mailed its owner about (mail.md § 5): 0 nothing, else the MailKind. Seeded silently by the first sweep after a start, so a
+    // restart never mails twice — and a transition while the server was down is not mailed.
+    private readonly Dictionary<long, byte> _alertMailed = [];
+    private bool _alertsSeeded;
+
+    /// <summary>What an installation should have told its owner: full, stopped unpaid, upkeep under an hour, or nothing (0).</summary>
+    private byte AlertOf(in InstallationCore c, long worldTick)
+    {
+        var state = InstallationState.Of(in c, worldTick, TicksPerHour);
+        return state == InstallationState.Full ? MailKind.HopperFull
+            : state == InstallationState.Unpaid ? MailKind.Stopped
+            : c.PaidUntil - worldTick < TicksPerHour ? MailKind.UpkeepLow
+            : (byte)0;
+    }
+
+    /// <summary>Queues the mail of a transition into an alert, once (mail.md § 5); a return to running clears it, so the next one is told again.</summary>
+    private void MailIfAlerted(long key, long worldTick)
+    {
+        if (!_installations.TryGetValue(key, out var found))
+        {
+            return;
+        }
+
+        var alert = AlertOf(in found.C, worldTick);
+        var was = _alertMailed.GetValueOrDefault(key);
+        _alertMailed[key] = alert;
+        if (alert == 0 || alert == was || !_alertsSeeded)
+        {
+            return;
+        }
+
+        var c = found.C;
+        var what = ItemCatalog.TryGet(c.Family, out var t) ? t.Name : "Unknown";
+        var where = FormattableString.Invariant($"{c.X:0}, {c.Z:0}");
+        var held = Installations.Held(in c, worldTick, TicksPerHour);
+        var it = $"Your {what} extractor at {where}";
+        var (subject, text) = alert switch
+        {
+            MailKind.HopperFull => ($"Extractor full: {what}",
+                FormattableString.Invariant($"{it} has filled its hopper ({held} / {c.Hopper}) and stopped. Collect it to start it again.")),
+            MailKind.Stopped => ($"Extractor stopped: {what}",
+                FormattableString.Invariant($"{it} ran out of upkeep and stopped, holding {held}. Pay its upkeep to start it again.")),
+            _ => ($"Upkeep running out: {what}", $"{it} has under an hour of upkeep left. Pay it, or it stops."),
+        };
+        QueueSystemMail(c.Owner, alert, key, subject, text);
     }
 
     /// <summary>The extractor's model, as the structure asset table numbers it (<see cref="StructureAssets.Table"/>).</summary>

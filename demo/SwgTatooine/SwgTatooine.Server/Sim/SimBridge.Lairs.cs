@@ -137,6 +137,10 @@ public sealed partial class SimBridge
         tx.Destroy(creature);
         _corpsesRemoved++;
         _lairEntities++;
+        if (_hordeLairs.ContainsKey(lairId))
+        {
+            _hordeRaidersKilled++;
+        }
 
         if (!tx.TryOpenMut(lairId, out var lair))
         {
@@ -223,9 +227,15 @@ public sealed partial class SimBridge
             var realm = lair.Read(CreatureLair.Realm).Value;
             var rng = new Rng(Salt(tick, id.EntityKey, 0x2C1B3C6Du));
 
-            // At the lair's position, round which its occupants stand, and at its level.
+            // At the lair's position, round which its occupants stand, and at its level. A horde's raider marches as its wave did (horde.md § 2).
+            _hordeLairs.TryGetValue(id, out var march);
             WorldBuilder.SpawnCreature(tx, ref rng, id, spawner.CreatureTemplate, spawner.Level, place.X, place.Z, spawner.AliveCount, _config, terrain,
-                realm);
+                realm, in march);
+            if (march.Active)
+            {
+                _hordeRaidersSpawned++;
+            }
+
             _creaturesRespawned++;
             _lairEntities++;
             spawner.AliveCount++;

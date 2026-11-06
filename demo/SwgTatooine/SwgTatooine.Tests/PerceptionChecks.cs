@@ -166,6 +166,69 @@ internal sealed class PerceptionChecks : ServedChecks
     }
 
     /// <summary>
+    /// A creature that set its <c>target</c> on the bot's body is read as its attacker, with its level, and the body's health is read off the wire
+    /// (BotBrain.Defence.cs): the bot knows it is attacked from the scan it already makes.
+    /// </summary>
+    [Test]
+    [CancelAfter(90_000)]
+    [Category("Integration")]
+    public void ACreatureOnTheBody_IsReadAsItsAttacker_AndTheBodysHealthIsRead()
+    {
+        using var sim = new TatooineSim(Worlds.Served(Dir));
+        sim.Initialize();
+        Harness = new SessionHarness(sim);
+        var link = Connect();
+
+        var port = sim.Index.Shuttleports[0];
+        Worlds.Park(sim, link.Session, port.X + 40f, port.Z, out var parked);
+        var body = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
+        var lair = EntityId.Null;
+        var config = sim.Config;
+        sim.WriteInTick(tx =>
+        {
+            var rng = new Rng(5);
+            lair = WorldBuilder.SpawnLair(tx, ref rng, CreatureTemplates.Rat, 5, port.X + 50f, port.Z, site: 0, expireTick: 0, config,
+                TerrainField.Shared(config.ContentScale), 0);
+        });
+        SessionHarness.Until(() => !lair.IsNull, "the lair to be spawned");
+        SessionHarness.UntilNamed(link.Session, lair, "the lair's view to reach the session", parked);
+
+        // Rats are aggressive (CreatureTemplates.Aggressive): one 10 m away sets its target on the body within its aggro radius.
+        var onBody = new System.Collections.Generic.HashSet<uint>();
+        SessionHarness.Until(() =>
+        {
+            onBody.Clear();
+            using var tx = sim.Dbe.CreateQuickTransaction();
+            foreach (var cluster in tx.For<Creature>().GetClusterEnumerator())
+            {
+                var ai = cluster.GetReadOnlySpan(Creature.Ai);
+                for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    EntityId target = ai[slot].Target;
+                    if (target == body)
+                    {
+                        onBody.Add(SessionHarness.NetIdOf(link.Session, cluster.GetEntityId(slot)));
+                    }
+                }
+            }
+
+            return onBody.Count > 0;
+        }, "a rat to set its target on the body");
+        Harness.Ticks(6);
+
+        var world = Replay(link, new WorldStore(link.Plan), new Perception(), new FacilityMap());
+        Assert.Multiple(() =>
+        {
+            Assert.That(onBody, Does.Not.Contain(0u), "a rat on the body is not in the session's view");
+            Assert.That(world.Attacker, Is.AnyOf([.. onBody]), "the bot does not read the rat on its body as its attacker");
+            Assert.That(world.AttackerLevel, Is.EqualTo(5), "the attacker's level is not the rats'");
+            Assert.That(world.AttackerM, Is.GreaterThan(0f).And.LessThan(30f), "the attacker's distance is not the rat's");
+            Assert.That(world.Health, Is.GreaterThan(0f).And.LessThanOrEqualTo(1f), "the body's health was not read off the wire");
+        });
+    }
+
+    /// <summary>
     /// character-level.md § 9: a bot reads its own combat level off the wire, and, given it, hunts what is within it — a CL 12 character's bot takes on a
     /// level 15 creature that a CL 1 bot leaves alone.
     /// </summary>

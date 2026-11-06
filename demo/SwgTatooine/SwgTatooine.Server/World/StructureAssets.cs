@@ -49,6 +49,9 @@ internal static class StructureAssets
         // A player's factory and harvester (catalogue 11), which were footprint boxes until then.
         "factory",
         "resource_extractor",
+
+        // A horde's fortress (horde.md § 2), asked of blender-models on 2026-11-04; a footprint box until it is published.
+        "tat_horde_fortress",
     ];
 
     /// <summary>
@@ -77,6 +80,7 @@ internal static class StructureAssets
         StructureKind.Interior,
         StructureKind.Factory,
         StructureKind.Harvester,
+        StructureKind.HordeFortress,
     ];
 
     /// <summary>The asset a structure of this kind is, as an index into <see cref="Table"/>.</summary>
@@ -100,6 +104,7 @@ internal static class StructureAssets
         StructureKind.TownHall => 8,
         StructureKind.Factory => 10,
         StructureKind.Harvester => 11,
+        StructureKind.HordeFortress => 12,
 
         // PoiProp, CampObject: nothing published stands in for them. Interior: the door decides, not the kind.
         _ => NoAsset,

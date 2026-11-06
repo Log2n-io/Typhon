@@ -11,7 +11,7 @@ namespace SwgTatooine.Server;
 /// <para><b>Identical</b>: the same template and Mk, made by the same crafter, every stat line, the max condition and the life factor equal — a blueprint's
 /// items by construction, hand-crafted ones only when their rolls matched. The craft's serial is not compared: a crate keeps the first item's.</para>
 /// <para><b>Pristine</b>: never used nor repaired, its condition whole and not broken — a worn item differs from its twin by its condition.</para>
-/// <para><b>Fungible goods do not crate</b>: materials, cores and add-ons are stacks of 99 already.</para>
+/// <para><b>Fungible goods do not crate</b>: materials, cores and add-ons are stacks already, of up to <see cref="ItemLedger.StackMax"/>.</para>
 /// </remarks>
 public static class Crates
 {
@@ -44,10 +44,9 @@ public static class Crates
             return false;
         }
 
-        var inv = CultureInfo.InvariantCulture;
-        json.Append(template.ToString(inv)).Append('.').Append(mk.ToString(inv)).Append('.').Append(s.Crafter.ToString(inv))
-            .Append('.').Append(s.Stat0.ToString(inv)).Append('.').Append(s.Stat1.ToString(inv)).Append('.').Append(s.Stat2.ToString(inv))
-            .Append('.').Append(s.Stat3.ToString(inv)).Append('.').Append(s.MaxCondition.ToString(inv)).Append('.').Append(s.LifeMilli.ToString(inv));
+        // Formatted straight into the builder: no string a number (every inventory read writes one key an item).
+        json.Append(CultureInfo.InvariantCulture,
+            $"{template}.{mk}.{s.Crafter}.{s.Stat0}.{s.Stat1}.{s.Stat2}.{s.Stat3}.{s.MaxCondition}.{s.LifeMilli}");
         return true;
     }
 }

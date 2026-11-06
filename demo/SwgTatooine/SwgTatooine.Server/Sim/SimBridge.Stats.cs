@@ -278,6 +278,7 @@ public sealed partial class SimBridge
         j.Append("\"refusedBy\":{");
         Num(j, "bad", WorkshopRefused(TatooineReplication.InstallationBad)).Append(',');
         Num(j, "notHere", WorkshopRefused(TatooineReplication.InstallationNotHere)).Append(',');
+        Num(j, "inTown", WorkshopRefused(TatooineReplication.InstallationInTown)).Append(',');
         Num(j, "lotTaken", WorkshopRefused(TatooineReplication.LotTaken)).Append(',');
         Num(j, "noLotsLeft", WorkshopRefused(TatooineReplication.NoLotsLeft)).Append(',');
         Num(j, "empty", WorkshopRefused(TatooineReplication.InstallationEmpty)).Append(',');
@@ -285,9 +286,20 @@ public sealed partial class SimBridge
         j.Append('}');
 
         // Waypoints (SimBridge.Waypoints.cs, client.md C38): made and deleted since start.
-        j.Append("},\"waypoints\":{");
+        // The horde (SimBridge.Horde.cs, horde.md § 8): the running or last event, its counts and live metrics; null when there has been none.
+        j.Append("},\"horde\":").Append(HordeReportJson ?? "null");
+        j.Append(",\"waypoints\":{");
         Num(j, "created", WaypointsCreated).Append(',');
         Num(j, "deleted", WaypointsDeleted);
+
+        // Mail (SimBridge.Mail.cs, mail.md § 8): sent by players and by the game, read, deleted, dropped, expired; /tell said and refused.
+        j.Append("},\"mail\":");
+        AppendMailJson(j);
+        j.Append(",\"mailRefusedBy\":{");
+        Num(j, "noSuchPlayer", WorkshopRefused(TatooineReplication.MailNoSuchPlayer)).Append(',');
+        Num(j, "bad", WorkshopRefused(TatooineReplication.MailBad)).Append(',');
+        Num(j, "unknown", WorkshopRefused(TatooineReplication.MailUnknown)).Append(',');
+        Num(j, "offline", WorkshopRefused(TatooineReplication.TellOffline));
 
         // Who answers a player's attack (SimBridge.Combat.cs, V33 and 2026-11-03): the crowd's bodies that fought back, fled and joined, the creatures
         // that joined a fight started on one of them.

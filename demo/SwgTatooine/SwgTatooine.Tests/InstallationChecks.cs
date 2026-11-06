@@ -228,6 +228,64 @@ internal sealed class InstallationChecks : ServedChecks
     }
 
     /// <summary>
+    /// ML-4 (mail.md § 5): an installation mails its owner once per transition — its upkeep under an hour, then stopped unpaid, then its hopper full — and
+    /// not again while it stays so; the state it was placed in, seeded by the first sweep, is not mailed.
+    /// </summary>
+    [Test]
+    [CancelAfter(240_000)]
+    public void AnInstallation_MailsItsOwner_OncePerTransition()
+    {
+        using var sim = Start();
+        var o = LogIn(sim, 0xE5A1);
+        var kit = StageKit(sim, o);
+        var (x, z) = Wild(sim);
+        Worlds.Park(sim, o.Link.Session, x + 3f, z);
+        Harness.Ticks(2);
+        Place(o.Link, kit, ItemCatalog.Metal);
+        SessionHarness.Until(() => sim.Bridge.InstallationsPlaced == 1, "the extractor placed");
+        var key = Of(sim, o).Single().Key;
+        var owner = unchecked((long)o.Character.RawValue);
+        sim.Bridge.SetInstallationSweepTicksForChecks(4);
+        var sweep = 6;
+        List<string> Kinds() => [.. System.Text.Json.JsonDocument.Parse(MailEndpoints.InboxJson(sim.Dbe, owner)).RootElement.GetProperty("mails")
+            .EnumerateArray().Select(m => m.GetProperty("kind").GetString()).Reverse()];
+
+        Harness.Ticks(sweep);
+        Assert.That(Kinds(), Is.Empty, "placed unpaid: the state it starts in is no news");
+
+        Pay(o.Link, key, 100);
+        SessionHarness.Until(() => sim.Bridge.UpkeepPaid == 100, "an hour of upkeep");
+        sim.Bridge.AdvanceInstallationClockForChecks(Hours(sim, 0.1));
+        Harness.Ticks(sweep);
+        Harness.Ticks(sweep);
+        Assert.That(Kinds(), Is.EqualTo(new[] { "upkeeplow" }), "under an hour left: told once, not at every sweep");
+
+        sim.Bridge.AdvanceInstallationClockForChecks(Hours(sim, 2));
+        Harness.Ticks(sweep);
+        Assert.That(Kinds(), Is.EqualTo(new[] { "upkeeplow", "stopped" }));
+
+        Breathe();
+        Pay(o.Link, key, 800);
+        SessionHarness.Until(() => sim.Bridge.UpkeepPaid == 900, "eight more hours");
+        sim.Bridge.AdvanceInstallationClockForChecks(Hours(sim, 2));
+        Harness.Ticks(sweep);
+        Harness.Ticks(sweep);
+        var inbox = System.Text.Json.JsonDocument.Parse(MailEndpoints.InboxJson(sim.Dbe, owner)).RootElement.GetProperty("mails");
+        Assert.Multiple(() =>
+        {
+            Assert.That(Kinds(), Is.EqualTo(new[] { "upkeeplow", "stopped", "hopperfull" }));
+            Assert.That(inbox[0].GetProperty("subject").GetString(), Is.EqualTo("Extractor full: Metal"));
+            Assert.That(
+                inbox[0].GetProperty("ref").GetString(),
+                Is.EqualTo(key.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                "it names the installation");
+            Assert.That(
+                MailEndpoints.MailJson(sim.Dbe, owner, long.Parse(inbox[0].GetProperty("id").GetString())),
+                Does.Contain("has filled its hopper (500 / 500)"));
+        });
+    }
+
+    /// <summary>
     /// What may not be placed or done is refused with its reason and writes nothing: in a city; a family an extractor does not draw; a lot taken; past the
     /// character's 10 lots; a collect out of reach, or of an empty hopper; an upkeep payment past the prepaid cap; another's installation.
     /// </summary>
@@ -243,7 +301,7 @@ internal sealed class InstallationChecks : ServedChecks
         Worlds.Park(sim, o.Link.Session, city.X, city.Z);
         Harness.Ticks(2);
         Place(o.Link, kits[0], ItemCatalog.Metal);
-        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationNotHere) == 1, "in a city");
+        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationInTown) == 1, "in a city");
 
         for (var i = 0; i < Installations.LotsPerCharacter; i++)
         {
@@ -283,7 +341,7 @@ internal sealed class InstallationChecks : ServedChecks
         Worlds.Park(sim, o.Link.Session, fx + 200f, fz + 200f);
         Harness.Ticks(2);
         Collect(o.Link, first);
-        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationNotHere) == 2, "out of reach");
+        SessionHarness.Until(() => Count(o.Link, TatooineReplication.InstallationNotHere) == 1, "out of reach");
         Worlds.Park(sim, o.Link.Session, fx, fz);
         Harness.Ticks(2);
         Collect(o.Link, first);

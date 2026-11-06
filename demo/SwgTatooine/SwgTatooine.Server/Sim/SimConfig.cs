@@ -62,6 +62,13 @@ public sealed class SimConfig
     /// </remarks>
     public float PopulationScale = 1f;
 
+    /// <summary>
+    /// The scripted crowd: the <c>PlayerThink</c> bodies with no character, named "Player #n" on screen. Off (<c>--no-crowd</c>, Loïc, 2026-11-04: "real
+    /// players, bots, or npc") the build spawns none and a reopened world destroys the ones it saved; the code stays. On again needs a fresh world: a world
+    /// saved without its crowd reopens without one.
+    /// </summary>
+    public bool Crowd = true;
+
     // ── The partitioning knobs under study ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -229,6 +236,9 @@ public sealed class SimConfig
     /// </summary>
     public bool WelcomePack = true;
 
+    /// <summary>Seconds between two stims (<see cref="TatooineData.StimCooldownSec"/>): shortened by the checks, which wait on a paced clock.</summary>
+    public float StimCooldownSec = TatooineData.StimCooldownSec;
+
     /// <summary>Share of in-city travel decisions taken by shuttle rather than on foot or mounted. [EST]</summary>
     public float ShuttleShare = 0.5f;
 
@@ -305,6 +315,13 @@ public sealed class SimConfig
     /// </para>
     /// </remarks>
     public bool CollideCrowd = true;
+
+    /// <summary>
+    /// A horde's raiders collide with structures as players do (Loïc, 2026-11-04: "the enemies went through the town hall"); no other creature does.
+    /// <c>--no-collide-raiders</c> turns it off. Raiders only: a march into a town is where walking through a building shows, and the wild's
+    /// creatures, thousands of them, would pay a structure query per step for nothing.
+    /// </summary>
+    public bool CollideRaiders = true;
 
     /// <summary>
     /// Simulation rate. SWG's server ran its main loop at roughly 10 Hz for AI and movement broadcast; this is the tick

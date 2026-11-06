@@ -1,7 +1,10 @@
 /**
  * The action bar: one slot per top-row digit, fixed rather than configurable (Loïc, 2026-10-24).
  *
- * <b>1 mounts, 2–4 are combat stances.</b> The swoop is a toggle the server answers (`mounted`). An attack slot is a
+ * <b>1 mounts, 2–4 are combat stances, 5 drinks a stim</b> (Loïc, 2026-11-05): the one with the fewest doses left (`potions.ts`), the server's to heal and
+ * to time — the slot shows how many doses are held and sweeps through the cooldown once the heal lands.
+ *
+ * <b>The stances.</b> The swoop is a toggle the server answers (`mounted`). An attack slot is a
  * pushed/unpushed toggle between idle and that weapon's stance (`SetStance`, replicated as the player's `stance`): in it
  * the body holds the weapon — everyone watching sees it — and the server fights its target when it is an enemy within
  * the stance's reach, one blow on the stance's own beat. Each blow arrives as an `Attack` event and plays the weapon's
@@ -13,7 +16,7 @@
  */
 
 /** What pressing a slot does. */
-export type ActionKind = 'mount' | 'attack';
+export type ActionKind = 'mount' | 'attack' | 'consume';
 
 export interface ActionSlot {
   /** The digit printed on the slot, 1-based. */
@@ -36,6 +39,7 @@ export const ACTION_SLOTS: readonly ActionSlot[] = [
   { key: 2, code: 'Digit2', kind: 'attack', label: 'Unarmed combat', asset: 'vibroknuckler', color: '#d9963a' },
   { key: 3, code: 'Digit3', kind: 'attack', label: 'One-handed combat', asset: 'sword_vibroblade', color: '#9a83e0' },
   { key: 4, code: 'Digit4', kind: 'attack', label: 'Pistol combat', asset: 'blaster_dl44', color: '#d0533f' },
+  { key: 5, code: 'Digit5', kind: 'consume', label: 'Stim', asset: 'potion_stim', color: '#45c46a' },
 ];
 
 /** No stance: the avatar is idle, holding nothing. */
@@ -58,10 +62,14 @@ export function slotForKey(code: string, modified: boolean): ActionSlot | null {
   return ACTION_SLOTS.find((s) => s.code === code) ?? null;
 }
 
-/** The stance a slot press leaves: an attack slot toggles its own stance, the swoop drops any. */
+/** The stance a slot press leaves: an attack slot toggles its own stance, the swoop drops any, a stim keeps it. */
 export function stanceAfter(stance: number, slot: ActionSlot): number {
   if (slot.kind === 'mount') {
     return NO_STANCE;
+  }
+
+  if (slot.kind === 'consume') {
+    return stance;
   }
 
   return stance === slot.key ? NO_STANCE : slot.key;

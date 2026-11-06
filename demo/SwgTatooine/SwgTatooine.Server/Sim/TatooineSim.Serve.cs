@@ -39,9 +39,18 @@ public sealed partial class TatooineSim
         EconomyEndpoints.CountersJson = () => _bridge?.EconomyCountersJson() ?? "{}";
         EconomyEndpoints.CrowdJson = () => _bridge?.CrowdCountersJson() ?? "{}";
         EconomyEndpoints.DemoJson = () => _bridge?.DemoStatsJson() ?? "{}";
+        MailEndpoints.Send = request => _bridge != null
+            ? _bridge.SendPlayerMail(request)
+            : System.Threading.Tasks.Task.FromResult(new MailOutcome(false, 0, TatooineReplication.CraftFailed, "the simulation is not started"));
+        MailEndpoints.Clock = () => (_bridge?.MailWorldTick ?? 0, _config.TickRateHz);
         AdminEndpoints.Desk = request => _bridge != null
             ? _bridge.Admin(request)
             : System.Threading.Tasks.Task.FromResult(new AdminOutcome(false, "the simulation is not started"));
+        AdminEndpoints.Horde = request => _bridge != null
+            ? _bridge.RequestHorde(request)
+            : System.Threading.Tasks.Task.FromResult(new HordeOutcome(false, 0, "the simulation is not started"));
+        AdminEndpoints.HordeReport = () => _bridge?.HordeReportJson;
+        HordeEndpoints.Status = () => _bridge?.HordeStatusJson;
         // Before the runtime starts: the facilities never move, and a spatial archetype is read off the tick only while nothing ticks.
         FacilityEndpoints.Json = FacilityEndpoints.Build(Dbe);
         TatooineHost.DashboardPort = _config.DashboardPort;

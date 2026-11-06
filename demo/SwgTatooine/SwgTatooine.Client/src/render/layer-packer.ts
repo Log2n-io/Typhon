@@ -206,7 +206,7 @@ interface FieldReaders {
   readonly mounted: FieldArray | null;
   /** A creature's outfit among its template's bodies; `null` for every other archetype. */
   readonly skin: FieldArray | null;
-  /** A player's combat stance, for the weapon in its hand; `null` for every other archetype. */
+  /** A player's combat stance, or an armed raider's, for the weapon in its hand; `null` for every other archetype. */
   readonly stance: FieldArray | null;
   /** Whom a creature fights — its replicated `target`, a netId in this view — which it faces while it stands; `null` otherwise. */
   readonly target: FieldArray | null;
@@ -283,7 +283,8 @@ function readersFor(name: string, store: ArchetypeStore): FieldReaders {
         yaw: null,
         mounted: null,
         skin: optional(store, 'skin'),
-        stance: null,
+        // An armed raider's weapon (the server's CreatureBrain.Stance, a player's stance numbers): drawn in its hand, its clip swung on each blow.
+        stance: optional(store, 'stance'),
         down: null,
         look: null,
         target: optional(store, 'target'),

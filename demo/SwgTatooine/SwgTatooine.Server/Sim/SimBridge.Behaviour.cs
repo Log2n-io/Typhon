@@ -41,6 +41,8 @@ public sealed partial class SimBridge
         long aggroHits = 0;
         long chaseLost = 0;
         long chaseGivenUp = 0;
+        long retargets = 0;
+        var guard = FortGuardNow;
         var corpses = ctx.Writer(CorpseQueue);
 
         using var clusters = ctx.ClusterIds != null
@@ -120,7 +122,18 @@ public sealed partial class SimBridge
 
                 // Leashing overrides everything: a creature dragged past its tether goes home and ignores the world on
                 // the way. Without it one kited creature walks off the map and its cluster's bound follows.
-                if (homeSq > ai.LeashRadius * ai.LeashRadius)
+                // A raider is never leashed (review, 2026-11-04): its home is the town it marches on, and a straight walk there through everything,
+                // ignoring the defenders, is no raid. Past its tether it drops its quarry and takes up the march, whose branch below steers it.
+                if (ai.March == RaiderMarches && (ai.Mode == AiMode.Leashing || homeSq > ai.LeashRadius * ai.LeashRadius))
+                {
+                    if (ai.Mode != AiMode.Wander)
+                    {
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
+                        ClearTarget(in cluster, ref brainsRw, idx);
+                        ai.Mode = AiMode.Wander;
+                    }
+                }
+                else if (homeSq > ai.LeashRadius * ai.LeashRadius)
                 {
                     SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Leashing);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, ai.HomeX, ai.HomeZ);
@@ -139,6 +152,20 @@ public sealed partial class SimBridge
                         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, ai.HomeX, ai.HomeZ);
                     }
 
+                    continue;
+                }
+
+                // A raider near its fortress while someone attacks it turns on that attacker, over anything else it was doing (Loïc, 2026-11-04: defend
+                // the fortress first, then kill who is near, then break the town hall). Null almost always: no horde, or nobody at its walls.
+                if (ai.March == RaiderGarrison && guard != null && vitals[idx].Health > 0
+                    && FortressDefence(ctx, guard, x, z, ai.Target.Id, out var assailant, out var ax, out var az))
+                {
+                    BrainsRw(in cluster, ref brainsRw)[idx].Target = assailant;
+                    SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
+                    move.DestX = ax;
+                    move.DestZ = az;
+                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, ax, az);
+                    retargets++;
                     continue;
                 }
 
@@ -165,6 +192,26 @@ public sealed partial class SimBridge
                     var dxT = quarryAt.X - x;
                     var dzT = quarryAt.Z - z;
                     var targetSq = (dxT * dxT) + (dzT * dzT);
+                    var range = AttackRangeOf(in ai);
+
+                    // An opportunist turns on a nearer prey (Loïc, 2026-11-04: "once it aggros a foe it doesn't let go"): one in reach while its quarry is
+                    // not, or one at under half the distance. Half the aggressive creatures, by their key; the rest hold on to what they chose.
+                    if (Opportunist(key) && ai.AggroRadius > 0f)
+                    {
+                        aggroQueries++;
+                        if (NearestPrey(ctx, cluster.Realm, x, z, MathF.Max(ai.AggroRadius, range), out var prey, out var px, out var pz, out var preySq)
+                            && prey != ai.Target.Id
+                            && ((targetSq > range * range * AttackRangeHysteresis * AttackRangeHysteresis && preySq <= range * range) || preySq * 4d < targetSq))
+                        {
+                            BrainsRw(in cluster, ref brainsRw)[idx].Target = prey;
+                            SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
+                            move.DestX = px;
+                            move.DestZ = pz;
+                            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, px, pz);
+                            retargets++;
+                            continue;
+                        }
+                    }
 
                     // AC-3's leash. Distinct from LeashRadius above, which measures from the lair: this one measures from the QUARRY, and it is what stops a
                     // creature following a mounted player across the planet at a speed it can never match.
@@ -196,7 +243,7 @@ public sealed partial class SimBridge
                     // between stopping and closing on successive decisions, which writes MORE than pursuing would.
                     if (ai.Mode == AiMode.Fighting)
                     {
-                        var breakRange = _creatureAttackRange * AttackRangeHysteresis;
+                        var breakRange = range * AttackRangeHysteresis;
                         if (targetSq > breakRange * breakRange)
                         {
                             SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
@@ -207,7 +254,7 @@ public sealed partial class SimBridge
                         continue;
                     }
 
-                    if (targetSq <= _creatureAttackRange * _creatureAttackRange)
+                    if (targetSq <= range * range)
                     {
                         SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Fighting);
                         StandStill(ref move);
@@ -225,7 +272,16 @@ public sealed partial class SimBridge
                 // Three states, distinguished by two absolute tick stamps so that neither of the two common ones writes anything: walking the current leg
                 // (the velocity already points the right way and the Move system applies it), standing still (written once, on the transition), and
                 // picking the next leg. See CreatureBrain.MoveUntilTick.
-                if (tick < t.MoveUntilTick)
+                if (ai.March == RaiderMarches && homeSq > HordeArriveM * HordeArriveM)
+                {
+                    // A raider on its way (horde.md § 2): along the event's route, from where it stands — no route state of its own — and the aggro
+                    // query below still turns it on a defender it passes.
+                    var (mx, mz) = HordeMarchPoint(x, z, ai.HomeX, ai.HomeZ);
+                    move.DestX = mx;
+                    move.DestZ = mz;
+                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, mx, mz);
+                }
+                else if (tick < t.MoveUntilTick)
                 {
                     // Mid-leg. Re-steering here would only re-derive the velocity it already has.
                 }
@@ -249,48 +305,17 @@ public sealed partial class SimBridge
                 if (ai.AggroRadius > 0f && vitals[idx].Health > 0)
                 {
                     aggroQueries++;
-                    var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = ai.AggroRadius };
-                    // The cluster's realm: a creature aggroes on the players of its own planet (Realms G1).
-                    var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
-                    try
+                    if (NearestPrey(ctx, cluster.Realm, x, z, ai.AggroRadius, out var bestEntity, out var tx, out var tz, out _))
                     {
-                        var bestSq = double.MaxValue;
-                        var found = false;
-                        var bestEntity = EntityId.Null;
-                        float tx = 0f, tz = 0f;
-                        while (e.MoveNext())
-                        {
-                            var hit = e.Current;
+                        aggroHits++;
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
 
-                            // A downed player is no threat and no prey. Read only for a hit nearer than the best so far, which in a 24 m bubble is a handful.
-                            if (hit.DistanceSq < bestSq && ctx.Accessor.TryOpen(hit.Entity, out var candidate)
-                                && candidate.Read(Player.Vitals).Health > 0)
-                            {
-                                // The query result is in the engine's f64 world frame (#914); the simulation keeps f32 positions.
-                                bestSq = hit.DistanceSq;
-                                tx = (float)((hit.MinX + hit.MaxX) * 0.5);
-                                tz = (float)((hit.MinY + hit.MaxY) * 0.5);
-                                bestEntity = hit.Entity;
-                                found = true;
-                            }
-                        }
-
-                        if (found)
-                        {
-                            aggroHits++;
-                            SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
-
-                            // The identity, not only the point (SWG-02). Without it the pursuit below has nothing to re-read and nothing to attack: shooter
-                            // and quarry identities were never captured anywhere, which is gap G7.
-                            BrainsRw(in cluster, ref brainsRw)[idx].Target = bestEntity;
-                            move.DestX = tx;
-                            move.DestZ = tz;
-                            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, tx, tz);
-                        }
-                    }
-                    finally
-                    {
-                        e.Dispose();
+                        // The identity, not only the point (SWG-02). Without it the pursuit below has nothing to re-read and nothing to attack: shooter
+                        // and quarry identities were never captured anywhere, which is gap G7.
+                        BrainsRw(in cluster, ref brainsRw)[idx].Target = bestEntity;
+                        move.DestX = tx;
+                        move.DestZ = tz;
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, tx, tz);
                     }
                 }
             }
@@ -311,6 +336,63 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _chaseGivenUp, chaseGivenUp);
         }
+
+        if (retargets != 0)
+        {
+            Interlocked.Add(ref _creatureRetargets, retargets);
+        }
+    }
+
+    /// <summary>A raider notices a player this close and turns on it, metres (Loïc, 2026-11-04: killing comes first, the march second).</summary>
+    internal const float RaiderNoticeM = 60f;
+
+    /// <summary>A creature with a blaster (<see cref="CreatureBrain.Stance"/> a pistol) shoots from this far: a player's pistol's reach.</summary>
+    internal const float CreatureBlasterRangeM = 30f;
+
+    // Creatures that turned on a nearer prey, since the process began.
+    private long _creatureRetargets;
+
+    /// <summary>Creatures that turned on a nearer prey, since the process began.</summary>
+    internal long CreatureRetargets => Interlocked.Read(ref _creatureRetargets);
+
+    /// <summary>How far a creature attacks from: a blaster's reach, or melee.</summary>
+    private float AttackRangeOf(in CreatureBrain ai) => ai.Stance == Stances.Pistol ? CreatureBlasterRangeM : _creatureAttackRange;
+
+    /// <summary>Whether a creature turns on a nearer prey: half of them, fixed by their key.</summary>
+    private bool Opportunist(long key) => Hash01(Salt(0, key, 0x0990A7E5u)) < 0.5f;
+
+    /// <summary>
+    /// The nearest living player within <paramref name="radius"/>: its entity, where it stands and its squared distance. A downed player is no threat and no
+    /// prey. A query result is in the engine's f64 world frame (#914); the simulation keeps f32 positions. The realm's own players only (Realms G1).
+    /// </summary>
+    private bool NearestPrey(TickContext ctx, RealmId realm, float x, float z, float radius, out EntityId entity, out float tx, out float tz, out double bestSq)
+    {
+        var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = radius };
+        var e = Dbe.ClusterSpatialQuery<Player>(realm).Radius(in sphere);
+        bestSq = double.MaxValue;
+        entity = EntityId.Null;
+        tx = 0f;
+        tz = 0f;
+        try
+        {
+            while (e.MoveNext())
+            {
+                var hit = e.Current;
+                if (hit.DistanceSq < bestSq && ctx.Accessor.TryOpen(hit.Entity, out var candidate) && candidate.Read(Player.Vitals).Health > 0)
+                {
+                    bestSq = hit.DistanceSq;
+                    tx = (float)((hit.MinX + hit.MaxX) * 0.5);
+                    tz = (float)((hit.MinY + hit.MaxY) * 0.5);
+                    entity = hit.Entity;
+                }
+            }
+        }
+        finally
+        {
+            e.Dispose();
+        }
+
+        return !entity.IsNull;
     }
 
     /// <summary>Pick a new wander destination inside the leash radius, on the creature's own side of its lair.</summary>
@@ -578,20 +660,36 @@ public sealed partial class SimBridge
     /// <remarks>
     /// A demo figure and not an engine one: what it sets is how much work the 50 m fan-out is given to do, which is the thing
     /// worth watching. It was a minute; two since speech is drawn as a bubble over the speaker (2026-10-25), because a town
-    /// square of scripted players talking once a minute each is a wall of text. See <see cref="NpcChatEverySeconds"/>.
+    /// square of scripted players talking once a minute each is a wall of text. See <see cref="NpcChatMinSeconds"/>.
     /// </remarks>
     private const float ChatEverySeconds = 120f;
 
     /// <summary>
-    /// How often a city NPC says something, in seconds of simulated time (SWG-09).
+    /// The least and the most time between two lines of one city NPC, seconds (SWG-09; Loïc, 2026-11-04: "a random based delay of 1 to 3 minutes, not
+    /// less than 1 minute"). It was a memoryless 1-in-40-s roll per tick, which put a line seconds after the last one as often as not.
     /// </summary>
-    /// <remarks>
-    /// <b>Set by what the screen shows, now that speech is a bubble over the speaker</b> (Loïc, 2026-10-25: "it's too much
-    /// right now, makes it too crowdy on screen"). It was 8 s, chosen when speech was only a line in the chat panel and a
-    /// silent panel read as broken; drawn over heads, the same rate put ten bubbles at once over a town square. Five times
-    /// slower keeps a town audibly alive and leaves the bubbles readable — and a player's own line stands out.
-    /// </remarks>
-    private const float NpcChatEverySeconds = 40f;
+    internal const int NpcChatMinSeconds = 60;
+
+    /// <inheritdoc cref="NpcChatMinSeconds"/>
+    internal const int NpcChatMaxSeconds = 180;
+
+    /// <summary>
+    /// Whether a city NPC speaks on this visit: once in each window of its own — (min + max) / 2 long, phased by its key — at an offset drawn per window
+    /// across (max − min) / 2. Two lines are then a window apart, give or take the two draws: 1 to 3 minutes, never under one even for a cluster
+    /// visited every <paramref name="k"/> ticks (the spread is shortened by a visit). No state: no timer field, no write.
+    /// </summary>
+    internal static bool NpcSpeaksNow(long tick, long key, int hz, int k, uint seedSalt)
+    {
+        hz = Math.Max(1, hz);
+        k = Math.Max(1, k);
+        var window = (long)(NpcChatMinSeconds + NpcChatMaxSeconds) / 2 * hz;
+        var spread = Math.Max(1L, ((long)(NpcChatMaxSeconds - NpcChatMinSeconds) / 2 * hz) - k);
+        var t = tick + (long)(Hash01(SaltOf(0, key, 0x51DE5EEDu, seedSalt)) * window);
+        var w = t / window;
+        var pos = t - (w * window);
+        var at = (long)(Hash01(SaltOf(w, key, 0x70171CE1u, seedSalt)) * spread);
+        return pos >= at && pos - k < at;
+    }
 
     /// <summary>
     /// Player behaviour: an activity mix rather than one loop.
@@ -660,6 +758,9 @@ public sealed partial class SimBridge
             // Read-only, so asking who drives these players does not mark the cluster changed. One byte per player, contiguous: a cache line covers 64 of
             // them, which is why possession is its own component rather than three more fields on PlayerState (SWG-01).
             var controls = cluster.GetReadOnlySpan(Player.Control);
+
+            // Who a fighter shoots at, as PlayerCombat last chose (Resolve phase, an earlier tick): one with nobody mills round its objective.
+            var sessions = cluster.GetReadOnlySpan(Player.Session);
             var realm = cluster.Realm.Value;
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks elapse between two visits of a strided realm at divisor N
 
@@ -794,6 +895,13 @@ public sealed partial class SimBridge
                             else if (state.Activity != PlayerActivity.Combat)
                             {
                                 state.ActivityTicks = 0;
+                            }
+                            else if (routes[idx].Objective == 1 && sessions[idx].Target.IsNull && (tick + key) % MillEveryTicks < k)
+                            {
+                                // At its objective with nothing to shoot — its occupants down, or past what the crowd takes: it walks a few metres round
+                                // the lair rather than stand still on the spot everyone who rode in from that side was given (Loïc, 2026-11-04).
+                                Mill(ref state, ref move, x, z, Salt(tick, key, 0x6D111A5Bu));
+                                pushSlots |= 1UL << idx;
                             }
                         }
                         else
@@ -942,6 +1050,11 @@ public sealed partial class SimBridge
         var batched = _config.BatchedSpatialWrites;
         Span<CreaturePlacement> next = stackalloc CreaturePlacement[64];
 
+        // A horde's raiders collide with structures (SimConfig.CollideRaiders): staged per cluster into the players' scratch and resolved by the same
+        // batch query and push (SimBridge.Proximity.cs). No disc: raiders are few and live only for an event, so each moving one asks every step.
+        var prox = CollisionDisabled || !_config.CollideRaiders ? null : (_proximity ??= new ProximityScratch());
+        long contacts = 0;
+
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Creature>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
             : ctx.Accessor.GetClusterEnumerator<Creature>(ctx.StartClusterIndex, ctx.EndClusterIndex);
@@ -962,6 +1075,7 @@ public sealed partial class SimBridge
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);
 
             var moved = 0UL;
+            var pending = 0;
             var bits = bits0;
             while (bits != 0)
             {
@@ -989,6 +1103,23 @@ public sealed partial class SimBridge
                 var nb = default(CreaturePlacement);
                 var gy = GroundAt(cluster.Realm, x, z);
                 Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
+                if (prox != null && ai.March != 0 && float.IsFinite(x) && float.IsFinite(z))
+                {
+                    // Staged: written once the cluster's query has come back and the push is done.
+                    prox.Slot[pending] = idx;
+                    prox.Half[pending] = h;
+                    prox.CandX[pending] = x;
+                    prox.CandZ[pending] = z;
+                    prox.FromX[pending] = p.X;
+                    prox.FromZ[pending] = p.Z;
+                    prox.FeetY[pending] = p.Y;
+                    prox.Count[pending] = 0;
+                    prox.Overflow[pending] = false;
+                    prox.Probe[pending] = new BSphere2F { CenterX = x, CenterY = z, Radius = h + ProbeReachM };
+                    pending++;
+                    continue;
+                }
+
                 nb.SetAt(x, z, gy, h);
                 if (batched)
                 {
@@ -1002,6 +1133,38 @@ public sealed partial class SimBridge
                 moved |= 1UL << idx;
             }
 
+            // The cluster's raiders against the structures round their steps: one batch query, each pushed out of what it walked into — the asset's own
+            // walls (StructureShapes) — then grounded and written as the others are.
+            if (pending > 0)
+            {
+                var sink = new ProximitySink(prox);
+                Dbe.ClusterSpatialQuery<WorldObject>(cluster.Realm).ForEachInRadius(prox.Probe.AsSpan(0, pending), ref sink);
+                var shapes = new StructureShapes(ctx.Accessor, AssetShapes);
+                for (var m = 0; m < pending; m++)
+                {
+                    var mx = prox.CandX[m];
+                    var mz = prox.CandZ[m];
+                    if (PushOut(prox.Neighbours(m), prox.Half[m], half, ref mx, ref mz, out _, ref shapes, prox.FeetY[m], prox.FromX[m], prox.FromZ[m]))
+                    {
+                        contacts++;
+                    }
+
+                    var nb = default(CreaturePlacement);
+                    nb.SetAt(mx, mz, GroundAt(cluster.Realm, mx, mz), prox.Half[m]);
+                    var slot = prox.Slot[m];
+                    if (batched)
+                    {
+                        next[slot] = nb;
+                    }
+                    else
+                    {
+                        cluster.WriteSpatial(Creature.Bounds, slot, nb);
+                    }
+
+                    moved |= 1UL << slot;
+                }
+            }
+
             // The moved slots in one call: the barrier's bookkeeping once per cluster rather than once per creature.
             if (batched && moved != 0)
             {
@@ -1011,7 +1174,18 @@ public sealed partial class SimBridge
             // Nothing to mark for dormancy: WriteSpatial notes the cluster for the fence's sleep sweep and wakes a sleeping one (rules DM-01, DM-05; #896),
             // so a cluster whose creatures only move stays awake without a dirty bit.
         }
+
+        if (contacts != 0)
+        {
+            Interlocked.Add(ref _raiderContacts, contacts);
+        }
     }
+
+    // Raider steps a structure stopped or turned, since the process began (SimConfig.CollideRaiders): the horde's report carries it.
+    private long _raiderContacts;
+
+    /// <summary>Raider steps a structure stopped or turned, since the process began.</summary>
+    internal long RaiderContacts => Interlocked.Read(ref _raiderContacts);
 
     /// <summary>Integrate player positions.</summary>
     public void PlayerMoveTick(TickContext ctx)
@@ -1339,9 +1513,6 @@ public sealed partial class SimBridge
         var tick = ctx.TickNumber;
         var batched = _config.BatchedSpatialWrites;
 
-        // A townsperson speaks about this often. They are the dense population, so this is the figure that decides
-        // whether a town sounds alive; the players' cadence is slower because there are far fewer of them per square.
-        var npcChatChance = 1f / MathF.Max(1f, NpcChatEverySeconds * _config.TickRateHz);
         Span<NpcPlacement> next = stackalloc NpcPlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -1380,7 +1551,7 @@ public sealed partial class SimBridge
                 // its placement — and the NPCs are the demo's densest population, so a repeated cluster lookup here is the
                 // one that multiplies. The surrounding loops hoist theirs for the same reason.
                 var npcId = cluster.GetEntityId(idx);
-                if (Hash01(Salt(tick, npcId.EntityKey, 0x70171CE1u)) < npcChatChance)
+                if (NpcSpeaksNow(tick, npcId.EntityKey, _config.TickRateHz, k, _seedSalt))
                 {
                     TatooineReplication.Speak(
                         ctx,

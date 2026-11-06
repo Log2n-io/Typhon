@@ -88,11 +88,15 @@ public sealed class AssetColliders
     /// <b>The factory and the resource extractor</b> (catalogue 11): a pad 0.25 and 0.3 m up, stepped onto, and every wall and machine 0.25 or 0.3 to
     /// 2.3 m on it; the factory's console 0.25 to 1.17 m, in front of its stand point.
     /// </para>
+    /// <para>
+    /// <b>The horde's fortress</b> (catalogue 18, <c>tat_horde_fortress-1</c>, horde.md D8): walls, towers, the gate's towers and its shut doors 4 m into the
+    /// passage, all standing on the ground from 0 — walls to a body, the courtyard behind them out of reach; the passage up to the doors walkable.
+    /// </para>
     /// </remarks>
     private static readonly string[] Verified =
     [
         "tat_house_small", "tat_house_large", "tat_shuttleport", "tat_house_large_interior", "tat_house_small_interior", "tat_townhall",
-        "tat_townhall_interior", "factory", "resource_extractor",
+        "tat_townhall_interior", "factory", "resource_extractor", "tat_horde_fortress",
     ];
 
     /// <summary>One primitive as this simulation sees it: an axis-aligned box in the asset's own plan.</summary>

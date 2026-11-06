@@ -26,6 +26,7 @@ bool noMissions;
 bool noMarket;
 int crafters;
 int installers;
+int mailers;
 string marketRush;
 int marketRushListings;
 string marketLog;
@@ -85,6 +86,7 @@ try
         min: 0);
     // --brain only: the installation owners (crafting-build.md § 10, O-7), the next share by index after the crafters; 0 is the A/B arm.
     installers = r.Int("--installers", defaults.InstallPercent, "percent of the trading bots that keep an extractor; 0 for none", min: 0);
+    mailers = r.Int("--mailers", defaults.MailPercent, "percent of the trading bots that write mail and /tells to the fleet; 0 for none", min: 0, max: 100);
     // --brain only: the bazaar's load test (bazaar.md § 8, M5-1): every bot to one city's bazaars, one in ten keeping 1 cr listings, the rest racing
     // to buy them. Two flags where the design wrote one with two values: the strict reader takes one value a flag.
     marketRush = r.Str("--market-rush", null, "the bazaar load test in this city: sellers keep 1 cr listings, the rest race to buy them", "<city>");
@@ -277,6 +279,8 @@ var options = new BotSwarmOptions
     Market = !noMarket,
     CraftPercent = Math.Min(100, crafters),
     InstallPercent = Math.Min(100 - Math.Min(100, crafters), installers),
+    MailPercent = mailers,
+    NameFor = accounts == null ? null : index => accounts[index]?.Name,
     MarketRush = marketRush,
     MarketRushListings = marketRushListings,
     OnMarketWin = winLog == null
@@ -383,7 +387,39 @@ while (!stopping.IsCancellationRequested)
         + $"tick p99 {swarm.ServerMetric("typhon.tick.p99"),7:F3} ms"
         + Home()
         + Errands()
+        + Defence()
+        + Horde()
+        + Gear()
         + Trade());
+}
+
+// The bots' gear (GearPlan): assessments made and found wanting, down to their fist now, defenders gone to arm, spares asked for, worn-down items thrown away.
+string Gear()
+{
+    var g = swarm.Gearing(out var kits);
+    var stims = swarm.Stims();
+    var room = swarm.Room();
+    return g.Assessed == 0 && g.Unarmed == 0 && stims.Asked == 0 ? string.Empty
+        : $"  gear {g.Assessed} assessed {g.Due} due {g.Unarmed} unarmed {g.Runs} runs {g.Spares} spares asked {kits} kits {g.Discarded} discarded"
+          + $" stims {stims.Asked} asked {stims.BuysPlanned} buys planned room {room.Made} made {room.Left} left remote {room.Remote} cores {room.Cores}";
+}
+
+// The horde's call (horde.md § 6): statuses heard, answers sent, rallies taken, at the point, ended.
+string Horde()
+{
+    var h = swarm.Hording();
+    return h.Heard == 0 ? string.Empty : $"  horde heard {h.Heard} answered {h.Answered} rallies {h.Rallies} arrived {h.Arrived} ended {h.Ended}";
+}
+
+// Attacked: how many attackers were rolled for, fought back, run from, and shaken off (BotBrain.Defence.cs).
+string Defence()
+{
+    var d = swarm.Defence();
+    var w = swarm.DefenceDetail();
+    return d.Attacked == 0
+        ? string.Empty
+        : $"  attacked {d.Attacked} fought {d.Fought} fled {d.Fled} escaped {d.Escaped} won {w.Won}"
+            + $" ran: odds {w.Odds} losing {w.Losing} stalled {w.Stalled} hurt {w.Hurt} unarmed {w.Unarmed} backstop {w.Backstop}";
 }
 
 // The bots that live in the home city, and how many stand in it now: the concentration, watched as it builds.
@@ -411,11 +447,15 @@ string Trade()
     var m = swarm.Market();
     var c = swarm.Crafting();
     var i = swarm.Installing();
+    var mail = swarm.Mailing();
     return (m.Trades == 0 ? string.Empty : $"  market {m.Trades} trades {m.Listed} listed {m.Vendored} vendored {m.Bought} bought {m.Won} won {m.BuyLost} lost")
         + (c.Started + c.Resumed == 0 ? string.Empty : $"  craft {c.Started} started {c.Finished} finished")
         + (i.Owners == 0
             ? string.Empty
-            : $"  install {i.Owners} owners {i.Kits} kits {i.Tends} tends {i.Placed} placed {i.Collects} collects {i.Payments} paid");
+            : $"  install {i.Owners} owners {i.Kits} kits {i.Tends} tends {i.Placed} placed {i.Collects} collects {i.Payments} paid")
+        + (mail.Heard + mail.Sent + mail.Tells == 0
+            ? string.Empty
+            : $"  mail {mail.Heard} heard {mail.Acted} acted {mail.Sent} sent {mail.Refused} refused {mail.Tells} tells {mail.TellsHeard} told");
 }
 
 // TICK frames applied across the population: a connected session that is never produced for looks healthy in every other number.
@@ -591,7 +631,7 @@ if (brain)
         $"missions: {missions.Asked} take(s) sent, {missions.Taken} taken, {missions.Completed} completed (paid), {missions.Cancelled} cancelled after "
         + $"{SwgTatooine.Bots.Brain.BotBrain.QuestSeconds:F0} s");
     var items = swarm.Items();
-    Console.WriteLine($"items: {items.LootRows} loot row(s) read, {items.UnitsLost} unit(s) lost to a full inventory, {items.Stacks} stack(s) held");
+    Console.WriteLine($"items: {items.LootRows} loot row(s) read, {items.UnitsLost} unit(s) lost to a full inventory, {items.Stacks} lot(s) held");
     if (noMarket)
     {
         Console.WriteLine("market: off (--no-market)");
@@ -636,6 +676,10 @@ if (brain)
         Console.WriteLine(
             $"installations: {inst.Owners} owner(s); {inst.Kits} kit buy(s) chosen, {inst.Tends} errand(s), {inst.Placed} place(s), "
             + $"{inst.Collects} collect(s), {inst.Payments} upkeep payment(s) sent");
+        var mailing = swarm.Mailing();
+        Console.WriteLine(
+            $"mail: {mailing.Heard} told, {mailing.Acted} acted on, {mailing.Sent} sent, {mailing.Refused} refused; {mailing.Tells} tell(s) sent, "
+            + $"{mailing.TellsHeard} heard");
     }
 
     var tips = swarm.Tips();
@@ -646,6 +690,15 @@ if (brain)
     Console.WriteLine(
         $"errands: {errands.Mounts} swoop mount/dismount ask(s), {errands.Doors} door crossing(s), {errands.Used} terminal(s) used, "
         + $"{errands.Paths} walk(s) searched round buildings, {errands.Ports} walk(s) out of a shuttleport's plaza");
+    var horde = swarm.Hording();
+    Console.WriteLine(
+        $"horde: {horde.Heard} status(es) heard, {horde.Answered} answer(s) sent, {horde.Rallies} rally point(s) taken, {horde.Arrived} arrived, {horde.Ended} ended");
+    var defence = swarm.Defence();
+    var detail = swarm.DefenceDetail();
+    Console.WriteLine(
+        $"attacked: {defence.Attacked} engagement(s) decided, {defence.Fought} fought back, {defence.Fled} run(s), {defence.Escaped} of them shaken off, "
+        + $"{detail.Won} fight(s) won; runs by cause: odds {detail.Odds}, losing {detail.Losing}, stalled {detail.Stalled}, hurt {detail.Hurt}, "
+        + $"unarmed {detail.Unarmed}, backstop {detail.Backstop}");
     if (options.Dashboard != null)
     {
         var reports = swarm.Reports;

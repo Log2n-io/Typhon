@@ -357,6 +357,23 @@ export function Toolbar() {
           >
             Grid
           </button>
+          <button
+            className={ui.showRings ? 'active' : ''}
+            onClick={() => {
+              ui.setShowRings(!ui.showRings);
+            }}
+          >
+            Rings
+          </button>
+          <button
+            className={ui.unlockZoom ? 'active' : ''}
+            title="Let the third-person camera zoom out to 2 km behind the body"
+            onClick={() => {
+              ui.setUnlockZoom(!ui.unlockZoom);
+            }}
+          >
+            Zoom
+          </button>
           {/* The sun's shadow map: a GPU cost with a toggle, because a 2 048 map is re-rendered over every structure the
               session holds and an impostor cannot cast at all — so what it buys depends on how near something real is. */}
           <button

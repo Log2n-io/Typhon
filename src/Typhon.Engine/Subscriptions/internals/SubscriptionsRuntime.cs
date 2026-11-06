@@ -1090,6 +1090,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         if (frames != null && session.IsValid && session.Slot < Options.MaxSessions)
         {
             ref var send = ref frames.SendStateOf(session.Slot);
+
+            // The slot's last session gave its frame blocks back when the slot was recycled (SUB-40): zeroing the struct over a block would lose it for good.
+            Debug.Assert(!send.BlockInSlot(0).IsValid && !send.BlockInSlot(1).IsValid, "a session slot is bound while it still holds a frame block (SUB-40)");
             SessionSendState.Initialize(ref send);
 
             // Silence is measured from the handshake, not from the first PING: a client that completes HELLO and then says nothing must be closed on the same

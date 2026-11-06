@@ -1,4 +1,4 @@
-import type { InventoryItem, InventorySnapshot, LostNote } from '../items';
+import { STACK_MAX as SERVER_STACK_MAX, type InventoryItem, type InventorySnapshot, type LostNote } from '../items';
 import type { PlayerNotice } from '../notices';
 import type { RevisionFetch } from '../revision-reader';
 import { Rng } from './rng';
@@ -6,7 +6,7 @@ import { Rng } from './rng';
 /**
  * The mock's answer to `GET /swg/inventory` (inventory-loot.md § 3.6), so the inventory window, its icons and the loot lines
  * can be exercised without the server: one character whose inventory a drop fills every {@link MOCK_DROP_MS}, placed by the
- * server's rules — the same item at the same Mk stacks to 99, then opens the lowest free slot; what does not fit is lost
+ * server's rules — the same item at the same Mk stacks to STACK_MAX, then opens the lowest free slot; what does not fit is lost
  * and noted. Its `items` revision moves with every drop, as the body's owner field does, and with every move the mock
  * bazaar makes (`data/mock/market.ts`): units taken into a listing or sold to the vendor, units collected.
  *
@@ -54,7 +54,7 @@ export function mockItem(template: number): MockItemDef | undefined {
   return MOCK_MATERIALS.find((m) => m.template === template) ?? MOCK_PARTS.find((m) => m.template === template);
 }
 
-const STACK_MAX = 99;
+const STACK_MAX = SERVER_STACK_MAX;
 const LOST = 10;
 const UNITS_PER_DROP = 4;
 /** One drop in four carries a core or an add-on: far above the server's rates, so the mock shows them. */

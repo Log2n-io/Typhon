@@ -578,6 +578,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
                 SessionsClosed = ReadCloseCounts(_subscriptionsRuntime),
                 FramesSkipped = ReadSkipCounts(_subscriptionsRuntime),
+                FramePool = ReadFramePool(_subscriptionsRuntime),
             };
         }
 
@@ -664,6 +665,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
             SessionsClosed = ReadCloseCounts(subscriptions),
             FramesSkipped = ReadSkipCounts(subscriptions),
+            FramePool = ReadFramePool(subscriptions),
             OwedOverflows = subscriptions?.Frames?.OwedOverflows ?? 0L,
             OwedLosts = subscriptions?.Frames?.OwedLosts ?? 0L,
             OwedLargest = subscriptions?.Frames?.OwedLargest ?? 0,
@@ -707,6 +709,27 @@ public sealed partial class TyphonRuntime : IDisposable
             : new SessionCloseCounts(t.ClosesBy(SessionCloseReason.ClientLeft), t.ClosesBy(SessionCloseReason.Kicked), t.ClosesBy(SessionCloseReason.LinkLost),
                 t.ClosesBy(SessionCloseReason.Lagging), t.ClosesBy(SessionCloseReason.Unacknowledged), t.ClosesBy(SessionCloseReason.ProtocolError),
                 t.ClosesBy(SessionCloseReason.ServerShutdown), t.ClosesBy(SessionCloseReason.InternalError), t.ClosesBy(SessionCloseReason.Abusive));
+    }
+
+    /// <summary>The frame pool's budget and occupancy; <c>default</c> with no replication.</summary>
+    private static FramePoolStats ReadFramePool(SubscriptionsRuntime subscriptions)
+    {
+        var pool = subscriptions?.Frames?.Pool;
+        if (pool == null)
+        {
+            return default;
+        }
+
+        var blocks = new int[FramePool.SizeClassCount];
+        var free = new int[FramePool.SizeClassCount];
+        for (var c = 0; c < blocks.Length; c++)
+        {
+            blocks[c] = pool.BlocksInClass(c);
+            free[c] = pool.FreeInClass(c);
+        }
+
+        return new FramePoolStats(pool.BudgetBytes, pool.CommittedBytes, pool.BlockCount, pool.RentedCount, pool.BudgetSkipCount, pool.SlabsReleasedCount, blocks,
+            free);
     }
 
     /// <summary>The frame stage's cumulative skips per cause; zeros with no replication.</summary>

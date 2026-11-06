@@ -181,6 +181,7 @@ export const STRUCTURE_KIND_NAMES: readonly string[] = [
   'Bazaar',
   'Mission terminal',
   'Town hall',
+  'Raider fortress',
 ];
 export const StructureKind = {
   Building: 0,
@@ -203,4 +204,7 @@ export const StructureKind = {
 
   /** A city's town hall: across from its shuttleport's gate, its door facing it, with a room behind the door like a house's. */
   TownHall: 11,
+
+  /** A horde's fortress: placed when a raid is triggered, gone when it ends (horde.md § 2). */
+  HordeFortress: 12,
 } as const;

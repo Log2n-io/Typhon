@@ -154,6 +154,28 @@ body,
   border-radius: 3px;
 }
 
+/*
+ * A potential enemy's tag (data/foe-tags.ts): the selection's text with its mark, and no box — the place names' shadow reads it (Loïc, 2026-11-04).
+ * While it hunts the avatar, a red glow under that shadow.
+ */
+.label-foe {
+  background: none;
+}
+
+.label-foe.engaged {
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 6px rgba(255, 60, 50, 0.85);
+}
+
+.foe-aggressive {
+  color: #ff5a4f;
+}
+
+.foe-passive {
+  color: #f5c542;
+}
+
 /* The hover and selection frames: four corners of the rectangle a body covers (render/selection-frame.ts). */
 .sel-frames {
   position: absolute;
@@ -695,11 +717,180 @@ button.active {
   font-variant-numeric: tabular-nums;
 }
 
+/* Slots keep their size (client.md C43): a wider window fits more of them on a row, never bigger ones. */
 .inventory-grid {
+  --inventory-slot: 44px;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fill, var(--inventory-slot));
+  justify-content: start;
   gap: 4px;
   margin-bottom: 6px;
+}
+
+.inventory-grid > .inventory-slot {
+  width: var(--inventory-slot);
+  height: var(--inventory-slot);
+  aspect-ratio: auto;
+}
+
+.inventory-slot.selected {
+  border-color: #9fd3ff;
+  box-shadow: inset 0 0 0 1px #9fd3ff;
+}
+
+.inventory-slot.drop {
+  border-color: var(--accent);
+  background: rgba(240, 184, 74, 0.15);
+}
+
+/* The grid beside the preview panel; the grid takes what the panel leaves. */
+.inventory-layout {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.inventory-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.inventory-expand {
+  margin-left: 8px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  color: #cfe6ff;
+  background: rgba(110, 170, 220, 0.12);
+  border: 1px solid rgba(110, 170, 220, 0.4);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.inventory-expand[aria-pressed='true'] {
+  background: rgba(110, 170, 220, 0.3);
+}
+
+.inventory-expand:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.inventory-details {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(110, 170, 220, 0.2);
+}
+
+.inventory-details-name {
+  font-weight: 600;
+}
+
+.inventory-mk.inline {
+  position: static;
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.item-preview {
+  position: relative;
+  height: 200px;
+  border-radius: 4px;
+  background: radial-gradient(circle at 50% 40%, rgba(110, 170, 220, 0.18), rgba(0, 0, 0, 0.35));
+}
+
+.item-preview-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.item-preview-canvas:active {
+  cursor: grabbing;
+}
+
+.item-preview-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.inventory-details-stats {
+  margin: 0;
+  font-size: 12px;
+}
+
+.inventory-details-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.1);
+}
+
+.inventory-details-line dt {
+  opacity: 0.7;
+}
+
+.inventory-details-line dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The count prompt under the grid: a split, an unpack, a throw-away — the last in red, as its own confirmation. */
+.inventory-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid rgba(110, 170, 220, 0.4);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+}
+
+.inventory-prompt.danger {
+  border-color: rgba(230, 90, 80, 0.7);
+}
+
+.inventory-prompt-count {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.inventory-prompt-count input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+
+.inventory-prompt-count input[type='number'] {
+  width: 80px;
+}
+
+.inventory-prompt-buttons {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.inventory-prompt-buttons button.danger {
+  color: #fff;
+  background: rgba(200, 60, 50, 0.85);
+  border-color: rgba(230, 90, 80, 0.9);
 }
 
 .inventory-slot {
@@ -1680,6 +1871,41 @@ button.active {
   pointer-events: none;
 }
 
+/* The stim slot's doses, bottom right. */
+.slot-count {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-shadow:
+    0 0 2px #000,
+    0 1px 1px #000;
+  pointer-events: none;
+}
+
+/* The stim's cooldown: a shade over the slot that drains from the top until a stim may be drunk again. */
+.slot-cooldown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  animation-name: slot-cooldown;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes slot-cooldown {
+  to {
+    height: 0%;
+  }
+}
+
 /* The press: a flash that fades, restarted on every use by remounting. */
 .slot-flash {
   position: absolute;
@@ -1745,6 +1971,29 @@ button.active {
 
 .bazaar-table td.mk5 {
   color: #ffcf4a;
+}
+
+/* The board's rows select for the preview panel, by a click or the arrow keys. */
+.bazaar-table[tabindex] {
+  outline: none;
+}
+
+.bazaar-table[tabindex] tbody tr:not(.bazaar-row-notice) {
+  cursor: pointer;
+}
+
+.bazaar-table[tabindex] tbody tr:not(.bazaar-row-notice):hover {
+  background: rgba(110, 170, 220, 0.08);
+}
+
+.bazaar-table tr.selected {
+  background: rgba(110, 170, 220, 0.2);
+}
+
+/* The preview stays in view while the board scrolls under it. */
+.bazaar .inventory-details {
+  position: sticky;
+  top: 0;
 }
 
 /* A row the board no longer lists, kept while its refusal is read: "Sold to someone else first". */
@@ -2114,4 +2363,269 @@ button.active {
   gap: 10px;
   z-index: 19;
   border-color: var(--accent);
+}
+
+/* The chat's tabs (client.md C44): a row above the lines, a count on a tab not shown, its editor under the row. */
+.chat-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  margin-bottom: 4px;
+}
+
+.chat-tab {
+  padding: 1px 7px;
+  font-size: 11px;
+  color: #cfe6ff;
+  background: rgba(110, 170, 220, 0.08);
+  border: 1px solid rgba(110, 170, 220, 0.3);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.chat-tab.active {
+  background: rgba(110, 170, 220, 0.3);
+  border-color: rgba(110, 170, 220, 0.7);
+}
+
+.chat-tab.unread {
+  border-color: var(--accent);
+}
+
+.chat-tab-count {
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  color: #1a1206;
+  background: var(--accent);
+  border-radius: 6px;
+}
+
+.chat-tab-tool {
+  padding: 1px 5px;
+}
+
+.chat-tabs .chat-count {
+  margin-left: auto;
+}
+
+.chat-tab-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 6px;
+  font-size: 11px;
+  border: 1px solid rgba(110, 170, 220, 0.3);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.chat-tab-name input {
+  margin-left: 6px;
+  width: 120px;
+}
+
+.chat-tab-categories {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 2px 8px;
+}
+
+.chat-tab-editor button.danger {
+  align-self: flex-start;
+}
+
+/* A /tell: its own colour, the other side a button that starts the answer. */
+.chat-tell .chat-speaker,
+.chat-tell .chat-text {
+  color: #e7a6ff;
+}
+
+.bottombar button.unread {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* The mail (mail.md § 6): the inbox on the left, the mail open or being written on the right. */
+.mail-layout {
+  display: flex;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.mail-list {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.mail-rows {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.mail-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1px 6px;
+  width: 100%;
+  padding: 4px 6px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(110, 170, 220, 0.12);
+  cursor: pointer;
+}
+
+.mail-row:hover {
+  background: rgba(110, 170, 220, 0.08);
+}
+
+.mail-row.selected {
+  background: rgba(110, 170, 220, 0.2);
+}
+
+.mail-row.unread .mail-row-subject,
+.mail-row.unread .mail-row-from {
+  font-weight: 700;
+  color: #fff;
+}
+
+.mail-row-from {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.mail-row-age {
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.mail-row-subject {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mail-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding-left: 10px;
+  border-left: 1px solid rgba(110, 170, 220, 0.2);
+}
+
+.mail-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.mail-reader {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+
+.mail-reader-subject {
+  font-weight: 700;
+}
+
+.mail-reader-from {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.mail-reader-text {
+  flex: 1;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.mail-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mail-composer label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.mail-composer label input {
+  flex: 1;
+}
+
+.mail-text {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.mail-bytes {
+  font-size: 11px;
+  opacity: 0.7;
+  margin-right: auto;
+}
+
+.mail-bytes.over {
+  color: #ff7a6e;
+  opacity: 1;
+}
+
+.mail-unread {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* The horde's line (horde.md § 6): centred at the top, over the world, under every window. */
+.horde-bar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: rgba(60, 14, 8, 0.85);
+  border: 1px solid #e0402a;
+  border-radius: 4px;
+  color: #ffe9dc;
+  font-size: 13px;
+  z-index: 40;
+  pointer-events: auto;
+}
+
+.horde-bar.over {
+  background: rgba(20, 20, 20, 0.8);
+  border-color: #888;
+}
+
+.horde-bar .horde-committed {
+  color: #ffd27a;
+  font-weight: 600;
+}
+
+.horde-bar button.quiet {
+  opacity: 0.7;
 }

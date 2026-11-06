@@ -76,6 +76,24 @@ public sealed class Utf8TextTests
         });
     }
 
+    /// <summary>The 64-byte type holds its capacity and refuses a byte past it, as the 256-byte one does — counted in bytes, laid out as the binders
+    /// read.</summary>
+    [Test]
+    public void TheShortTypeHoldsItsCapacity_AndRefusesPastIt()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(Utf8Text64.From(new string('x', Utf8Text64.Capacity)).Length, Is.EqualTo(Utf8Text64.Capacity));
+            Assert.That(() => Utf8Text64.From(new string('x', Utf8Text64.Capacity + 1)), Throws.ArgumentException);
+            Assert.That(() => Utf8Text64.From(new string('é', 32)), Throws.Nothing);
+            Assert.That(() => Utf8Text64.From(new string('é', 33)), Throws.ArgumentException);
+            Assert.That(() => Utf8Text64.FromUtf8(new byte[Utf8Text64.Capacity + 1]), Throws.ArgumentException);
+            Assert.That(Utf8Text64.From("han").ToString(), Is.EqualTo("han"));
+            Assert.That(System.Runtime.InteropServices.Marshal.SizeOf<Utf8Text64>(), Is.EqualTo(Utf8Text64.Capacity + sizeof(ushort)),
+                "the binders' layout: a ushort length, then the bytes");
+        });
+    }
+
     [Test]
     public void TwoValuesAreEqualWhenTheirBytesAre()
     {

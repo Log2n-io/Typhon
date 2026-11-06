@@ -441,7 +441,7 @@ public sealed class AssetCollisionChecks
         [
             StructureKind.Building, StructureKind.CraftingStation, StructureKind.Shuttleport, StructureKind.PoiProp,
             StructureKind.PlayerHouse, StructureKind.Factory, StructureKind.Harvester, StructureKind.CampObject, StructureKind.Bazaar,
-            StructureKind.MissionTerminal, StructureKind.TownHall,
+            StructureKind.MissionTerminal, StructureKind.TownHall, StructureKind.HordeFortress,
         ];
 
         var rng = new Rng(20261022u);

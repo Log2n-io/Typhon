@@ -16,7 +16,7 @@ namespace SwgTatooine.Server;
 public sealed class ItemAuditResult
 {
     /// <summary>The most violations kept by name; the count is exact beyond it.</summary>
-    public const int ViolationsKept = 50;
+    public const int ViolationsKept = 100;
 
     /// <summary>No rule broken.</summary>
     public bool Ok => ViolationCount == 0;
@@ -161,8 +161,9 @@ public static class ItemEndpoints
             return Results.StatusCode(StatusCodes.Status401Unauthorized);
         }
 
+        // Built without a string (PooledJson): 4 000 bots re-read it on every items revision — 4.8 MB/s live of builders and their copies (2026-11-05).
         return CharacterStore.TryFind(dbe, account, out var character, out _)
-            ? Results.Text(InventoryJson(dbe, character), "application/json")
+            ? PooledJson.Of((dbe, character), static (json, s) => AppendInventory(json, s.dbe, s.character))
             : Results.Text(Empty, "application/json");
     }
 
@@ -198,10 +199,20 @@ public static class ItemEndpoints
     /// </remarks>
     public static string InventoryJson(DatabaseEngine dbe, EntityId character)
     {
+        var json = new StringBuilder(1024);
+        AppendInventory(json, dbe, character);
+        return json.ToString();
+    }
+
+    // The stacks an inventory read sorts: the request thread's own list, kept from request to request.
+    [ThreadStatic] private static List<(ulong Id, ItemStack Stack)> t_stacks;
+
+    /// <summary><see cref="InventoryJson"/> written into <paramref name="json"/>.</summary>
+    public static void AppendInventory(StringBuilder json, DatabaseEngine dbe, EntityId character)
+    {
         ArgumentNullException.ThrowIfNull(dbe);
         var ix = Indexes(dbe);
         var key = unchecked((long)character.RawValue);
-        var inv = CultureInfo.InvariantCulture;
         using var tx = dbe.CreateQuickTransaction();
         bool open;
         using (var wallets = tx.EnumerateIndex<Wallet, long>(ix.WalletByOwner, key, key))
@@ -209,7 +220,8 @@ public static class ItemEndpoints
             open = wallets.MoveNext();
         }
 
-        var stacks = new List<(ulong Id, ItemStack Stack)>();
+        var stacks = t_stacks ??= new List<(ulong Id, ItemStack Stack)>(64);
+        stacks.Clear();
         using (var found = tx.EnumerateIndex<ItemStack, long>(ix.StackByOwner, key, key))
         {
             while (found.MoveNext())
@@ -219,14 +231,13 @@ public static class ItemEndpoints
         }
 
         stacks.Sort(static (x, y) => x.Stack.Slot.CompareTo(y.Stack.Slot));
-        var json = new StringBuilder(1024);
         json.Append("{\"open\":").Append(open ? "true" : "false").Append(",\"slots\":").Append(ItemLedger.Slots).Append(",\"items\":[");
         for (var i = 0; i < stacks.Count; i++)
         {
             var s = stacks[i].Stack;
             ItemCatalog.TryGet(s.Template, out var t);
             json.Append(i == 0 ? "{" : ",{")
-                .Append("\"id\":\"").Append(stacks[i].Id.ToString(inv)).Append('"')
+                .Append("\"id\":\"").Append(stacks[i].Id).Append('"')
                 .Append(",\"slot\":").Append(s.Slot);
             Item(json, in t, s.Template);
             json.Append(",\"mk\":").Append(s.Mk)
@@ -264,7 +275,7 @@ public static class ItemEndpoints
                 .Append('}');
         }
 
-        return json.Append("]}").ToString();
+        json.Append("]}");
     }
 
     // "item" (the asset id), "name" and "category" — the client has no item table — or "unknown" for a template the catalogue does not hold; and
@@ -310,7 +321,7 @@ public static class ItemEndpoints
             .Append(",\"lifeMilli\":").Append(s.LifeMilli)
             .Append(",\"repairs\":").Append(s.Repairs)
             .Append(",\"broken\":").Append((s.Flags & ItemFlags.Broken) != 0 ? "true" : "false")
-            .Append(",\"crafter\":\"").Append(s.Crafter.ToString(CultureInfo.InvariantCulture)).Append("\"}");
+            .Append(",\"crafter\":\"").Append(s.Crafter).Append("\"}");
     }
 
     /// <summary>Rows after <paramref name="after"/>, in sequence, at most <paramref name="limit"/>: <c>{"rows":[…],"next"}</c>.</summary>
@@ -720,8 +731,9 @@ public static class ItemEndpoints
             ok = false;
         }
 
-        // A pack or an unpack moves units between two stacks of one owner (crafting-catalog.md § 11.2); every other row moves them between two.
-        if (r.From == r.To && r.Kind is not (ItemMoveKind.Pack or ItemMoveKind.Unpack))
+        // A pack, an unpack or a move moves units between two stacks of one owner (crafting-catalog.md § 11.2, inventory-loot.md § 10); every other row
+        // moves them between two.
+        if (r.From == r.To && r.Kind is not (ItemMoveKind.Pack or ItemMoveKind.Unpack or ItemMoveKind.Move))
         {
             result.Violation($"seq {r.Seq}: both sides are {r.From}");
             ok = false;
@@ -779,6 +791,8 @@ public static class ItemEndpoints
             case ItemMoveKind.Decay:
             case ItemMoveKind.Repair:
             case ItemMoveKind.AdminTake:
+            case ItemMoveKind.Discard:
+            case ItemMoveKind.Consume:
                 if (r.From == ItemLedger.World || isListing(r.From) || r.To != ItemLedger.World)
                 {
                     result.Violation($"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must go from a character to World, not {r.From} to {r.To}");
@@ -794,6 +808,13 @@ public static class ItemEndpoints
                     && (r.Template is not (ItemCatalog.KitWeaponRepair or ItemCatalog.KitArmorRepair) || r.Count != 1 || r.Ref == 0))
                 {
                     result.Violation($"seq {r.Seq}: a repair row must consume one repair kit naming the item, not {r.Count} of template {r.Template}");
+                }
+
+                // A potion's last dose drunk: one potion.
+                if (r.Kind == ItemMoveKind.Consume
+                    && (!ItemCatalog.TryGet(r.Template, out var drunk) || drunk.Category != ItemCategory.Potion || r.Count != 1))
+                {
+                    result.Violation($"seq {r.Seq}: a consume row must destroy one potion, not {r.Count} of template {r.Template}");
                 }
 
                 break;
@@ -826,6 +847,15 @@ public static class ItemEndpoints
                     result.Violation(
                         $"seq {r.Seq}: a {ItemMoveKind.NameOf(r.Kind)} row must move items with stats between two stacks of one character, naming its crate, "
                         + $"not {r.From} to {r.To} for {r.Ref}");
+                }
+
+                break;
+            case ItemMoveKind.Move:
+                // Units between two stacks of one character, split or merged; an item with stats moves slot without a row.
+                if (r.From != r.To || r.From == ItemLedger.World || isListing(r.From) || ItemCatalog.HasStats(r.Template) || r.FromStack == r.ToStack
+                    || r.Ref != 0)
+                {
+                    result.Violation($"seq {r.Seq}: a move row must move units between two stacks of one character, not {r.From} to {r.To} for {r.Ref}");
                 }
 
                 break;

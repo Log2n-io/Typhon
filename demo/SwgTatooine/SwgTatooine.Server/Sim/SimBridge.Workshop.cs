@@ -104,6 +104,10 @@ public sealed partial class SimBridge
         var refines = subs == null ? default : subs.Commands<RefineItems>();
         var packs = subs == null ? default : subs.Commands<PackItem>();
         var unpacks = subs == null ? default : subs.Commands<UnpackItem>();
+        var moves = subs == null ? default : subs.Commands<MoveItem>();
+        var discards = subs == null ? default : subs.Commands<DiscardItem>();
+        var consumes = subs == null ? default : subs.Commands<ConsumeItem>();
+        var sorts = subs == null ? default : subs.Commands<SortItems>();
         var places = subs == null ? default : subs.Commands<PlaceInstallation>();
         var collects = subs == null ? default : subs.Commands<CollectInstallation>();
         var pays = subs == null ? default : subs.Commands<PayUpkeep>();
@@ -113,11 +117,13 @@ public sealed partial class SimBridge
         var waypointDeletes = subs == null ? default : subs.Commands<DeleteWaypoint>();
         var waypointActives = subs == null ? default : subs.Commands<SetActiveWaypoint>();
         var waypointing = waypointCreates.Count + waypointDeletes.Count + waypointActives.Count;
+        var mailing = subs == null ? 0 : subs.Commands<ReadMail>().Count + subs.Commands<DeleteMail>().Count + subs.Commands<TellPlayer>().Count;
         var crafting = starts.Count + experiments.Count + enhances.Count + finishes.Count + repairs.Count + salvages.Count + refines.Count + packs.Count
-            + unpacks.Count + installing + waypointing;
+            + unpacks.Count + moves.Count + discards.Count + consumes.Count + sorts.Count + installing + waypointing;
         var flushDue = ctx.TickNumber % Math.Max(1, _config.TickRateHz) == 0;
-        if (unequips.Count + equips.Count + crafting == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue) && !AdminPending
-            && !InstallationsDue(ctx.TickNumber))
+        PublishMailTick(ctx.WorldTick);
+        if (unequips.Count + equips.Count + crafting + mailing == 0 && _gearDue.Count == 0 && _gearDueCharacters.Count == 0 && !WearPending(flushDue)
+            && !AdminPending && !InstallationsDue(ctx.TickNumber) && !MailPending)
         {
             Interlocked.Exchange(ref _worldTickNow, ctx.WorldTick + InstallClockOffset);
             return;
@@ -153,6 +159,10 @@ public sealed partial class SimBridge
         _refinesApplied.Clear();
         _packsApplied.Clear();
         _unpacksApplied.Clear();
+        _movesApplied.Clear();
+        _discardsApplied.Clear();
+        _consumesApplied.Clear();
+        _heals.Clear();
         _gearScratch.Clear();
         _gearScratch.AddRange(_gearDue);
         _gearDue.Clear();
@@ -235,6 +245,27 @@ public sealed partial class SimBridge
                     UnpackFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
                 }
 
+                // The inventory window's (inventory-loot.md § 10), after the crates': a drag in the same tick as an unpack lands in the grid it left.
+                foreach (var command in moves)
+                {
+                    MoveFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in discards)
+                {
+                    DiscardFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in consumes)
+                {
+                    ConsumeFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
+                foreach (var command in sorts)
+                {
+                    SortFromCommand(tx, tick0, subs, in command, ctx.WorldTick);
+                }
+
                 // Installations (crafting-build.md § 10): a place, then collects and payments, then pick-ups — a client that pays and picks up in one tick
                 // has its payment settled first.
                 foreach (var command in places)
@@ -277,6 +308,9 @@ public sealed partial class SimBridge
             // The operators' requests (SimBridge.Admin.cs), after the players': a worn item they rewrite or take is in the gear computed below.
             AdminTick(tx, ctx.WorldTick);
 
+            // Mail (SimBridge.Mail.cs): the game's queued since the last pass, the players' sent by HTTP, read, deleted; /tell said.
+            MailTick(tx, tick0, ctx, subs);
+
             // The gear from what the transaction leaves worn, read through it before it commits; written to the bodies once it has.
             _gearComputed.Clear();
             foreach (var (character, body) in _gearScratch)
@@ -286,8 +320,10 @@ public sealed partial class SimBridge
             }
 
             var written = _equipsApplied.Count + _unequipsApplied.Count + _craftsApplied.Count + _repairsApplied.Count + _salvagesApplied.Count
-                + _refinesApplied.Count + _packsApplied.Count + _unpacksApplied.Count + _installsApplied.Count + _waypointsApplied.Count + _wearCounts.Writes
-                + _adminApplied.Count > 0;
+                + _refinesApplied.Count + _packsApplied.Count + _unpacksApplied.Count + _movesApplied.Count + _discardsApplied.Count + _consumesApplied.Count
+                + _sortsApplied.Count
+                + _installsApplied.Count + _waypointsApplied.Count + _wearCounts.Writes
+                + _adminApplied.Count + _mailApplied.Count + _mailCommandsApplied.Count + _systemMailTaken.Count > 0;
             if (written)
             {
                 FlushItemHead(tx);
@@ -320,8 +356,11 @@ public sealed partial class SimBridge
             EndCrafts(committed);
             EndRefines(subs, committed);
             EndCrates(subs, committed);
+            EndGrid(subs, committed);
+            EndPotions(ctx, subs, committed);
         }
 
+        EndMail(ctx, subs, committed);
         EndInstallations(tick0, subs, committed, ctx.TickNumber, ctx.WorldTick);
         EndWaypoints(subs, committed);
 
