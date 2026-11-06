@@ -16,7 +16,11 @@ public enum MarketCategory : byte
 }
 
 /// <summary>One stack an inventory holds, as <c>GET /swg/inventory</c> said: its template, asset, category, Mk and count.</summary>
-public readonly record struct HeldStack(ushort Template, string Item, MarketCategory Category, int Mk, int Count);
+public readonly record struct HeldStack(ushort Template, string Item, MarketCategory Category, int Mk, int Count)
+{
+    /// <summary>The stack's id, what a discard names; 0 when unread.</summary>
+    public ulong Id { get; init; }
+}
 
 /// <summary>
 /// An item with stats in a bot's inventory (crafting-build.md § 2.1): its id, template, the slot it sits in, the equip slot it is worn in (0 for none: a part,
@@ -42,6 +46,9 @@ public readonly record struct GearItem(ulong Id, ushort Template, int Slot, int 
     /// <summary>What it packs with (the server's <c>packKey</c>): equal for identical pristine items; null for one that does not pack.</summary>
     public string PackKey { get; init; }
 
+    /// <summary>What it is worth in a fight (<see cref="MarketJson.PowerOf"/>): a weapon's damage a second, a piece's protection; 0 when unread.</summary>
+    public int Power { get; init; }
+
     /// <summary>Whether it is a crate.</summary>
     public bool Crate => Count > 1;
 
@@ -54,6 +61,9 @@ public readonly record struct StandardOffer(ushort Template, string Item, long P
 {
     /// <summary>A vendor material's price a unit, milli-credits (a quantity's price is its total rounded down); 0 for an item with stats.</summary>
     public long PriceMilli { get; init; }
+
+    /// <summary>What the typical craft it sells is worth in a fight (<see cref="MarketJson.PowerOf"/>); 0 for units, or unread.</summary>
+    public int Power { get; init; }
 }
 
 /// <summary>A bazaar buy collected into the character: the listing it came from (the <c>buy</c> row's <c>ref</c>), and what and how many.</summary>
@@ -68,6 +78,9 @@ public readonly record struct BrowseRow(ulong Id, int City, string Item, MarketC
     public int MaxCondition { get; init; } = 1;
 
     public bool Broken { get; init; }
+
+    /// <summary>What it is worth in a fight, as <see cref="GearItem.Power"/>; 0 for units, or unread.</summary>
+    public int Power { get; init; }
 
     /// <summary>Broken, or under 20 % of its max: not worth buying to wear (crafting-build.md § 6, Gear).</summary>
     public bool WornDown => Broken || (MaxCondition > 0 && Condition * 5L < MaxCondition);
@@ -105,6 +118,12 @@ public static class MarketCatalog
     /// <summary>... of a core by Mk; an add-on's is a core's [EST].</summary>
     private static readonly double[] CoreValue = [0d, 726d, 1_549d, 3_099d, 5_950d, 11_106d];
 
+    /// <summary>A repair kit's value, credits (the server's <c>MarketValues.KitMilli</c>).</summary>
+    public const double KitValue = 150d;
+
+    /// <summary>A stim's value, credits (the server's <c>MarketValues.StimMilli</c>): no Mk.</summary>
+    public const double StimValue = 231.2d;
+
     /// <summary>
     /// The model's market value of one unit, credits — what <c>/swg/market/prices</c> says of any (item, Mk) it names — or 0 for an item without one.
     /// </summary>
@@ -115,6 +134,17 @@ public static class MarketCatalog
     /// </remarks>
     public static double ModelValue(string asset, int mk)
     {
+        // A repair kit: no Mk, one value (the server's MarketValues.KitMilli).
+        if (asset != null && asset.StartsWith("kit_", StringComparison.Ordinal))
+        {
+            return mk == 0 ? KitValue : 0d;
+        }
+
+        if (asset == GearPlan.StimItem)
+        {
+            return mk == 0 ? StimValue : 0d;
+        }
+
         if (asset == null || mk is < 1 or > 5 || TemplateOf(asset) == 0)
         {
             return 0d;
@@ -146,6 +176,27 @@ public static class MarketJson
         ? ulong.Parse(e.GetString() ?? "0", CultureInfo.InvariantCulture)
         : e.GetUInt64();
 
+    /// <summary>
+    /// What an item with stats is worth in a fight, from its <c>stats</c> (crafting-catalog.md § 4-5): a weapon's damage a second, × 1 000 — its damage over
+    /// its delay; an armour piece's protection, the mean of its kinetic and energy. Compared within a slot only; 0 for anything else.
+    /// </summary>
+    public static int PowerOf(JsonElement stats)
+    {
+        if (stats.ValueKind != JsonValueKind.Object)
+        {
+            return 0;
+        }
+
+        if (stats.TryGetProperty("damage", out var damage) && stats.TryGetProperty("delayMs", out var delay) && delay.GetInt32() > 0)
+        {
+            return (int)(damage.GetInt64() * 1000L / delay.GetInt32());
+        }
+
+        return stats.TryGetProperty("kinetic", out var kinetic) && stats.TryGetProperty("energy", out var energy)
+            ? (kinetic.GetInt32() + energy.GetInt32()) / 2
+            : 0;
+    }
+
     /// <summary>An amount of credits, whole or not.</summary>
     public static double Number(JsonElement row, string name) =>
         row.TryGetProperty(name, out var e) && e.ValueKind == JsonValueKind.Number ? e.GetDouble() : 0d;
@@ -168,6 +219,7 @@ public static class MarketJson
             offers.Add(new StandardOffer((ushort)o.GetProperty("template").GetInt32(), o.GetProperty("item").GetString(), (long)Number(o, "price"), wears)
             {
                 PriceMilli = o.TryGetProperty("priceMilli", out var milli) ? milli.GetInt64() : 0,
+                Power = s.ValueKind == JsonValueKind.Object ? PowerOf(s) : 0,
             });
         }
 
@@ -195,6 +247,7 @@ public static class MarketJson
                 Condition = l.TryGetProperty("stats", out var st) && st.TryGetProperty("condition", out var cond) ? cond.GetInt32() : 1,
                 MaxCondition = st.ValueKind == JsonValueKind.Object && st.TryGetProperty("maxCondition", out var max) ? max.GetInt32() : 1,
                 Broken = st.ValueKind == JsonValueKind.Object && st.TryGetProperty("broken", out var broken) && broken.ValueKind == JsonValueKind.True,
+                Power = PowerOf(st),
             });
         }
 
@@ -210,6 +263,9 @@ public static class MarketJson
 /// <param name="Reserved">How many are reserved for it.</param>
 public sealed record MarketMine(ulong[] ListedIds, int Reserved)
 {
+    /// <summary>Its listings still listed, with what each holds: the item's category and Mk (what a visit takes off the board); empty when unread.</summary>
+    public MineListing[] ListedRows { get; init; } = [];
+
     public static MarketMine None { get; } = new([], 0);
 
     /// <summary>Listings still listed.</summary>
@@ -218,6 +274,62 @@ public sealed record MarketMine(ulong[] ListedIds, int Reserved)
     /// <summary>Whether it names anything: a browser re-reads it on each <c>items</c> revision while it does.</summary>
     public bool Empty => ListedIds.Length == 0 && Reserved == 0;
 
+    /// <summary>The city (region, a city plus one) each reserved good waits in, as the answer said; empty when it named none.</summary>
+    public int[] ReservedCities { get; init; } = [];
+
+    /// <summary>Each reserved good's asset, by the same index; null where the answer named none.</summary>
+    public string[] ReservedItems { get; init; } = [];
+
+    /// <summary>Whether a good of <paramref name="item"/> waits for it in a city other than <paramref name="region"/>: bought there, not yet fetched.</summary>
+    public bool WaitsElsewhere(string item, int region)
+    {
+        for (var i = 0; item != null && i < ReservedItems.Length && i < ReservedCities.Length; i++)
+        {
+            if (ReservedItems[i] == item && ReservedCities[i] != region)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The goods reserved for it in one city — the only ones a collect there takes (the server refuses the rest, <c>MarketWrongCity</c>). The night of
+    /// 2026-11-04: bots holding goods returned in another city collected nothing, were refused at every visit, and — "goods wait for it" — bought no gear.
+    /// </summary>
+    public int ReservedIn(int region)
+    {
+        var n = 0;
+        foreach (var c in ReservedCities)
+        {
+            n += c == region && region != 0 ? 1 : 0;
+        }
+
+        return ReservedCities.Length == 0 ? 0 : n;
+    }
+
+    /// <summary>The first city other than <paramref name="region"/> holding goods reserved for it: where to fetch them; 0 for none, or none named.</summary>
+    /// <remarks>Gear only — a weapon or an armour piece, what is worth the trip (Loïc, 2026-11-05); a returned core or material waits for a visit there.</remarks>
+    public int ElsewhereThan(int region)
+    {
+        for (var i = 0; i < ReservedCities.Length; i++)
+        {
+            var item = i < ReservedItems.Length ? ReservedItems[i] : null;
+            if (ReservedCities[i] != 0 && ReservedCities[i] != region && IsGear(item))
+            {
+                return ReservedCities[i];
+            }
+        }
+
+        return 0;
+    }
+
+    // A weapon or an armour piece, by its asset.
+    private static bool IsGear(string item) =>
+        item != null && (item.StartsWith("armor_", StringComparison.Ordinal) || item.StartsWith("blaster_", StringComparison.Ordinal)
+            || item.StartsWith("sword_", StringComparison.Ordinal) || item == "vibroknuckler");
+
     /// <summary>Reads an answer: <c>{"listed":[{"id",…}],"reserved":[{"id",…}],"caps":{…}}</c>.</summary>
     public static MarketMine Parse(string json)
     {
@@ -225,20 +337,41 @@ public sealed record MarketMine(ulong[] ListedIds, int Reserved)
         var root = doc.RootElement;
         var listed = root.GetProperty("listed");
         var ids = new ulong[listed.GetArrayLength()];
+        var rows = new MineListing[ids.Length];
         var i = 0;
         foreach (var l in listed.EnumerateArray())
         {
-            ids[i++] = MarketJson.Id(l.GetProperty("id"));
+            rows[i] = new MineListing(
+                MarketJson.Id(l.GetProperty("id")),
+                l.TryGetProperty("item", out var it) && it.ValueKind == JsonValueKind.String ? it.GetString() : null,
+                MarketCatalog.CategoryOf(l.TryGetProperty("category", out var cat) && cat.ValueKind == JsonValueKind.String ? cat.GetString() : null),
+                l.TryGetProperty("mk", out var mk) && mk.ValueKind == JsonValueKind.Number ? mk.GetInt32() : 0);
+            ids[i] = rows[i].Id;
+            i++;
         }
 
-        return new MarketMine(ids, root.GetProperty("reserved").GetArrayLength());
+        var reserved = root.GetProperty("reserved");
+        var cities = new int[reserved.GetArrayLength()];
+        var items = new string[cities.Length];
+        var r = 0;
+        foreach (var g in reserved.EnumerateArray())
+        {
+            items[r] = g.TryGetProperty("item", out var item) && item.ValueKind == JsonValueKind.String ? item.GetString() : null;
+            cities[r++] = g.TryGetProperty("city", out var city) && city.ValueKind == JsonValueKind.Number ? city.GetInt32() : 0;
+        }
+
+        return new MarketMine(ids, cities.Length) { ReservedCities = cities, ReservedItems = items, ListedRows = rows };
     }
 }
+
+/// <summary>One of its listings as <c>/mine</c> says: the listing, its item's asset, category and Mk.</summary>
+public readonly record struct MineListing(ulong Id, string Item, MarketCategory Category, int Mk);
 
 /// <summary>What <c>GET /swg/market/prices</c> last said: each (item, Mk)'s market value, credits a unit — what a bot prices a listing and a buy by.</summary>
 public sealed class MarketPrices
 {
     private readonly Dictionary<(string Item, int Mk), double> _value = [];
+    private readonly Dictionary<(string Item, int Mk), (int Listed, long Lowest, int Sales)> _board = [];
 
     public static MarketPrices None { get; } = new();
 
@@ -258,6 +391,22 @@ public sealed class MarketPrices
         return this;
     }
 
+    /// <summary>Sets what the board holds of one (item, Mk), planet-wide: its listings and the lowest unit price (0 for none).</summary>
+    public MarketPrices WithBoard(string item, int mk, int listed, long lowest, int sales = 0)
+    {
+        _board[(item, mk)] = (listed, lowest, sales);
+        return this;
+    }
+
+    /// <summary>The listings of an (item, Mk) on the board, planet-wide; 0 when none, or unread.</summary>
+    public int ListedOf(string item, int mk) => item != null && _board.TryGetValue((item, mk), out var b) ? b.Listed : 0;
+
+    /// <summary>The lowest unit price it is listed at, planet-wide; 0 when it is not listed, or unread.</summary>
+    public long LowestOf(string item, int mk) => item != null && _board.TryGetValue((item, mk), out var b) ? b.Lowest : 0;
+
+    /// <summary>Its recent sales on the board, planet-wide (the answer's <c>sales</c>, the server's last sales kept); 0 when none, or unread.</summary>
+    public int SalesOf(string item, int mk) => item != null && _board.TryGetValue((item, mk), out var b) ? b.Sales : 0;
+
     /// <summary>Reads an answer: <c>{"prices":[{"item","mk","value",…}]}</c> — or the array alone.</summary>
     public static MarketPrices Parse(string json)
     {
@@ -267,7 +416,14 @@ public sealed class MarketPrices
         var prices = new MarketPrices();
         foreach (var p in rows.EnumerateArray())
         {
-            prices.With(p.GetProperty("item").GetString(), p.GetProperty("mk").GetInt32(), MarketJson.Number(p, "value"));
+            var item = p.GetProperty("item").GetString();
+            var mk = p.GetProperty("mk").GetInt32();
+            prices.With(item, mk, MarketJson.Number(p, "value"));
+            if (p.TryGetProperty("listed", out var listed) && listed.ValueKind == JsonValueKind.Number)
+            {
+                var sales = p.TryGetProperty("sales", out var sold) && sold.ValueKind == JsonValueKind.Number ? sold.GetInt32() : 0;
+                prices.WithBoard(item, mk, listed.GetInt32(), (long)MarketJson.Number(p, "lowest"), sales);
+            }
         }
 
         return prices;

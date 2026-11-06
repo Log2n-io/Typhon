@@ -425,6 +425,16 @@ public sealed partial class SimBridge
                 break;
             }
 
+            case CombatTargetKind.Siege:
+            {
+                // A horde's fortress (horde.md § 10): its footprint's centre and half, the building's own box.
+                var b = entity.Read(WorldObject.Bounds).Bounds;
+                tx = (b.MinX + b.MaxX) * 0.5f;
+                tz = (b.MinY + b.MaxY) * 0.5f;
+                half = (b.MaxX - b.MinX) * 0.5f;
+                break;
+            }
+
             default:
                 // Nothing it could damage. Gated out before this for a session's player; Gone rather than a read of components it does not have.
                 return TargetVerdict.Gone;
@@ -627,7 +637,9 @@ public sealed partial class SimBridge
                 var p = player.Read(Player.Bounds);
                 var dx = p.X - places[idx].X;
                 var dz = p.Z - places[idx].Z;
-                if ((dx * dx) + (dz * dz) > reachSq)
+                // A blaster's reach for one that carries it (CreatureBrain.Stance), melee for the rest — with the same hysteresis CreatureThink stops at.
+                var reachHere = brains[idx].Stance == Stances.Pistol ? CreatureBlasterRangeM * AttackRangeHysteresis : reach;
+                if ((dx * dx) + (dz * dz) > (brains[idx].Stance == Stances.Pistol ? reachHere * reachHere : reachSq))
                 {
                     // Walked out of reach between two decisions. CreatureThink re-closes on its own cadence; nothing is written here, and in particular the
                     // weapon is NOT re-armed, so a creature cannot bank cooldown by being out of range.
@@ -732,6 +744,25 @@ public sealed partial class SimBridge
                 continue;
             }
 
+            // A blow on a horde's fortress: the event's hit points, taken by the horde's pass (SimBridge.Siege.cs). The building is never opened for
+            // writing — nothing of it changes — and a fortress gone with its event is a blow that lands nowhere.
+            if (ev.Kind == CombatEventKind.Damage && ev.TargetKind == CombatTargetKind.Siege)
+            {
+                if (tx.TryOpen(ev.Target, out _))
+                {
+                    SiegeBlow(ev.Attacker, ev.Amount);
+                    damageApplied++;
+                    var amount = (ushort)Math.Clamp(ev.Amount, 0, ushort.MaxValue);
+                    TatooineReplication.Strike(ctx, new Attack { Attacker = ev.Attacker, Target = ev.Target, Amount = amount });
+                }
+                else
+                {
+                    stale++;
+                }
+
+                continue;
+            }
+
             if (!tx.TryOpenMut(ev.Target, out var target))
             {
                 // The target was destroyed between the push and here. Nothing in this demo destroys anything a shot can name, so this is latent — and it is
@@ -776,6 +807,7 @@ public sealed partial class SimBridge
                     }
 
                     break;
+
 
                 default:
                     // A lethal blow leaves the player down where it stands, health 0, which is what keeps a second shooter from killing it again: every later

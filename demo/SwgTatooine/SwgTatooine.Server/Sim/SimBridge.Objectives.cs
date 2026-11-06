@@ -301,6 +301,9 @@ public sealed partial class SimBridge
         }
 
         NoteObjectiveLevel(level);
+
+        // The ride to the next one at the ride's speed: a fighter that milled round the last one walks.
+        move.SpeedMps = TatooineData.PlayerMountSpeedMps;
         state.ActivityTicks = AimAt(ref state, ref move, x, z, lx, lz);
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
         counts.Taken++;
@@ -332,6 +335,35 @@ public sealed partial class SimBridge
         Interlocked.Add(ref _objectivesOutOfRange, counts.OutOfRange);
     }
 
+    /// <summary>How often a fighter at its objective with nothing to shoot picks a new spot round it, ticks: every few seconds, staggered by body.</summary>
+    private long MillEveryTicks => 3L * Math.Max(1, _config.TickRateHz);
+
+    /// <summary>The pace a fighter walks round its objective at, m/s: a walk, not the ride that brought it.</summary>
+    private const float MillSpeedMps = 2.5f;
+
+    /// <summary>
+    /// A fighter with nothing to shoot (<c>PlayerThink</c>): a walk to another point of the stand-off ring round its objective, a third to two thirds of a
+    /// radian along it, either way — still in range of the lair and of whatever comes out of it.
+    /// </summary>
+    private void Mill(ref PlayerState state, ref PlayerMotion move, float x, float z, uint salt)
+    {
+        (move.DestX, move.DestZ) = MillPoint(state.MissionX, state.MissionZ, x, z, RangedRange * ObjectiveStandOff, salt);
+        move.SpeedMps = MillSpeedMps;
+        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+    }
+
+    /// <summary>
+    /// Where a fighter at (<paramref name="x"/>, <paramref name="z"/>) mills to round its objective: 0.7 to 1 of the stand-off from it, 0.35 to 0.7 radians
+    /// along the ring from where it stands, either way.
+    /// </summary>
+    internal static (float X, float Z) MillPoint(float objectiveX, float objectiveZ, float x, float z, float standOff, uint salt)
+    {
+        var bearing = MathF.Atan2(z - objectiveZ, x - objectiveX);
+        var turn = (0.35f + (Hash01(salt) * 0.35f)) * (Hash01(salt ^ 0x9E3779B9u) < 0.5f ? -1f : 1f);
+        var r = standOff * (0.7f + (Hash01(salt ^ 0x85EBCA6Bu) * 0.3f));
+        return (objectiveX + (MathF.Cos(bearing + turn) * r), objectiveZ + (MathF.Sin(bearing + turn) * r));
+    }
+
     /// <summary>Makes the lair at (<paramref name="lx"/>, <paramref name="lz"/>) the objective: the destination its stand-off point on the fighter's side.</summary>
     /// <returns>
     /// The fight's time, ticks: the ride there at the fighter's speed and then <see cref="ObjectiveGiveUpSeconds"/> — the give-up times the fight, not the
@@ -349,11 +381,16 @@ public sealed partial class SimBridge
             d = 1f;
         }
 
+        // Turned up to half a radian either way, by where the fighter stands: riders from one side were all given the one spot, and stood in each other.
         var standOff = RangedRange * ObjectiveStandOff;
+        var spread = (Hash01((uint)BitConverter.SingleToInt32Bits(x) * 0x9E3779B1u ^ (uint)BitConverter.SingleToInt32Bits(z)) - 0.5f) * 1f;
+        var (sin, cos) = MathF.SinCos(spread);
+        var ux = ((dx * cos) - (dz * sin)) / d;
+        var uz = ((dx * sin) + (dz * cos)) / d;
         state.MissionX = lx;
         state.MissionZ = lz;
-        move.DestX = lx + (dx / d * standOff);
-        move.DestZ = lz + (dz / d * standOff);
+        move.DestX = lx + (ux * standOff);
+        move.DestZ = lz + (uz * standOff);
         var ride = MathF.Max(0f, d - standOff) / MathF.Max(1f, move.SpeedMps);
         return (int)((ride + ObjectiveGiveUpSeconds) * _config.TickRateHz);
     }

@@ -388,14 +388,38 @@ while (!stopping.IsCancellationRequested)
         + Home()
         + Errands()
         + Defence()
+        + Horde()
+        + Gear()
         + Trade());
+}
+
+// The bots' gear (GearPlan): assessments made and found wanting, down to their fist now, defenders gone to arm, spares asked for, worn-down items thrown away.
+string Gear()
+{
+    var g = swarm.Gearing(out var kits);
+    var stims = swarm.Stims();
+    var room = swarm.Room();
+    return g.Assessed == 0 && g.Unarmed == 0 && stims.Asked == 0 ? string.Empty
+        : $"  gear {g.Assessed} assessed {g.Due} due {g.Unarmed} unarmed {g.Runs} runs {g.Spares} spares asked {kits} kits {g.Discarded} discarded"
+          + $" stims {stims.Asked} asked {stims.BuysPlanned} buys planned room {room.Made} made {room.Left} left remote {room.Remote} cores {room.Cores}";
+}
+
+// The horde's call (horde.md § 6): statuses heard, answers sent, rallies taken, at the point, ended.
+string Horde()
+{
+    var h = swarm.Hording();
+    return h.Heard == 0 ? string.Empty : $"  horde heard {h.Heard} answered {h.Answered} rallies {h.Rallies} arrived {h.Arrived} ended {h.Ended}";
 }
 
 // Attacked: how many attackers were rolled for, fought back, run from, and shaken off (BotBrain.Defence.cs).
 string Defence()
 {
     var d = swarm.Defence();
-    return d.Attacked == 0 ? string.Empty : $"  attacked {d.Attacked} fought {d.Fought} fled {d.Fled} escaped {d.Escaped}";
+    var w = swarm.DefenceDetail();
+    return d.Attacked == 0
+        ? string.Empty
+        : $"  attacked {d.Attacked} fought {d.Fought} fled {d.Fled} escaped {d.Escaped} won {w.Won}"
+            + $" ran: odds {w.Odds} losing {w.Losing} stalled {w.Stalled} hurt {w.Hurt} unarmed {w.Unarmed} backstop {w.Backstop}";
 }
 
 // The bots that live in the home city, and how many stand in it now: the concentration, watched as it builds.
@@ -666,9 +690,15 @@ if (brain)
     Console.WriteLine(
         $"errands: {errands.Mounts} swoop mount/dismount ask(s), {errands.Doors} door crossing(s), {errands.Used} terminal(s) used, "
         + $"{errands.Paths} walk(s) searched round buildings, {errands.Ports} walk(s) out of a shuttleport's plaza");
-    var defence = swarm.Defence();
+    var horde = swarm.Hording();
     Console.WriteLine(
-        $"attacked: {defence.Attacked} attacker(s) rolled for, {defence.Fought} fought back, {defence.Fled} run(s), {defence.Escaped} of them shaken off");
+        $"horde: {horde.Heard} status(es) heard, {horde.Answered} answer(s) sent, {horde.Rallies} rally point(s) taken, {horde.Arrived} arrived, {horde.Ended} ended");
+    var defence = swarm.Defence();
+    var detail = swarm.DefenceDetail();
+    Console.WriteLine(
+        $"attacked: {defence.Attacked} engagement(s) decided, {defence.Fought} fought back, {defence.Fled} run(s), {defence.Escaped} of them shaken off, "
+        + $"{detail.Won} fight(s) won; runs by cause: odds {detail.Odds}, losing {detail.Losing}, stalled {detail.Stalled}, hurt {detail.Hurt}, "
+        + $"unarmed {detail.Unarmed}, backstop {detail.Backstop}");
     if (options.Dashboard != null)
     {
         var reports = swarm.Reports;

@@ -506,6 +506,12 @@ public static class EconomyEndpoints
     /// <summary>A string as a JSON string's contents.</summary>
     internal static string Escape(string s)
     {
+        // Nothing to escape — every item and city name: the string itself, not a builder and a copy a call (0.9 MB/s of polled endpoints, 2026-11-05).
+        if (s.AsSpan().IndexOfAny(EscapedChars) < 0)
+        {
+            return s;
+        }
+
         var b = new StringBuilder(s.Length + 8);
         foreach (var c in s)
         {
@@ -528,6 +534,11 @@ public static class EconomyEndpoints
 
         return b.ToString();
     }
+
+    // What Escape rewrites: the quote, the backslash and the control characters.
+    private static readonly System.Buffers.SearchValues<char> EscapedChars = System.Buffers.SearchValues.Create(
+        "\"\\\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\u0008\u0009\u000a\u000b\u000c\u000d\u000e\u000f"
+        + "\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f");
 
     /// <summary>The indexes, resolved once per engine: resolving one parses an expression tree, which a read a second need not repeat.</summary>
     private static IndexSet Indexes(DatabaseEngine dbe)

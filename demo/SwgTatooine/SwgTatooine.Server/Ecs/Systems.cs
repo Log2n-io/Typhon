@@ -59,6 +59,9 @@ internal sealed class PlayerThinkSystem : QuerySystem
     protected override void Configure(SystemBuilder b) => b
         .Name("PlayerThink")
         .Phase(SimPhases.Think)
+
+        // A fighter's target, as PlayerCombat chose it a tick before (Resolve): one with nobody mills round its objective. Written in other phases only.
+        .Reads<PlayerSession>()
         .Parallel()
         .ChunksPerWorker(2f)
         .Reads<PlayerPlacement>()
@@ -99,9 +102,68 @@ internal sealed class CreatureMoveSystem : QuerySystem
         .Reads<CreatureMotion>()
         .Reads<CreatureBrain>()
         .Writes<CreaturePlacement>()
+
+        // A raider collides with the structures round its step (SimConfig.CollideRaiders), as PlayerMove's bodies do: their placement and what they are.
+        .Reads<StructurePlacement>()
+        .Reads<Structure>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureMoveTick(ctx);
+}
+
+/// <summary>
+/// The Horde (horde.md, <c>SimBridge.Horde.cs</c>): an operator's raid on a city — its event, fortress, raid lairs and waves; the answers to its call;
+/// its status to every session.
+/// </summary>
+/// <remarks>
+/// Serial, in the Economy phase after the lair director (which removes and refills its raiders) and the mission desk (which reserves lairs), through a
+/// side transaction as theirs: it spawns and destroys lairs, creatures and a structure.
+/// </remarks>
+internal sealed class HordeSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+
+    public HordeSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("Horde")
+        .Phase(SimPhases.Economy)
+        .AfterAll("Economy", "LairLife", "Missions", "Ledger", "Loot", "Market", "Workshop")
+
+        .SideWrites<HordeCore>()
+        .SideWrites<HordeResponder>()
+        .Reads<Character>()
+        .Reads<PlayerPlacement>()
+        .Reads<PlayerVitals>()
+
+        // The session level the attendance is reckoned against (MeanSessionLevel), and the fortress's ground clear of installations (PlaceFortress) —
+        // after the workshop, which places them.
+        .Reads<PlayerControl>()
+        .Reads<PlayerLook>()
+        .ReadsFresh<InstallationPlacement>()
+
+        // What a committed defender is doing, for the event's metrics: its target, its course, and whether it rides — this tick's, after the Economy
+        // systems that write a player's state.
+        .Reads<PlayerSession>()
+        .Reads<PlayerMotion>()
+        .ReadsFresh<PlayerState>()
+        .Writes<Lair>()
+        .Writes<LairPlacement>()
+        .Writes<LairVitals>()
+        .Writes<LairRealm>()
+        .Writes<CreaturePlacement>()
+        .Writes<CreatureMotion>()
+        .Writes<CreatureVitals>()
+        .Writes<CreatureBrain>()
+        .Writes<CreatureTimers>()
+        .Writes<CreatureRealm>()
+        .Writes<CreatureHome>()
+        .Writes<StructurePlacement>()
+        .Writes<Structure>()
+        .Writes<StructureRegion>()
+        .Writes<StructureRealm>();
+
+    protected override void Execute(TickContext ctx) => _bridge.HordeTick(ctx);
 }
 
 /// <summary>
@@ -390,6 +452,9 @@ internal sealed class PlayerCombatSystem : QuerySystem
         .Reads<LairVitals>()
         .Reads<Lair>()
 
+        // A horde's fortress, which a shot may name (CombatTargetKind.Siege): where it stands and how far it reaches.
+        .Reads<StructurePlacement>()
+
         // The shooter's level, carried on its blow for the drain's level factor (character-level.md § 6).
         .Reads<PlayerLook>()
         // A creature's level, which a scripted body must not fight above (content-levels.md § 5): its lair's, through its home — not its brain's, which
@@ -550,6 +615,7 @@ internal sealed class ProgressionSystem : CallbackSystem
         // Who holds a mission whose lair was broken: a stranger's break is a lair kill (IsStranger).
         .Reads<HeldMission>()
         .Writes<PlayerLook>()
+        // And a potion drunk (SimBridge.Potions.cs): the heal.
         .Writes<PlayerVitals>();
 
     protected override void Execute(TickContext ctx) => _bridge.ProgressionTick(ctx);
@@ -713,6 +779,10 @@ internal sealed class WorkshopSystem : CallbackSystem
         .Writes<PlayerGear>()
         .Writes<PlayerState>()
         .Reads<PlayerLook>()
+
+        // A potion drunk (SimBridge.Potions.cs): whether the body may — up and hurt. The heal is Progression's, in the Report phase: a writer of vitals here
+        // would have to order against every reader of them in the economy, and SingleVersion vitals have no snapshot to give those before it.
+        .Reads<PlayerVitals>()
 
         // An operator's level and XP (SimBridge.Admin.cs), through its side transaction; the body is brought to them by Progression, in the Report phase.
         .SideWrites<CharacterProgress>()

@@ -286,7 +286,9 @@ public sealed partial class SimBridge
         j.Append('}');
 
         // Waypoints (SimBridge.Waypoints.cs, client.md C38): made and deleted since start.
-        j.Append("},\"waypoints\":{");
+        // The horde (SimBridge.Horde.cs, horde.md § 8): the running or last event, its counts and live metrics; null when there has been none.
+        j.Append("},\"horde\":").Append(HordeReportJson ?? "null");
+        j.Append(",\"waypoints\":{");
         Num(j, "created", WaypointsCreated).Append(',');
         Num(j, "deleted", WaypointsDeleted);
 

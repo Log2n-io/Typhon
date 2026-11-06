@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -65,15 +66,35 @@ public sealed class MarketCityView
     /// tick pays per changed city.
     /// </summary>
     /// <remarks>
-    /// One sort of <see cref="long"/> keys rather than of the rows: template (7 bits), Mk (3), unit price (20 — at most 1 000 000) and the listed tick
+    /// One sort of <see cref="ulong"/> keys rather than of the rows: template (7 bits), Mk (3), unit price (20 — at most 1 000 000) and the listed tick
     /// counted from the board's oldest (34 bits: ten years at 50 Hz). Rows equal on all four are in no particular order, which nothing shows.
+    /// <para><b>Unsigned.</b> The key was a <see cref="long"/>: a template of 64 or more set its sign bit and sorted before every other, so the board was
+    /// not in the order a browse binary-searches, and a browse naming an item found nothing for the DL-44 (69), repair kits (62-63) and items the search
+    /// fell past — every bot buying a weapon fell to the vendor (the night of 2026-11-04). A template past 127 would overflow its seven bits: asserted.</para>
     /// </remarks>
     public static void SortBoard(ListingView[] rows)
+    {
+        ulong[] keys = null;
+        int[] order = null;
+        SortBoard(rows, ref keys, ref order);
+    }
+
+    /// <summary>
+    /// <see cref="SortBoard(ListingView[])"/> with the caller's scratch, grown as needed and kept: the desk's tick sorts every changed city each publish, and
+    /// a key and an index array a city a publish was 1.3 MB/s live (2026-11-05). The rows are permuted in place, cycle by cycle — no copy of the board.
+    /// </summary>
+    public static void SortBoard(ListingView[] rows, ref ulong[] keys, ref int[] order)
     {
         var n = rows.Length;
         if (n < 2)
         {
             return;
+        }
+
+        if (keys == null || keys.Length < n)
+        {
+            keys = new ulong[Math.Max(n, 2 * (keys?.Length ?? 0))];
+            order = new int[keys.Length];
         }
 
         var oldest = long.MaxValue;
@@ -82,20 +103,40 @@ public sealed class MarketCityView
             oldest = Math.Min(oldest, v.ListedTick);
         }
 
-        var keys = new long[n];
-        var order = new int[n];
         for (var i = 0; i < n; i++)
         {
             ref readonly var v = ref rows[i];
-            keys[i] = ((long)v.Template << 57) | ((long)v.Mk << 54) | (Math.Min(v.UnitPrice, (1L << 20) - 1) << 34) | Math.Min(v.ListedTick - oldest, (1L << 34) - 1);
+            Debug.Assert(v.Template < 128 && v.Mk < 8, "the board's sort key holds a template in 7 bits and a Mk in 3");
+            keys[i] = ((ulong)v.Template << 57) | ((ulong)v.Mk << 54) | ((ulong)Math.Min(v.UnitPrice, (1L << 20) - 1) << 34)
+                | (ulong)Math.Min(v.ListedTick - oldest, (1L << 34) - 1);
             order[i] = i;
         }
 
-        Array.Sort(keys, order);
-        var copy = (ListingView[])rows.Clone();
-        for (var i = 0; i < n; i++)
+        keys.AsSpan(0, n).Sort(order.AsSpan(0, n));
+
+        // rows[i] takes rows[order[i]]: each cycle of the permutation walked once, a visited index marked by its complement.
+        for (var start = 0; start < n; start++)
         {
-            rows[i] = copy[order[i]];
+            if (order[start] < 0 || order[start] == start)
+            {
+                continue;
+            }
+
+            var held = rows[start];
+            var at = start;
+            while (true)
+            {
+                var from = order[at];
+                order[at] = ~from;
+                if (from == start)
+                {
+                    rows[at] = held;
+                    break;
+                }
+
+                rows[at] = rows[from];
+                at = from;
+            }
         }
     }
 
@@ -156,6 +197,12 @@ public readonly record struct MarketPriceView(ushort Template, byte Mk, long Val
 /// </summary>
 public sealed class MarketSnapshot
 {
+    /// <summary>
+    /// <c>/swg/market/prices</c>' answer for this snapshot, UTF-8, encoded by its first request: identical for every caller of one version (the endpoint
+    /// sets it; a race encodes it twice, the same bytes).
+    /// </summary>
+    internal byte[] PricesUtf8;
+
     /// <summary>Before the desk's first publish.</summary>
     public static readonly MarketSnapshot Empty = new();
 
@@ -443,7 +490,11 @@ public sealed partial class SimBridge
     private readonly Dictionary<int, MarketCityView> _cityViews = [];
     private readonly Dictionary<int, PriceRing> _priceRings = [];
     private long[] _ageScratch = [];
-    private readonly Dictionary<int, (List<ListingView> Listed, int Reserved, long Value)> _rebuiltScratch = [];
+    // A dirty city's board as the publish builds it: counted in a first pass, filled into one exact array in a second (6.8 MB/s live of growing lists,
+    // their copies and the sort's scratch, 2026-11-05).
+    private readonly Dictionary<int, (ListingView[] Rows, int Filled, int Reserved, long Value)> _rebuiltScratch = [];
+    private ulong[] _sortKeys;
+    private int[] _sortOrder;
     private readonly Dictionary<int, (int Listed, long Lowest)> _lowestScratch = [];
 
     // A listing's life in world ticks; 0 = TatooineData.ListingLifeHours. A check stages an expiry by shortening it.
@@ -1508,7 +1559,7 @@ public sealed partial class SimBridge
         _marketWritten = true;
         var stats = kit ? Installations.StandardKit() : StandardStats(in issue);
         var creditSeq = _head.LastSeq + 1;
-        if (MintInstance(tx, buyer, v.Template, kit ? (byte)0 : (byte)1, in stats, ItemMoveKind.Standard, creditSeq, worldTick).IsNull
+        if (MintInstance(tx, buyer, v.Template, kit ? (byte)0 : Equipment.StandardMk(v.Template), in stats, ItemMoveKind.Standard, creditSeq, worldTick).IsNull
             || !Transfer(tx, buyer, EconomyLedger.World, price, TransferKind.Standard, v.Template, worldTick))
         {
             _marketAbort = true;
@@ -1697,7 +1748,26 @@ public sealed partial class SimBridge
         rebuilt.Clear();
         foreach (var key in _dirtyCities)
         {
-            rebuilt[key] = ([], 0, 0);
+            rebuilt[key] = (null, 0, 0, 0);
+        }
+
+        // The first pass counts each dirty city's listed rows, so the second fills one array of the exact size.
+        foreach (var (_, entry) in _book)
+        {
+            ref readonly var l = ref entry.L;
+            var cityKey = CityKey(l.Realm, l.City);
+            if (rebuilt.TryGetValue(cityKey, out var counting))
+            {
+                rebuilt[cityKey] = l.State == ListingState.Listed
+                    ? counting with { Filled = counting.Filled + 1 }
+                    : counting with { Reserved = counting.Reserved + 1 };
+            }
+        }
+
+        foreach (var key in _dirtyCities)
+        {
+            var counted = rebuilt[key];
+            rebuilt[key] = (counted.Filled == 0 ? [] : new ListingView[counted.Filled], 0, counted.Reserved, 0);
         }
 
         var lowest = _lowestScratch;
@@ -1721,23 +1791,18 @@ public sealed partial class SimBridge
                 _ageScratch[ages++] = Math.Max(0, worldTick - l.ListedTick);
                 if (dirty)
                 {
-                    board.Listed.Add(new ListingView(id, l.Template, l.Mk, l.Quantity, l.UnitPrice, l.Seller, entry.SellerName, l.ListedTick, l.City, l.Realm,
-                        entry.Stats));
+                    board.Rows[board.Filled++] = new ListingView(id, l.Template, l.Mk, l.Quantity, l.UnitPrice, l.Seller, entry.SellerName, l.ListedTick,
+                        l.City, l.Realm, entry.Stats);
                     board.Value += l.UnitPrice * l.Quantity;
                     rebuilt[cityKey] = board;
                 }
-            }
-            else if (dirty)
-            {
-                board.Reserved++;
-                rebuilt[cityKey] = board;
             }
         }
 
         foreach (var (key, board) in rebuilt)
         {
-            var array = board.Listed.ToArray();
-            MarketCityView.SortBoard(array);
+            var array = board.Rows;
+            MarketCityView.SortBoard(array, ref _sortKeys, ref _sortOrder);
             var realm = (ushort)(key >> 16);
             var city = (ushort)(key & 0xFFFF);
             _cityViews[key] = new MarketCityView

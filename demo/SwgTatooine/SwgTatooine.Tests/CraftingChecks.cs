@@ -113,6 +113,28 @@ internal sealed class CraftingChecks
         });
     }
 
+    /// <summary>
+    /// The vendor's and the welcome pack's stim is a typical Mk I craft (Loïc, 2026-11-05): every input Mk I, its parts crafted typically, 3 points on its
+    /// potency — within 2 % of the craft's mean.
+    /// </summary>
+    [Test]
+    public void TheStandardStim_IsATypicalMkICraft()
+    {
+        Schematics.TryGet(ItemCatalog.Stim, out var stim);
+        Span<double> v = stackalloc double[1];
+        double sum = 0;
+        for (var i = 0; i < Crafts; i++)
+        {
+            Crafting.Run(stim, Inputs(stim, 1, 9_000 + i), 11, i, [3], 0, v);
+            sum += v[0];
+        }
+
+        var mean = sum / Crafts;
+        Assert.That(Equipment.TryStandard(ItemCatalog.Stim, out var standard), Is.True, "the vendor sells a stim");
+        Assert.That(standard.Stat0, Is.EqualTo(mean).Within(mean * 0.02), $"a typical Mk I stim heals {mean:F1}");
+        Assert.That(standard.MaxCondition, Is.EqualTo(Schematics.DosesOf(ItemCatalog.Stim)), "its doses");
+    }
+
     [Test]
     public void TheLuck_IsTheCataloguesOdds()
     {

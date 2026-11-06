@@ -122,6 +122,7 @@ public static class CommandLine
 
         r.Group("shuttles");
         c.Shuttles = !r.Switch("--no-shuttles", "do not run shuttles at all");
+        c.Crowd = !r.Switch("--no-crowd", "no scripted crowd: sessions, bots and NPCs only (a reopened world drops the crowd it saved)");
         c.ShuttleShare = r.Float("--shuttle-share", c.ShuttleShare, "share of players that travel", min: 0f, max: 1f);
         c.ShuttleIntervalS = r.Float("--shuttle-interval", c.ShuttleIntervalS, "seconds between departures", min: 0.001f);
         c.BoardingWindowS = r.Float("--boarding-window", c.BoardingWindowS, "seconds a shuttle boards for", min: 0.001f);
@@ -158,6 +159,7 @@ public static class CommandLine
         c.Unpaced = r.Switch("--unpaced", "tick back to back, for count-only comparisons; never for timings");
         c.CollisionAudit = r.Switch("--collision-audit", "re-check every written position against a fresh spatial query, and report any found inside a "
             + "structure; an independent oracle, far too slow for a normal run") || c.CollisionAudit;
+        c.CollideRaiders = !r.Switch("--no-collide-raiders", "let a horde's raiders walk through structures (they collide by default; no other creature does)");
         c.CollideCrowd = !r.Switch("--no-collide-crowd", "let the scripted crowd walk through structures; collision then costs only the bodies "
             + "real sessions drive, which is what every tick figure published before 2026-10-22 was measured with");
         c.WorkerCount = r.Int("--workers", c.WorkerCount, "worker threads; 0 takes the processor count", min: 0, max: 4096);

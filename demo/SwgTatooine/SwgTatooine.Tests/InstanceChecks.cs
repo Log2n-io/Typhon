@@ -287,8 +287,8 @@ internal sealed class InstanceChecks : ServedChecks
     }
 
     /// <summary>
-    /// C1-6: a new character's wallet opens with the welcome pack — its 1 000 cr grant and one standard-issue blaster, minted in the same commit as a
-    /// <c>grant</c> item row — exactly once: a second login opens nothing more.
+    /// C1-6: a new character's wallet opens with the welcome pack — its 1 000 cr grant, one standard-issue blaster, a repair kit and three stims, minted in
+    /// the same commit as <c>grant</c> item rows — exactly once: a second login opens nothing more.
     /// </summary>
     [Test]
     [CancelAfter(180_000)]
@@ -302,9 +302,9 @@ internal sealed class InstanceChecks : ServedChecks
         sim.Initialize();
         Harness = new SessionHarness(sim);
         var a = LogIn(sim, 0x9341, At(Home(sim)), 1);
-        SessionHarness.Until(() => Instances(sim, a.Character).Count == 1, "the pack");
+        SessionHarness.Until(() => Instances(sim, a.Character).Count == 1 + SimBridge.WelcomeStims, "the pack");
         Harness.Ticks(2);
-        var (id, stack, _) = Instances(sim, a.Character).Single();
+        var (id, stack, _) = Instances(sim, a.Character).Single(i => i.Stack.Template == Blaster);
         var packRows = Items.Rows(sim).Where(r => r.To == a.Key && r.Kind == ItemMoveKind.Grant).ToList();
         var grant = Ledgers.Rows(sim).Single(r => r.To == a.Key && r.Kind == TransferKind.Grant);
         Assert.Multiple(() =>
@@ -312,8 +312,12 @@ internal sealed class InstanceChecks : ServedChecks
             Assert.That((stack.Template, stack.Mk), Is.EqualTo((Blaster, (byte)1)));
             Assert.That(
                 packRows.Select(r => (r.Template, r.Mk, r.Count)),
-                Is.EquivalentTo(new[] { (Blaster, (byte)1, 1), (ItemCatalog.KitWeaponRepair, (byte)0, 1) }),
-                "the pack: the blaster and a weapon repair kit (C3)");
+                Is.EquivalentTo(new[]
+                {
+                    (Blaster, (byte)1, 1), (ItemCatalog.KitWeaponRepair, (byte)0, 1),
+                    (ItemCatalog.Stim, (byte)0, 1), (ItemCatalog.Stim, (byte)0, 1), (ItemCatalog.Stim, (byte)0, 1),
+                }),
+                "the pack: the blaster, a weapon repair kit (C3) and three stims (C2)");
             var blasterRow = packRows.Single(r => r.Template == Blaster);
             Assert.That((blasterRow.From, blasterRow.ToStack, blasterRow.Ref), Is.EqualTo((ItemLedger.World, unchecked((long)id.RawValue), 0L)));
             Assert.That(packRows.All(r => r.WorldTick == grant.WorldTick), Is.True, "the pack and the credits are not one commit");
@@ -332,9 +336,9 @@ internal sealed class InstanceChecks : ServedChecks
             Assert.That(again.Character, Is.EqualTo(a.Character));
             Assert.That(
                 Items.Rows(sim).Count(r => r.To == a.Key && r.Kind == ItemMoveKind.Grant),
-                Is.EqualTo(2),
-                "the pack (a blaster and a kit) was granted again");
-            Assert.That(Instances(sim, a.Character), Has.Count.EqualTo(1));
+                Is.EqualTo(2 + SimBridge.WelcomeStims),
+                "the pack (a blaster, a kit and the stims) was granted again");
+            Assert.That(Instances(sim, a.Character), Has.Count.EqualTo(1 + SimBridge.WelcomeStims));
         });
     }
 

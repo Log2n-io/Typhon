@@ -3,6 +3,7 @@ import { CRATE_CAPACITY, packSteps } from './crates';
 import { kitMenuItems } from './installations';
 import { isUnits } from './inventory-grid';
 import type { InventoryItem } from './items';
+import { STIM_ITEM } from './potions';
 
 /**
  * An item's context menu (client.md C42, C43): everything the character can do with it from its slot — a kit placed here, an item with stats worn, an item
@@ -20,6 +21,16 @@ export function itemMenuItems(item: InventoryItem, items: readonly InventoryItem
 
   const entries: ContextMenuItem[] = [...kitMenuItems(item)];
   const crate = item.stats !== undefined && item.count > 1;
+  if (item.item === STIM_ITEM && (item.stats?.condition ?? 0) > 0 && (!crate || freeSlots > 0)) {
+    entries.push({
+      label: 'Drink',
+      hint: crate
+        ? 'One out of the crate, and a dose of it: heals at once, one every 15 s'
+        : 'A dose: heals at once, one every 15 s',
+      action: { kind: 'consume', item: item.id },
+    });
+  }
+
   if (item.stats !== undefined && (item.stats.wears ?? 0) > 0 && !crate) {
     entries.push({
       label: 'Equip',

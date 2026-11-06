@@ -83,6 +83,24 @@ public enum GoalWhy : byte
 
     /// <summary>The run shook the attacker off: decide again.</summary>
     Escaped,
+
+    /// <summary>A horde's rally point taken: off to its city, or walking to the point (horde.md § 6).</summary>
+    RallyChosen,
+
+    /// <summary>A raider near the rally point: fought, whatever its level.</summary>
+    RallyFight,
+
+    /// <summary>At the rally point.</summary>
+    RallyArrived,
+
+    /// <summary>The horde is over, or the commitment decayed: back to the day's loop.</summary>
+    RallyEnded,
+
+    /// <summary>Its gear assessed and found wanting (GearPlan): off to the bazaar to replace, better or back it up — or, down to its fist, to arm.</summary>
+    GearChosen,
+
+    /// <summary>Goods reserved for it in another city — gear bought there, 20 % stronger than its own city had: off to fetch them (Loïc, 2026-11-05).</summary>
+    PickupChosen,
 }
 
 /// <summary>What happened to a walk (a leg): planned, a point reached, re-planned, stuck, given up.</summary>
@@ -146,6 +164,9 @@ public enum Activity
 
     /// <summary>Out at its installations (crafting-build.md § 10).</summary>
     Tending,
+
+    /// <summary>Answering a horde's call: at its gather point, its fight, its town hall or its fortress (horde.md § 10).</summary>
+    Defending,
 }
 
 /// <summary>
@@ -201,7 +222,8 @@ public sealed partial class BotBrain
     public Activity Activity => _activity;
 
     /// <summary>A goal's activity: a visit by what it visits, any other goal by its value.</summary>
-    public static Activity ActivityOf(Goal goal, int visitKind) => goal == Goal.Tending ? Activity.Tending : goal != Goal.Visiting
+    public static Activity ActivityOf(Goal goal, int visitKind) => goal == Goal.Tending ? Activity.Tending : goal == Goal.Defending ? Activity.Defending
+        : goal != Goal.Visiting
         ? (Activity)goal
         : visitKind switch
         {
@@ -224,6 +246,8 @@ public sealed partial class BotBrain
     /// </summary>
     private void Become(Goal to, GoalWhy why, long tick, uint subject = 0, float metres = 0f)
     {
+        // Only an idle the bot chose strolls; one that is a pause in something else (a craft going out, a landing) stands.
+        _strolling = to == Goal.Idling && why == GoalWhy.IdleChosen;
         if (to == Goal.Choosing)
         {
             if (Goal != Goal.Choosing)

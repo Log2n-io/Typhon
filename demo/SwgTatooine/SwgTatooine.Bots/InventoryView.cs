@@ -8,11 +8,12 @@ namespace SwgTatooine.Bots;
 /// <param name="Stacks">The grid's entries, units counted in lots of <see cref="MarketPlan.LotSize"/>.</param>
 /// <param name="LastLost">The highest lost note number met.</param>
 /// <param name="Slots">The grid's slots in use: what a drop needs a free one of.</param>
+/// <param name="Capacity">The grid's slots, as the answer said (<c>slots</c>); <see cref="MarketPlan.GridSlots"/> when it did not.</param>
 /// <remarks>
 /// <b>No ledger rows.</b> The answer carries none: the ledger is the operators' audit trail, never read by a game client (Loïc, 2026-10-29). Drops and
 /// bazaar buys reach the bot as the server's notices (<see cref="BotEvents"/>).
 /// </remarks>
-public sealed record InventoryView(int Stacks, int LastLost, int Slots = 0)
+public sealed record InventoryView(int Stacks, int LastLost, int Slots = 0, int Capacity = MarketPlan.GridSlots)
 {
     public static InventoryView None { get; } = new(0, 0);
 
@@ -72,6 +73,7 @@ public sealed record InventoryView(int Stacks, int LastLost, int Slots = 0)
                     Broken = stats.TryGetProperty("broken", out var b) && b.ValueKind == JsonValueKind.True,
                     Count = s.TryGetProperty("count", out var n) ? n.GetInt32() : 1,
                     PackKey = s.TryGetProperty("packKey", out var p) ? p.GetString() : null,
+                    Power = MarketJson.PowerOf(stats),
                 });
                 continue;
             }
@@ -81,9 +83,10 @@ public sealed record InventoryView(int Stacks, int LastLost, int Slots = 0)
                 item,
                 MarketCatalog.CategoryOf(s.TryGetProperty("category", out var c) ? c.GetString() : null),
                 s.GetProperty("mk").GetInt32(),
-                s.GetProperty("count").GetInt32()));
+                s.GetProperty("count").GetInt32()) { Id = s.TryGetProperty("id", out var id) ? MarketJson.Id(id) : 0 });
         }
 
-        return new InventoryView(grid, lastLost, slots);
+        var capacity = root.TryGetProperty("slots", out var cap) && cap.ValueKind == JsonValueKind.Number ? cap.GetInt32() : MarketPlan.GridSlots;
+        return new InventoryView(grid, lastLost, slots, capacity);
     }
 }

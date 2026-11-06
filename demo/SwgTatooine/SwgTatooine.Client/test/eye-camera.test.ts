@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EYE_HEIGHT_M, EyeCamera, MAX_EYE_DISTANCE_M } from '../src/camera/eye-camera';
+import { EYE_HEIGHT_M, EyeCamera, MAX_EYE_DISTANCE_M, UNLOCKED_EYE_DISTANCE_M } from '../src/camera/eye-camera';
 
 /*
  * CLI3D-10 — the camera that stands in the world.
@@ -107,6 +107,42 @@ describe('EyeCamera', () => {
 
     settle(cam);
     expect(cam.distance).toBeCloseTo(MAX_EYE_DISTANCE_M, 6);
+  });
+
+  it('with the zoom unlocked, pulls back to the unlocked bound, and locked again is held at 30 m at once', () => {
+    const cam = new EyeCamera();
+    cam.jumpTo(0, 0, 0, 0);
+    cam.zoomLimitM = cam.maxDistanceM = UNLOCKED_EYE_DISTANCE_M;
+    for (let i = 0; i < 60; i++) {
+      cam.zoomBy(1.5);
+    }
+
+    settle(cam);
+    expect(cam.distance).toBeCloseTo(UNLOCKED_EYE_DISTANCE_M, 3);
+    cam.zoomLimitM = cam.maxDistanceM = MAX_EYE_DISTANCE_M;
+    cam.update(1 / 60);
+    expect(cam.effectiveDistance).toBeLessThanOrEqual(MAX_EYE_DISTANCE_M);
+  });
+
+  it('past the default range, is pulled in by neither a wall nor the ground along the ray, and stays above the ground it stands over', () => {
+    const cam = new EyeCamera();
+    cam.jumpTo(0, 0, 0, 0);
+    cam.zoomLimitM = cam.maxDistanceM = UNLOCKED_EYE_DISTANCE_M;
+    // A wall 10 m behind the body, and a ridge 50 m high between 100 m and 120 m back.
+    cam.clearance = () => 10;
+    cam.ground = { heightAt: (_x: number, z: number) => (z <= -100 && z >= -120 ? 50 : 0) };
+    for (let i = 0; i < 20; i++) {
+      cam.zoomBy(1.5);
+    }
+
+    settle(cam);
+    expect(cam.effectiveDistance).toBeGreaterThan(MAX_EYE_DISTANCE_M * 10);
+    expect(cam.eyeY).toBeGreaterThanOrEqual(0);
+
+    // Within the default range the wall still holds it.
+    cam.zoomLimitM = cam.maxDistanceM = MAX_EYE_DISTANCE_M;
+    settle(cam);
+    expect(cam.effectiveDistance).toBeLessThan(10);
   });
 
   it('glides to a moving subject instead of snapping with it', () => {

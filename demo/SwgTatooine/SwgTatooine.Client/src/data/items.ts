@@ -344,7 +344,7 @@ function isItem(value: unknown): value is InventoryItem {
   );
 }
 
-function isStats(value: unknown): value is ItemStats {
+export function isStats(value: unknown): value is ItemStats {
   if (typeof value !== 'object' || value === null) {
     return false;
   }

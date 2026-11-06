@@ -164,6 +164,9 @@ public static class MarketEndpoints
     /// <summary>The mine handler itself, for the checks: a request in, the result out.</summary>
     internal static IResult GetMineForChecks(DatabaseEngine dbe, MarketSnapshot board, HttpContext context) => GetMine(dbe, board, context);
 
+    /// <summary>The prices handler itself, for the checks.</summary>
+    internal static IResult GetPricesForChecks(MarketSnapshot board, HttpContext context) => GetPrices(board, context);
+
     private static IResult GetBrowse(MarketSnapshot board, HttpContext context)
     {
         // The board's version AND the query: one ETag per answer, so a cached page of one query is never served for another.
@@ -202,15 +205,18 @@ public static class MarketEndpoints
             return Results.StatusCode(StatusCodes.Status401Unauthorized);
         }
 
+        // Built without a string (PooledJson): every bot re-reads it on each items revision while it names something — 2.6 MB/s live (2026-11-05).
         return CharacterStore.TryFind(dbe, account, out var character, out _)
-            ? Results.Text(MineJson(dbe, character, board), "application/json")
+            ? PooledJson.Of((dbe, character, board), static (json, s) => AppendMine(json, s.dbe, s.character, s.board))
             : Results.Text(MineEmpty, "application/json");
     }
 
     private static IResult GetPrices(MarketSnapshot board, HttpContext context)
     {
         context.Response.Headers.CacheControl = "no-cache";
-        return Results.Text(PricesJson(board), "application/json");
+
+        // Encoded once per snapshot (MarketSnapshot.PricesUtf8): the same 29 KB for every caller, rebuilt per request at 1.8 MB/s live (2026-11-05).
+        return PooledJson.Of(board.PricesUtf8 ??= Encoding.UTF8.GetBytes(PricesJsonCore(board)));
     }
 
     private static IResult GetAudit(DatabaseEngine dbe, MarketSnapshot board, HttpContext context)
@@ -436,14 +442,39 @@ public static class MarketEndpoints
     /// </summary>
     public static string MineJson(DatabaseEngine dbe, EntityId character, MarketSnapshot board)
     {
+        var json = new StringBuilder(1024);
+        AppendMine(json, dbe, character, board);
+        return json.ToString();
+    }
+
+    // The listings' seller and collector indexes, resolved once per engine: an expression tree a lookup built two of on every request.
+    private static (DatabaseEngine Dbe, IndexRef Seller, IndexRef Collector) _mineIndexes;
+    private static readonly object MineIndexesLock = new();
+
+    private static (IndexRef Seller, IndexRef Collector) MineIndexes(DatabaseEngine dbe)
+    {
+        lock (MineIndexesLock)
+        {
+            if (!ReferenceEquals(_mineIndexes.Dbe, dbe))
+            {
+                _mineIndexes = (dbe, dbe.GetIndexRef<Listing, long>(l => l.Seller), dbe.GetIndexRef<Listing, long>(l => l.Collector));
+            }
+
+            return (_mineIndexes.Seller, _mineIndexes.Collector);
+        }
+    }
+
+    /// <summary><see cref="MineJson"/> written into <paramref name="json"/>.</summary>
+    public static void AppendMine(StringBuilder json, DatabaseEngine dbe, EntityId character, MarketSnapshot board)
+    {
         ArgumentNullException.ThrowIfNull(dbe);
         board ??= MarketSnapshot.Empty;
         var key = unchecked((long)character.RawValue);
-        var json = new StringBuilder(1024);
+        var (byseller, bycollector) = MineIndexes(dbe);
         using var tx = dbe.CreateQuickTransaction();
         json.Append("{\"listed\":[");
         var first = true;
-        using (var mine = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Seller), key, key))
+        using (var mine = tx.EnumerateIndex<Listing, long>(byseller, key, key))
         {
             while (mine.MoveNext())
             {
@@ -467,7 +498,7 @@ public static class MarketEndpoints
 
         json.Append("],\"reserved\":[");
         first = true;
-        using (var mine = tx.EnumerateIndex<Listing, long>(dbe.GetIndexRef<Listing, long>(l => l.Collector), key, key))
+        using (var mine = tx.EnumerateIndex<Listing, long>(bycollector, key, key))
         {
             while (mine.MoveNext())
             {
@@ -486,8 +517,8 @@ public static class MarketEndpoints
             }
         }
 
-        return json.Append("],\"caps\":{\"listings\":").Append(TatooineData.MaxListings)
-            .Append(",\"reserved\":").Append(TatooineData.MaxReserved).Append("}}").ToString();
+        json.Append("],\"caps\":{\"listings\":").Append(TatooineData.MaxListings)
+            .Append(",\"reserved\":").Append(TatooineData.MaxReserved).Append("}}");
 
         static void Common(StringBuilder json, MarketSnapshot board, long id, in Listing l)
         {
@@ -532,7 +563,7 @@ public static class MarketEndpoints
                 .Append(",\"item\":\"").Append(t.Asset).Append('"')
                 .Append(",\"name\":\"").Append(EconomyEndpoints.Escape(t.Name ?? "")).Append('"')
                 .Append(",\"category\":\"").Append(ItemCategory.NameOf(t.Category)).Append('"')
-                .Append(",\"mk\":1")
+                .Append(",\"mk\":").Append(Equipment.StandardMk(s.Template))
                 .Append(",\"price\":").Append(Equipment.StandardPrice(s.Template));
             ItemEndpoints.Stats(json, in t, SimBridge.StandardStats(in s));
             json.Append('}');

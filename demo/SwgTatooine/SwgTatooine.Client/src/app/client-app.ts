@@ -45,8 +45,10 @@ import { meanAndP95, overviewPolicy, regionDue } from './frame-policy';
 import { headingFromVelocity } from '../math/vec';
 import { DATA_ARCHETYPES, resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
 import { altitudeField, altitudeOf, groundedAltitude, Placement } from '../data/placement';
-import type { HealthBar } from '../render/labels';
+import type { FoeTag, HealthBar } from '../render/labels';
+import { FOE_TAG_MAX, FOE_TAG_RANGE_M, foeTagOpacity, hostilityOf, NearestPicker } from '../data/foe-tags';
 import { DamageText, type Anchor } from '../render/damage-text';
+import { HealFx } from '../render/heal-fx';
 import type { AnimationGraph } from '../character/animation-graph';
 import { PlayerNameDirectory } from '../data/player-names';
 import { entityTag, viewerClOf, type EntityTag } from '../data/content-level';
@@ -62,6 +64,8 @@ import { useInstallations } from '../state/installations-store';
 import { installationAt, installationMenu, type InstallationList } from '../data/installations';
 import { useWaypoints } from '../state/waypoints-store';
 import { useMail } from '../state/mail-store';
+import { useHorde } from '../state/horde-store';
+import { hordeGuide } from '../data/horde';
 import { useCharacter } from '../state/character-store';
 import { edgeArrow, WaypointPillar } from '../render/waypoint-marker';
 import { colorOf, GROUP_COLORS, groupOf } from '../data/waypoints';
@@ -180,7 +184,7 @@ import {
   type MoveIntent,
 } from './player-intent';
 import { Predictor, speedForClass, type GrantedSpeeds } from './predictor';
-import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M } from '../camera/eye-camera';
+import { DEFAULT_THIRD_PERSON_M, MAX_EYE_DISTANCE_M, UNLOCKED_EYE_DISTANCE_M } from '../camera/eye-camera';
 import { bodyOpacityAt, marchEye } from '../camera/eye-clearance';
 import {
   countDrivers,
@@ -591,6 +595,7 @@ export class ClientApp {
   private readonly attacks: AttackLines;
   /** The fights as they look: swings, bolts, hit reactions and damage numbers, played at render time. */
   private readonly fx: CombatFx;
+  private readonly heals: HealFx;
   /** The active waypoint's pillar, and the arrow at the screen's edge when it is out of view (client.md C38, U5). */
   private readonly waypointPillar: WaypointPillar;
   private waypointEdge: HTMLElement | null = null;
@@ -878,8 +883,22 @@ export class ClientApp {
     // Every blow the server streams, played at render time: the attacker's swing — the crowd's, or this session's avatar's —
     // a bolt for a shot, and on impact the target's hit reaction and its damage over its head.
     this.fx = new CombatFx(this.scene);
+    this.heals = new HealFx(this.scene);
     this.waypointPillar = new WaypointPillar(this.scene);
     this.damage = new DamageText(this.scene);
+    this.heals.hooks = {
+      // The heal's number over the body, green; this player's own starts its stim slot's cooldown.
+      healed: (netId, amount) => {
+        const now = performance.now();
+        if (amount > 0) {
+          this.damage.spawn(netId, amount, now, false, true);
+        }
+
+        if (netId === this.source?.selfNetId) {
+          useUi.getState().drankStim(now);
+        }
+      },
+    };
     this.fx.hooks = {
       strike: (netId) => {
         this.crowdRouter?.strike(netId);
@@ -895,7 +914,11 @@ export class ClientApp {
 
         this.damage.spawn(netId, amount, performance.now(), crit);
       },
-      ranged: (netId) => this.archetypeName(netId) === 'Player' && this.fieldOf(netId, 'stance') === PISTOL_STANCE,
+      // A pistol shoots, a player's or an armed raider's: a bolt flies rather than a swing landing.
+      ranged: (netId) => {
+        const archetype = this.archetypeName(netId);
+        return (archetype === 'Player' || archetype === 'Creature') && this.fieldOf(netId, 'stance') === PISTOL_STANCE;
+      },
       aim: (netId) => this.heightOf(netId) * 0.6,
     };
     // The debug lines see every blow; the effects play them. One sink for the source, the two behind it.
@@ -904,6 +927,9 @@ export class ClientApp {
         this.attacks.onAttack(tick, attacker, target);
         this.fight.note(attacker, target, this.source?.selfNetId ?? 0, performance.now());
         this.fx.push(tick, attacker, target, damage, crit);
+      },
+      onHeal: (tick, netId, amount) => {
+        this.heals.push(tick, netId, amount);
       },
       onChat: (tick, speaker, text) => {
         const own = speaker !== 0 && speaker === (this.source?.selfNetId ?? 0);
@@ -932,6 +958,16 @@ export class ClientApp {
         if (!outgoing) {
           useMail.getState().heardFrom(other);
         }
+      },
+      // The horde (horde.md § 6): its status on the HUD's line, the rally point on the guide.
+      onHorde: (status) => {
+        useHorde.getState().heard(status);
+      },
+      onRally: (rally) => {
+        useHorde.getState().rallied(rally);
+      },
+      onRadar: (radar) => {
+        useHorde.getState().radared(radar);
       },
     };
     this.labels = new Labels(overlay);
@@ -1262,6 +1298,7 @@ export class ClientApp {
         return;
       }
 
+      this.creatureNames = set.creatures.map((kind) => kind.name);
       this.templateHeights = set.creatures.map(
         (kind) => described.get(kind.bodies[0] ?? '')?.bounds.render[1][1] ?? 1.5,
       );
@@ -1439,6 +1476,7 @@ export class ClientApp {
     this.pressRing.dispose();
     this.attacks.dispose();
     this.fx.dispose();
+    this.heals.dispose();
     this.waypointPillar.dispose();
     this.damage.dispose();
     for (const layer of this.layers) {
@@ -1533,6 +1571,7 @@ export class ClientApp {
     useInstallations.getState().reset();
     useWaypoints.getState().reset();
     useMail.getState().reset();
+    useHorde.getState().reset();
     useCharacter.getState().reset();
     this.mine.clear();
     this.mineVersion = -1;
@@ -1973,6 +2012,7 @@ export class ClientApp {
     const waypoints = useWaypoints.getState();
     waypoints.ensure();
     useMail.getState().ensure();
+    useHorde.getState().ensure();
     const own = [...(waypoints.list ?? [])].sort((a, b) => Number(b.active) - Number(a.active));
     own.forEach((w, i) => {
       this.navTargets.push({
@@ -2071,9 +2111,13 @@ export class ClientApp {
    * edge the way to turn. Only for a player on the planet, where the waypoints are.
    */
   private paintWaypoint(matrix: ArrayLike<number>): void {
+    const hordeGuideOf = (h: ReturnType<typeof useHorde.getState>) => hordeGuide(h.status, h.rally, h.mutedEvent);
     const source = this.source;
     const onPlanet = source !== null && source.canPlay && source.selfNetId !== 0 && this.profile.kind === 'planet';
-    const active = onPlanet ? (useWaypoints.getState().list?.find((w) => w.active) ?? null) : null;
+    // A horde's rally point, while the answer stands, before the player's own: it is where they said they would be (horde.md § 6).
+    const active = onPlanet
+      ? (hordeGuideOf(useHorde.getState()) ?? useWaypoints.getState().list?.find((w) => w.active) ?? null)
+      : null;
     if (this.waypointEdge === null || !this.waypointEdge.isConnected) {
       this.waypointEdge = document.querySelector<HTMLElement>('.waypoint-edge');
     }
@@ -3193,6 +3237,7 @@ export class ClientApp {
 
     this.attacks.bind(this.world);
     this.fx.bind(this.world);
+    this.heals.bind(this.world);
   }
 
   private onUiChange(state: UiState, previous: UiState): void {
@@ -3586,7 +3631,9 @@ export class ClientApp {
       // 1.9 m over the feet — under the 2 m the colliders stop at, so the walls still stop it — and at 7 m back.
       const indoors = isIndoors(this.profile.kind);
       this.eyeCamera.maxEyeHeightM = indoors ? 1.9 : Infinity;
-      this.eyeCamera.maxDistanceM = indoors ? 7 : MAX_EYE_DISTANCE_M;
+      // The zoom unlocked (a debug setting) outdoors only: in a room more than 7 m is a wall.
+      this.eyeCamera.zoomLimitM = useUi.getState().unlockZoom ? UNLOCKED_EYE_DISTANCE_M : MAX_EYE_DISTANCE_M;
+      this.eyeCamera.maxDistanceM = indoors ? 7 : this.eyeCamera.zoomLimitM;
       this.cameraShapes = this.gatherStructureShapes();
       this.eyeCamera.clearance = this.cameraShapes > 0 ? this.eyeClearance : null;
       this.eyeCamera.update(dt);
@@ -3754,6 +3801,7 @@ export class ClientApp {
 
     this.attacks.update(view);
     this.fx.update(view, now / 1000);
+    this.heals.update(view, now / 1000);
     this.damage.update(view, now, this.headOf);
     this.sendRegion(now, ui.viewRadius, cam.targetX, cam.targetZ, playing);
     this.sendViewRadius(ui.playerRadius);
@@ -3787,7 +3835,8 @@ export class ClientApp {
     g.heatMask = this.heatMask;
     g.showGrid = ui.showGrid;
     g.showDebug = ui.showDebug;
-    g.hasSelection = hasSelection;
+    // The rings round the selection are a debug view (ui.showRings); the selection itself is not.
+    g.hasSelection = hasSelection && ui.showRings;
     g.selectionX = this.selectedX;
     g.selectionZ = this.selectedZ;
     this.profile.update(g, this.grid, this.source?.debug ?? null);
@@ -3812,6 +3861,8 @@ export class ClientApp {
         this.labels.hidePlaces();
       }
 
+      // The tags first, then the bars: a bar goes on the pile over its body's tag.
+      this.updateFoeTags(matrix, view);
       this.updateEnemyBars(matrix, view);
 
       if (this.hoverTag !== null) {
@@ -4707,7 +4758,9 @@ export class ClientApp {
         ? STRUCTURE_KIND_NAMES[this.fieldOf(netId, 'kind')]
         : archetype === 'Player'
           ? (this.names.nameOf(this.fieldOf(netId, 'nameId')) ?? undefined)
-          : undefined;
+          : archetype === 'Creature'
+            ? this.creatureNames[this.fieldOf(netId, 'template')] || undefined
+            : undefined;
     return entityTag(kindName ?? `${this.archetypes.label(archetypeIndex)} #${netId}`, level, viewerCl);
   }
 
@@ -5243,6 +5296,14 @@ export class ClientApp {
 
   /** How tall each creature template's body is, metres, from its first body's descriptor: where its health bar sits. */
   private templateHeights: readonly number[] = [];
+  /** Each creature template's name, by its replicated `template`: the server's (`/typhon/demo.json`), what a creature's tag says. */
+  private creatureNames: readonly string[] = [];
+  /** The potential enemies tagged this frame, pooled, and the nearest of them picked. */
+  private readonly foeTags: FoeTag[] = [];
+  private readonly foePicker = new NearestPicker(FOE_TAG_MAX);
+  /** Each tagged creature's tag, by netId: its name and level are sent once on enter, so it is built once — again when the viewer's CL moves. */
+  private readonly foeTagCache = new Map<number, EntityTag>();
+  private foeTagViewer: number | null = null;
 
   /** Each creature template's body box, from the same descriptor: what its selection frame is drawn round. */
   private templateBoxes: readonly (BodyBox | null)[] = [];
@@ -5484,6 +5545,76 @@ export class ClientApp {
 
     n = this.lairBars(view, n);
     this.labels.updateBars(matrix, originX, originZ, this.cssSize.width, this.cssSize.height, this.enemyBars, n);
+  }
+
+  /**
+   * A tag over every potential enemy near the eye (data/foe-tags.ts): each living creature within {@link FOE_TAG_RANGE_M}, the nearest
+   * {@link FOE_TAG_MAX}, says its name and CL with its hostility mark — alarmed while it hunts the avatar. One hovered or selected has its tag already.
+   */
+  private updateFoeTags(matrix: ArrayLike<number>, view: FrameView): void {
+    const archetype = this.archetypes.indexOf('Creature');
+    const picker = this.foePicker;
+    picker.reset();
+    const store = archetype < 0 ? null : this.world.archetypeStore(archetype);
+    const hpField = store === null ? -1 : store.fieldIndex('hp');
+    if (store !== null && store.hasPosition && hpField >= 0) {
+      const hps = store.fieldAt(hpField);
+      const ground = altitudeField(store);
+      const reach = FOE_TAG_RANGE_M * FOE_TAG_RANGE_M;
+      for (let i = 0; i < store.liveCount; i++) {
+        const slot = store.live[i];
+        const netId = store.netIds[slot];
+        if (!(hps[slot] > 0) || this.stackTop.has(netId)) {
+          continue;
+        }
+
+        evaluateSlot(store, slot, this.clock.renderTick, this.clock.renderFrac, this.scratch, 0);
+        const at = this.placement.read(store.dims, this.scratch, 0);
+        const dx = at.x - view.originX - view.eyeX;
+        const dy = altitudeOf(ground, slot, at, this.profile.ground) - view.eyeY;
+        const dz = at.z - view.originZ - view.eyeZ;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 <= reach) {
+          picker.offer(netId, d2);
+        }
+      }
+    }
+
+    const viewerCl = this.viewerCl();
+    if (viewerCl !== this.foeTagViewer || this.foeTagCache.size > 1024) {
+      this.foeTagViewer = viewerCl;
+      this.foeTagCache.clear();
+    }
+
+    const self = this.source?.selfNetId ?? 0;
+    let n = 0;
+    for (let i = 0; i < picker.count; i++) {
+      const netId = picker.idAt(i);
+      if (!this.frameOf(matrix, netId, this.cssSize.width, this.cssSize.height)) {
+        continue;
+      }
+
+      let tag = this.foeTagCache.get(netId);
+      if (tag === undefined) {
+        tag = this.tagText(netId, archetype, this.levelOf(netId), viewerCl);
+        this.foeTagCache.set(netId, tag);
+      }
+
+      if (n >= this.foeTags.length) {
+        this.foeTags.push({ sx: 0, sy: 0, tag, hostility: 'passive', engaged: false, opacity: 1 });
+      }
+
+      const r = this.frameRect;
+      const foe = this.foeTags[n++];
+      foe.sx = (r.left + r.right) * 0.5;
+      foe.sy = pileOn(this.stackTop, netId, r.top, TAG_STACK_PX);
+      foe.tag = tag;
+      foe.hostility = hostilityOf(this.fieldOf(netId, 'aggro'));
+      foe.engaged = self !== 0 && this.fieldOf(netId, 'target') === self;
+      foe.opacity = foeTagOpacity(Math.sqrt(picker.d2At(i)), foe.engaged);
+    }
+
+    this.labels.updateFoeTags(this.foeTags, n);
   }
 
   /** The bar count while {@link fight} is walked: the walk's visitor is bound once, so it carries the count in a field. */

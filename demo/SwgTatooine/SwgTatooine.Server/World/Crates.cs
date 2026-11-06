@@ -44,10 +44,9 @@ public static class Crates
             return false;
         }
 
-        var inv = CultureInfo.InvariantCulture;
-        json.Append(template.ToString(inv)).Append('.').Append(mk.ToString(inv)).Append('.').Append(s.Crafter.ToString(inv))
-            .Append('.').Append(s.Stat0.ToString(inv)).Append('.').Append(s.Stat1.ToString(inv)).Append('.').Append(s.Stat2.ToString(inv))
-            .Append('.').Append(s.Stat3.ToString(inv)).Append('.').Append(s.MaxCondition.ToString(inv)).Append('.').Append(s.LifeMilli.ToString(inv));
+        // Formatted straight into the builder: no string a number (every inventory read writes one key an item).
+        json.Append(CultureInfo.InvariantCulture,
+            $"{template}.{mk}.{s.Crafter}.{s.Stat0}.{s.Stat1}.{s.Stat2}.{s.Stat3}.{s.MaxCondition}.{s.LifeMilli}");
         return true;
     }
 }

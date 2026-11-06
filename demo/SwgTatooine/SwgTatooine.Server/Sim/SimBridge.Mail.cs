@@ -67,6 +67,12 @@ public sealed partial class SimBridge
     /// <summary>The players' mails one <c>Workshop</c> pass writes at most; the rest wait for the next. The endpoint's rate holds each sender to one a
     /// second.</summary>
     private const int MailRequestsPerPass = 64;
+
+    /// <summary>
+    /// The game's mails one pass writes at most; the rest wait for the next. A horde mails every character at once (horde.md § 3): ten thousand inserts and
+    /// inbox reads in one tick's transaction is the tick a run stalls on, and 256 a pass spreads them over the tick rate's seconds.
+    /// </summary>
+    internal const int SystemMailPerPass = 256;
     private readonly List<(SessionId Session, ushort Seq)> _mailCommandsApplied = [];
     private readonly Dictionary<string, long> _characterByName = new(StringComparer.Ordinal);
     private readonly Dictionary<EntityId, uint> _mailSessions = [];
@@ -268,8 +274,9 @@ public sealed partial class SimBridge
     {
         lock (_systemMailLock)
         {
-            _systemMailTaken.AddRange(_systemMail);
-            _systemMail.Clear();
+            var take = Math.Min(_systemMail.Count, SystemMailPerPass);
+            _systemMailTaken.AddRange(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_systemMail)[..take]);
+            _systemMail.RemoveRange(0, take);
         }
 
         foreach (var (owner, kind, reference, subject, text) in _systemMailTaken)

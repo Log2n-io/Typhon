@@ -125,6 +125,8 @@ export interface MarketState {
   readonly buyStandard: (template: number, price: number, quantity?: number) => void;
   /** Wears an item with stats (crafting-build.md § 2.2); its refusal shows on the `'gear'` row. */
   readonly equip: (itemId: string) => void;
+  /** Drinks a dose of a potion in the grid (crafting-catalog.md § 5.4), or one out of its crate. */
+  readonly consume: (itemId: string) => void;
   /** Sends a command as the panels' buttons do: held while one of its row is in flight, its refusal shown on its row. False when not sent. */
   readonly sendCommand: (command: MarketCommand) => boolean;
   /**
@@ -144,6 +146,8 @@ export interface MarketState {
   /** Moves `count` of a stack into grid slot `slot` (0: the lowest free), and throws `count` of one away (inventory-loot.md § 10). Refusals on `'gear'`. */
   readonly move: (item: string, slot: number, count: number) => void;
   readonly discard: (item: string, count: number) => void;
+  /** Stacks the same units and orders the grid by type, name and mark (the inventory window's "Sort & stack"). Refusals on `'gear'`. */
+  readonly sort: () => void;
   /** The server refused `command` with `reason`. */
   readonly refused: (reason: number, command: MarketCommand) => void;
   /**
@@ -494,6 +498,9 @@ export const useMarket = create<MarketState>((set, get) => {
     equip: (itemId) => {
       send({ kind: 'equip', item: itemId });
     },
+    consume: (itemId) => {
+      send({ kind: 'consume', item: itemId });
+    },
     unequip: (slot) => {
       send({ kind: 'unequip', slot });
     },
@@ -508,6 +515,9 @@ export const useMarket = create<MarketState>((set, get) => {
     },
     discard: (item, count) => {
       send({ kind: 'discard', item, count });
+    },
+    sort: () => {
+      send({ kind: 'sort' });
     },
     refused: (reason, command) => {
       const row = commandRow(command);

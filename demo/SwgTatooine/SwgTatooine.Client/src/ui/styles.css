@@ -154,6 +154,28 @@ body,
   border-radius: 3px;
 }
 
+/*
+ * A potential enemy's tag (data/foe-tags.ts): the selection's text with its mark, and no box — the place names' shadow reads it (Loïc, 2026-11-04).
+ * While it hunts the avatar, a red glow under that shadow.
+ */
+.label-foe {
+  background: none;
+}
+
+.label-foe.engaged {
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 0 6px rgba(255, 60, 50, 0.85);
+}
+
+.foe-aggressive {
+  color: #ff5a4f;
+}
+
+.foe-passive {
+  color: #f5c542;
+}
+
 /* The hover and selection frames: four corners of the rectangle a body covers (render/selection-frame.ts). */
 .sel-frames {
   position: absolute;
@@ -748,6 +770,11 @@ button.active {
 
 .inventory-expand[aria-pressed='true'] {
   background: rgba(110, 170, 220, 0.3);
+}
+
+.inventory-expand:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .inventory-details {
@@ -1844,6 +1871,41 @@ button.active {
   pointer-events: none;
 }
 
+/* The stim slot's doses, bottom right. */
+.slot-count {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-shadow:
+    0 0 2px #000,
+    0 1px 1px #000;
+  pointer-events: none;
+}
+
+/* The stim's cooldown: a shade over the slot that drains from the top until a stim may be drunk again. */
+.slot-cooldown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  animation-name: slot-cooldown;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes slot-cooldown {
+  to {
+    height: 0%;
+  }
+}
+
 /* The press: a flash that fades, restarted on every use by remounting. */
 .slot-flash {
   position: absolute;
@@ -1909,6 +1971,29 @@ button.active {
 
 .bazaar-table td.mk5 {
   color: #ffcf4a;
+}
+
+/* The board's rows select for the preview panel, by a click or the arrow keys. */
+.bazaar-table[tabindex] {
+  outline: none;
+}
+
+.bazaar-table[tabindex] tbody tr:not(.bazaar-row-notice) {
+  cursor: pointer;
+}
+
+.bazaar-table[tabindex] tbody tr:not(.bazaar-row-notice):hover {
+  background: rgba(110, 170, 220, 0.08);
+}
+
+.bazaar-table tr.selected {
+  background: rgba(110, 170, 220, 0.2);
+}
+
+/* The preview stays in view while the board scrolls under it. */
+.bazaar .inventory-details {
+  position: sticky;
+  top: 0;
 }
 
 /* A row the board no longer lists, kept while its refusal is read: "Sold to someone else first". */
@@ -2510,4 +2595,37 @@ button.active {
 .mail-unread {
   font-size: 11px;
   color: var(--accent);
+}
+
+/* The horde's line (horde.md § 6): centred at the top, over the world, under every window. */
+.horde-bar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: rgba(60, 14, 8, 0.85);
+  border: 1px solid #e0402a;
+  border-radius: 4px;
+  color: #ffe9dc;
+  font-size: 13px;
+  z-index: 40;
+  pointer-events: auto;
+}
+
+.horde-bar.over {
+  background: rgba(20, 20, 20, 0.8);
+  border-color: #888;
+}
+
+.horde-bar .horde-committed {
+  color: #ffd27a;
+  font-weight: 600;
+}
+
+.horde-bar button.quiet {
+  opacity: 0.7;
 }

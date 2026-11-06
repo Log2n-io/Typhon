@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ARRIVAL_S,
   arrivalPose,
+  departurePose,
   flightAt,
   HOVER_HEIGHT_M,
   shuttleMoment,
@@ -50,6 +51,26 @@ describe('the flight', () => {
     expect(flightAt(shuttleMoment(6000 - 5 * HZ, 0, SCHEDULE, HZ))?.y).toBeGreaterThan(0);
     expect(flightAt(shuttleMoment(1500 + 5 * HZ, 0, SCHEDULE, HZ))?.y).toBeGreaterThan(0);
     expect(flightAt(shuttleMoment(3000, 0, SCHEDULE, HZ))).toBeNull();
+  });
+
+  it('leaves nose first: up to the hover, then out ahead of the nose, its heading the way it flies (Loïc, 2026-11-05)', () => {
+    expect(departurePose(0)).toMatchObject({ x: 0, y: 0, z: 0, yaw: 0 });
+    expect(departurePose(5).y).toBeCloseTo(HOVER_HEIGHT_M, 6);
+    // The landed nose is +z: the departure goes that way, where the arrival came from -z — no longer the arrival backwards.
+    expect(departurePose(ARRIVAL_S).z).toBeGreaterThan(150);
+    expect(arrivalPose(0).z).toBeLessThan(-150);
+    for (let t = 6; t < ARRIVAL_S; t += 1) {
+      const a = departurePose(t);
+      const b = departurePose(t + 0.25);
+      // Flying forward: the nose (yaw, +Z towards +X) within a few degrees of the way it moves once the turn is done.
+      expect(b.z - a.z).toBeGreaterThan(0);
+      if (t >= 10) {
+        const moving = Math.atan2(b.x - a.x, b.z - a.z);
+        expect(Math.abs(a.yaw - moving)).toBeLessThan(0.1);
+      }
+    }
+
+    expect(departurePose(ARRIVAL_S).noseUp).toBeGreaterThan(0);
   });
 });
 

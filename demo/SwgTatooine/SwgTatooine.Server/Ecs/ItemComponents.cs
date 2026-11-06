@@ -113,6 +113,12 @@ public static class ItemMoveKind
     /// </summary>
     public const byte Discard = 26;
 
+    /// <summary>
+    /// A potion drunk to its last dose (crafting-catalog.md § 5.4): the owner → World, destroyed. A dose that leaves one is no row — it changes the item's
+    /// condition, as wear does. <see cref="ItemLedgerEntry.Ref"/> is 0.
+    /// </summary>
+    public const byte Consume = 27;
+
     /// <summary>The name a kind is shown by, over HTTP and in the audit.</summary>
     public static string NameOf(byte kind) => kind switch
     {
@@ -140,6 +146,7 @@ public static class ItemMoveKind
         Pickup => "pickup",
         Move => "move",
         Discard => "discard",
+        Consume => "consume",
         _ => "unknown",
     };
 }

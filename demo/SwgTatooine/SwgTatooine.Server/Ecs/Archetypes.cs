@@ -209,6 +209,20 @@ public partial class MailArch : Archetype<MailArch>
     public static readonly Comp<MailCore> Core = Register<MailCore>();
 }
 
+/// <summary>A raid on a city (horde.md § 1): the event's truth. Written by the <c>Horde</c> system alone.</summary>
+[Archetype(1, "Horde")]
+public partial class HordeArch : Archetype<HordeArch>
+{
+    public static readonly Comp<HordeCore> Core = Register<HordeCore>();
+}
+
+/// <summary>One character's answer to a horde's call (horde.md § 5). Written by the <c>Horde</c> system alone.</summary>
+[Archetype(1, "HordeResponder")]
+public partial class HordeResponderArch : Archetype<HordeResponderArch>
+{
+    public static readonly Comp<HordeResponder> Core = Register<HordeResponder>();
+}
+
 /// <summary>
 /// What the world sees of an installation: where it stands, what it is and what it is doing. Static and replicated, as a structure, and a view only — rebuilt
 /// from <see cref="InstallationArch"/> when a world opens, so a lost one costs nothing.

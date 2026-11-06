@@ -185,6 +185,13 @@ export function previewLines(item: InventoryItem): PreviewLine[] {
     lines.push({ label: 'Worn on', value: worn.label });
   }
 
+  // A potion's condition is its doses (crafting-catalog.md § 5.4), and it is never repaired.
+  if (item.category === 'potion') {
+    lines.push({ label: 'Doses', value: `${String(s.condition)} / ${String(s.maxCondition)}` });
+    lines.push({ label: 'Made by', value: s.crafter === '0' ? 'standard issue or loot' : 'a crafter' });
+    return lines;
+  }
+
   if (s.maxCondition > 0) {
     const pct = Math.round((100 * s.condition) / s.maxCondition);
     lines.push({

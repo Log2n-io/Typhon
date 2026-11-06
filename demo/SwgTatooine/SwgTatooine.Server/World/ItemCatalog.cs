@@ -143,6 +143,10 @@ public static class ItemCatalog
     public const ushort AddonAdditive = 19;
     public const ushort PaddedHelmet = 44;
     public const ushort CompositeHelmet = 50;
+
+    /// <summary>The stim (crafting-catalog.md § 5.4): an instant heal, three doses — the one potion drunk so far.</summary>
+    public const ushort Stim = 56;
+
     /// <summary>The repair kits (crafting-catalog.md § 9.2): a weapon's, an armour piece's.</summary>
     public const ushort KitWeaponRepair = 62;
 
@@ -214,6 +218,9 @@ public static class ItemLedger
     /// </summary>
     public const int StackMax = 100_000;
 
-    /// <summary>A character's inventory grid: slots 1..40 (crafting-build.md O-9: a crafter holds one recipe's inputs and its gear).</summary>
-    public const int Slots = 40;
+    /// <summary>
+    /// A character's inventory grid: slots 1..50 — 40 at O-9 (crafting-build.md: a crafter holds one recipe's inputs and its gear), 50 since 2026-11-05
+    /// (Loïc), room to buy a whole set of gear.
+    /// </summary>
+    public const int Slots = 50;
 }

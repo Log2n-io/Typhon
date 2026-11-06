@@ -89,17 +89,30 @@ public sealed partial class SimBridge
             return;
         }
 
-        // Validated: each item a new instance with the crate's stats, in the lowest free slot, a row from the crate to it.
+        Unpack(tx, owner, items, src, item, in stats, n, worldTick);
+        _craftBodies.Add(body);
+        _unpacksApplied.Add(command);
+    }
+
+    /// <summary>
+    /// <paramref name="n"/> items out of the crate in slot <paramref name="src"/>, validated by the caller (fewer than it holds, as many slots free): each a
+    /// new instance with <paramref name="stats"/> — the crate's, or one a drink has already spent a dose of — in the lowest free slot, a row from the crate
+    /// to it.
+    /// </summary>
+    /// <returns>The last item unpacked.</returns>
+    private EntityId Unpack(Transaction tx, long owner, OwnerItems items, int src, EntityId item, in ItemInstance stats, int n, long worldTick)
+    {
         var (template, mk) = (items.Slots[src].Template, items.Slots[src].Mk);
         var crateKey = (long)item.RawValue;
         var left = items.Slots[src].Count;
+        var id = EntityId.Null;
         for (var i = 0; i < n; i++)
         {
             var slot = FreeSlot(items);
             left--;
             var seq = _itemHead.LastSeq + 1;
             var single = new ItemStack { Owner = owner, Template = template, Mk = mk, Slot = (byte)slot, Count = 1, LastSeq = seq, Rows = 1 };
-            var id = tx.Spawn<ItemInstanceArch>(ItemStackArch.Stack.Set(in single), ItemInstanceArch.Stats.Set(in stats));
+            id = tx.Spawn<ItemInstanceArch>(ItemStackArch.Stack.Set(in single), ItemInstanceArch.Stats.Set(in stats));
             items.Slots[slot] = new ItemSlot { Stack = id, Template = template, Mk = mk, Count = 1, Instance = true };
             AppendItemRow(tx, owner, owner, crateKey, (long)id.RawValue, left, 1, 1, template, mk, ItemMoveKind.Unpack, crateKey, worldTick);
             _pendingStacks++;
@@ -114,8 +127,7 @@ public sealed partial class SimBridge
         items.Slots[src].Count = left;
         _itemHeadDirty = true;
         _pendingUnpacked += n;
-        _craftBodies.Add(body);
-        _unpacksApplied.Add(command);
+        return id;
     }
 
     /// <summary>How many grid slots are free.</summary>

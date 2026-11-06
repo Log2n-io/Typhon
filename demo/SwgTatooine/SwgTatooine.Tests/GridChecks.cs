@@ -51,6 +51,8 @@ internal sealed class GridChecks : ServedChecks
     private static void Discard(FakeLink link, EntityId item, int count)
         => link.SendCommand(nameof(DiscardItem), new RecordValues { ["item"] = FieldValue.OfUInt64(item.RawValue), ["count"] = FieldValue.Of(count) });
 
+    private static void Sort(FakeLink link) => link.SendCommand(nameof(SortItems), new RecordValues { ["order"] = FieldValue.Of(0) });
+
     private static int Refused(FakeLink link, byte reason) => Ledgers.Refusals(link).Count(r => r == reason);
 
     private static void AuditsOk(TatooineSim sim, string when)
@@ -258,5 +260,57 @@ internal sealed class GridChecks : ServedChecks
             "the bad shapes refused");
         Assert.That(OreStacks(sim, character).Single(s => s.Id == ore).Stack.Count, Is.EqualTo(600), "nothing of them was written");
         AuditsOk(sim, "after the refusals");
+    }
+
+    /// <summary>
+    /// "Sort &amp; stack" (Loïc, 2026-11-04): Ore in three stacks — 100 000, 20 000, and 30 000 split off to the last slot — a Hide stack and a blaster. The
+    /// two part stacks merge into the first of them (one <c>move</c> row), the full one is left alone, the blaster never merges, and the grid is laid out
+    /// from slot 1 with no gap, by type, name and mark: the Hide before the Ore, the materials before the weapon.
+    /// </summary>
+    [Test]
+    [CancelAfter(120_000)]
+    public void SortAndStack_MergesTheSameUnits_AndOrdersByTypeNameMark()
+    {
+        using var sim = Start();
+        var (link, character) = LogIn(sim, 0xC603);
+        StageOre(sim, character, 150_000);
+        var half = OreStacks(sim, character)[1].Id;
+        Move(link, half, LastFreeSlot(sim, character), 30_000);
+        SessionHarness.Until(() => sim.Bridge.GridSplits == 1, "the split applied");
+        Breathe();
+        var blaster = StageBlaster(sim, character);
+        var hides = Items.Stacks(sim, character).Count(s => s.Stack.Template == ItemCatalog.Hide);
+        sim.Bridge.StageTransfer(ItemLedger.World, unchecked((long)character.RawValue), ItemCatalog.Hide, 1, 500, ItemMoveKind.Kill, 2);
+        SessionHarness.Until(() => Items.Stacks(sim, character).Count(s => s.Stack.Template == ItemCatalog.Hide) == hides + 1, "the staged hide");
+        AuditsOk(sim, "before the sort");
+
+        var rows = Items.Rows(sim).Count;
+        Sort(link);
+        SessionHarness.Until(() => sim.Bridge.GridSorts == 1, "the sort applied");
+        Breathe();
+
+        var grid = Items.Stacks(sim, character).Where(s => s.Stack.Slot <= ItemLedger.Slots).OrderBy(s => s.Stack.Slot).ToArray();
+        var keys = grid
+            .Select(s => ItemCatalog.TryGet(s.Stack.Template, out var t) ? (t.Category, t.Name, s.Stack.Mk) : (byte.MaxValue, "", s.Stack.Mk))
+            .ToArray();
+        Assert.Multiple(() =>
+        {
+            Assert.That(OreStacks(sim, character).Select(s => s.Stack.Count), Is.EqualTo(new[] { ItemLedger.StackMax, 50_000 }), "the part stacks merged");
+            Assert.That(grid.Select(s => (int)s.Stack.Slot), Is.EqualTo(Enumerable.Range(1, grid.Length)), "laid out from slot 1, no gap");
+            Assert.That(
+                keys.Zip(keys.Skip(1)).All(p => p.First.Item1 < p.Second.Item1
+                    || (p.First.Item1 == p.Second.Item1 && string.CompareOrdinal(p.First.Item2, p.Second.Item2) < 0)
+                    || (p.First.Item1 == p.Second.Item1 && p.First.Item2 == p.Second.Item2 && p.First.Item3 <= p.Second.Item3)),
+                Is.True,
+                $"ordered by type, name, mark: {string.Join(", ", keys)}");
+            Assert.That(
+                grid.Select(s => s.Stack.Template).ToList().IndexOf(ItemCatalog.Hide),
+                Is.LessThan(grid.Select(s => s.Stack.Template).ToList().IndexOf(Ore)),
+                "the Hide before the Ore");
+            Assert.That(grid.Any(s => s.Id == blaster), Is.True, "the blaster kept, never merged");
+            var row = Items.Rows(sim).Skip(rows).Single();
+            Assert.That((row.Kind, row.From == row.To, row.Count, row.ToAfter), Is.EqualTo((ItemMoveKind.Move, true, 30_000, 50_000)), "one merge row");
+        });
+        AuditsOk(sim, "after the sort");
     }
 }

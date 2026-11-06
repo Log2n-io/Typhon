@@ -1,0 +1,239 @@
+@page "/events"
+@using System.Text.Json.Nodes
+@using System.Threading
+@using System.Net.Http
+@implements IDisposable
+@inject AdminLink Admin
+@inject AdminSession Session
+
+<PageTitle>Tatooine events</PageTitle>
+
+<header class="top">
+    <h1>Events</h1>
+    <span class="muted">the Horde (horde.md): a raid on a city, its knobs, and its live metrics</span>
+    <nav class="links"><a href="">← Dashboard</a></nav>
+</header>
+
+@if (!Admin.Configured)
+{
+    <main class="grid">
+        <section class="card wide">
+            <h2>The back office is off</h2>
+            <p>Set <code>@AdminLink.KeyVariable</code> in the environment of the game server and of this dashboard, the same on both, and restart them.</p>
+        </section>
+    </main>
+}
+else if (!Session.Unlocked)
+{
+    <main class="grid">
+        <section class="card unlock">
+            <h2>Operator key</h2>
+            <form @onsubmit="Unlock">
+                <input type="password" @bind="_typed" placeholder="SWG_ADMIN_KEY" autofocus />
+                <button type="submit" class="act">Open</button>
+            </form>
+            @if (_unlockFailed)
+            {
+                <p class="refused">not the key</p>
+            }
+        </section>
+    </main>
+}
+else
+{
+    <main class="grid">
+        <section class="card">
+            <h2>Horde near
+                <select @bind="_city">
+                    @foreach (var city in Cities)
+                    {
+                        <option value="@city">@city</option>
+                    }
+                </select>
+                starting in <input class="num" type="number" min="0" max="120" @bind="_startsInMin" /> min</h2>
+            <table class="knobs">
+                <tr><td>waves</td><td><input class="num" type="number" min="0" max="50" @bind="_waves" /> <span class="muted small">0 = endless</span></td></tr>
+                <tr><td>raiders a wave</td><td><input class="num" type="number" min="1" max="500" @bind="_waveSize" /></td></tr>
+                <tr><td>wave period</td><td><input class="num" type="number" min="2" max="3600" @bind="_wavePeriodS" /> s</td></tr>
+                <tr><td>respawn</td><td><input type="checkbox" @bind="_respawn" /> <span class="muted small">a raider killed comes back at the fortress</span></td></tr>
+                <tr><td>level</td><td><input class="num" type="number" min="1" max="50" @bind="_level" /> ± <input class="num" type="number" min="0" max="20" @bind="_spread" /></td></tr>
+                <tr><td>raiders</td><td>
+                    @foreach (var (bit, name) in Templates)
+                    {
+                        <label class="check"><input type="checkbox" checked="@((_templates & (1 << bit)) != 0)" @onchange="e => Toggle(bit, (bool)e.Value)" /> @name</label>
+                    }
+                    <span class="muted small">two at most</span></td></tr>
+                <tr><td>defenders asked for</td><td><input class="num" type="number" min="0" max="4000" @bind="_target" /> <span class="muted small">0: from the raid's force</span></td></tr>
+                <tr><td>duration</td><td><input class="num" type="number" min="1" max="600" @bind="_durationMin" /> min</td></tr>
+                <tr><td>arrive within</td><td><input class="num" type="number" min="5" max="3600" @bind="_timeoutS" /> s, then a <input class="num" type="number" min="0" max="3600" @bind="_cooldownS" /> s cooldown</td></tr>
+                <tr><td>fortress</td><td><input class="num" type="number" min="0" max="3000" @bind="_fortressM" /> m beyond the city's edge <span class="muted small">0: 250-400 m</span></td></tr>
+                <tr><td>garrison</td><td><input class="num" type="number" min="0" max="100" @bind="_garrisonPercent" /> % of each wave holds the fortress</td></tr>
+                <tr><td>raider power</td><td><input class="num" type="number" min="10" max="2000" @bind="_raiderHealthPct" /> % health, <input class="num" type="number" min="10" max="2000" @bind="_raiderHitPct" /> % hit, of a creature of their level</td></tr>
+            </table>
+            <p>
+                <button class="act" @onclick="Start" disabled="@_busy">Start</button>
+                <button class="act danger" @onclick="End" disabled="@_busy">End the running one</button>
+                @if (_answer != null)
+                {
+                    <span class="@(_answerOk ? "ok" : "refused")">@_answer</span>
+                }
+            </p>
+        </section>
+
+        <section class="card">
+            <h2>Live <span class="muted small">@_readNote</span></h2>
+            @if (_horde == null)
+            {
+                <p class="muted">no horde has run since the server started</p>
+            }
+            else
+            {
+                <table class="metrics">
+                    <tr><td>where</td><td>@Str("city") — @Str("phase") · starts in @Num("startsInS") s · ends in @Num("endsInS") s</td></tr>
+                    <tr><td>waves</td><td>@Num("waves", "spawned") of @Num("waves", "of") · @Num("waves", "size") a wave every @Num("waves", "periodS") s · level @Num("waves", "level")</td></tr>
+                    <tr><td>raiders</td><td>@Num("raiders", "alive") alive · @Num("raiders", "spawned") spawned · @Num("raiders", "killed") killed · @Num("raiders", "atTarget") at the target</td></tr>
+                    <tr><td>defenders</td><td>@Num("defenders", "committed") committed of @Num("defenders", "target") · @Num("defenders", "present") present · @Num("defenders", "arrived") arrived · @Num("defenders", "decayed") decayed (@Num("defenders", "decay", "late") late, @Num("defenders", "decay", "offline") offline) · @Num("defenders", "recommitted") sent back</td></tr>
+                    <tr><td>arrival</td><td>p50 @Num("defenders", "arrivalS", "p50") s · p90 @Num("defenders", "arrivalS", "p90") s</td></tr>
+                    <tr><td>refused</td><td>enough @Num("defenders", "refused", "enough") · answered @Num("defenders", "refused", "answered") · cooldown @Num("defenders", "refused", "cooldown") · none @Num("defenders", "refused", "none")</td></tr>
+                    <tr><td>wire</td><td>@Num("statusesSent") statuses sent · combat queue overflow @Num("combatOverflow")</td></tr>
+                </table>
+                <p class="muted small">Tick and replication are on the Dashboard and Bots pages; client fps is read in a browser at the rally point.</p>
+            }
+        </section>
+    </main>
+}
+
+@code {
+    // The original names, by index: what the players read (06-gameplay.md § 7). The server accepts either name.
+    private static readonly string[] Cities = ["Port Sable", "Whitestone", "Dry Wells", "Red Mesa", "Tern's Rest", "Tallow", "Far Reach"];
+
+    // The aggressive templates (CreatureTemplates): a raid draws its raiders from them.
+    private static readonly (int Bit, string Name)[] Templates = [(0, "rats"), (3, "vipers"), (4, "spiders"), (5, "wasps"), (6, "ninjas"), (7, "sand ninjas"), (8, "soldiers")];
+
+    // The defaults of horde.md § 9: small first.
+    private string _city = "Whitestone";
+    private int _startsInMin = 3;
+    private int _waves = 3;
+    private int _waveSize = 20;
+    private int _wavePeriodS = 60;
+    private bool _respawn;
+    private int _level = 5;
+    private int _spread = 2;
+    private int _templates = (1 << 0) | (1 << 3);
+    private int _target;
+    private int _durationMin = 15;
+    private int _timeoutS = 300;
+    private int _cooldownS = 120;
+    private int _garrisonPercent = 20;
+    private int _fortressM;
+    private int _raiderHealthPct = 300;
+    private int _raiderHitPct = 150;
+
+    private string _typed;
+    private bool _unlockFailed;
+    private bool _busy;
+    private string _answer;
+    private bool _answerOk;
+    private JsonNode _horde;
+    private string _readNote = "";
+    private readonly CancellationTokenSource _stop = new();
+
+    private void Unlock()
+    {
+        _unlockFailed = !Admin.Matches(_typed);
+        _typed = null;
+        if (!_unlockFailed)
+        {
+            Session.Unlocked = true;
+        }
+    }
+
+    protected override void OnInitialized() => _ = PollAsync();
+
+    public void Dispose()
+    {
+        _stop.Cancel();
+        _stop.Dispose();
+    }
+
+    // Once a second while the page is open and unlocked: the server publishes the metrics once a pass.
+    private async Task PollAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+            {
+                if (!Session.Unlocked || !Admin.Configured)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    _horde = await Admin.Horde();
+                    _readNote = $"read {DateTime.Now:HH:mm:ss}";
+                }
+                catch (Exception e) when (e is InvalidOperationException or HttpRequestException or TaskCanceledException)
+                {
+                    _readNote = e.Message;
+                }
+
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The page closed.
+        }
+    }
+
+    private void Toggle(int bit, bool on) => _templates = on ? _templates | (1 << bit) : _templates & ~(1 << bit);
+
+    private async Task Start()
+    {
+        _busy = true;
+        var knobs = new JsonObject
+        {
+            ["city"] = _city,
+            ["startsInS"] = _startsInMin * 60,
+            ["durationS"] = _durationMin * 60,
+            ["waves"] = _waves,
+            ["waveSize"] = _waveSize,
+            ["wavePeriodS"] = _wavePeriodS,
+            ["respawn"] = _respawn,
+            ["level"] = _level,
+            ["levelSpread"] = _spread,
+            ["templates"] = _templates,
+            ["targetDefenders"] = _target,
+            ["fortressM"] = _fortressM,
+            ["commitTimeoutS"] = _timeoutS,
+            ["cooldownS"] = _cooldownS,
+            ["garrisonPercent"] = _garrisonPercent,
+            ["raiderHealthPct"] = _raiderHealthPct,
+            ["raiderHitPct"] = _raiderHitPct,
+        };
+        (_answerOk, _answer) = await Admin.Horde(knobs);
+        _busy = false;
+    }
+
+    private async Task End()
+    {
+        _busy = true;
+        (_answerOk, _answer) = await Admin.Horde(null);
+        _busy = false;
+    }
+
+    private string Str(string name) => (string)_horde?[name] ?? "";
+
+    private string Num(params string[] path)
+    {
+        JsonNode node = _horde;
+        foreach (var p in path)
+        {
+            node = node?[p];
+        }
+
+        return node?.ToString() ?? "–";
+    }
+}

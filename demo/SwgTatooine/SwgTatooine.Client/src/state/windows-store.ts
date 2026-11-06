@@ -45,6 +45,8 @@ export interface WindowsState {
   readonly setChatTabs: (tabs: readonly ChatTab[]) => void;
   /** Opens or closes the inventory's preview panel with the window's rect it widens or narrows, kept as one (client.md C43). */
   readonly setInventoryPreview: (open: boolean, rect: WindowRect) => void;
+  /** The same for the bazaar's preview panel, beside the board. */
+  readonly setBazaarPreview: (open: boolean, rect: WindowRect) => void;
   /** Every window back where it opens by default, every bar where it is drawn; the lock and the debug layer as they were. */
   readonly resetLayout: () => void;
   /** The Options window (client.md C36): the player's settings, the lock, the debug layer, the reset. */
@@ -125,10 +127,14 @@ export const useWindows = create<WindowsState>((set, get) => {
       const { layout } = get();
       keep({ ...layout, windows: { ...layout.windows, inventory: rect }, inventoryPreview });
     },
-    resetLayout: () => {
-      // The preview closes with it: the window opens at its narrow default.
+    setBazaarPreview: (bazaarPreview, rect) => {
       const { layout } = get();
-      keep({ ...layout, windows: {}, bars: {}, chatW: 0, chatH: 0, inventoryPreview: false });
+      keep({ ...layout, windows: { ...layout.windows, bazaar: rect }, bazaarPreview });
+    },
+    resetLayout: () => {
+      // The previews go back with it, as the windows open by default: the inventory's closed, the bazaar's open.
+      const { layout } = get();
+      keep({ ...layout, windows: {}, bars: {}, chatW: 0, chatH: 0, inventoryPreview: false, bazaarPreview: true });
     },
     optionsOpen: false,
     toggleOptions: () => {

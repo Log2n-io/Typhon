@@ -33,6 +33,9 @@ public enum Goal
 
     /// <summary>Out to its installations, or to a wild lot to place one: walking there, then tending it (crafting-build.md § 10).</summary>
     Tending,
+
+    /// <summary>Answering a horde's call (horde.md § 6): at the rally point, or walking to it, fighting what comes.</summary>
+    Defending,
 }
 
 /// <summary>
@@ -124,6 +127,9 @@ public sealed partial class BotBrain
 
     /// <summary>How close a bot gets before attacking, in metres — inside the server's own weapon reach (the pistol's 30 m, edge to edge).</summary>
     public const float StrikeM = 20f;
+
+    /// <summary>How close a bot down to its fist gets before striking, centre to centre: the fist reaches a metre past the two bodies' edges.</summary>
+    public const float MeleeM = 1.2f;
 
     /// <summary>
     /// How near a creature may come before the bot backs off, in metres: its bite reaches 6 m and it closes at 2-4 m/s, so this leaves two seconds of
@@ -229,23 +235,32 @@ public sealed partial class BotBrain
     /// </summary>
     public const double MountRetrySeconds = 10d;
 
-    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): ten of its 40 slots left, a quest's worth of drops.</summary>
+    /// <summary>A bot holding this many stacks or more goes to trade (bazaar.md § 8): ten of its slots left, a quest's worth of drops.</summary>
     /// <remarks>
     /// 24 left six, and a bot that set out on a quest with 23 stacks came back full: live, 2 000 bots, two thirds of them questing at any time, the
     /// market cut the drops lost to a full inventory by a tenth only (2026-10-27). With 20 and the vendor's floor at 8 (<c>MarketPlan.KeepStacks</c>),
-    /// a quest starts with twelve slots free at least. The grid grew to 40 (crafting-build.md O-9): 30 keeps the ten left.
+    /// a quest starts with twelve slots free at least. The grid grew to 40 (crafting-build.md O-9), then 50 (Loïc, 2026-11-05): ten left still.
     /// </remarks>
-    public const int MarketStacks = 30;
+    public const int MarketStacks = MarketPlan.GridSlots - 10;
 
     /// <summary>A bot this full is losing drops: the errand says so (<see cref="GoalWhy.MarketFull"/>) — the measure of headroom too small.</summary>
-    /// <remarks>One slot short of the 40 (crafting-build.md O-9): the next drop of a new key is lost. Slots, not lots (inventory-loot.md § 10).</remarks>
-    public const int MarketFullStacks = 39;
+    /// <remarks>One slot short of the grid: the next drop of a new key is lost. Slots, not lots (inventory-loot.md § 10).</remarks>
+    public const int MarketFullStacks = MarketPlan.GridSlots - 1;
 
     /// <summary>A bazaar errand, made or failed, is not chosen again for this long, in seconds: a vendor that refuses cannot hold a bot at the bazaar.</summary>
     public const double MarketRetrySeconds = 120d;
 
+    /// <summary>A pick-up in another city, made or failed, is not set off on again for this long, in seconds: a refused collect cannot fly it about.</summary>
+    public const double PickupRetrySeconds = 300d;
+
     /// <summary>Added to the stay at a bazaar it trades at, in seconds: the plan goes out at two commands a second (the commands' rate).</summary>
     public const double TradeSeconds = 10d;
+
+    /// <summary>The crafts a crafter makes in one station visit at most, one after another while it holds the next one's inputs.</summary>
+    public const int CraftChain = 8;
+
+    // The crafts of the station visit under way.
+    private int _chained;
 
     /// <summary>
     /// The longest a bot stands at a bazaar past its trade's stay while its plan is still going out (<see cref="Perceived.Trading"/>), in seconds: market
@@ -305,6 +320,9 @@ public sealed partial class BotBrain
     private readonly Leg _leg = new();
     private uint _rng;
 
+    /// <summary>The seed it was made with, for the draws that must stay this bot's whatever it has done since (<see cref="Willing"/>).</summary>
+    private readonly uint _seed;
+
     /// <summary>A brain for one bot.</summary>
     /// <param name="cities">The map it ships with: where the cities are.</param>
     /// <param name="seed">Its own seed; two bots with the same seed behave identically.</param>
@@ -326,7 +344,8 @@ public sealed partial class BotBrain
 
         _cities = cities;
         _assets = assets;
-        _rng = seed == 0 ? 0x9E3779B9u : seed;   // xorshift is dead at zero, and a caller numbering bots from 0 would hand it one
+        _rng = seed == 0 ? 0x9E3779B9u : seed;
+        _seed = _rng;   // xorshift is dead at zero, and a caller numbering bots from 0 would hand it one
         _wildAngle = (_rng % 6283u) / 1000d;      // which way out of town its installations go: its own, fixed by its seed
         _rate = ticksPerSecond > 0d ? ticksPerSecond : 1d;
         _idleTicks = Ticks(IdleSeconds);
@@ -429,7 +448,7 @@ public sealed partial class BotBrain
     /// Whether the nearest creature is one to HUNT: at or below <see cref="MaxLevel"/>, or of no stated level. A level-45 viper in view does not pull a
     /// CL-1 bot into a fight it cannot win. A mission's defenders are not asked: they are fought at any level, since the lair cannot be broken past them.
     /// </summary>
-    private bool Huntable(in Perceived world) => world.NearestCreatureLevel <= MaxLevel;
+    private bool Huntable(in Perceived world) => _defending || world.NearestCreatureLevel <= MaxLevel || (world.NearestCreatureRaider && DefendsTown(in world));
 
     /// <summary>The REGION it is going to — a city plus one — or 0 when it is not travelling.</summary>
     /// <remarks>
@@ -497,6 +516,22 @@ public sealed partial class BotBrain
 
     /// <summary>The creature it last gave up on, which it does not hunt again.</summary>
     private uint _givenUpOn;
+
+    // When it gave up on _givenUpOn: a creature given up on is fought again after GivenUpSeconds (review, 2026-11-04: it hid every raider behind it).
+    private long _givenUpAt;
+
+    // The creature a hunt is on: what it gives up on, rather than whatever is nearest when its time runs out.
+    private uint _hunted;
+
+    // An idle bot's next stroll, and when it takes it (Loïc, 2026-11-04: "they should wander if they do nothing"); whether its idle is one that strolls.
+    private long _strollAt;
+    private bool _strolling;
+
+    /// <summary>A creature given up on is fought again after this long, seconds.</summary>
+    public const double GivenUpSeconds = 45d;
+
+    /// <summary>The creature given up on, while that lasts; 0 once it has expired.</summary>
+    private uint GivenUp(long tick) => _givenUpOn != 0 && tick - _givenUpAt < Ticks(GivenUpSeconds) ? _givenUpOn : 0u;
     private int _mountAsks;
 
     /// <summary>The realm it was in last tick, so a door crossed is noticed as the change it is.</summary>
@@ -566,6 +601,7 @@ public sealed partial class BotBrain
 
     /// <summary>When the bazaar errand may be chosen again: set whenever it is tried, made or not.</summary>
     private long _marketAt;
+    private long _pickupAt;
 
     /// <summary>
     /// The errand under way is the bazaar errand (<see cref="GoalWhy.MarketChosen"/>) or the craft errand (<see cref="GoalWhy.CraftChosen"/>), not an
@@ -650,6 +686,21 @@ public sealed partial class BotBrain
             return leave;
         }
 
+        // A horde's call answered: to the rally point and the fight there, over whatever it was doing (BotBrain.Horde.cs).
+        if (Rally(in world, tick) is { } rally)
+        {
+            return rally;
+        }
+
+        // Down to its fist with a weapon to buy (GearPlan.Urgent): a hunt, a quest, an idle gives way to the bazaar errand — on its fist every fight is a
+        // flight (the night of 2026-11-04: 1 800 bots unarmed, a hundred rearmed in five minutes, the rest waiting for their quests to end).
+        if (world.GearUrgent && Trades && _assets != null && tick >= _marketAt && Goal is Goal.Hunting or Goal.Questing or Goal.Idling
+            && Bazaar(in world, RegionAt(world.X, world.Z)) is { } armory && Routing.Distance(world.X, world.Z, armory.At.X, armory.At.Z) <= ErrandReachM)
+        {
+            Become(Goal.Choosing, GoalWhy.GearChosen, tick);
+            return Choose(in world, tick);
+        }
+
         switch (Goal)
         {
             case Goal.Hunting:
@@ -669,13 +720,31 @@ public sealed partial class BotBrain
             case Goal.Idling:
                 if (tick < _until)
                 {
-                    return Intent.None;
+                    return Stroll(in world, tick);
                 }
 
                 break;
         }
 
         return Choose(in world, tick);
+    }
+
+    /// <summary>
+    /// An idle bot strolls rather than stands (Loïc, 2026-11-04: "they should wander if they do nothing"): every few seconds a few metres on foot, round
+    /// where it is, at a walk — a body the server's collision keeps out of the walls.
+    /// </summary>
+    private Intent Stroll(in Perceived world, long tick)
+    {
+        if (!_strolling || tick < _strollAt || world.Mounted || world.Realm != 0)
+        {
+            return Intent.None;
+        }
+
+        // Its own stream (review, 2026-11-04): a stroll's draws must not shift the rolls every choice makes after it.
+        _strollAt = tick + Ticks(4d + (NextStroll() % 5u));
+        var angle = (NextStroll() % 6283u) / 1000f;
+        var reach = 6f + (NextStroll() % 10u);
+        return Intent.MoveTo(world.X + (MathF.Cos(angle) * reach), world.Z + (MathF.Sin(angle) * reach));
     }
 
     /// <summary>Picks the next goal.</summary>
@@ -713,15 +782,39 @@ public sealed partial class BotBrain
 
         var here = RegionAt(world.X, world.Z);
 
+        // Gear bought in another city, stronger than its own had (Loïc, 2026-11-05: "they must buy remotely and go pick it up"): there, and to a bazaar of
+        // that city, which alone collects it — before the desk, as any bazaar errand; home again after, by the rule below.
+        if (Trades && _assets != null && world.PickupRegion != 0 && tick >= _pickupAt)
+        {
+            if (here != world.PickupRegion)
+            {
+                _pickupAt = tick + Ticks(PickupRetrySeconds);
+                return GoTo(in world, tick, world.PickupRegion - 1, here, GoalWhy.PickupChosen);
+            }
+
+            if (BazaarOf(in world, here) is { } counter && Routing.Distance(world.X, world.Z, counter.At.X, counter.At.Z) <= ErrandReachM)
+            {
+                _pickupAt = tick + Ticks(PickupRetrySeconds);
+                if (StartVisitAt(in world, tick, Routing.BazaarKind, GoalWhy.PickupChosen, counter))
+                {
+                    return Visit(in world, tick);
+                }
+            }
+        }
+
         // Nearly full, goods waiting for it, an input or an extractor kit to buy: its city's bazaar, before the desk — a quest taken now would lose its
         // drops (the remarks).
         // A bazaar out of errand reach — the bot is back from a quest's lair, kilometres out — is no try: it goes when back in reach, not 120 s later.
+        // Its gear assessed and found wanting (GearPlan, Loïc 2026-11-04): a piece to replace or better, a spare, or no weapon at all — the same errand.
         if (Trades && _assets != null && tick >= _marketAt
-            && (world.InventoryStacks >= MarketStacks || world.Reserved > 0 || world.InputWanted || world.KitWanted)
+            && (world.InventoryStacks >= MarketStacks || world.Reserved > 0 || world.InputWanted || world.KitWanted || world.GearDue || world.GearUrgent
+                || world.SellDue)
             && Bazaar(in world, here) is { } bazaar && Routing.Distance(world.X, world.Z, bazaar.At.X, bazaar.At.Z) <= ErrandReachM)
         {
             _marketAt = tick + Ticks(MarketRetrySeconds);
-            var why = world.InventorySlots >= MarketFullStacks ? GoalWhy.MarketFull : GoalWhy.MarketChosen;
+            var why = world.InventorySlots >= MarketFullStacks ? GoalWhy.MarketFull
+                : world.GearUrgent || (world.GearDue && world.InventoryStacks < MarketStacks && world.Reserved == 0) ? GoalWhy.GearChosen
+                : GoalWhy.MarketChosen;
             if (StartVisitAt(in world, tick, Routing.BazaarKind, why, bazaar))
             {
                 return Visit(in world, tick);
@@ -760,9 +853,10 @@ public sealed partial class BotBrain
             }
         }
 
-        if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != _givenUpOn && Huntable(in world))
+        if (world.NearestCreature != 0 && world.NearestCreatureM <= NoticeM && world.NearestCreature != GivenUp(tick) && Huntable(in world))
         {
             Become(Goal.Hunting, GoalWhy.CreatureNoticed, tick, world.NearestCreature, world.NearestCreatureM);
+            _hunted = world.NearestCreature;
             _huntUntil = tick + Ticks(HuntSeconds);
             return Hunt(in world, tick);
         }
@@ -873,26 +967,23 @@ public sealed partial class BotBrain
     /// <returns>The command.</returns>
     private Intent Hunt(in Perceived world, long tick)
     {
-        // Fighting back an attacker: that one, not the nearest, and at any level.
-        if (HuntAttacker(in world, tick) is { } back)
-        {
-            return back;
-        }
-
         // A fight that has not ended in this long will not: something it cannot hurt, or cannot reach. Leave that one be and get on with the day —
         // the first live run had two bots naming the same target from the same spot for all three minutes.
-        if (world.NearestCreature != 0 && tick >= _huntUntil)
+        // The creature hunted is what it gives up on — not whatever happens to be nearest when the time runs out — and a defender gives up on nothing.
+        if (world.NearestCreature != 0 && tick >= _huntUntil && !_defending)
         {
-            _givenUpOn = world.NearestCreature;
+            _givenUpOn = _hunted != 0 ? _hunted : world.NearestCreature;
+            _givenUpAt = tick;
             Become(Goal.Choosing, GoalWhy.HuntTimeout, tick);
             return Choose(in world, tick);
         }
 
-        if (world.NearestCreature == 0 || world.NearestCreature == _givenUpOn || !Huntable(in world))
+        var givenUp = GivenUp(tick);
+        if (world.NearestCreature == 0 || world.NearestCreature == givenUp || !Huntable(in world))
         {
             // Killed, or it wandered out of view, or what is nearest now is past this bot's level. Nothing to hunt, so decide again.
             var why = world.NearestCreature == 0 ? GoalWhy.HuntTargetGone
-                : world.NearestCreature == _givenUpOn ? GoalWhy.HuntGivenUpTarget
+                : world.NearestCreature == givenUp ? GoalWhy.HuntGivenUpTarget
                 : GoalWhy.HuntNotHuntable;
             Become(Goal.Choosing, why, tick);
             return Choose(in world, tick);
@@ -909,12 +1000,14 @@ public sealed partial class BotBrain
 
         // Attacking is naming a target and letting the server's combat path resolve it, which is exactly what a browser
         // does — there is no attack command, and that is the point. Where to stand while it does is Engage's.
-        return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true);
+        return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true,
+            melee: world.Unarmed);
     }
 
     /// <summary>
     /// How a bot fights a target at <paramref name="distanceM"/>: closes in past <see cref="StrikeM"/>, stands and shoots between the two, and — a
-    /// creature, which bites — runs from it inside <see cref="KiteM"/>, still shooting. A lair does not move or bite: the bot stands at its range.
+    /// creature, which bites — runs from it inside <see cref="KiteM"/>, still shooting. A lair does not move or bite: the bot stands at its range. Down
+    /// to its fist (<paramref name="melee"/>), it closes to <see cref="MeleeM"/> and stands there: a kite at 12 m is a fight it never strikes in.
     /// </summary>
     /// <param name="x">The bot, east.</param>
     /// <param name="z">The bot, north.</param>
@@ -923,10 +1016,16 @@ public sealed partial class BotBrain
     /// <param name="tz">The target, north.</param>
     /// <param name="distanceM">Between the two.</param>
     /// <param name="mobile">Whether the target chases and bites (a creature), rather than stands (a lair).</param>
+    /// <param name="melee">Whether it fights with its fist (<see cref="Perceived.Unarmed"/>).</param>
     /// <returns>An attack carrying its motion: towards, none, or away.</returns>
-    public static Intent Engage(float x, float z, uint target, float tx, float tz, float distanceM, bool mobile)
+    public static Intent Engage(float x, float z, uint target, float tx, float tz, float distanceM, bool mobile, bool melee = false)
     {
         var run = Routing.SpeedClassOf(TravelMode.Run);
+        if (melee)
+        {
+            return distanceM > MeleeM ? Intent.Attack(target, Routing.HeadingTo(x, z, tx, tz), run) : Intent.Attack(target);
+        }
+
         if (distanceM > StrikeM)
         {
             return Intent.Attack(target, Routing.HeadingTo(x, z, tx, tz), run);
@@ -1137,13 +1236,14 @@ public sealed partial class BotBrain
         _leg.Clear();
         if (world.MissionLair != 0 && world.MissionLairGuards == 0)
         {
-            return Engage(world.X, world.Z, world.MissionLair, world.MissionLairX, world.MissionLairZ, (float)toLair, mobile: false);
+            return Engage(world.X, world.Z, world.MissionLair, world.MissionLairX, world.MissionLairZ, (float)toLair, mobile: false, melee: world.Unarmed);
         }
 
         if (world.NearestCreature != 0
             && Routing.Distance(world.NearestCreatureX, world.NearestCreatureZ, world.MissionLairX, world.MissionLairZ) <= DefenderM)
         {
-            return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true);
+            return Engage(world.X, world.Z, world.NearestCreature, world.NearestCreatureX, world.NearestCreatureZ, world.NearestCreatureM, mobile: true,
+                melee: world.Unarmed);
         }
 
         // Nothing to shoot in view yet: close on the lair.
@@ -1374,7 +1474,7 @@ public sealed partial class BotBrain
         _leg.FinalReach = UseReachM;
         _visitAt = (found.X, found.Z);
         _visitRegion = to.Region;
-        _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull or GoalWhy.CraftChosen;
+        _marketErrand = why is GoalWhy.MarketChosen or GoalWhy.MarketFull or GoalWhy.CraftChosen or GoalWhy.GearChosen or GoalWhy.PickupChosen;
         VisitSerial++;
 
         Become(Goal.Visiting, why, tick, (uint)kind, (float)Routing.Distance(world.X, world.Z, found.X, found.Z));
@@ -1438,6 +1538,13 @@ public sealed partial class BotBrain
         var region = HomeRegion != 0 ? HomeRegion
             : here != 0 ? here
             : Facilities.TryNearest(Routing.BazaarKind, world.X, world.Z, out _, out var nearest) ? nearest : 0;
+        return BazaarOf(in world, region);
+    }
+
+    /// <summary>The nearest bazaar of a city — the one it stands in, not its home's: where a defender down to its fist buys a weapon (Loïc, 2026-11-04).
+    /// </summary>
+    private (Facility At, int Region)? BazaarOf(in Perceived world, int region)
+    {
         Span<Facility> near = stackalloc Facility[1];
         return region != 0 && Facilities.NearestIn(region, Routing.BazaarKind, world.X, world.Z, [], near) > 0 ? (near[0], region) : null;
     }
@@ -1525,6 +1632,17 @@ public sealed partial class BotBrain
                 return Intent.None;   // the craft still going out: its start needs the station within 6 m
             }
 
+            // A crafter crafts on at its station while it has the next craft in hand, up to CraftChain (the night of 2026-11-04: one craft a visit, a
+            // blaster's five steps an hour, and the vendor selling 4 600 standard-issue pieces the crafters could have made).
+            if (_visitKind == Routing.CraftingStationKind && Crafts && world.CraftReady && !world.Crafting && _chained < CraftChain)
+            {
+                _chained++;
+                _until = tick + Ticks(TradeSeconds);
+                _tradeCap = _until + Ticks(MaxTradeHoldSeconds);
+                CraftsAsked++;
+                return Intent.Craft;
+            }
+
             if (RushRegion != 0 && _visitKind == Routing.BazaarKind)
             {
                 // The load test stands at its bazaar for good: the next round.
@@ -1535,8 +1653,10 @@ public sealed partial class BotBrain
 
             if (_marketErrand)
             {
-                // Traded: back to the day's loop — the desk, a quest — and not off on a flight the way an errand to look at a bazaar often is.
+                // Traded: back to the day's loop — the desk, a quest — and not off on a flight the way an errand to look at a bazaar often is. A defender's
+                // trip to arm is over too: the next one waits its retry, bought or not.
                 _marketErrand = false;
+                _gearRun = false;
                 _flyNext = false;
                 Become(Goal.Choosing, _visitKind == Routing.CraftingStationKind ? GoalWhy.CraftDone : GoalWhy.MarketDone, tick);
                 return Choose(in world, tick);
@@ -1596,6 +1716,7 @@ public sealed partial class BotBrain
                 {
                     _until += Ticks(TradeSeconds);
                     _tradeCap = _until + Ticks(MaxTradeHoldSeconds);
+                    _chained = 1;
                     CraftsAsked++;
                     return Intent.Craft;
                 }
@@ -1609,6 +1730,7 @@ public sealed partial class BotBrain
                 }
 
                 _marketErrand = false;
+                _gearRun = false;
                 Become(Goal.Idling, GoalWhy.VisitFailed, tick);
                 _until = tick + Ticks(2);
                 return Intent.Move(0f, 0);
@@ -2341,6 +2463,22 @@ public sealed partial class BotBrain
 
     /// <summary>xorshift32: deterministic, allocation-free, and owned by this bot alone.</summary>
     /// <returns>The next value.</returns>
+    private uint _strollRng;
+
+    /// <summary>The stroll's own xorshift, seeded from the bot's: idling never moves the main stream.</summary>
+    private uint NextStroll()
+    {
+        if (_strollRng == 0)
+        {
+            _strollRng = (_seed * 2654435761u) | 1u;
+        }
+
+        _strollRng ^= _strollRng << 13;
+        _strollRng ^= _strollRng >> 17;
+        _strollRng ^= _strollRng << 5;
+        return _strollRng;
+    }
+
     private uint Next()
     {
         _rng ^= _rng << 13;

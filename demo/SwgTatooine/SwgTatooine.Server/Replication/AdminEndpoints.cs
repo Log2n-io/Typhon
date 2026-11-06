@@ -28,7 +28,7 @@ namespace SwgTatooine.Server;
 /// answers when it has committed, or with why it was refused.
 /// </para>
 /// </remarks>
-public static class AdminEndpoints
+public static partial class AdminEndpoints
 {
     /// <summary>The environment variable holding the operators' key.</summary>
     public const string KeyVariable = "SWG_ADMIN_KEY";
@@ -75,6 +75,7 @@ public static class AdminEndpoints
         app.MapPost("/admin/character/{id}/items", Writer(expected, AdminAction.AddItem));
         app.MapPost("/admin/character/{id}/items/remove", Writer(expected, AdminAction.RemoveItem));
         app.MapPost("/admin/character/{id}/items/stats", Writer(expected, AdminAction.ItemStats));
+        MapHorde(app, expected);
         Console.WriteLine($"  admin: ON - /admin/* answers a request carrying {KeyVariable} in {KeyHeader}");
         return true;
     }

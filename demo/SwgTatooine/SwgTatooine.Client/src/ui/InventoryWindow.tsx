@@ -31,7 +31,7 @@ import { ItemPreview } from './ItemPreview';
 import { WindowFrame } from './WindowFrame';
 
 /** The item grid's slots before the first read; the server's answer carries its own (`slots`). */
-export const INVENTORY_SLOTS = 40;
+export const INVENTORY_SLOTS = 50;
 
 /** The preview panel's width, px: the window grows by it when the panel opens, and shrinks back when it closes. */
 export const PREVIEW_PANEL_W = 280;
@@ -48,6 +48,9 @@ const initialRect = (vw: number, vh: number): WindowRect => ({ x: vw - 634, y: M
  * onto the same units (merged, as much as the stack there holds), onto an identical item or crate with room (packed), or onto anything else (swapped);
  * with Shift held onto a free slot, it asks how many to split off. <b>A double click wears it</b>, as dragging it onto the character window's slot does
  * (client.md C39). With the bazaar open, a click also picks it for the Sell tab (bazaar.md § 6).
+ *
+ * <b>Sort &amp; stack</b> (Loïc, 2026-11-04), in the title bar, asks the server to merge every stack of the same units and lay the grid out by type, name and
+ * mark from the first slot.
  *
  * <b>Everything else is the item's own menu</b> (client.md C42): a right-click on a slot offers what that item does — placed, worn, packed, unpacked,
  * split, thrown away. Those that need a count open the prompt under the grid; throwing away always does, as its confirmation. The window lists; the item
@@ -141,6 +144,17 @@ export function InventoryWindow() {
           <span className="inventory-credits" data-testid="inventory-credits">
             {wallet === null ? '…' : formatCredits(wallet.credits)}
           </span>
+          <button
+            type="button"
+            className="inventory-expand"
+            disabled={items.every((i) => i.slot > 100)}
+            title="Stack the same items together, then sort the grid by type, name and mark"
+            onClick={() => {
+              useMarket.getState().sort();
+            }}
+          >
+            Sort &amp; stack
+          </button>
           <button
             type="button"
             className="inventory-expand"
@@ -500,8 +514,8 @@ function CountPrompt({
   );
 }
 
-/** The preview panel: the selected item turning, its name, and every stat it has (client.md C43). */
-function ItemDetails({ item }: { readonly item: InventoryItem | undefined }) {
+/** The preview panel: the selected item turning, its name, and every stat it has (client.md C43); the bazaar's board shows the same. */
+export function ItemDetails({ item }: { readonly item: InventoryItem | undefined }) {
   if (item === undefined) {
     return (
       <aside className="inventory-details" style={{ width: PREVIEW_PANEL_W }} aria-label="Item preview">

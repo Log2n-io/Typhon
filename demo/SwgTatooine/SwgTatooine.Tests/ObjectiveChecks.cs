@@ -58,6 +58,36 @@ internal sealed class ObjectiveChecks
         });
     }
 
+    /// <summary>
+    /// A fighter at its objective with nothing to shoot mills round it (Loïc, 2026-11-04: a crowd of them stood still in one spot): every new point is
+    /// still inside the stand-off ring, a walk of several metres from where it stands, and the draws go both ways round — never the same spot twice.
+    /// </summary>
+    [Test]
+    public void AFighterWithNothingToShoot_MillsRoundItsObjective_InRange()
+    {
+        const float StandOff = 18f;
+        var (x, z) = (StandOff, 0f);
+        var seen = new HashSet<(int, int)>();
+        var left = 0;
+        for (var i = 0u; i < 200u; i++)
+        {
+            var (nx, nz) = SimBridge.MillPoint(0f, 0f, x, z, StandOff, (i * 2654435761u) | 1u);
+            var fromObjective = MathF.Sqrt((nx * nx) + (nz * nz));
+            var step = MathF.Sqrt(((nx - x) * (nx - x)) + ((nz - z) * (nz - z)));
+            Assert.That(fromObjective, Is.InRange(StandOff * 0.7f - 0.01f, StandOff + 0.01f), $"draw {i} left the stand-off ring");
+            Assert.That(step, Is.GreaterThan(4f), $"draw {i} is no walk at all");
+            left += MathF.Atan2(nz, nx) > MathF.Atan2(z, x) ? 1 : 0;
+            seen.Add(((int)nx, (int)nz));
+            (x, z) = (nx, nz);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(left, Is.InRange(60, 140), "the walks do not go both ways round");
+            Assert.That(seen, Has.Count.GreaterThan(100), "the fighter keeps returning to the same spots");
+        });
+    }
+
     // ── One world, run once: the census, the fighters at their fringes, and the creatures they must leave alone ──────────────────────────────────────
 
     private string _dir;

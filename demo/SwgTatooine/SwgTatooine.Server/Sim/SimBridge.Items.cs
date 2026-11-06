@@ -40,7 +40,7 @@ public sealed partial class SimBridge
         public bool Instance;
     }
 
-    // A character's grid: Slots[1..40]; Slots[0] unused, so a slot number indexes it. And what it wears: Equipped[slot - EquipSlot.First].
+    // A character's grid: Slots[1..ItemLedger.Slots]; Slots[0] unused, so a slot number indexes it. And what it wears: Equipped[slot - EquipSlot.First].
     private sealed class OwnerItems
     {
         public readonly ItemSlot[] Slots = new ItemSlot[ItemLedger.Slots + 1];
@@ -819,8 +819,8 @@ public sealed partial class SimBridge
             Kind = kind,
         };
         tx.Spawn<ItemLedgerArch>(ItemLedgerArch.Entry.Set(in row));
-        // A throw-away is the player's own act, said by the grid it leaves (inventory-loot.md § 10): no notice.
-        if (kind != ItemMoveKind.Discard)
+        // A throw-away is the player's own act, said by the grid it leaves (inventory-loot.md § 10): no notice. A potion drunk empty is too.
+        if (kind is not (ItemMoveKind.Discard or ItemMoveKind.Consume))
         {
             QueueNotice(PlayerNotice.Items, from, to, ItemLedger.World, ItemMoveKind.NameOf(kind), 0, count, template, mk, reference);
         }

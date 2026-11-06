@@ -142,6 +142,7 @@ internal sealed class BotCraftChecks
     [Test]
     public void WhatItWillNotUse_IsListed_ButNotItsPartsNorWhatItWearsNext()
     {
+        // The stim stands for an item it holds past its keeping (stimsKept 0): the stims a bot drinks are BotGearPlanChecks'.
         var prices = MarketPrices.None.With("blaster_dl44", 2, 1_000d).With("potion_stim", 1, 50d);
         var gear = new List<GearItem>
         {
@@ -152,14 +153,16 @@ internal sealed class BotCraftChecks
             new(5, ItemCatalog.PaddedHelmet, 6, EquipSlot.Head, 0, "armor_padded_helmet", 1),
         };
         var rng = 7u;
-        var plan = MarketPlan.Surplus(gear, prices, 0, 1, ref rng);
+        var plan = MarketPlan.Surplus(gear, prices, 0, 1, ref rng, stimsKept: 0);
         Assert.Multiple(() =>
         {
             Assert.That(plan.ConvertAll(c => c.Item), Is.EqualTo(new ulong[] { 2, 4 }), "the helmet goes on next; the grip is crafted with");
             Assert.That(plan[0].UnitPrice, Is.InRange(900L, 1_100L));
             Assert.That(plan[0].Quantity, Is.EqualTo(1));
-            Assert.That(MarketPlan.Surplus(gear, prices, MarketPlan.MaxListed - 1, 1, ref rng), Has.Count.EqualTo(1), "up to the bot's listing cap");
-            Assert.That(MarketPlan.Surplus(gear, prices, 0, 2, ref rng).ConvertAll(c => c.Item), Is.EqualTo(new ulong[] { 4 }), "at band II, an upgrade");
+            Assert.That(MarketPlan.Surplus(gear, prices, MarketPlan.MaxListed - 1, 1, ref rng, stimsKept: 0), Has.Count.EqualTo(1),
+                "up to the bot's listing cap");
+            Assert.That(MarketPlan.Surplus(gear, prices, 0, 2, ref rng, stimsKept: 0).ConvertAll(c => c.Item), Is.EqualTo(new ulong[] { 4 }),
+                "at band II, an upgrade");
         });
     }
 
@@ -181,11 +184,28 @@ internal sealed class BotCraftChecks
         });
     }
 
-    /// <summary>No bot crafts potions until they have a use and a value: it could never sell one, and would fill its grid.</summary>
+    /// <summary>
+    /// A third of the crafters make stims (Loïc, 2026-11-05: potions crafted, sold and drunk): with a stim's materials held, the plan's first craft is one
+    /// of its parts — its compound or its vial — and the stim once both are held.
+    /// </summary>
     [Test]
-    public void NoCrafterMakesPotions_UntilTheyHaveAUse()
+    public void APotionCrafter_WorksUpToAStim_ItsPartsFirst()
     {
-        Assert.That(CraftPlan.Lines, Is.EqualTo(new[] { CraftLine.Weapon, CraftLine.Armor }));
+        var held = new List<HeldStack>
+        {
+            Units(ItemCatalog.Gland, 2, 20), Units(ItemCatalog.Water, 1, 60), Units(ItemCatalog.Crystal, 2, 20), Units(ItemCatalog.Chemical, 2, 20),
+        };
+        var targets = CraftPlan.Targets(CraftLine.Potion);
+        var first = CraftPlan.Next(Book, targets, 0, held, []);
+        var parts = new List<HeldPart> { new(1, Schematics.Restorative, 500), new(2, Schematics.Vial, 500) };
+        var stim = CraftPlan.Next(Book, targets, 0, held, parts);
+        Assert.Multiple(() =>
+        {
+            Assert.That(CraftPlan.Lines, Is.EqualTo(new[] { CraftLine.Weapon, CraftLine.Armor, CraftLine.Potion }));
+            Assert.That(first?.Schematic, Is.AnyOf(Schematics.Restorative, Schematics.Vial), "a part first");
+            Assert.That(stim?.Schematic, Is.EqualTo(ItemCatalog.Stim), "the stim once its parts are held");
+            Assert.That(stim?.Parts, Is.EquivalentTo(new ulong[] { 1, 2 }));
+        });
     }
 
     /// <summary>A refusal of a craft's start drops the rest of it: its points and finish would each be refused in turn.</summary>
@@ -206,7 +226,8 @@ internal sealed class BotCraftChecks
 
     /// <summary>
     /// Loïc, 2026-11-02: what no low-level creature drops, the vendor sells at Mk I. A crafter with nothing buys, in one visit, every vendor material its
-    /// target's tree lacks — each bought counted as held for the next — within a third of its wallet; the vendor's own price, the total rounded down.
+    /// target's tree lacks — each bought counted as held for the next — and whole trees for <see cref="CraftPlan.InputBatch"/> − 1 more items (the night
+    /// of 2026-11-04), a lot of 99 at most, within a third of its wallet; the vendor's own price, the total rounded down.
     /// </summary>
     [Test]
     public void ACrafter_BuysWhatItsTreeLacks_FromTheVendor()
@@ -219,13 +240,14 @@ internal sealed class BotCraftChecks
             // Metal 4), the blaster's own Metal 20 — one buy per material the vendor sells, its whole deficit; the Hide the beasts drop.
             Assert.That(
                 buys.ConvertAll(b => (b.Template, b.Quantity)),
-                Is.EqualTo(new[] { (ItemCatalog.Metal, 50), (ItemCatalog.Crystal, 13), (ItemCatalog.Gas, 8) }));
+                Is.EqualTo(new[] { (ItemCatalog.Metal, 99), (ItemCatalog.Crystal, 13 * 3), (ItemCatalog.Gas, 8 * 3) }),
+                "three trees: Metal 150 capped at a lot");
             List<HeldStack> held = [Units(ItemCatalog.CoreRanged, 1, 1), Units(ItemCatalog.Metal, 1, 30)];
             var withCore = CraftPlan.FromVendorAll(Book, ItemCatalog.Blaster, held, [], offers, 10_000);
             Assert.That(
                 withCore.ConvertAll(b => (b.Template, b.Quantity)),
-                Is.EqualTo(new[] { (ItemCatalog.Metal, 10), (ItemCatalog.Crystal, 8), (ItemCatalog.Gas, 8) }),
-                "a core held: its recipe is not bought, and what is held counts against the rest");
+                Is.EqualTo(new[] { (ItemCatalog.Metal, 99), (ItemCatalog.Crystal, 8 + (13 * 2)), (ItemCatalog.Gas, 8 + (8 * 2)) }),
+                "a core held: its recipe is not bought for this one, what is held counts against it, and two whole trees on top");
             Assert.That(buys.ConvertAll(b => b.UnitPrice), Is.EqualTo(buys.ConvertAll(b => Equipment.StandardMaterialPrice(b.Template, b.Quantity))));
             Assert.That(CraftPlan.FromVendorAll(Book, ItemCatalog.Blaster, [], [], offers, 50), Is.Empty, "a third of 50 cr buys no Metal");
             Assert.That(offers.FindAll(o => o.PriceMilli > 0).ConvertAll(o => o.Template), Is.EquivalentTo(Equipment.StandardMaterials));

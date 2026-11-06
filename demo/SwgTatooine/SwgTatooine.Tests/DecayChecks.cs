@@ -38,7 +38,7 @@ internal sealed class DecayChecks : ServedChecks
         public long Key => unchecked((long)Character.RawValue);
     }
 
-    /// <summary>A character with its welcome pack — a worn Mk I blaster and a weapon repair kit — standing 2 m from a crafting station.</summary>
+    /// <summary>A character with its welcome pack — a worn Mk I blaster, a weapon repair kit and three stims — standing 2 m from a crafting station.</summary>
     private Body LogIn(TatooineSim sim, ulong account)
     {
         var link = Harness.Connect(TatooineReplication.PlayerKind, TestAccounts.For(sim.Dbe, account));
@@ -50,7 +50,7 @@ internal sealed class DecayChecks : ServedChecks
         var characterAccount = TestAccounts.For(sim.Dbe, account);
         var character = EntityId.Null;
         SessionHarness.Until(() => CharacterStore.TryFind(sim.Dbe, characterAccount, out character, out _), "the account's character");
-        SessionHarness.Until(() => Items.Stacks(sim, character).Count == 2, "the welcome pack");
+        SessionHarness.Until(() => Items.Stacks(sim, character).Count == 2 + SimBridge.WelcomeStims, "the welcome pack");
         SessionHarness.Until(() => GearOf(sim, body).Stance == Stances.Pistol, "the pack's blaster worn");
         Harness.Ticks(2);
         return new Body(link, body, character);

@@ -105,6 +105,9 @@ public static class CombatTargetKind
     /// a session's player never fired; it fired the day it did.
     /// </remarks>
     public const byte Unshootable = 3;
+
+    /// <summary>A horde's fortress (horde.md § 10): its blows go to the event's hit points, not to a component of the building.</summary>
+    public const byte Siege = 4;
 }
 
 /// <summary>
@@ -155,6 +158,16 @@ internal struct KillEvent
     /// desk completes the mission on exactly that, so the XP and the loot systems test the same byte: a mission lair's break is a stranger's only at 0.
     /// </summary>
     public byte OwnerHit;
+}
+
+/// <summary>A potion drunk: the body to heal and the stim's potency — what the <c>Workshop</c> hands <c>Progression</c> once the dose is spent.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct HealEvent
+{
+    public EntityId Body;
+
+    /// <summary>The stim's potency, hit points: healed within what the body lacks.</summary>
+    public int Potency;
 }
 
 /// <summary>A body to bring up to its character's progress: what the mission desk hands <c>Progression</c> after paying a mission's XP (character-level.md § 5).</summary>

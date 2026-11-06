@@ -568,6 +568,7 @@ public static class TatooineHost
         app.MapInstallations(runtime.Engine);
         app.MapWaypoints(runtime.Engine);
         app.MapMail(runtime.Engine);
+        app.MapHorde();
         // The bazaar's board is the simulation's, published by its desk: asked at each request. Required — MapMarket refuses to start without it.
         app.MapMarket(runtime.Engine, marketBoard);
         app.MapProgress(runtime.Engine);
@@ -582,6 +583,7 @@ public static class TatooineHost
         // overrun count and the compute-vs-durability split — readable with curl, which is what makes them watchable on a box nobody has a client for.
         // It writes its JSON with a Utf8JsonWriter, so the slim builder's source-generated serialization is not involved.
         app.MapTyphonStats("/typhon/stats.json");
+        app.MapTyphonSystemTicks("/typhon/systems/ticks");
         // Plain text, not JSON: the slim builder uses source-generated serialization, and a health check is not worth a serializer context.
         app.MapGet("/healthz", () => Results.Text($"tick {runtime.CurrentTickNumber}"));
 

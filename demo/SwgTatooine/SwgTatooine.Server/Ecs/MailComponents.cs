@@ -23,6 +23,9 @@ public static class MailKind
     /// <summary>A listing expired, its goods reserved for the seller.</summary>
     public const byte Expired = 6;
 
+    /// <summary>A horde marches on a city (horde.md § 3): sent to every character when it is announced.</summary>
+    public const byte Horde = 7;
+
     /// <summary>The name a kind is shown by, over HTTP and in the stats.</summary>
     public static string NameOf(byte kind) => kind switch
     {
@@ -32,6 +35,7 @@ public static class MailKind
         Stopped => "stopped",
         Sold => "sold",
         Expired => "expired",
+        Horde => "horde",
         _ => "unknown",
     };
 }

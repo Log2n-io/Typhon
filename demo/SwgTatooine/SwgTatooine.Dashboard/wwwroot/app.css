@@ -51,7 +51,43 @@ body {
     min-width: 0;
 }
 
+/* A card across the whole row: the server-health timeline (claude/scratch/swg-dashboard-system-timeline.md D5). */
+.card.wide { grid-column: 1 / -1; }
+
 .card h2 { margin: 0 0 10px; font-size: 15px; color: var(--accent); }
+
+/* The system timeline (systimeline.js): its canvases size themselves to this box's width. */
+.systl { position: relative; }
+.systl canvas { display: block; width: 100%; }
+/* The pinned y-axis, then the bars at a fixed pitch in a horizontal scroller; bars narrower than the view sit at its right ("now"). */
+.systl .tl-row { display: flex; align-items: flex-start; }
+.systl .tl-row > canvas { flex: none; }
+.systl .tl-scroll {
+    flex: 1 1 auto; min-width: 0; display: flex; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px;
+    scrollbar-width: thin; scrollbar-color: #3a4450 transparent;
+}
+.systl .tl-bars { flex: none; margin-left: auto; }
+.systl .tl-bars canvas { width: 0; }
+.systl .tl-tip {
+    position: absolute; pointer-events: none; z-index: 5; display: none; min-width: 260px; max-width: 420px;
+    background: #0f1317; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 11px; line-height: 1.45;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.systl .tl-tip b { color: var(--accent); font-weight: 600; }
+.systl .tl-tip table { border-collapse: collapse; width: 100%; margin-top: 4px; }
+.systl .tl-tip td { padding: 0 4px; white-space: nowrap; }
+.systl .tl-tip td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.systl .tl-sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.systl .tl-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; margin: 6px 0 2px; color: var(--muted); }
+.systl .tl-drill { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; display: none; }
+.systl .tl-drill h4 { margin: 0 0 6px; font-size: 12px; color: var(--accent); font-weight: 600; }
+.systl .tl-drill h4 span { color: var(--muted); font-weight: 400; }
+.systl .tl-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.systl .tl-table th, .systl .tl-table td { padding: 2px 6px; text-align: left; }
+.systl .tl-table td.num, .systl .tl-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.systl .tl-util { height: 7px; background: rgba(255, 255, 255, .06); border-radius: 4px; overflow: hidden; min-width: 80px; }
+.systl .tl-util div { height: 100%; background: var(--accent); opacity: .85; }
+.systl .tl-empty { color: var(--muted); font-size: 12px; padding: 30px 0; text-align: center; }
 .card h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 
 .kpis {
@@ -59,6 +95,8 @@ body {
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     gap: 8px;
 }
+
+.kpis.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .kpi { background: rgba(255, 255, 255, .03); border-radius: 6px; padding: 6px 8px; }
 .kpi .value { font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

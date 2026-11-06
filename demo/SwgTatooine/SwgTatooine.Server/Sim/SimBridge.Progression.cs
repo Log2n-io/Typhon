@@ -104,6 +104,9 @@ public sealed partial class SimBridge
             return;
         }
 
+        // The potions the Workshop spent this tick (SimBridge.Potions.cs).
+        ApplyHeals(ctx);
+
         // The mission desk's XP of this tick, committed with its rewards: its holders' bodies, brought up to it (§ 5).
         var refreshes = ProgressQueue.Count;
         if (refreshes != 0)

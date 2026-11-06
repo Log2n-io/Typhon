@@ -124,6 +124,8 @@ public static class CraftPlan
     public const ushort Knuckler = 67;
     public const ushort Sword = 68;
     public const ushort Blaster = 69;
+    public const ushort KitWeapon = MarketPlan.KitWeapon;
+    public const ushort KitArmor = MarketPlan.KitArmor;
 
     /// <summary>The bazaar's most a crafter pays for an input, × its value (crafting-catalog.md § 15.2).</summary>
     public const double InputOverValue = 1.5;
@@ -132,25 +134,188 @@ public static class CraftPlan
     public const int KeptStacksPerTemplate = 2;
 
     /// <summary>
-    /// The lines crafters work today: weapons and armour, in halves. Potions wait for a use and a value — no bot drinks one, the vendor refuses them and
-    /// they cannot be listed — so a potion crafter would only fill its grid (review, 2026-11-02; potions usable is C2-6, #1394).
+    /// The lines crafters work: weapons, armour and potions, in thirds (crafting-build.md § 6). The potion line makes stims only — the one potion a bot drinks
+    /// and the market values (Loïc, 2026-11-05); the others wait for a use.
     /// </summary>
-    public static readonly CraftLine[] Lines = [CraftLine.Weapon, CraftLine.Armor];
+    public static readonly CraftLine[] Lines = [CraftLine.Weapon, CraftLine.Armor, CraftLine.Potion];
 
-    /// <summary>What a line's crafters make, in the order they try them.</summary>
+    /// <summary>
+    /// What a line's crafters make, in the order they try them when the board says nothing (<see cref="ByDemand"/>): the line's items, and its repair kit
+    /// (Loïc, 2026-11-04: crafters make what the market lacks — no kit had ever been listed).
+    /// </summary>
     public static ushort[] Targets(CraftLine line) => line switch
     {
-        CraftLine.Weapon => [Blaster, Sword, Knuckler],
-        CraftLine.Armor => [44, 45, 46, 47, 48, 49],
-        _ => [56, 57, 58, 59, 60, 61],
+        CraftLine.Weapon => [Blaster, Sword, Knuckler, KitWeapon],
+        CraftLine.Armor => [44, 45, 46, 47, 48, 49, KitArmor],
+        _ => [GearPlan.Stim],
     };
 
-    /// <summary>The craft to start now, or null: the first target, from <paramref name="first"/> round, that it can make or work toward.</summary>
-    public static CraftJob Next(CraftBook book, ushort[] targets, int first, IReadOnlyList<HeldStack> held, IReadOnlyList<HeldPart> parts)
+    /// <summary>The asset a target is browsed and priced by; null for one this table does not name.</summary>
+    public static string OutputItem(ushort template) => template switch
+    {
+        Blaster => "blaster_dl44",
+        Sword => "sword_vibroblade",
+        Knuckler => "vibroknuckler",
+        KitWeapon => "kit_weapon_repair",
+        KitArmor => "kit_armor_repair",
+        GearPlan.Stim => GearPlan.StimItem,
+        44 => "armor_padded_helmet",
+        45 => "armor_padded_torso",
+        46 => "armor_padded_arms",
+        47 => "armor_padded_legs",
+        48 => "armor_padded_gloves",
+        49 => "armor_padded_boots",
+        _ => null,
+    };
+
+    /// <summary>The items' worth of vendor inputs a crafter buys at once (<see cref="FromVendorAll"/>), a lot of 99 a material at most.</summary>
+    public const int InputBatch = 3;
+
+    /// <summary>A crafter goes to sell once it holds this many goods (<see cref="ForSale"/>).</summary>
+    public const int SellAt = 3;
+
+    /// <summary>
+    /// A crafter's goods to sell: the items with stats in its grid it will neither wear nor keep as its spare, sound, not parts — what it made — and its
+    /// kits past those it keeps (<see cref="MarketPlan.CrafterKitsKept"/>), a listing's lot each.
+    /// </summary>
+    public static int ForSale(IReadOnlyList<GearItem> gear, IReadOnlyList<HeldStack> held, ulong spare, ulong wear)
+    {
+        var n = 0;
+        foreach (var g in gear)
+        {
+            n += !g.Worn && g.Wears != 0 && !g.WornDown && g.Id != spare && g.Id != wear && g.Template is not (>= FirstPart and <= LastPart) ? 1 : 0;
+        }
+
+        foreach (var h in held)
+        {
+            n += IsKit(h.Template) && h.Count > MarketPlan.CrafterKitsKept
+                ? (h.Count - MarketPlan.CrafterKitsKept + MarketPlan.KitLot - 1) / MarketPlan.KitLot
+                : 0;
+        }
+
+        // The stims it made, past the one it keeps: Surplus's own rule, a listing each.
+        return n + GearPlan.StimsToSell(gear, GearPlan.CrafterStimsKept).Count;
+    }
+
+    /// <summary>Whether a template is a repair kit (weapon, armour, vehicle, structure: 62-65).</summary>
+    public static bool IsKit(ushort template) => template is >= 62 and <= 65;
+
+    /// <summary>
+    /// A line's targets, the most wanted first (Loïc, 2026-11-04: crafters identify what needs to be crafted and sold): by the item's listings against its
+    /// recent sales planet-wide — what sells as fast as it is listed first — and the line's own order between equals. With the book, each Mk it can make
+    /// is weighed on its own: Mk I, and each Mk II-V whose core the board lists (<see cref="CoreMks"/>); without it, or for a target without a core, every
+    /// Mk counted together.
+    /// </summary>
+    public static ushort[] ByDemand(ushort[] targets, MarketPrices prices, CraftBook book = null)
+    {
+        var order = (ushort[])targets.Clone();
+        var glutted = new bool[order.Length];
+        var demand = new double[order.Length];
+        for (var i = 0; i < order.Length; i++)
+        {
+            var item = OutputItem(order[i]);
+            var listed = 0;
+            var sold = 0;
+            for (var mk = 0; mk <= 5; mk++)
+            {
+                listed += prices.ListedOf(item, mk);
+                sold += prices.SalesOf(item, mk);
+            }
+
+            // Listed against sold: what sells as fast as it is listed first (the night of 2026-11-04: weapon kits, none listed, went first and sold 47;
+            // blasters, two listed at a time, sold 146).
+            demand[i] = (listed + 1d) / (sold + 1d);
+            glutted[i] = listed >= SaturatedListings;
+
+            // What none buys at any Mk is glutted whole, its few Mk II listings notwithstanding (the night of 2026-11-06: weighed by Mk, swords and
+            // knucklers came back, 72 and 83 Mk I listed and none sold at any Mk).
+            if (book == null || (glutted[i] && sold == 0) || CoreOf(book, order[i]) is not { } core)
+            {
+                continue;
+            }
+
+            // Its Mks apart: the night of 2026-11-06, 63-76 Mk I helmets, legs, gloves and boots listed — and Mk II-IV of each none, sold out — cut the
+            // pieces whole, and the armour line made arms and kits alone. An item is glutted when every Mk it can make is; it is as wanted as its
+            // scarcest Mk that is not.
+            glutted[i] = true;
+            demand[i] = double.MaxValue;
+            var scarcest = double.MaxValue;
+            for (var mk = 1; mk <= 5; mk++)
+            {
+                if (mk >= 2 && prices.ListedOf(core.Item, mk) == 0)
+                {
+                    continue;
+                }
+
+                var atMk = prices.ListedOf(item, mk);
+                var ratio = (atMk + 1d) / (prices.SalesOf(item, mk) + 1d);
+                scarcest = Math.Min(scarcest, ratio);
+                if (atMk < SaturatedListings)
+                {
+                    glutted[i] = false;
+                    demand[i] = Math.Min(demand[i], ratio);
+                }
+            }
+
+            if (glutted[i])
+            {
+                demand[i] = scarcest;
+            }
+        }
+
+        var index = new int[order.Length];
+        for (var i = 0; i < index.Length; i++)
+        {
+            index[i] = i;
+        }
+
+        Array.Sort(index, (a, b) => demand[a] != demand[b] ? demand[a].CompareTo(demand[b]) : a.CompareTo(b));
+
+        // What the board is glutted with is not made at all, the scarcest kept when all is: the night of 2026-11-04 ended with 83 knucklers and 59 swords
+        // listed and none sold (bots fight with blasters), crafted when a blaster's inputs were short. Each glutted target skipped, not the rest after it.
+        var kept = 0;
+        foreach (var i in index)
+        {
+            kept += glutted[i] ? 0 : 1;
+        }
+
+        var sorted = new ushort[Math.Max(1, kept)];
+        var n = 0;
+        foreach (var i in index)
+        {
+            if (!glutted[i])
+            {
+                sorted[n++] = order[i];
+            }
+        }
+
+        if (kept == 0)
+        {
+            sorted[0] = order[index[0]];
+        }
+
+        return sorted;
+    }
+
+    /// <summary>The listings of an item, planet-wide, past which a crafter stops making it (<see cref="ByDemand"/>).</summary>
+    public const int SaturatedListings = 40;
+
+    /// <summary>
+    /// The craft to start now, or null: the first target, from <paramref name="first"/> round, that it can make or work toward — of those in
+    /// <paramref name="lootedOnly"/> (<see cref="MkIGlutted"/>), only one it holds a looted core for.
+    /// </summary>
+    public static CraftJob Next(CraftBook book, ushort[] targets, int first, IReadOnlyList<HeldStack> held, IReadOnlyList<HeldPart> parts,
+        HashSet<ushort> lootedOnly = null)
     {
         for (var i = 0; i < targets.Length; i++)
         {
-            if (Step(book, targets[(first + i) % targets.Length], held, parts, 0) is { } job)
+            var target = targets[(first + i) % targets.Length];
+            if (lootedOnly != null && lootedOnly.Contains(target) && !HoldsLootedCore(book, target, held))
+            {
+                continue;
+            }
+
+            if (Step(book, target, held, parts, 0) is { } job)
             {
                 return job;
             }
@@ -158,6 +323,183 @@ public static class CraftPlan
 
         return null;
     }
+
+    /// <summary>
+    /// The targets the board is glutted with at Mk I (<see cref="SaturatedListings"/>), wanted only above it (<see cref="ByDemand"/>): crafted only with a
+    /// looted core in hand. The night of 2026-11-06, crafters short of a Mk II core crafted a Mk I one and made the Mk I piece: 2 296 Mk I weapons and
+    /// 1 302 Mk I armour pieces listed within the hour. Empty without the book.
+    /// </summary>
+    public static HashSet<ushort> MkIGlutted(ushort[] targets, MarketPrices prices, CraftBook book)
+    {
+        var glutted = new HashSet<ushort>();
+        foreach (var t in targets)
+        {
+            if (book != null && CoreOf(book, t) != null && prices.ListedOf(OutputItem(t), 1) >= SaturatedListings)
+            {
+                glutted.Add(t);
+            }
+        }
+
+        return glutted;
+    }
+
+    /// <summary>
+    /// A crafter's refines up (crafting-catalog.md § 11.1; Loïc, 2026-11-06: what it cannot craft at Mk III it refines Mk II into — that is the
+    /// feature's point), whatever its band: the core of <paramref name="target"/> into the highest Mk III-V the board wants the item at (not glutted,
+    /// <see cref="SaturatedListings"/>) and does not list the core at, from N of the Mk below it holds — never from Mk I, a crafted core — while it holds
+    /// none at that Mk or above; and every add-on of the target's kind held N times at Mk II-IV into the next, the craft taking its best.
+    /// </summary>
+    public static List<(ushort Template, int Mk, int Count)> RefineUp(CraftBook book, ushort target, IReadOnlyList<HeldStack> held, MarketPrices prices)
+    {
+        var up = new List<(ushort, int, int)>();
+        if (book == null)
+        {
+            return up;
+        }
+
+        if (CoreOf(book, target) is { } core && UpTo(core, OutputItem(target), held, prices) is { } mk
+            && UnitsAt(held, core.Template, mk - 1) >= RefinePlan.RatioOf(mk - 1) * core.Count)
+        {
+            up.Add((core.Template, mk - 1, core.Count));
+        }
+
+        var addon = AddonOf(book, target);
+        for (var k = 2; k <= 4 && addon != 0; k++)
+        {
+            var make = Math.Min(UnitsAt(held, addon, k) / RefinePlan.RatioOf(k), RefinePlan.MaxPerAction);
+            if (make > 0)
+            {
+                up.Add((addon, k, make));
+            }
+        }
+
+        return up;
+    }
+
+    /// <summary>
+    /// The cores a crafter buys to refine up (<see cref="RefineUp"/>): of the Mk below the one it would refine into, what it lacks of N, when the board
+    /// lists that many; null when it would not refine, or holds them already.
+    /// </summary>
+    public static (BookSlot Core, int Mk, int Count)? RefineBuy(CraftBook book, ushort target, IReadOnlyList<HeldStack> held, MarketPrices prices)
+    {
+        if (book == null || CoreOf(book, target) is not { } core || UpTo(core, OutputItem(target), held, prices) is not { } mk)
+        {
+            return null;
+        }
+
+        var lack = (RefinePlan.RatioOf(mk - 1) * core.Count) - UnitsAt(held, core.Template, mk - 1);
+        return lack > 0 && prices.ListedOf(core.Item, mk - 1) >= lack ? (core, mk - 1, lack) : null;
+    }
+
+    /// <summary>
+    /// Of a list of cores' listings, the cheapest that make <paramref name="count"/> together, each at most <see cref="InputOverValue"/> × its value, not its
+    /// own, the whole within <see cref="MarketPlan.BuyWalletShare"/> of the wallet; empty when they do not.
+    /// </summary>
+    public static List<BrowseRow> ChooseMany(IReadOnlyList<BrowseRow> rows, MarketPrices prices, string item, int count, long wallet,
+        IReadOnlyCollection<ulong> own)
+    {
+        var fit = new List<BrowseRow>();
+        foreach (var r in rows)
+        {
+            var value = prices.ValueOf(r.Item, r.Mk);
+            if (r.Item == item && value > 0d && r.Unit <= InputOverValue * value && !Owns(own, r.Id))
+            {
+                fit.Add(r);
+            }
+        }
+
+        fit.Sort((a, b) => a.Unit.CompareTo(b.Unit));
+        var chosen = new List<BrowseRow>();
+        var units = 0;
+        var total = 0L;
+        foreach (var r in fit)
+        {
+            if (units >= count)
+            {
+                break;
+            }
+
+            chosen.Add(r);
+            units += r.Quantity;
+            total += r.Total;
+        }
+
+        return units >= count && total <= MarketPlan.BuyWalletShare * wallet ? chosen : [];
+    }
+
+    // The Mk a crafter would refine a target's core into: the highest III-V the item is wanted at and the core not listed at, while it holds none at it or
+    // above; null for none.
+    private static int? UpTo(BookSlot core, string item, IReadOnlyList<HeldStack> held, MarketPrices prices)
+    {
+        for (var mk = 5; mk >= 3; mk--)
+        {
+            if (Units(held, core.Template, mk, 5, core.Count) > 0)
+            {
+                return null;
+            }
+
+            if (prices.ListedOf(item, mk) < SaturatedListings && prices.ListedOf(core.Item, mk) == 0
+                && prices.ListedOf(core.Item, mk - 1) + UnitsAt(held, core.Template, mk - 1) > 0)
+            {
+                return mk;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Its stacks less what <paramref name="refines"/> take (N of a Mk for each one made): what its craft plans from while they wait.</summary>
+    public static List<HeldStack> Without(IReadOnlyList<HeldStack> held, List<(ushort Template, int Mk, int Count)> refines)
+    {
+        var take = new Dictionary<(ushort, int), int>();
+        foreach (var (template, mk, count) in refines)
+        {
+            take[(template, mk)] = (take.TryGetValue((template, mk), out var n) ? n : 0) + (count * RefinePlan.RatioOf(mk));
+        }
+
+        var left = new List<HeldStack>(held.Count);
+        foreach (var h in held)
+        {
+            if (take.TryGetValue((h.Template, h.Mk), out var t) && t > 0)
+            {
+                var off = Math.Min(t, h.Count);
+                take[(h.Template, h.Mk)] = t - off;
+                if (h.Count > off)
+                {
+                    left.Add(h with { Count = h.Count - off });
+                }
+
+                continue;
+            }
+
+            left.Add(h);
+        }
+
+        return left;
+    }
+
+    private static int UnitsAt(IReadOnlyList<HeldStack> held, ushort template, int mk)
+    {
+        var n = 0;
+        foreach (var h in held)
+        {
+            n += h.Template == template && h.Mk == mk ? h.Count : 0;
+        }
+
+        return n;
+    }
+
+    private static ushort AddonOf(CraftBook book, ushort target) => book.Of(target)?.Kind switch
+    {
+        "weapon" => AddonWeapon,
+        "armor" => AddonArmor,
+        "potion" => AddonAdditive,
+        _ => 0,
+    };
+
+    /// <summary>Whether it holds a core above Mk I for a target, enough for one craft.</summary>
+    public static bool HoldsLootedCore(CraftBook book, ushort target, IReadOnlyList<HeldStack> held)
+        => CoreOf(book, target) is { } core && Units(held, core.Template, 2, 5, core.Count) > 0;
 
     /// <summary>
     /// The templates a crafter keeps from the vendor and off the board: every material, core and add-on its targets' recipes take, down to their parts'.
@@ -195,6 +537,11 @@ public static class CraftPlan
             if (uses != null && uses.Contains((s.Template, s.Mk)))
             {
                 continue;   // the planned craft's: kept, and counted against nothing
+            }
+
+            if (keeps.Contains(s.Template) && s.Category == MarketCategory.Core && s.Mk >= 2)
+            {
+                continue;   // a looted core its recipes take: what crafts above Mk I (CoreMks), never traded however small its stack
             }
 
             (keeps.Contains(s.Template) ? kept : trade).Add(s);
@@ -381,9 +728,14 @@ public static class CraftPlan
     {
         var buys = new List<MarketCommand>();
         var budget = (long)(MarketPlan.BuyWalletShare * wallet);
+
+        // The next InputBatch items' worth, not one (the night of 2026-11-04: a crafter bought one tree's inputs, crafted it, and walked back to the vendor
+        // — its 1 200 blasters in three hours were its own replacements, none left to sell): what this one lacks, and whole trees for the rest.
+        var whole = Deficits(book, target, [], []);
         foreach (var (template, deficit) in Deficits(book, target, held, parts))
         {
-            if (buys.Count < 6 && FromVendor(offers, new BookSlot("bulk", template, null, deficit), budget) is { } buy)
+            var want = deficit + (whole.TryGetValue(template, out var tree) ? tree * (InputBatch - 1) : 0);
+            if (buys.Count < 6 && FromVendor(offers, new BookSlot("bulk", template, null, want), budget) is { } buy)
             {
                 buys.Add(buy);
                 budget -= buy.UnitPrice;
@@ -391,6 +743,46 @@ public static class CraftPlan
         }
 
         return buys;
+    }
+
+    /// <summary>The core slot of a target's schematic — an item takes its core's Mk (the server's <c>StartPlan</c>) — or null for one without a core.</summary>
+    public static BookSlot? CoreOf(CraftBook book, ushort target)
+    {
+        foreach (var slot in book.Of(target)?.Slots ?? [])
+        {
+            if (slot.Kind == "core")
+            {
+                return slot;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The Mks of looted core a crafter looks for on the board, the highest first (Loïc, 2026-11-05: the bots buy the best gear they can wear, and the
+    /// crafters made 1 391 Mk I blasters to 6 above it in 39 min): the item takes its core's Mk, a crafted core is Mk I, so a Mk II+ item needs a looted
+    /// core. Each Mk II-V the board lists the core at and is not glutted with the item at (<see cref="SaturatedListings"/>); none while it holds a core
+    /// above Mk I already, nor for a target without a core.
+    /// </summary>
+    public static List<int> CoreMks(CraftBook book, ushort target, IReadOnlyList<HeldStack> held, MarketPrices prices)
+    {
+        var mks = new List<int>();
+        if (CoreOf(book, target) is not { } core || Units(held, core.Template, 2, 5, core.Count) > 0)
+        {
+            return mks;
+        }
+
+        var item = OutputItem(target);
+        for (var mk = 5; mk >= 2; mk--)
+        {
+            if (prices.ListedOf(core.Item, mk) > 0 && prices.ListedOf(item, mk) < SaturatedListings)
+            {
+                mks.Add(mk);
+            }
+        }
+
+        return mks;
     }
 
     /// <summary>The parts in an inventory's grid: its items with stats of a part's template, with their grades.</summary>

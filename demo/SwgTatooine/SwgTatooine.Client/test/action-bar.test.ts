@@ -25,18 +25,25 @@ describe('the slot a key uses', () => {
   });
 
   /** Shift+digit is the boost; the bar and the boost must never both take one key press. */
-  it('is none with a modifier, and every shifted digit is a boost instead', () => {
+  it('is none with a modifier, and every shifted digit of the four boosts is a boost instead', () => {
     for (const slot of ACTION_SLOTS) {
       expect(slotForKey(slot.code, true)).toBeNull();
-      expect(boostFor(slot.code, true)).not.toBeNull();
       expect(boostFor(slot.code, false)).toBeNull();
+      expect(boostFor(slot.code, true) !== null).toBe(slot.key <= 4);
     }
   });
 
-  it('is none on the numeric pad and past the four slots', () => {
+  it('is none on the numeric pad and past the five slots', () => {
     expect(slotForKey('Numpad1', false)).toBeNull();
-    expect(slotForKey('Digit5', false)).toBeNull();
+    expect(slotForKey('Digit6', false)).toBeNull();
     expect(slotForKey('KeyW', false)).toBeNull();
+  });
+
+  it('drinks a stim on 5, keeping the stance (Loïc, 2026-11-05)', () => {
+    const stim = slotForKey('Digit5', false);
+    expect(stim).toMatchObject({ key: 5, kind: 'consume', asset: 'potion_stim' });
+    expect(stanceAfter(3, stim!)).toBe(3);
+    expect(stanceAfter(NO_STANCE, stim!)).toBe(NO_STANCE);
   });
 });
 

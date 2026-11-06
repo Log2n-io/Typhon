@@ -129,7 +129,7 @@ internal sealed class EquipChecks : ServedChecks
 
         sim.Bridge.StageInstance(a.Key, Gloves, 1, StatsOf(Gloves));
         sim.Bridge.StageInstance(a.Key, Torso, 1, StatsOf(Torso));
-        SessionHarness.Until(() => Items.Stacks(sim, a.Character).Count == 4, "the armour (and the pack's blaster and repair kit)");
+        SessionHarness.Until(() => Items.Stacks(sim, a.Character).Count == 4 + SimBridge.WelcomeStims, "the armour (and the pack's blaster, kit and stims)");
         Harness.Ticks(1);
         Equip(a.Link, Of(sim, a, Gloves).Id);
         Equip(a.Link, Of(sim, a, Torso).Id);
@@ -156,7 +156,7 @@ internal sealed class EquipChecks : ServedChecks
         sim.Bridge.StageInstance(a.Key, Blaster, 2, StatsOf(Blaster));
         sim.Bridge.StageInstance(a.Key, ItemCatalog.Sword, 1, StatsOf(ItemCatalog.Sword));
         sim.Bridge.StageTransfer(ItemLedger.World, a.Key, ItemCatalog.Hide, 1, 5, ItemMoveKind.Kill, 1);
-        SessionHarness.Until(() => Items.Stacks(sim, a.Character).Count == 5, "the items (and the pack's blaster and repair kit)");
+        SessionHarness.Until(() => Items.Stacks(sim, a.Character).Count == 5 + SimBridge.WelcomeStims, "the items (and the pack's blaster, kit and stims)");
         Harness.Ticks(1);
 
         var before = Count(a.Link, TatooineReplication.EquipLevel);
@@ -214,7 +214,7 @@ internal sealed class EquipChecks : ServedChecks
         {
             var a = LogIn(first, 0x9421, 1);
             first.Bridge.StageInstance(a.Key, Torso, 1, StatsOf(Torso));
-            SessionHarness.Until(() => Items.Stacks(first, a.Character).Count == 3, "the torso (and the pack's blaster and repair kit)");
+            SessionHarness.Until(() => Items.Stacks(first, a.Character).Count == 3 + SimBridge.WelcomeStims, "the torso (and the pack's blaster, kit and stims)");
             Harness.Ticks(1);
             Equip(a.Link, Of(first, a, Torso).Id);
             SessionHarness.Until(() => GearOf(first, a.Body).Gear.MitKinetic > 0 && GearOf(first, a.Body).Gear.Stance == Stances.Pistol, "both worn");

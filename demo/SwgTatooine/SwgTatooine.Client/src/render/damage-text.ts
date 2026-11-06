@@ -25,8 +25,11 @@ const RISE_PX = 36;
 /** A glyph's height on screen, CSS pixels. */
 const GLYPH_PX = 17;
 
-/** The atlas: what a number is spelt with, in column order — twice, red then gold, the second set a critical's. */
-const GLYPHS = '-0123456789';
+/** The atlas: what a number is spelt with, in column order — three times: red, gold for a critical, green for a heal. */
+const GLYPHS = '-+0123456789';
+
+/** The atlas's sets, in order: a blow's, a critical's, a heal's. */
+const SETS = 3;
 
 /** How much larger a critical's number is drawn (crafting-catalog.md § 9.3: "a larger number, its own colour"). */
 export const CRIT_SCALE = 1.4;
@@ -49,6 +52,7 @@ interface Number_ {
   text: string;
   live: boolean;
   crit: boolean;
+  heal: boolean;
   /** Where it was last seen: a body that leaves the view mid-number keeps its number where it was. */
   readonly at: Anchor;
   seen: boolean;
@@ -115,25 +119,29 @@ export class DamageText {
     material.setTexture('uAtlas', this.atlas);
     material.setFloat('uGlyphPx', GLYPH_PX);
     material.setFloat('uAspect', CELL_W / CELL_H);
-    material.setFloat('uColumns', GLYPHS.length * 2);
+    material.setFloat('uColumns', GLYPHS.length * SETS);
     mesh.material = material;
     this.material = material;
     this.setCount(0);
   }
 
-  /** A blow landed on `netId` for `amount`: "-amount" rises over its head for {@link DAMAGE_MS}; a critical's gold and {@link CRIT_SCALE} larger. */
-  spawn(netId: number, amount: number, nowMs: number, crit = false): void {
+  /**
+   * A blow landed on `netId` for `amount`: "-amount" rises over its head for {@link DAMAGE_MS}; a critical's gold and {@link CRIT_SCALE} larger. A heal
+   * (`heal`) is "+amount", green.
+   */
+  spawn(netId: number, amount: number, nowMs: number, crit = false, heal = false): void {
     let n = this.numbers.find((d) => !d.live);
     if (n === undefined && this.numbers.length < NUMBERS) {
-      n = { netId: 0, born: 0, text: '', live: false, crit: false, at: { x: 0, y: 0, z: 0 }, seen: false };
+      n = { netId: 0, born: 0, text: '', live: false, crit: false, heal: false, at: { x: 0, y: 0, z: 0 }, seen: false };
       this.numbers.push(n);
     }
 
     n ??= this.numbers.reduce((a, b) => (a.born <= b.born ? a : b));
     n.netId = netId;
     n.born = nowMs;
-    n.text = `-${String(Math.max(0, Math.round(amount)))}`;
-    n.crit = crit;
+    n.text = `${heal ? '+' : '-'}${String(Math.max(0, Math.round(amount)))}`;
+    n.crit = crit && !heal;
+    n.heal = heal;
     n.live = true;
     n.seen = false;
   }
@@ -182,7 +190,7 @@ export class DamageText {
         this.anchors[b + 1] = n.at.y;
         this.anchors[b + 2] = z;
         this.anchors[b + 3] = alpha;
-        this.glyphData[b] = GLYPHS.indexOf(n.text[i]) + (n.crit ? GLYPHS.length : 0);
+        this.glyphData[b] = GLYPHS.indexOf(n.text[i]) + GLYPHS.length * (n.heal ? 2 : n.crit ? 1 : 0);
         this.scales[g] = n.crit ? CRIT_SCALE : 1;
         this.glyphData[b + 1] = i;
         this.glyphData[b + 2] = n.text.length;
@@ -216,7 +224,7 @@ export class DamageText {
 function glyphAtlas(scene: Scene): DynamicTexture {
   const texture = new DynamicTexture(
     'damage-glyphs',
-    { width: CELL_W * GLYPHS.length * 2, height: CELL_H },
+    { width: CELL_W * GLYPHS.length * SETS, height: CELL_H },
     scene,
     true,
     Texture.TRILINEAR_SAMPLINGMODE,
@@ -225,19 +233,20 @@ function glyphAtlas(scene: Scene): DynamicTexture {
   texture.wrapU = Texture.CLAMP_ADDRESSMODE;
   texture.wrapV = Texture.CLAMP_ADDRESSMODE;
   const ctx = texture.getContext() as CanvasRenderingContext2D;
-  ctx.clearRect(0, 0, CELL_W * GLYPHS.length * 2, CELL_H);
+  ctx.clearRect(0, 0, CELL_W * GLYPHS.length * SETS, CELL_H);
   ctx.font = `800 ${String(CELL_H * 0.78)}px system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
-  for (let i = 0; i < GLYPHS.length * 2; i++) {
+  for (let i = 0; i < GLYPHS.length * SETS; i++) {
     const cx = CELL_W * (i + 0.5);
     const cy = CELL_H * 0.55;
     const glyph = GLYPHS[i % GLYPHS.length];
     ctx.lineWidth = 8;
-    ctx.strokeStyle = 'rgba(20, 0, 0, 0.9)';
+    const set = Math.floor(i / GLYPHS.length);
+    ctx.strokeStyle = set === 2 ? 'rgba(0, 20, 6, 0.9)' : 'rgba(20, 0, 0, 0.9)';
     ctx.strokeText(glyph, cx, cy);
-    ctx.fillStyle = i < GLYPHS.length ? '#ff4b3e' : '#ffd23e';
+    ctx.fillStyle = set === 0 ? '#ff4b3e' : set === 1 ? '#ffd23e' : '#5dff8a';
     ctx.fillText(glyph, cx, cy);
   }
 

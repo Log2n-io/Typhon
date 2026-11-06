@@ -58,6 +58,19 @@ public readonly struct Perceived
     /// <summary>That creature's level, 1-50 (content-levels.md), whatever it is; 0 from a server that does not send one.</summary>
     public int NearestCreatureLevel { get; init; }
 
+    /// <summary>A horde's fortress in view (horde.md § 10): its netId, 0 for none, and where it stands.</summary>
+    public uint Fortress { get; init; }
+
+    public float FortressX { get; init; }
+
+    public float FortressZ { get; init; }
+
+    /// <summary>Whether the nearest creature is a horde's raider (its replicated <c>raider</c>): fought at any level by a defender.</summary>
+    public bool NearestCreatureRaider { get; init; }
+
+    /// <summary>That creature's health, a share of its maximum (its replicated <c>hp</c>, 0-1); 0 when the server sends none.</summary>
+    public float NearestCreatureHealth { get; init; }
+
     /// <summary>The nearest creature whose replicated <c>target</c> is this body — what is chasing it or biting it — or 0.</summary>
     /// <remarks>Read in the same pass as <see cref="NearestCreature"/>: one more field load per creature in view, no query of its own.</remarks>
     public uint Attacker { get; init; }
@@ -73,6 +86,18 @@ public readonly struct Perceived
 
     /// <summary>The attacker's level, 1-50; 0 from a server that does not send one.</summary>
     public int AttackerLevel { get; init; }
+
+    /// <summary>Whether the attacker is a horde's raider.</summary>
+    public bool AttackerRaider { get; init; }
+
+    /// <summary>
+    /// The attacker's health, a share of its maximum (its replicated <c>hp</c>, 0-1); 0 when the server sends none. A fight's odds are read from it
+    /// (<c>BotBrain.Defence.cs</c>): how fast it falls against how fast the bot's own does.
+    /// </summary>
+    public float AttackerHealth { get; init; }
+
+    /// <summary>How many creatures in view have this body as their <c>target</c>: a pack, against which a fight's odds are worse by as many.</summary>
+    public int Attackers { get; init; }
 
     /// <summary>The body's health, a share of its maximum (its replicated <c>hp</c>, 0-1); 0 when the server sends none.</summary>
     public float Health { get; init; }
@@ -140,6 +165,12 @@ public readonly struct Perceived
     /// <summary>Bazaar goods reserved for it — bought elsewhere, or a listing returned — as <c>GET /swg/market/mine</c> last said (bazaar.md § 5).</summary>
     public int Reserved { get; init; }
 
+    /// <summary>
+    /// A city (a region, a city plus one) where goods reserved for it wait that it does not trade at — gear bought there because it was stronger
+    /// (crafting-build.md § 6.1) — to travel to and collect; 0 for none.
+    /// </summary>
+    public int PickupRegion { get; init; }
+
     /// <summary>Whether its trade at the bazaar is still being read or sent (bazaar.md § 8): the bot stands at the terminal until it is done.</summary>
     public bool Trading { get; init; }
 
@@ -159,6 +190,21 @@ public readonly struct Perceived
 
     /// <summary>Whether something it wears is worn down with a repair left and a kit held (crafting-build.md § 6, Repair): an errand to a station.</summary>
     public bool RepairDue { get; init; }
+
+    /// <summary>
+    /// Whether it fights with its fist (<c>GearPlan.Unarmed</c>): no sound weapon worn. It closes in to strike, and runs from what attacks it (Loïc,
+    /// 2026-11-04: a bot whose blaster broke stood 24 m off a fortress, punching air). False until its first inventory read.
+    /// </summary>
+    public bool Unarmed { get; init; }
+
+    /// <summary>Whether its gear assessment says a trip to the bazaar is due (<c>GearPlan.Due</c>): a piece to replace or better, or a spare to buy.</summary>
+    public bool GearDue { get; init; }
+
+    /// <summary>Down to its fist with no spare to put on, and a weapon it can pay for: the bazaar first, raid or no raid (<c>GearPlan.Urgent</c>).</summary>
+    public bool GearUrgent { get; init; }
+
+    /// <summary>A crafter with goods to sell and a listing slot free (<c>CraftPlan.ForSale</c>): an errand to the bazaar, to sell.</summary>
+    public bool SellDue { get; init; }
 
     /// <summary>
     /// Whether an installation owner has one to tend — a hopper to collect, upkeep to pay — or a kit to place (crafting-build.md § 10), and where: its

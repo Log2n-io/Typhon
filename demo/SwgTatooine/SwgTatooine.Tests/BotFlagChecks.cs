@@ -181,14 +181,14 @@ internal sealed class BotFlagChecks : ServedChecks
         Assert.Multiple(() =>
         {
             Assert.That(lost, Is.Zero, "the first read counted losses that were already there");
-            Assert.That(view, Is.EqualTo(new InventoryView(1, 1, 1)));
+            Assert.That(view, Is.EqualTo(new InventoryView(1, 1, 1, 30)));
         });
 
         view = InventoryView.Parse(second, view, count: true, out lost);
         Assert.Multiple(() =>
         {
             Assert.That(lost, Is.EqualTo(3), "the new note's units");
-            Assert.That(view, Is.EqualTo(new InventoryView(2, 2, 2)));
+            Assert.That(view, Is.EqualTo(new InventoryView(2, 2, 2, 30)));
         });
 
         view = InventoryView.Parse(second, view, count: true, out lost);

@@ -1,6 +1,7 @@
 @page "/"
 @implements IDisposable
 @inject DashboardFeed Feed
+@inject IJSRuntime JS
 
 <PageTitle>Tatooine dashboard</PageTitle>
 
@@ -15,11 +16,11 @@
     <span class="dot @(s.Up ? "up" : "down")"></span>
     <span class="muted">@(s.Up ? "live" : $"server not answering: {s.Error}")</span>
     <span class="muted">· @Feed.Server · read @Age(s.At) ago</span>
-    <nav class="links"><a href="accounts">Accounts →</a> · <a href="bots">Bots →</a></nav>
+    <nav class="links"><a href="accounts">Accounts →</a> · <a href="bots">Bots →</a> · <a href="events">Events →</a></nav>
 </header>
 
 <main class="grid">
-    <section class="card">
+    <section class="card wide">
         <h2>Server health</h2>
         <div class="kpis">
             @Kpi("tick p50", Ms(N(hl, "tickMs", "p50")))
@@ -32,13 +33,9 @@
             @Kpi("WAL wait p99", Ms(N(hl, "durabilityMs", "waitP99")))
         </div>
         @Spark("tick p99", "ms")
-        <h3>Systems, mean per tick</h3>
-        <table class="bars">
-            @foreach (var (name, us) in Systems(hl))
-            {
-                <tr><td>@name</td><td class="num">@F(us, 0) µs</td><td class="bar"><div style="width:@Pct(us, MaxSystem(hl))"></div></td></tr>
-            }
-        </table>
+        <h3>Systems, CPU per tick — last 10 min, one bar a second (scroll back for older seconds, click a bar for its ticks)</h3>
+        @* Drawn by systimeline.js on its own canvases: Blazor never re-renders inside it (the timeline design's D4). *@
+        <div class="systl" @ref="_timelineHost"></div>
     </section>
 
     <section class="card">
@@ -460,7 +457,7 @@
 
     <section class="card">
         <h2>Progression</h2>
-        <div class="kpis">
+        <div class="kpis two">
             @Kpi("mean CL, people", F(N(st, "progression", "meanCl", "people"), 1))
             @Kpi("mean CL, bots", F(N(st, "progression", "meanCl", "bots"), 1))
             @Kpi("people by CL band", ClBands(st, "people"))
@@ -498,7 +495,71 @@
 @code {
     protected override void OnInitialized() => Feed.Changed += Refresh;
 
-    public void Dispose() => Feed.Changed -= Refresh;
+    public void Dispose()
+    {
+        Feed.Changed -= Refresh;
+        _self?.Dispose();
+    }
+
+    private ElementReference _timelineHost;
+    private DotNetObjectReference<Home> _self;
+    private long _timelineSent;
+    private string[] _namesSent;
+    private bool _timelineReady;
+
+    /// <summary>
+    /// The timeline's canvas, fed after each render: the first sends every second held and the names, the rest only the seconds changed since — the
+    /// circuit's own <see cref="_timelineSent"/> against <see cref="SystemTimeline.Version"/>. One interop call a poll.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        var timeline = Feed.Timeline;
+        try
+        {
+            if (firstRender)
+            {
+                _self = DotNetObjectReference.Create(this);
+                await JS.InvokeVoidAsync("sysTimeline.init", _timelineHost, _self);
+                _timelineReady = true;
+            }
+
+            if (!_timelineReady || timeline.Version == _timelineSent)
+            {
+                return;
+            }
+
+            var names = timeline.Names;
+            if (!ReferenceEquals(names, _namesSent))
+            {
+                // New names (a first answer, another build): everything again.
+                await JS.InvokeVoidAsync("sysTimeline.names", _timelineHost, names, timeline.Workers, timeline.TicksPerSecond,
+                    N(Feed.Latest.Health, "tickMs", "target"));
+                _namesSent = names;
+                _timelineSent = 0;
+            }
+
+            var seconds = timeline.CopySeconds(_timelineSent, out var version);
+            _timelineSent = version;
+            if (seconds.Length > 0)
+            {
+                await JS.InvokeVoidAsync("sysTimeline.seconds", _timelineHost, seconds, timeline.Workers, N(Feed.Latest.Health, "tickMs", "target"),
+                    N(Feed.Latest.Health, "tickMs", "multiplier"));
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit went away between the render and the call.
+        }
+        catch (JSException)
+        {
+            // systimeline.js did not load (or threw): the rest of the page stands; the timeline stays empty rather than failing the circuit.
+            _timelineReady = false;
+        }
+    }
+
+    /// <summary>The drill-down's data, asked by the canvas when a bar is clicked: that second's ticks (<see cref="SystemTimeline.CopyTicks"/>).</summary>
+    [JSInvokable]
+    public byte[] Ticks(double second) => Feed.Timeline.CopyTicks((long)second);
 
     private void Refresh() => _ = InvokeAsync(StateHasChanged);
 
@@ -577,15 +638,6 @@
             <span class="muted">@series — last 10 min, peak @F(max, 1)@unit</span>
         </div>
     };
-
-    private static IEnumerable<(string Name, double Us)> Systems(JsonNode health)
-        => (health?["systems"] as JsonArray ?? [])
-            .Select(n => (Name: n?["name"]?.ToString() ?? "?", Us: N(n, "meanUs")))
-            .Where(x => !double.IsNaN(x.Us))
-            .OrderByDescending(x => x.Us)
-            .Take(10);
-
-    private static double MaxSystem(JsonNode health) => Systems(health).Select(x => x.Us).DefaultIfEmpty(1d).Max();
 
     /// <summary>The lootable items (inventory-loot.md § 3.1), the held-units table's rows in the catalogue's order, by asset id.</summary>
     private static readonly (string Id, string Name)[] Lootable =

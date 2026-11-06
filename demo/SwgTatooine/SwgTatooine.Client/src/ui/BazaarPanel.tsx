@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ITEM_ICON_PX, itemInitials, itemTooltip, mkNumeral } from '../data/items';
 import {
@@ -10,6 +10,7 @@ import {
   priceOf,
   standardMaterialPrice,
   itemVendorPayout,
+  listingItem,
   vendorPayout,
   type BazaarTab,
   type MarketCategory,
@@ -17,12 +18,18 @@ import {
   type MarketSort,
   type StandardOffer,
 } from '../data/market';
+import type { WindowRect } from '../data/ui-layout';
 import { formatCredits } from '../data/wallet';
 import { CITIES } from '../data/world-data';
 import { useItems } from '../state/items-store';
 import { collectableHere, useMarket } from '../state/market-store';
 import { useWallet } from '../state/wallet-store';
+import { useWindows } from '../state/windows-store';
+import { ItemDetails, PREVIEW_PANEL_W } from './InventoryWindow';
 import { WindowFrame } from './WindowFrame';
+
+// Wide enough for the board and the preview panel beside it, open by default.
+const initialRect = (): WindowRect => ({ x: 20, y: 70, w: 662 + PREVIEW_PANEL_W, h: 0 });
 
 /**
  * The bazaar (bazaar.md § 6): the board of a city or of all, the stack being sold, this character's listings and the goods
@@ -34,6 +41,9 @@ import { WindowFrame } from './WindowFrame';
  * <b>Nothing here is optimistic.</b> A button sends its command and its row waits; an accepted command moves the `items` or
  * `wallet` revision and the reads that follow redraw the rows, the balance and the grid. A refusal is written on the row it
  * was about — the race loser reads "Sold to someone else first" on the listing it clicked.
+ *
+ * <b>The board's preview</b> (<b>&gt;&gt;</b>) is the inventory's panel: a click on a listing selects it, the arrow keys walk the board, and the panel
+ * shows the selected item turning, with its stats.
  */
 export function BazaarPanel() {
   const open = useMarket((s) => s.open);
@@ -43,9 +53,20 @@ export function BazaarPanel() {
   const close = useMarket((s) => s.close);
   const mine = useMarket((s) => s.mine);
   const credits = useWallet((s) => s.wallet?.credits ?? null);
+  const previewOpen = useWindows((s) => s.layout.bazaarPreview);
+  const [selected, setSelected] = useState<string | null>(null);
   if (!open) {
     return null;
   }
+
+  const togglePreview = (): void => {
+    const windows = useWindows.getState();
+    const rect = windows.layout.windows.bazaar ?? initialRect();
+    windows.setBazaarPreview(!previewOpen, {
+      ...rect,
+      w: Math.max(420, rect.w + (previewOpen ? -PREVIEW_PANEL_W : PREVIEW_PANEL_W)),
+    });
+  };
 
   const tabButton = (t: BazaarTab, label: string) => (
     <button
@@ -73,13 +94,23 @@ export function BazaarPanel() {
           <span className="inventory-credits" data-testid="bazaar-credits">
             {credits === null ? '…' : formatCredits(credits)}
           </span>
+          <button
+            type="button"
+            className="inventory-expand"
+            aria-pressed={previewOpen}
+            aria-label={previewOpen ? 'Hide the item preview' : 'Show the item preview'}
+            title={previewOpen ? 'Hide the item preview' : 'Show the selected listing: its model and its stats'}
+            onClick={togglePreview}
+          >
+            {previewOpen ? '<<' : '>>'}
+          </button>
         </>
       }
       onClose={close}
       ariaLabel="Bazaar"
       className="bazaar"
       minW={420}
-      initial={() => ({ x: 20, y: 70, w: 662, h: 0 })}
+      initial={initialRect}
     >
       <div className="bazaar-tabs" role="tablist">
         {tabButton('browse', 'Browse')}
@@ -88,7 +119,7 @@ export function BazaarPanel() {
         {tabButton('reserved', `Reserved${mine === null ? '' : ` (${String(mine.reserved.length)})`}`)}
         {tabButton('issue', 'Standard issue')}
       </div>
-      {tab === 'browse' ? <BrowseTab /> : null}
+      {tab === 'browse' ? <BrowseTab selected={selected} onSelect={setSelected} preview={previewOpen} /> : null}
       {tab === 'sell' ? <SellTab /> : null}
       {tab === 'mine' ? <MineTab /> : null}
       {tab === 'reserved' ? <ReservedTab /> : null}
@@ -99,7 +130,15 @@ export function BazaarPanel() {
 
 const NOT_HERE = 'Stand at a bazaar terminal';
 
-function BrowseTab() {
+function BrowseTab({
+  selected,
+  onSelect,
+  preview,
+}: {
+  readonly selected: string | null;
+  readonly onSelect: (id: string) => void;
+  readonly preview: boolean;
+}) {
   const query = useMarket((s) => s.query);
   const page = useMarket((s) => s.page);
   const kept = useMarket((s) => s.kept);
@@ -114,6 +153,10 @@ function BrowseTab() {
   const credits = useWallet((s) => s.wallet?.credits ?? null);
   const icons = useItems((s) => s.icons);
   const stacks = useMarket((s) => s.stacks);
+  const selectedRow = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    selectedRow.current?.scrollIntoView({ block: 'nearest' });
+  }, [selected]);
 
   // The item filter: what the price list knows, by the name it states (or the board's, the inventory's — no item table here).
   const names = new Map<string, string>();
@@ -144,7 +187,16 @@ function BrowseTab() {
             ? 'Not enough credits'
             : 'Buy it for the total';
     return [
-      <tr key={l.id} className={gone ? 'gone' : undefined} data-testid={`listing-${l.id}`}>
+      <tr
+        key={l.id}
+        ref={l.id === selected ? selectedRow : undefined}
+        className={[gone ? 'gone' : '', l.id === selected ? 'selected' : ''].join(' ').trim() || undefined}
+        aria-selected={l.id === selected}
+        data-testid={`listing-${l.id}`}
+        onClick={() => {
+          onSelect(l.id);
+        }}
+      >
         <td>
           <ItemIcon item={l.item} name={l.name} icon={icons[l.item]} />
         </td>
@@ -181,136 +233,153 @@ function BrowseTab() {
     ];
   };
 
+  // The arrow keys walk the board's rows, as a click picks one: the first on the first press.
+  const listed = page?.listings ?? [];
+  const onKey = (e: React.KeyboardEvent): void => {
+    if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || listed.length === 0) {
+      return;
+    }
+
+    e.preventDefault();
+    const at = listed.findIndex((l) => l.id === selected);
+    const next = at < 0 ? 0 : Math.min(listed.length - 1, Math.max(0, at + (e.key === 'ArrowDown' ? 1 : -1)));
+    onSelect(listed[next].id);
+  };
+
+  const shown = [...listed, ...kept].find((l) => l.id === selected);
   return (
-    <>
-      <div className="row wrap bazaar-filters">
-        <select
-          aria-label="City"
-          value={query.city}
-          onChange={(e) => {
-            setQuery({ city: Number(e.target.value), realm: useMarket.getState().hereRealm });
-          }}
-        >
-          <option value={0}>All cities</option>
-          {CITIES.map((c, i) => (
-            <option key={c.name} value={i + 1}>
-              {i + 1 === here ? `${c.name} (here)` : c.name}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Category"
-          value={query.cat}
-          onChange={(e) => {
-            setQuery({ cat: e.target.value as MarketCategory, item: '' });
-          }}
-        >
-          <option value="">Any kind</option>
-          <option value="material">Materials</option>
-          <option value="core">Cores</option>
-          <option value="addon">Add-ons</option>
-        </select>
-        <select
-          aria-label="Item"
-          value={query.item}
-          onChange={(e) => {
-            setQuery({ item: e.target.value });
-          }}
-        >
-          <option value="">Any item</option>
-          {[...items].map(([id, name]) => (
-            <option key={id} value={id}>
-              {name}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="Mk"
-          value={query.mk}
-          onChange={(e) => {
-            setQuery({ mk: Number(e.target.value) });
-          }}
-        >
-          <option value={0}>Any Mk</option>
-          {[1, 2, 3, 4, 5].map((mk) => (
-            <option key={mk} value={mk}>
-              Mk {mkNumeral(mk)}
-            </option>
-          ))}
-        </select>
-        <input
-          type="number"
-          aria-label="Max unit price"
-          placeholder="max cr"
-          min={0}
-          max={MAX_UNIT_PRICE}
-          value={query.max === 0 ? '' : query.max}
-          onChange={(e) => {
-            setQuery({ max: Math.max(0, Math.floor(Number(e.target.value) || 0)) });
-          }}
-        />
-        <select
-          aria-label="Sort"
-          value={query.sort}
-          onChange={(e) => {
-            setQuery({ sort: e.target.value as MarketSort });
-          }}
-        >
-          <option value="price">Cheapest</option>
-          <option value="-price">Dearest</option>
-          <option value="new">Newest</option>
-          <option value="mk">Highest Mk</option>
-        </select>
-      </div>
-      {error !== null ? <div className="missions-notice">{error}</div> : null}
-      <table className="missions-table bazaar-table">
-        <thead>
-          <tr>
-            <th />
-            <th>Item</th>
-            <th>Mk</th>
-            <th>Qty</th>
-            <th>Unit</th>
-            <th>Total</th>
-            <th>City</th>
-            <th>Seller</th>
-            <th>Age</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {page?.listings.map((l) => row(l, false))}
-          {kept.map((l) => row(l, true))}
-        </tbody>
-      </table>
-      {page !== null && page.listings.length === 0 ? <div className="hint">Nothing listed that matches.</div> : null}
-      {page === null && error === null ? <div className="hint">Reading the board…</div> : null}
-      {page !== null ? (
-        <div className="row bazaar-pager">
-          <button
-            type="button"
-            disabled={page.page <= 1}
-            onClick={() => {
-              setQuery({ page: page.page - 1 });
+    <div className="inventory-layout">
+      <div className="inventory-main">
+        <div className="row wrap bazaar-filters">
+          <select
+            aria-label="City"
+            value={query.city}
+            onChange={(e) => {
+              setQuery({ city: Number(e.target.value), realm: useMarket.getState().hereRealm });
             }}
           >
-            ‹ Prev
-          </button>
-          <span className="hint">
-            Page {page.page} / {page.pages} · {page.total} listed
-          </span>
-          <button
-            type="button"
-            disabled={page.page >= page.pages}
-            onClick={() => {
-              setQuery({ page: page.page + 1 });
+            <option value={0}>All cities</option>
+            {CITIES.map((c, i) => (
+              <option key={c.name} value={i + 1}>
+                {i + 1 === here ? `${c.name} (here)` : c.name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Category"
+            value={query.cat}
+            onChange={(e) => {
+              setQuery({ cat: e.target.value as MarketCategory, item: '' });
             }}
           >
-            Next ›
-          </button>
+            <option value="">Any kind</option>
+            <option value="material">Materials</option>
+            <option value="core">Cores</option>
+            <option value="addon">Add-ons</option>
+          </select>
+          <select
+            aria-label="Item"
+            value={query.item}
+            onChange={(e) => {
+              setQuery({ item: e.target.value });
+            }}
+          >
+            <option value="">Any item</option>
+            {[...items].map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Mk"
+            value={query.mk}
+            onChange={(e) => {
+              setQuery({ mk: Number(e.target.value) });
+            }}
+          >
+            <option value={0}>Any Mk</option>
+            {[1, 2, 3, 4, 5].map((mk) => (
+              <option key={mk} value={mk}>
+                Mk {mkNumeral(mk)}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            aria-label="Max unit price"
+            placeholder="max cr"
+            min={0}
+            max={MAX_UNIT_PRICE}
+            value={query.max === 0 ? '' : query.max}
+            onChange={(e) => {
+              setQuery({ max: Math.max(0, Math.floor(Number(e.target.value) || 0)) });
+            }}
+          />
+          <select
+            aria-label="Sort"
+            value={query.sort}
+            onChange={(e) => {
+              setQuery({ sort: e.target.value as MarketSort });
+            }}
+          >
+            <option value="price">Cheapest</option>
+            <option value="-price">Dearest</option>
+            <option value="new">Newest</option>
+            <option value="mk">Highest Mk</option>
+          </select>
         </div>
-      ) : null}
-    </>
+        {error !== null ? <div className="missions-notice">{error}</div> : null}
+        <table className="missions-table bazaar-table" tabIndex={0} aria-label="Listings" onKeyDown={onKey}>
+          <thead>
+            <tr>
+              <th />
+              <th>Item</th>
+              <th>Mk</th>
+              <th>Qty</th>
+              <th>Unit</th>
+              <th>Total</th>
+              <th>City</th>
+              <th>Seller</th>
+              <th>Age</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {page?.listings.map((l) => row(l, false))}
+            {kept.map((l) => row(l, true))}
+          </tbody>
+        </table>
+        {page !== null && page.listings.length === 0 ? <div className="hint">Nothing listed that matches.</div> : null}
+        {page === null && error === null ? <div className="hint">Reading the board…</div> : null}
+        {page !== null ? (
+          <div className="row bazaar-pager">
+            <button
+              type="button"
+              disabled={page.page <= 1}
+              onClick={() => {
+                setQuery({ page: page.page - 1 });
+              }}
+            >
+              ‹ Prev
+            </button>
+            <span className="hint">
+              Page {page.page} / {page.pages} · {page.total} listed
+            </span>
+            <button
+              type="button"
+              disabled={page.page >= page.pages}
+              onClick={() => {
+                setQuery({ page: page.page + 1 });
+              }}
+            >
+              Next ›
+            </button>
+          </div>
+        ) : null}
+      </div>
+      {preview ? <ItemDetails item={shown === undefined ? undefined : listingItem(shown)} /> : null}
+    </div>
   );
 }
 

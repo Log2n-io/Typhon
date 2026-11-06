@@ -765,7 +765,7 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(ledger, Does.Contain($"\"item\":\"mat_hide\",\"mk\":2,\"fromStack\":\"0\",\"toStack\":\"{stack}\"}}"));
             Assert.That(ledger, Does.EndWith("],\"next\":1}"));
             Assert.That(inventory, Is.EqualTo(
-                $"{{\"open\":true,\"slots\":40,\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
+                $"{{\"open\":true,\"slots\":{ItemLedger.Slots},\"items\":[{{\"id\":\"{stack}\",\"slot\":1,\"item\":\"mat_hide\",\"name\":\"Hide\",\"category\":\"material\",\"template\":8,\"mk\":2,"
                 + "\"count\":7}],\"lost\":[]}"), "the inventory carries ledger rows: the client never reads them");
         });
     }
@@ -886,7 +886,7 @@ internal sealed class InventoryChecks : ServedChecks
             {
                 ContentHttpResult c => (c.StatusCode ?? 200, c.ResponseContent),
                 IStatusCodeHttpResult s => (s.StatusCode ?? 0, null),
-                var other => throw new AssertionException($"unexpected result {other}"),
+                var written => (200, Answers.Written(written, context)),
             };
         }
 
@@ -899,7 +899,8 @@ internal sealed class InventoryChecks : ServedChecks
             Assert.That(Get("Bearer " + AuthToken.Mint(TestAccounts.For(sim.Dbe, 0x740F))).Body, Is.EqualTo(ItemEndpoints.Empty), "an account with no character");
             Assert.That(mine.Status, Is.EqualTo(200));
             Assert.That(mine.Body, Does.Contain("\"item\":\"mat_venom\""), "the bearer's own stack is missing");
-            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":40,\"items\":[],\"lost\":[]}"), "another's items, or not open");
+            Assert.That(theirs.Body, Does.StartWith("{\"open\":true,\"slots\":" + ItemLedger.Slots + ",\"items\":[],\"lost\":[]}"),
+                "another's items, or not open");
         });
     }
 

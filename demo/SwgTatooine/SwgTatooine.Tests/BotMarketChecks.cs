@@ -52,7 +52,8 @@ public sealed class BotMarketChecks
 
     /// <summary>
     /// The plan's order and bounds (§ 8): collect first when goods are reserved; cores and add-ons listed while fewer than 5 are; materials sold to the
-    /// vendor, the cheapest unit first, until <see cref="MarketPlan.KeepStacks"/> stacks are left; a buy last.
+    /// vendor, the cheapest unit first, until <see cref="MarketPlan.KeepStacks"/> stacks are left; a buy last, and its collect after it (review, 2026-11-04:
+    /// what it bought is taken at once, not at its next visit).
     /// </summary>
     [Test]
     public void ThePlan_Collects_ListsUpToFive_VendorsTheCheapestDownToItsFloor_AndBuysLast()
@@ -77,8 +78,9 @@ public sealed class BotMarketChecks
                 "not the cheapest unit first");
             Assert.That(vendors.Take(6).All(v => v.Template == MarketCatalog.TemplateOf("mat_hide") && v.Mk == 1), Is.True, "not the cheapest unit first");
             Assert.That(vendors.Take(6).Select(v => v.Quantity), Is.Ordered, "of two stacks of one value, not the smaller first");
-            Assert.That(steps[^1], Is.EqualTo(MarketStep.Buy), "the buy is not last");
-            Assert.That((plan[^1].Listing, plan[^1].UnitPrice), Is.EqualTo((900UL, 1600L)), "the buy is not at the price shown");
+            Assert.That(steps[^2], Is.EqualTo(MarketStep.Buy), "the buy is not last");
+            Assert.That((steps[^1], plan[^1].Listing), Is.EqualTo((MarketStep.Collect, 0UL)), "what it bought not collected at once");
+            Assert.That((plan[^2].Listing, plan[^2].UnitPrice), Is.EqualTo((900UL, 1600L)), "the buy is not at the price shown");
             Assert.That(steps.IndexOf(MarketStep.Vendor), Is.GreaterThan(steps.LastIndexOf(MarketStep.List)), "vendored before listing");
         });
     }
@@ -193,7 +195,8 @@ public sealed class BotMarketChecks
         var wide = MarketPlan.Plan(bones, MarketMine.None, Prices, ref rng, listMaterial: true, null, gridStacks: 30);
         var narrow = MarketPlan.Plan(bones, MarketMine.None, Prices, ref rng, listMaterial: true, null, gridStacks: 10);
         var huge = MarketPlan.Plan([Material("mat_bone", 3, 100_000)], MarketMine.None, Prices, ref rng, listMaterial: false, null, gridStacks: 2_000);
-        var core = MarketPlan.Plan([Core("core_armor", 2, 150)], MarketMine.None, Prices, ref rng, listMaterial: false, null, gridStacks: 30);
+        var core = MarketPlan.Plan([Core("core_armor", 1, 150)], MarketMine.None, Prices, ref rng, listMaterial: false, null, gridStacks: 30);
+        var looted = MarketPlan.Plan([Core("core_armor", 2, 150)], MarketMine.None, Prices, ref rng, listMaterial: false, null, gridStacks: 30);
         Assert.Multiple(() =>
         {
             Assert.That(lots, Is.EqualTo((1, 1, 2, 4, 1)));
@@ -207,8 +210,10 @@ public sealed class BotMarketChecks
                 Is.EqualTo(new[] { (MarketStep.List, MarketPlan.LotSize), (MarketStep.Vendor, MarketPlan.LotSize) }),
                 "10 lots, one listed: one more sold reaches the floor of 8");
             Assert.That(huge.Count(c => c.Step == MarketStep.Vendor), Is.EqualTo(MarketPlan.MaxVendorSalesPerVisit), "a stack of 100 000 is sold over visits");
-            Assert.That(core.Select(c => (c.Step, c.Quantity)), Is.EqualTo(new[] { (MarketStep.List, MarketPlan.LotSize), (MarketStep.Vendor, 51) }),
-                "a core stack past a lot lists one, and the vendor takes the rest");
+            Assert.That(core.Select(c => (c.Step, c.Quantity)), Is.EqualTo(new[] { (MarketStep.Vendor, MarketPlan.LotSize), (MarketStep.Vendor, 51) }),
+                "a Mk I core stack is never listed — nobody buys one (2026-11-05) — the vendor takes it lot by lot");
+            Assert.That(looted.Select(c => (c.Step, c.Quantity)), Is.EqualTo(new[] { (MarketStep.List, MarketPlan.LotSize) }),
+                "above Mk I a lot is listed and the rest waits for a listing: a Mk II+ item's core");
         });
     }
 
@@ -404,8 +409,8 @@ public sealed class BotMarketChecks
         {
             Assert.That(held, Is.EqualTo(new[]
             {
-                new HeldStack(8, "mat_hide", MarketCategory.Material, 1, 4),
-                new HeldStack(14, "core_armor", MarketCategory.Core, 2, 1),
+                new HeldStack(8, "mat_hide", MarketCategory.Material, 1, 4) { Id = 9 },
+                new HeldStack(14, "core_armor", MarketCategory.Core, 2, 1) { Id = 10 },
             }));
             Assert.That(view.Stacks, Is.EqualTo(2));
             Assert.That(MarketCatalog.AssetOf(14), Is.EqualTo("core_armor"));
@@ -529,15 +534,20 @@ internal sealed class BotMarketDeskChecks : ServedChecks
         return new Trader(link, character);
     }
 
-    /// <summary>Two cores, then materials (Mk I-IV, five units each, ore first) until the inventory's 40 slots are full: a bot back from a day's hunting.</summary>
+    /// <summary>
+    /// The stacks <see cref="Fill"/> leaves: two cores and every material key a kill drops (Mk I-IV) — 46 of the 50 slots, a bot back from a day's hunting.
+    /// </summary>
+    private const int FillStacks = 2 + (ItemCatalog.Venom * 4);
+
+    /// <summary>Two cores, then materials (Mk I-IV, five units each, ore first): <see cref="FillStacks"/>.</summary>
     private static void Fill(TatooineSim sim, Trader t)
     {
         sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.CoreArmor, 2, 1, ItemMoveKind.Kill, 1);
         sim.Bridge.StageTransfer(ItemLedger.World, t.Key, ItemCatalog.AddonWeapon, 2, 1, ItemMoveKind.Kill, 1);
         var n = 2;
-        for (ushort template = 1; template <= ItemCatalog.Venom && n < ItemLedger.Slots; template++)
+        for (ushort template = 1; template <= ItemCatalog.Venom && n < FillStacks; template++)
         {
-            for (byte mk = 1; mk <= 4 && n < ItemLedger.Slots; mk++, n++)
+            for (byte mk = 1; mk <= 4 && n < FillStacks; mk++, n++)
             {
                 sim.Bridge.StageTransfer(ItemLedger.World, t.Key, template, mk, 5, ItemMoveKind.Kill, 1);
             }
@@ -588,7 +598,7 @@ internal sealed class BotMarketDeskChecks : ServedChecks
             Fill(sim, s);
         }
 
-        SessionHarness.Until(() => sellers.All(s => Items.Stacks(sim, s.Character).Count == ItemLedger.Slots), "the inventories to be full");
+        SessionHarness.Until(() => sellers.All(s => Items.Stacks(sim, s.Character).Count == FillStacks), "the inventories to be full");
         Harness.Ticks(2);
 
         // Two visits each, as the brain makes them. The board has never been published with these cores on it — it prices what is held only when a
@@ -650,7 +660,7 @@ internal sealed class BotMarketDeskChecks : ServedChecks
                 Assert.That(Items.Stacks(sim, s.Character).Count, Is.LessThanOrEqualTo(MarketPlan.KeepStacks), "the vendor did not take a bot to its floor");
             }
 
-            Assert.That(vendored, Is.GreaterThanOrEqualTo(2 * (ItemLedger.Slots - MarketPlan.KeepStacks - 2)), "the premise: the plans vendored");
+            Assert.That(vendored, Is.GreaterThanOrEqualTo(2 * (FillStacks - MarketPlan.KeepStacks - 2)), "the premise: the plans vendored");
             Assert.That(rows.Count(r => r.Kind == TransferKind.Vendor), Is.EqualTo(vendored), "not one vendor payment a sale");
             Assert.That(listed, Has.Count.EqualTo(4), "the cores and add-ons were not all listed");
             foreach (var c in listed)

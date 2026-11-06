@@ -430,21 +430,18 @@ public sealed class WorldIndexRebuildTests
 
         using (var sim = Persisted.Run(Persisted.Config(_dir, persist: true, ticks: 5)))
         {
-            // Read out first: EntityRef is a ref struct and cannot be captured by Assert.Multiple's lambda (CS8175).
-            byte kind;
-            uint controller;
+            // Destroyed, not handed to the crowd (2026-11-04): a session's avatar is spawned fresh on every connect, so one saved with the world is an
+            // orphan — handed back, every restart under load grew the crowd by every session connected at the save (32 911 bodies on a world of 1 600).
+            bool exists;
             using (var tx = sim.Dbe.CreateQuickTransaction())
             {
-                var player = tx.Open(possessed);
-                kind = player.Read(Player.Control).Kind;
-                controller = player.Read(Player.Session).Controller;
+                exists = tx.TryOpen(possessed, out _);
             }
 
             Assert.Multiple(() =>
             {
-                Assert.That(kind, Is.EqualTo(ControllerKind.Scripted),
-                    "a player possessed when the world was saved is still marked as somebody's, and that session is gone");
-                Assert.That(controller, Is.Zero, "the dead session's id is still on the player");
+                Assert.That(exists, Is.False, "a player possessed when the world was saved still stands, and that session is gone");
+                Assert.That(sim.Index.Players, Does.Not.Contain(possessed), "the reopened index still lists it");
             });
         }
     }

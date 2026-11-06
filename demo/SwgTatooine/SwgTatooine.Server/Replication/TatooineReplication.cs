@@ -600,6 +600,17 @@ public struct MoveItem
 }
 
 /// <summary>
+/// "Drink this" (crafting-catalog.md § 5.4, crafting-build.md C2): a dose of a potion in the grid, anywhere — a stim heals its potency at once, within the
+/// body's maximum, and the next waits <see cref="TatooineData.StimCooldownSec"/>. Its last dose destroys it. From a crate, one is unpacked into a free slot
+/// and drunk. Applied by <c>Workshop</c>; everyone who knows the body sees it (<see cref="Healed"/>).
+/// </summary>
+public struct ConsumeItem
+{
+    /// <summary>The potion's or its crate's raw id, as <c>/swg/inventory</c> gave it.</summary>
+    public ulong Item;
+}
+
+/// <summary>
 /// "Throw it away" (inventory-loot.md § 10): <see cref="Count"/> units of a stack in the grid, or the item, or the crate whole, destroyed to World. Applied by
 /// <c>Workshop</c>.
 /// </summary>
@@ -610,6 +621,16 @@ public struct DiscardItem
 
     /// <summary>Units, 1 to the stack's count; an item with stats or a crate goes whole, its count.</summary>
     public uint Count;
+}
+
+/// <summary>
+/// "Sort &amp; stack" (inventory-loot.md § 10): every stack of the same units merged into the first of them, up to <see cref="ItemLedger.StackMax"/>, then the
+/// grid ordered by type, name and mark from slot 1, with no gap. Applied by <c>Workshop</c>.
+/// </summary>
+public struct SortItems
+{
+    /// <summary>The order asked for: 0, type then name then mark — the only one so far.</summary>
+    public byte Order;
 }
 
 /// <summary>"I've read it": one of the character's own mails marked read (mail.md § 3). Sending is <c>POST /swg/mail</c>: a text past a command's 512
@@ -665,6 +686,115 @@ public struct Whisper
 
     /// <summary>1 on the sender's own echo.</summary>
     public byte Outgoing;
+}
+
+/// <summary>
+/// A horde's status (horde.md § 4), heard by every session on the planet and in the realms under it, sent when it changes and at most once a second: the
+/// browser's HUD line and the bots' reason to answer.
+/// </summary>
+public struct HordeStatus
+{
+    /// <summary>The planet realm whose subtree hears it.</summary>
+    public ushort Realm;
+
+    /// <summary>The event's raw id: what <see cref="AnswerCall"/> names.</summary>
+    public ulong Event;
+
+    /// <summary>See <see cref="HordePhase"/>.</summary>
+    public byte Phase;
+
+    /// <summary>The city attacked (its index), for the line's name.</summary>
+    public byte City;
+
+    /// <summary>Committed defenders against the attendance asked for, in 255ths: 255 is enough, and answering is refused.</summary>
+    public byte HelpNeeded;
+
+    /// <summary>Seconds until the waves start; 0 once they have.</summary>
+    public uint StartsInS;
+
+    /// <summary>Raiders alive, defenders committed, defenders standing at the target.</summary>
+    public uint RaidersAlive;
+
+    public uint Committed;
+
+    public uint Present;
+
+    /// <summary>The target, where the raiders go and the defenders rally.</summary>
+    public float TargetX;
+
+    public float TargetZ;
+
+    /// <summary>The fortress the raiders come out of: the line's direction and the map's mark, for everyone (Loïc, 2026-11-04).</summary>
+    public float FortX;
+
+    public float FortZ;
+
+    /// <summary>The town hall the raiders break (horde.md § 10).</summary>
+    public float HallX;
+
+    public float HallZ;
+
+    /// <summary>The town hall's and the fortress's hit points, as 1 + 254ths of their whole: 1 is broken, 255 whole, 0 none (0 means no data).</summary>
+    public byte HallHp;
+
+    public byte FortHp;
+}
+
+/// <summary>
+/// The raiders, where they are (horde.md § 10, Loïc 2026-11-04: a radar to guide the defenders): the <see cref="Max"/> most crowded clusters, every few
+/// seconds during a raid, to the whole planet.
+/// </summary>
+public struct HordeRadar
+{
+    /// <summary>The most clusters one radar carries.</summary>
+    public const int Max = 8;
+
+    public ushort Realm;
+
+    public ulong Event;
+
+    /// <summary>The clusters used, the most crowded first.</summary>
+    public byte Count;
+
+    public float X0, Z0, X1, Z1, X2, Z2, X3, Z3, X4, Z4, X5, Z5, X6, Z6, X7, Z7;
+
+    public ushort N0, N1, N2, N3, N4, N5, N6, N7;
+
+    /// <summary>Sets cluster <paramref name="i"/>.</summary>
+    public void Set(int i, float x, float z, ushort n)
+    {
+        switch (i)
+        {
+            case 0: (X0, Z0, N0) = (x, z, n); break;
+            case 1: (X1, Z1, N1) = (x, z, n); break;
+            case 2: (X2, Z2, N2) = (x, z, n); break;
+            case 3: (X3, Z3, N3) = (x, z, n); break;
+            case 4: (X4, Z4, N4) = (x, z, n); break;
+            case 5: (X5, Z5, N5) = (x, z, n); break;
+            case 6: (X6, Z6, N6) = (x, z, n); break;
+            case 7: (X7, Z7, N7) = (x, z, n); break;
+        }
+    }
+}
+
+/// <summary>"I'll defend" (horde.md § 5): the session's character commits to the horde named. Refused once enough have.</summary>
+public struct AnswerCall
+{
+    /// <summary>The event's raw id, as <see cref="HordeStatus"/> gave it.</summary>
+    public ulong Event;
+}
+
+/// <summary>To a character that answered (horde.md § 5): where to go. Its waypoint while the event lasts.</summary>
+public struct HordeRally
+{
+    public ulong Event;
+
+    public float X;
+
+    public float Z;
+
+    /// <summary>See <see cref="ResponderState"/>: committed, arrived, or decayed (the waypoint goes).</summary>
+    public byte State;
 }
 
 /// <summary>"Cancel this mission" — one the session's character holds, named by the id the journal (<c>GET /swg/missions</c>) gave it.</summary>
@@ -861,6 +991,22 @@ public struct Attack
 
     /// <summary>1 when the blow was a critical (crafting-catalog.md § 9.3): the one part of the roll a player reads, drawn larger and in its own colour.</summary>
     public byte Crit;
+}
+
+/// <summary>
+/// A potion drunk (crafting-catalog.md § 5.4): what a client draws the heal's effect for, over the body that drank it.
+/// </summary>
+/// <remarks>
+/// <b>Routed to the sessions that know the body</b>, as a blow is to those that know either end: whoever sees it drink sees it heal. The health after it
+/// arrives as state in the same frame (<see cref="Attack"/>'s remark).
+/// </remarks>
+public struct Healed
+{
+    /// <summary>The body that drank.</summary>
+    public EntityId Body;
+
+    /// <summary>Health given, in the simulation's units: a magnitude for the effect's number, within what the body lacked.</summary>
+    public ushort Amount;
 }
 
 /// <summary>
@@ -1397,6 +1543,30 @@ public static partial class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: a /tell to a character nobody is playing now: mail reaches them offline.</summary>
     public const byte TellOffline = AckReasons.FirstApplicationReason + 75;
+
+    /// <summary><c>ACKS</c> reason: no horde of that id is running, or it is over.</summary>
+    public const byte HordeNone = AckReasons.FirstApplicationReason + 76;
+
+    /// <summary><c>ACKS</c> reason: enough have answered this horde (horde.md D2); going anyway counts as present.</summary>
+    public const byte HordeEnough = AckReasons.FirstApplicationReason + 77;
+
+    /// <summary><c>ACKS</c> reason: this character's last answer decayed, and its cooldown runs.</summary>
+    public const byte HordeCooldown = AckReasons.FirstApplicationReason + 78;
+
+    /// <summary><c>ACKS</c> reason: this character has answered this horde already.</summary>
+    public const byte HordeAnswered = AckReasons.FirstApplicationReason + 79;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: a <see cref="ConsumeItem"/> of something not in the grid or not a potion that is drunk (the stim, so far), from a crate with no free
+    /// slot to unpack it into, or by a body that is down.
+    /// </summary>
+    public const byte ConsumeBad = AckReasons.FirstApplicationReason + 80;
+
+    /// <summary><c>ACKS</c> reason: a stim within <see cref="TatooineData.StimCooldownSec"/> of the last.</summary>
+    public const byte ConsumeCooldown = AckReasons.FirstApplicationReason + 81;
+
+    /// <summary><c>ACKS</c> reason: a stim at full health, which would heal nothing.</summary>
+    public const byte ConsumeFull = AckReasons.FirstApplicationReason + 82;
 
     /// <summary>How close to a shuttleport a player must stand to board, in metres.</summary>
     /// <remarks>
@@ -1943,6 +2113,46 @@ public static partial class TatooineReplication
         }
     }
 
+    /// <summary>A horde's status to its planet's subtree (horde.md § 4), when this process serves clients. From a serial system.</summary>
+    public static void Announce(TickContext tick, in HordeStatus status)
+    {
+        if (_declared && tick.Subscriptions != null)
+        {
+            tick.Subscriptions.Emit(in status);
+            System.Threading.Interlocked.Increment(ref _hordeStatuses);
+        }
+    }
+
+    /// <summary>The horde's radar to its planet's subtree (horde.md § 10). From a serial system.</summary>
+    public static void Radar(TickContext tick, in HordeRadar radar)
+    {
+        if (_declared && tick.Subscriptions != null)
+        {
+            tick.Subscriptions.Emit(in radar);
+        }
+    }
+
+    /// <summary>The running horde's fortress, raw (0 for none): the one building a session's shot may name (<see cref="CombatTargetKind.Siege"/>).</summary>
+    private static long _siegeFortress;
+
+    /// <summary>Sets the fortress a shot may name; 0 when no horde runs. From the horde's serial pass.</summary>
+    public static void SetSiegeFortress(EntityId fortress) => System.Threading.Volatile.Write(ref _siegeFortress, fortress.IsNull ? 0 : (long)fortress.RawValue);
+
+    /// <summary>The rally point to the session of a character that answered a horde. From a serial system.</summary>
+    public static void Tell(TickContext tick, uint session, in HordeRally rally)
+    {
+        if (_declared && tick.Subscriptions != null)
+        {
+            tick.Subscriptions.EmitTo(SessionId.FromValue(session), in rally);
+        }
+    }
+
+    // Horde statuses put on the wire (horde.md AC-2: none while steady).
+    private static long _hordeStatuses;
+
+    /// <summary>Horde statuses emitted since start.</summary>
+    public static long HordeStatusesSent => System.Threading.Interlocked.Read(ref _hordeStatuses);
+
     /// <summary>Announces <paramref name="news"/> to its realm's subtree, when this process serves clients. From a serial system.</summary>
     /// <param name="tick">The tick context of the system this is called from.</param>
     /// <param name="news">The news.</param>
@@ -1996,6 +2206,15 @@ public static partial class TatooineReplication
         {
             tick.Subscriptions.Emit(in attack);
             System.Threading.Interlocked.Increment(ref _strikes);
+        }
+    }
+
+    /// <summary>Puts one potion drunk on the wire, to the sessions that know the body. From <c>Progression</c>, after the heal has been written.</summary>
+    public static void Heal(TickContext tick, in Healed healed)
+    {
+        if (_declared && tick.Subscriptions != null)
+        {
+            tick.Subscriptions.Emit(in healed);
         }
     }
 
@@ -2294,6 +2513,12 @@ public static partial class TatooineReplication
 
         subs.Event<RealmNews>(e => e.RouteToRealm(n => new RealmId(n.Realm), subtree: true));
 
+        // A potion drunk: to whoever knows the body, which is who can see it heal.
+        subs.Event<Healed>(e => e
+            .RouteToKnown(h => h.Body)
+            .Entity(h => h.Body, "body")
+            .Field(h => h.Amount, Codec.U16, "amount"));
+
         // Every accepted ask is a RESET of a whole planet, the dearest frame there is: once a second, a burst of two. Spectators only — a possessed player
         // moves between planets by taking a shuttle like everyone else, and now that admission assigns roles the engine can say so instead of this being a
         // string comparison in BindOpenedSessions (which stays, as the check that the god camera is not a player's).
@@ -2536,6 +2761,49 @@ public static partial class TatooineReplication
             .Field(n => n.Text, Codec.Str(Mail.TellMaxBytes), "text")
             .Field(n => n.Outgoing, Codec.U8, "outgoing"));
 
+        // The horde (horde.md § 4-5): its status to the whole planet as RealmNews goes, at most once a second; an answer at most every two; the rally
+        // point to whoever answered.
+        subs.Event<HordeStatus>(e => e
+            .RouteToRealm(n => new RealmId(n.Realm), subtree: true)
+            .Field(n => n.Event, Codec.U64, "event")
+            .Field(n => n.Phase, Codec.U8, "phase")
+            .Field(n => n.City, Codec.U8, "city")
+            .Field(n => n.HelpNeeded, Codec.U8, "help")
+            .Field(n => n.StartsInS, Codec.VarUInt, "startsIn")
+            .Field(n => n.RaidersAlive, Codec.VarUInt, "raiders")
+            .Field(n => n.Committed, Codec.VarUInt, "committed")
+            .Field(n => n.Present, Codec.VarUInt, "present")
+            .Field(n => n.TargetX, Codec.F32, "x")
+            .Field(n => n.TargetZ, Codec.F32, "z")
+            .Field(n => n.FortX, Codec.F32, "fx")
+            .Field(n => n.FortZ, Codec.F32, "fz")
+            .Field(n => n.HallX, Codec.F32, "hx")
+            .Field(n => n.HallZ, Codec.F32, "hz")
+            .Field(n => n.HallHp, Codec.U8, "hall")
+            .Field(n => n.FortHp, Codec.U8, "fort"));
+        subs.Event<HordeRadar>(e => e
+            .RouteToRealm(n => new RealmId(n.Realm), subtree: true)
+            .Field(n => n.Event, Codec.U64, "event")
+            .Field(n => n.Count, Codec.U8, "count")
+            .Field(n => n.X0, Codec.F32, "x0").Field(n => n.Z0, Codec.F32, "z0").Field(n => n.N0, Codec.VarUInt, "n0")
+            .Field(n => n.X1, Codec.F32, "x1").Field(n => n.Z1, Codec.F32, "z1").Field(n => n.N1, Codec.VarUInt, "n1")
+            .Field(n => n.X2, Codec.F32, "x2").Field(n => n.Z2, Codec.F32, "z2").Field(n => n.N2, Codec.VarUInt, "n2")
+            .Field(n => n.X3, Codec.F32, "x3").Field(n => n.Z3, Codec.F32, "z3").Field(n => n.N3, Codec.VarUInt, "n3")
+            .Field(n => n.X4, Codec.F32, "x4").Field(n => n.Z4, Codec.F32, "z4").Field(n => n.N4, Codec.VarUInt, "n4")
+            .Field(n => n.X5, Codec.F32, "x5").Field(n => n.Z5, Codec.F32, "z5").Field(n => n.N5, Codec.VarUInt, "n5")
+            .Field(n => n.X6, Codec.F32, "x6").Field(n => n.Z6, Codec.F32, "z6").Field(n => n.N6, Codec.VarUInt, "n6")
+            .Field(n => n.X7, Codec.F32, "x7").Field(n => n.Z7, Codec.F32, "z7").Field(n => n.N7, Codec.VarUInt, "n7"));
+        subs.Command<AnswerCall>(c => c
+            .Rate(1 * rateScale, 2 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Event, Codec.U64, "event"));
+        subs.Event<HordeRally>(e => e
+            .RouteToSession()
+            .Field(n => n.Event, Codec.U64, "event")
+            .Field(n => n.X, Codec.F32, "x")
+            .Field(n => n.Z, Codec.F32, "z")
+            .Field(n => n.State, Codec.U8, "state"));
+
         // The inventory window's own (inventory-loot.md § 10): a drag is one command, so a burst of them is the player tidying, not a script.
         subs.Command<MoveItem>(c => c
             .Rate(4 * rateScale, 8 * rateScale)
@@ -2548,6 +2816,14 @@ public static partial class TatooineReplication
             .Roles(SessionRole.Player)
             .Field(m => m.Item, Codec.U64, "item")
             .Field(m => m.Count, Codec.VarUInt, "count"));
+        subs.Command<ConsumeItem>(c => c
+            .Rate(2 * rateScale, 4 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Item, Codec.U64, "item"));
+        subs.Command<SortItems>(c => c
+            .Rate(1 * rateScale, 2 * rateScale)
+            .Roles(SessionRole.Player)
+            .Field(m => m.Order, Codec.U8, "order"));
 
         // Installations (crafting-build.md § 10): queued, applied by the Workshop at the tip's rate.
         subs.Command<PlaceInstallation>(c => c
@@ -4444,6 +4720,13 @@ public static partial class TatooineReplication
         if (routing == _lairRouting)
         {
             return CombatTargetKind.Lair;
+        }
+
+        // The running horde's fortress is the one building a shot may name (horde.md § 10).
+        var fortress = System.Threading.Volatile.Read(ref _siegeFortress);
+        if (fortress != 0 && (long)target.RawValue == fortress)
+        {
+            return CombatTargetKind.Siege;
         }
 
         return routing == _playerRouting ? CombatTargetKind.Player : CombatTargetKind.Unshootable;

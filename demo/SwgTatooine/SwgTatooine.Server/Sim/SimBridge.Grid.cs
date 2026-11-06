@@ -6,7 +6,7 @@ namespace SwgTatooine.Server;
 
 /// <summary>
 /// The inventory window's own commands (inventory-loot.md § 10), in the Workshop's transaction, anywhere: a stack moved to another slot — split, merged or
-/// swapped — and a stack or an item thrown away.
+/// swapped — a stack or an item thrown away, and the whole grid stacked and sorted.
 /// </summary>
 /// <remarks>
 /// <b>Units moved between two stacks are a row; a slot change is not.</b> A split and a merge change two stacks' counts, so the audit replays them
@@ -17,10 +17,14 @@ public sealed partial class SimBridge
 {
     private readonly List<ClientCommand<MoveItem>> _movesApplied = [];
     private readonly List<ClientCommand<DiscardItem>> _discardsApplied = [];
+    private readonly List<ClientCommand<SortItems>> _sortsApplied = [];
 
-    // The transaction under way's, published when it commits: [0] re-slotted, [1] split, [2] merged, [3] swapped, [4] discarded.
-    private readonly long[] _pendingGrid = new long[5];
-    private readonly long[] _grid = new long[5];
+    // A sort's grid: its occupied slots, in the order it puts them (reused).
+    private readonly List<(int Slot, ItemSlot Item)> _sortScratch = [];
+
+    // The transaction under way's, published when it commits: [0] re-slotted, [1] split, [2] merged, [3] swapped, [4] discarded, [5] sorted.
+    private readonly long[] _pendingGrid = new long[6];
+    private readonly long[] _grid = new long[6];
 
     /// <summary>Stacks or items moved whole to a free slot since start.</summary>
     public long GridMoves => Interlocked.Read(ref _grid[0]);
@@ -36,6 +40,9 @@ public sealed partial class SimBridge
 
     /// <summary>Stacks or items thrown away since start, whole or in part.</summary>
     public long GridDiscards => Interlocked.Read(ref _grid[4]);
+
+    /// <summary>Grids stacked and sorted since start.</summary>
+    public long GridSorts => Interlocked.Read(ref _grid[5]);
 
     private void MoveFromCommand(Transaction tx, Transaction tick0, SubscriptionsCommands subs, in ClientCommand<MoveItem> command, long worldTick)
     {
@@ -143,7 +150,102 @@ public sealed partial class SimBridge
         _discardsApplied.Add(command);
     }
 
-    /// <summary>The Workshop's transaction ended: its moves and discards counted, or refused because nothing of them was written.</summary>
+    /// <summary>
+    /// "Sort &amp; stack" (Loïc, 2026-11-04): first every stack of the same units (template and mark, never an item with stats or a crate) merged into the
+    /// first of them as far as it holds, a <see cref="ItemMoveKind.Move"/> row each as a dragged merge writes; then the grid ordered by type, name and mark
+    /// from slot 1 with no gap, which changes only where each is drawn, without a row.
+    /// </summary>
+    private void SortFromCommand(Transaction tx, Transaction tick0, SubscriptionsCommands subs, in ClientCommand<SortItems> command, long worldTick)
+    {
+        if (!CraftActor(tick0, command.Session, out var owner, out var body, out _, out _, out _))
+        {
+            RefuseWorkshop(subs, in command, TatooineReplication.NotInWorld);
+            return;
+        }
+
+        // One order so far: another is a client this server does not know, not a sort to guess at (review, 2026-11-04).
+        if (command.Value.Order != 0)
+        {
+            RefuseWorkshop(subs, in command, TatooineReplication.MoveBad);
+            return;
+        }
+
+        var items = ItemsOf(owner);
+        for (var s = 1; s <= ItemLedger.Slots; s++)
+        {
+            ref var into = ref items.Slots[s];
+            if (into.Count == 0 || into.Instance)
+            {
+                continue;
+            }
+
+            for (var t = s + 1; t <= ItemLedger.Slots && into.Count < ItemLedger.StackMax; t++)
+            {
+                ref var from = ref items.Slots[t];
+                if (from.Count == 0 || from.Instance || from.Template != into.Template || from.Mk != into.Mk)
+                {
+                    continue;
+                }
+
+                var add = Math.Min(from.Count, ItemLedger.StackMax - into.Count);
+                var (template, mk) = (from.Template, from.Mk);
+                var fromAfter = Debit(tx, items, t, add, out var fromStack);
+                var toAfter = Credit(tx, owner, items, s, template, mk, add, out var toStack);
+                AppendItemRow(tx, owner, owner, fromStack, toStack, fromAfter, toAfter, add, template, mk, ItemMoveKind.Move, 0, worldTick);
+                _itemHeadDirty = true;
+                _pendingGrid[2]++;
+            }
+        }
+
+        var order = _sortScratch;
+        order.Clear();
+        for (var s = 1; s <= ItemLedger.Slots; s++)
+        {
+            if (items.Slots[s].Count > 0)
+            {
+                order.Add((s, items.Slots[s]));
+            }
+        }
+
+        order.Sort(SortOrder);
+        Array.Clear(items.Slots, 1, ItemLedger.Slots);
+        for (var i = 0; i < order.Count; i++)
+        {
+            var (was, item) = order[i];
+            items.Slots[i + 1] = item;
+            if (was != i + 1)
+            {
+                SetSlot(tx, item.Stack, (byte)(i + 1));
+            }
+        }
+
+        _pendingGrid[5]++;
+        _craftBodies.Add(body);
+        _sortsApplied.Add(command);
+    }
+
+    /// <summary>
+    /// The sort's order: the catalogue's type (its category), then the name, then the mark; the bigger stack first, then the slot it was in, so equal items
+    /// keep their order. An unknown template goes last.
+    /// </summary>
+    private static int SortOrder((int Slot, ItemSlot Item) a, (int Slot, ItemSlot Item) b)
+    {
+        var knownA = ItemCatalog.TryGet(a.Item.Template, out var ta);
+        var knownB = ItemCatalog.TryGet(b.Item.Template, out var tb);
+        var c = knownB.CompareTo(knownA);
+        if (c == 0 && knownA)
+        {
+            c = ta.Category.CompareTo(tb.Category);
+            c = c != 0 ? c : string.CompareOrdinal(ta.Name, tb.Name);
+        }
+
+        c = c != 0 ? c : a.Item.Template.CompareTo(b.Item.Template);
+        c = c != 0 ? c : a.Item.Mk.CompareTo(b.Item.Mk);
+        c = c != 0 ? c : b.Item.Count.CompareTo(a.Item.Count);
+        return c != 0 ? c : a.Slot.CompareTo(b.Slot);
+    }
+
+    /// <summary>The Workshop's transaction ended: its moves, discards and sorts counted, or refused because nothing of them was written.</summary>
     private void EndGrid(SubscriptionsCommands subs, bool committed)
     {
         for (var i = 0; i < _pendingGrid.Length; i++)
@@ -167,9 +269,15 @@ public sealed partial class SimBridge
             {
                 RefuseWorkshop(subs, in c, TatooineReplication.CraftFailed);
             }
+
+            foreach (var c in _sortsApplied)
+            {
+                RefuseWorkshop(subs, in c, TatooineReplication.CraftFailed);
+            }
         }
 
         _movesApplied.Clear();
         _discardsApplied.Clear();
+        _sortsApplied.Clear();
     }
 }

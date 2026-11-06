@@ -344,6 +344,8 @@ public sealed partial class TatooineSim : IDisposable
 
         // Mail (mail.md § 2): a character's inbox, Versioned and non-spatial like a waypoint; the text apart from the header the list reads.
         Dbe.RegisterComponentFromAccessor<MailCore>();
+        Dbe.RegisterComponentFromAccessor<HordeCore>();
+        Dbe.RegisterComponentFromAccessor<HordeResponder>();
         Dbe.RegisterComponentFromAccessor<CraftState>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerEntry>();
         Dbe.RegisterComponentFromAccessor<ItemLedgerHead>();

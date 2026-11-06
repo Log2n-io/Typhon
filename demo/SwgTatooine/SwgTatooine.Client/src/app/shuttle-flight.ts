@@ -3,8 +3,9 @@
  * sky on its way in and out.
  *
  * <b>Ported from the physics testbench</b> (`tools/testbench/src/world/shuttle-flight.ts`): a curved, decelerating
- * approach from high behind the pad to a hover above it, then a vertical touchdown, and the departure as the arrival
- * played backwards. Closed-form in time, so a client that arrives in the middle of a flight draws it where it is, and
+ * approach from high behind the pad to a hover above it, then a vertical touchdown. The departure is its own flight, not
+ * the arrival played backwards — that flew the shuttle tail first (Loïc, 2026-11-05): a vertical lift to the hover, then a
+ * climb out ahead of the nose, speeding up. Closed-form in time, so a client that arrives in the middle of a flight draws it where it is, and
  * every client draws the same shuttle in the same place.
  *
  * <b>The schedule is the server's, not this client's</b> (`/typhon/demo.json` → `shuttle`): city `c`'s port is down
@@ -43,6 +44,15 @@ const P0: Vec3 = [70, 95, -170];
 const P1: Vec3 = [45, 55, -80];
 const P2: Vec3 = [0, 24, -18];
 const P3: Vec3 = [0, HOVER_HEIGHT_M, 0];
+const APPROACH: readonly Vec3[] = [P0, P1, P2, P3];
+
+/** Departure control points, the same frame: from the hover out ahead of the nose, climbing, veering the other way. */
+const DEPARTURE: readonly Vec3[] = [
+  [0, HOVER_HEIGHT_M, 0],
+  [0, 24, 18],
+  [-45, 55, 80],
+  [-70, 95, 170],
+];
 
 /** Where the shuttle is relative to the pad: a position in the pad frame, a yaw and a nose-up pitch. */
 export interface FlightPose {
@@ -58,19 +68,19 @@ export interface FlightPose {
 const smoothstep = (u: number): number => u * u * (3 - 2 * u);
 const clamp01 = (u: number): number => Math.min(1, Math.max(0, u));
 
-function bezier(u: number, axis: 0 | 1 | 2): number {
+function bezier(p: readonly Vec3[], u: number, axis: 0 | 1 | 2): number {
   const a = (1 - u) ** 3;
   const b = 3 * (1 - u) ** 2 * u;
   const c = 3 * (1 - u) * u * u;
   const d = u ** 3;
-  return a * P0[axis] + b * P1[axis] + c * P2[axis] + d * P3[axis];
+  return a * p[0][axis] + b * p[1][axis] + c * p[2][axis] + d * p[3][axis];
 }
 
-function bezierTangent(u: number, axis: 0 | 1 | 2): number {
+function bezierTangent(p: readonly Vec3[], u: number, axis: 0 | 1 | 2): number {
   const a = 3 * (1 - u) ** 2;
   const b = 6 * (1 - u) * u;
   const c = 3 * u * u;
-  return a * (P1[axis] - P0[axis]) + b * (P2[axis] - P1[axis]) + c * (P3[axis] - P2[axis]);
+  return a * (p[1][axis] - p[0][axis]) + b * (p[2][axis] - p[1][axis]) + c * (p[3][axis] - p[2][axis]);
 }
 
 /** A pose or a moment written in place: the frame loop keeps one of each rather than allocating them sixty times a second. */
@@ -88,10 +98,10 @@ export function arrivalPose(
   if (t < APPROACH_S) {
     // Ease out: fast from the sky, slowing into the hover.
     const u = 1 - (1 - clamp01(t / APPROACH_S)) ** 2;
-    const along = Math.atan2(bezierTangent(u, 0), bezierTangent(u, 2));
-    out.x = bezier(u, 0);
-    out.y = bezier(u, 1);
-    out.z = bezier(u, 2);
+    const along = Math.atan2(bezierTangent(APPROACH, u, 0), bezierTangent(APPROACH, u, 2));
+    out.x = bezier(APPROACH, u, 0);
+    out.y = bezier(APPROACH, u, 1);
+    out.z = bezier(APPROACH, u, 2);
     // Along the path, settling to the landed heading over the last third; nose up while braking, level in the hover.
     out.yaw = along * (1 - smoothstep(clamp01((u - 0.66) / 0.34)));
     out.noseUp = 0.14 * Math.sin(Math.PI * u);
@@ -104,6 +114,36 @@ export function arrivalPose(
   out.z = 0;
   out.yaw = 0;
   out.noseUp = 0;
+  return out;
+}
+
+/**
+ * The pose `t` seconds after lift-off, clamped to the departure: straight up to the hover over {@link TOUCHDOWN_S}, then
+ * {@link APPROACH_S} along the departure path, nose first — easing in, so it leaves the hover at rest and is fastest out of
+ * sight — turning onto the path's heading over the first third and nosing up into the climb.
+ *
+ * @param out Written and returned when given; a new pose otherwise.
+ */
+export function departurePose(
+  t: number,
+  out: Writable<FlightPose> = { x: 0, y: 0, z: 0, yaw: 0, noseUp: 0 },
+): FlightPose {
+  if (t < TOUCHDOWN_S) {
+    out.x = 0;
+    out.y = HOVER_HEIGHT_M * smoothstep(clamp01(t / TOUCHDOWN_S));
+    out.z = 0;
+    out.yaw = 0;
+    out.noseUp = 0;
+    return out;
+  }
+
+  const u = clamp01((t - TOUCHDOWN_S) / APPROACH_S) ** 2;
+  const along = Math.atan2(bezierTangent(DEPARTURE, u, 0), bezierTangent(DEPARTURE, u, 2));
+  out.x = bezier(DEPARTURE, u, 0);
+  out.y = bezier(DEPARTURE, u, 1);
+  out.z = bezier(DEPARTURE, u, 2);
+  out.yaw = along * smoothstep(clamp01(u / 0.34));
+  out.noseUp = 0.14 * smoothstep(clamp01(u / 0.3));
   return out;
 }
 
@@ -155,8 +195,7 @@ export function flightAt(moment: ShuttleMoment, out?: Writable<FlightPose>): Fli
   }
 
   if (moment.sinceDepartureS <= ARRIVAL_S) {
-    // The departure: the arrival played backwards.
-    return arrivalPose(ARRIVAL_S - moment.sinceDepartureS, out);
+    return departurePose(moment.sinceDepartureS, out);
   }
 
   return null;

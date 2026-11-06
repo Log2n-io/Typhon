@@ -49,6 +49,93 @@ public sealed class ReviewFixChecks
         Assert.That(again!.Message, Does.Contain("empty"));
     }
 
+    /// <summary>
+    /// <c>--no-crowd</c> (Loïc, 2026-11-04): a world built without the scripted crowd has none and runs; a world saved with one reopens without it.
+    /// </summary>
+    [Test]
+    public void WithoutTheCrowd_ABuildHasNone_ARunTicks_AndAReopenDropsTheSavedOne()
+    {
+        SimConfig crowded = Worlds.Small(_dir);
+        using (TatooineSim sim = new(crowded))
+        {
+            sim.Initialize();
+            Assert.That(Players(sim.Dbe), Is.Not.Zero, "the premise: a crowd was built");
+
+            sim.Map.Config.Crowd = false;
+            WorldIndex index = new();
+            var census = WorldRebuild.Rebuild(sim.Dbe, sim.Map, index, realm: 0);
+            Assert.Multiple(() =>
+            {
+                Assert.That(Players(sim.Dbe), Is.Zero, "the saved crowd still stands");
+                Assert.That(index.Players, Is.Empty);
+                Assert.That(census.Players, Is.Zero);
+            });
+        }
+
+        Worlds.Delete(_dir);
+        _dir = Worlds.NewDirectory();
+        SimConfig empty = Worlds.Small(_dir);
+        empty.Crowd = false;
+        empty.WarmTicks = 2;
+        empty.MeasuredTicks = 20;
+        using TatooineSim bare = new(empty);
+        bare.Initialize();
+        Assert.That(Players(bare.Dbe), Is.Zero, "a crowd was built");
+        Assert.DoesNotThrow(() => bare.Run());
+    }
+
+    /// <summary>
+    /// A session's avatar saved with the world is destroyed on reopen, not handed to the crowd: every restart under load used to grow the crowd by every
+    /// session connected at the save (32 911 bodies on a world built with 1 600).
+    /// </summary>
+    [Test]
+    public void ASavedAvatar_IsDestroyedOnReopen_NotHandedToTheCrowd()
+    {
+        SimConfig config = Worlds.Small(_dir);
+        using TatooineSim sim = new(config);
+        sim.Initialize();
+        var crowd = Players(sim.Dbe);
+        EntityId avatar;
+        using (var tx = sim.Dbe.CreateQuickTransaction())
+        {
+            avatar = EntityId.Null;
+            foreach (var p in tx.Query<Player>())
+            {
+                avatar = p.Id;
+                break;
+            }
+
+            var body = tx.OpenMut(avatar);
+            var control = body.Read(Player.Control);
+            control.Kind = ControllerKind.Human;
+            body.Set(Player.Control, control);
+            tx.Commit();
+        }
+
+        WorldIndex index = new();
+        var census = WorldRebuild.Rebuild(sim.Dbe, sim.Map, index, realm: 0);
+        using var check = sim.Dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(check.TryOpen(avatar, out _), Is.False, "the saved avatar is still there");
+            Assert.That(Players(sim.Dbe), Is.EqualTo(crowd - 1), "the crowd lost or gained bodies");
+            Assert.That(census.Players, Is.EqualTo(crowd - 1));
+            Assert.That(index.Players, Does.Not.Contain(avatar));
+        });
+    }
+
+    private static int Players(DatabaseEngine dbe)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var n = 0;
+        foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+        {
+            n += System.Numerics.BitOperations.PopCount(cluster.OccupancyBits);
+        }
+
+        return n;
+    }
+
     /// <summary>A blow queued behind a fatal one is withdrawn when that fatal one cloned the player.</summary>
     /// <remarks>
     /// <para>

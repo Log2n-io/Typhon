@@ -1,4 +1,4 @@
-import { STACK_MAX, type ItemStats } from './items';
+import { isStats, STACK_MAX, type InventoryItem, type ItemStats } from './items';
 import { CITIES } from './world-data';
 
 /**
@@ -65,6 +65,23 @@ export interface MarketListing extends MarketGoods {
   /** The seller's character id, as decimal text. */
   readonly seller: string;
   readonly sellerName: string;
+  /** An item with stats: its lines, as the inventory states them; absent for units. */
+  readonly stats?: ItemStats;
+}
+
+/** A listing as an inventory item, for the preview panel the inventory shows (client.md C43): the same lines, the same model. */
+export function listingItem(l: MarketListing): InventoryItem {
+  const item = {
+    id: l.id,
+    slot: 0,
+    item: l.item,
+    name: l.name,
+    category: l.category,
+    template: l.template,
+    mk: l.mk,
+    count: l.qty,
+  };
+  return l.stats === undefined ? item : { ...item, stats: l.stats };
 }
 
 /** One page of the board. */
@@ -365,6 +382,9 @@ export const MARKET_REASONS: Readonly<Record<number, string>> = {
   201: 'A mail needs a subject, and not to yourself; a tell needs something to say',
   202: 'No such mail of yours',
   203: 'That player is not online: send a mail, which waits for them',
+  208: 'That cannot be drunk now: not a stim, down, or no room to take one out of its crate',
+  209: 'Wait for the last stim: one every 15 s',
+  210: 'You are at full health',
 };
 
 /** The reason codes by name, the order § 3.1 gives them. */
@@ -428,6 +448,8 @@ export type MarketCommand =
   | { readonly kind: 'standard'; readonly template: number; readonly price: number; readonly quantity?: number }
   /** Wear an item with stats (crafting-build.md § 2.2), by its id. */
   | { readonly kind: 'equip'; readonly item: string }
+  /** Drink a dose of a potion, or of one out of its crate (crafting-catalog.md § 5.4). */
+  | { readonly kind: 'consume'; readonly item: string }
   /** Take off what is worn in an equip slot, 101-107. */
   | { readonly kind: 'unequip'; readonly slot: number }
   /** Start a craft (crafting-build.md C2): the Mk of each material or core slot in order (0 = the lowest that covers a bulk slot), the parts' ids. */
@@ -459,11 +481,15 @@ export type MarketCommand =
    */
   | { readonly kind: 'move'; readonly item: string; readonly slot: number; readonly count: number }
   | { readonly kind: 'discard'; readonly item: string; readonly count: number }
+  /** "Sort & stack": the same units merged up to a stack's limit, then the grid ordered by type, name and mark from slot 1. */
+  | { readonly kind: 'sort' }
   /** Mail (mail.md § 3): one of the player's own marked read, or deleted ('0': every read one). Sending is `POST /swg/mail`, its text past a command. */
   | { readonly kind: 'mailRead'; readonly mail: string }
   | { readonly kind: 'mailDelete'; readonly mail: string }
   /** A /tell: a line to one player online, by name. */
   | { readonly kind: 'tell'; readonly to: string; readonly text: string }
+  /** A horde's call answered (horde.md § 5): committed at once, or refused "enough" / "cooldown". */
+  | { readonly kind: 'answerCall'; readonly event: string }
   /** Installations (crafting-build.md § 10): a kit placed on the lot the body stands in, drawing `family`; a hopper collected; upkeep paid; one picked up. */
   | { readonly kind: 'installPlace'; readonly item: string; readonly family: number }
   | { readonly kind: 'installCollect'; readonly installation: string }
@@ -525,6 +551,11 @@ export function marketWire(
       return item === null ? null : { name: 'Equip', values: { item } };
     }
 
+    case 'consume': {
+      const item = idOf(command.item);
+      return item === null ? null : { name: 'ConsumeItem', values: { item } };
+    }
+
     case 'unequip':
       return { name: 'Unequip', values: { slot: command.slot } };
     case 'craftStart': {
@@ -557,12 +588,16 @@ export function marketWire(
       return { name: 'MoveItem', values: { item: itemOf(command.item), slot: command.slot, count: command.count } };
     case 'discard':
       return { name: 'DiscardItem', values: { item: itemOf(command.item), count: command.count } };
+    case 'sort':
+      return { name: 'SortItems', values: { order: 0 } };
     case 'mailRead':
       return { name: 'ReadMail', values: { mail: itemOf(command.mail) } };
     case 'mailDelete':
       return { name: 'DeleteMail', values: { mail: itemOf(command.mail) } };
     case 'tell':
       return { name: 'TellPlayer', values: { to: command.to, text: command.text } };
+    case 'answerCall':
+      return { name: 'AnswerCall', values: { event: itemOf(command.event) } };
     case 'installPlace':
       return { name: 'PlaceInstallation', values: { item: itemOf(command.item), family: command.family } };
     case 'installCollect':
@@ -602,16 +637,20 @@ export function commandRow(command: MarketCommand): string {
       return 'issue';
     case 'equip':
     case 'unequip':
+    case 'consume':
     case 'pack':
     case 'unpack':
     case 'move':
     case 'discard':
+    case 'sort':
       return 'gear';
     case 'mailRead':
     case 'mailDelete':
       return 'mail';
     case 'tell':
       return 'tell';
+    case 'answerCall':
+      return 'horde';
     case 'installPlace':
     case 'installCollect':
     case 'installPay':
@@ -803,9 +842,12 @@ export function priceOf(prices: readonly MarketPrice[], item: string, mk: number
 function listingOf(raw: unknown): MarketListing | null {
   const r = record(raw);
   const goods = r === null ? null : goodsOf(r);
-  return r === null || goods === null
-    ? null
-    : { ...goods, seller: idText(r.seller) ?? '', sellerName: str(r.sellerName) };
+  if (r === null || goods === null) {
+    return null;
+  }
+
+  const listing = { ...goods, seller: idText(r.seller) ?? '', sellerName: str(r.sellerName) };
+  return isStats(r.stats) ? { ...listing, stats: r.stats } : listing;
 }
 
 /** The goods every market row carries; `null` for a row without an id, a quantity or a price. */

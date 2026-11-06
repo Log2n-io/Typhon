@@ -10,6 +10,7 @@ import { PrefixUploader } from '../src/render/prefix-upload';
 import { buildShape, type ShapeKind } from '../src/render/shapes';
 import * as shaders from '../src/render/shaders';
 import { KNOWN_ARCHETYPES } from '../src/data/archetypes';
+import { STRUCTURE_KIND_NAMES, StructureKind } from '../src/data/swg-schema';
 import { STYLE_COUNT, styleFor, TINT_COUNT, type LayerStyle } from '../src/render/styles';
 import {
   invertMatrix4,
@@ -107,6 +108,12 @@ describe('style bounds', () => {
         expect(style.bounds.pickY[i]).toBe(h / 2);
       });
     }
+  });
+
+  it("frames a horde's fortress round its published asset, not the default box, and names it", () => {
+    const structure = styleFor('WorldObject');
+    expect(structure.sizes[StructureKind.HordeFortress]).toEqual([31.1, 32.75, 28.3]);
+    expect(STRUCTURE_KIND_NAMES[StructureKind.HordeFortress]).toBe('Raider fortress');
   });
 });
 

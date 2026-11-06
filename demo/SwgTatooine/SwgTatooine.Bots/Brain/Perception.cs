@@ -42,6 +42,15 @@ public sealed class Perception
     private int _offerLevelField = -1;
     private int _creatureLevelField = -1;
     private int _creatureTargetField = -1;
+    private int _creatureModeField = -1;
+    private int _creatureRaiderField = -1;
+    private int _creatureHpField = -1;
+
+    /// <summary>A replicated creature mode: dead, a corpse lying its few seconds (the server's <c>AiMode.Dead</c>).</summary>
+    private const int DeadMode = 5;
+
+    /// <summary>A creature whose segment starts this much farther than the nearest so far is not evaluated: none walks it in a segment's life.</summary>
+    private const double SegmentSlackM = 250d;
     private int _hpField = -1;
     private int _kindField = -1;
     private int _regionField = -1;
@@ -296,6 +305,16 @@ public sealed class Perception
         var set = store.Archetypes[archetype];
         var levels = _creatureLevelField >= 0 ? set.Numbers[_creatureLevelField] : null;
         var targets = _creatureTargetField >= 0 ? set.Numbers[_creatureTargetField] : null;
+        var modes = _creatureModeField >= 0 ? set.Numbers[_creatureModeField] : null;
+        var raiders = _creatureRaiderField >= 0 ? set.Numbers[_creatureRaiderField] : null;
+        var healths = _creatureHpField >= 0 ? set.Numbers[_creatureHpField] : null;
+        var bestRaider = false;
+        var bestHealth = 0f;
+        var onMeHealth = 0f;
+        var onMeCount = 0;
+        var onMeRaider = false;
+        Span<double> motion = stackalloc double[Math.Max(1, set.MotionStride)];
+        var tick = Math.Max(0L, store.Tick);
         var best = double.MaxValue;
         var bestNetId = 0u;
         var bestX = 0f;
@@ -311,10 +330,29 @@ public sealed class Perception
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
+
+            // A corpse lies a few seconds where it fell: no prey, no threat (it fooled the hunt and the town's alarm alike).
+            if (modes != null && (int)modes[slot] == DeadMode)
+            {
+                continue;
+            }
+
+            // Where it IS, not where its segment started — the bot's own body learned that first (above). The head is only the cheap reject: nothing
+            // walks SegmentSlackM in one segment, so one that far past the best is not worth evaluating.
             var at = set.HeadPosition(slot);
-            var px = (float)at[0];
-            var pz = set.Dims > 1 ? (float)at[1] : 0f;
+            var hx = (float)at[0];
+            var hz = set.Dims > 1 ? (float)at[1] : 0f;
+            var coarse = Routing.Distance(x, z, hx, hz);
+            if (coarse > best + SegmentSlackM && (targets == null || targets[slot] != self))
+            {
+                continue;
+            }
+
+            MotionEvaluator.EvaluateSlot(set, slot, tick, 0d, motion);
+            var px = (float)motion[0];
+            var pz = set.Dims > 1 ? (float)motion[1] : 0f;
             var distance = Routing.Distance(x, z, px, pz);
+            var raider = raiders != null && raiders[slot] != 0;
             if (distance < best)
             {
                 best = distance;
@@ -322,6 +360,13 @@ public sealed class Perception
                 bestX = px;
                 bestZ = pz;
                 bestLevel = levels != null ? (int)levels[slot] : 0;
+                bestRaider = raider;
+                bestHealth = healths != null ? (float)healths[slot] : 0f;
+            }
+
+            if (targets != null && targets[slot] == self)
+            {
+                onMeCount++;
             }
 
             if (targets != null && targets[slot] == self && distance < nearestOnMe)
@@ -331,6 +376,8 @@ public sealed class Perception
                 onMeX = px;
                 onMeZ = pz;
                 onMeLevel = levels != null ? (int)levels[slot] : 0;
+                onMeRaider = raider;
+                onMeHealth = healths != null ? (float)healths[slot] : 0f;
             }
         }
 
@@ -346,11 +393,16 @@ public sealed class Perception
             NearestCreatureZ = bestZ,
             NearestCreatureM = (float)best,
             NearestCreatureLevel = bestLevel,
+            NearestCreatureRaider = bestRaider,
+            NearestCreatureHealth = bestHealth,
             Attacker = onMe,
             AttackerX = onMeX,
             AttackerZ = onMeZ,
             AttackerM = onMe == 0 ? 0f : (float)nearestOnMe,
             AttackerLevel = onMeLevel,
+            AttackerRaider = onMe != 0 && onMeRaider,
+            AttackerHealth = onMe == 0 ? 0f : onMeHealth,
+            Attackers = onMeCount,
         };
     }
 
@@ -386,10 +438,23 @@ public sealed class Perception
         var yaws = _yawField >= 0 ? set.Numbers[_yawField] : null;
 
         var port = 0;
+        var fortress = 0u;
+        float fortX = 0f, fortZ = 0f;
         for (var i = 0; i < set.LiveCount; i++)
         {
             var slot = set.Live[i];
             var region = (int)regions[slot];
+
+            // A horde's fortress, out in the wild (horde.md § 10): what a defender assaults, by its netId.
+            if ((int)kinds[slot] == HordeFortressKind)
+            {
+                var f = set.HeadPosition(slot);
+                fortress = set.NetIds[slot];
+                fortX = (float)f[0];
+                fortZ = set.Dims > 1 ? (float)f[1] : 0f;
+                continue;
+            }
+
             if (region == 0)
             {
                 continue;   // in the wild: it belongs to no city, so there is nothing to remember it under
@@ -418,8 +483,11 @@ public sealed class Perception
             }
         }
 
-        return world with { PortRegion = port };
+        return world with { PortRegion = port, Fortress = fortress, FortressX = fortX, FortressZ = fortZ };
     }
+
+    /// <summary>The server's <c>StructureKind.HordeFortress</c>.</summary>
+    public const int HordeFortressKind = 12;
 
     /// <summary><c>ACKS</c> reason: the body was not at a shuttleport — <c>TatooineReplication.ShuttleNotAtPort</c>.</summary>
     /// <remarks>
@@ -490,6 +558,9 @@ public sealed class Perception
         _offerLevelField = FieldOf(store, _offers, "level");
         _creatureLevelField = FieldOf(store, _creatures, "level");
         _creatureTargetField = FieldOf(store, _creatures, "target");
+        _creatureModeField = FieldOf(store, _creatures, "mode");
+        _creatureRaiderField = FieldOf(store, _creatures, "raider");
+        _creatureHpField = FieldOf(store, _creatures, "hp");
 
         // Both fields are resolved against the archetype they are read from, which is the bug this line replaced: the
         // first version resolved a field index against `Player` and then indexed it into whatever archetype held the

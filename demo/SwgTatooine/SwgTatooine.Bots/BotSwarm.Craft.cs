@@ -128,8 +128,17 @@ public sealed partial class BotSwarm
         public readonly long[] CraftRefused = new long[CraftReasons];
 
         private CraftBook _book;
-        private ushort[] _craftTargets = [];
+        private volatile ushort[] _craftTargets = [];
+
+        // Its line's targets in the line's own order; _craftTargets is them by demand (CraftPlan.ByDemand), re-ordered at each assessment.
+        private ushort[] _lineTargets = [];
         private HashSet<ushort> _craftKeeps = [];
+
+        // Of its targets, those glutted at Mk I: crafted only with a looted core in hand (CraftPlan.MkIGlutted), re-read at each assessment.
+        private volatile HashSet<ushort> _lootedOnly = [];
+
+        // The (template, Mk) its refines up take (CraftPlan.RefineUp): kept off the board until the station.
+        private volatile HashSet<(ushort, int)> _refineUses = [];
 
         // Which of its targets it tries first: moved on by each craft started, so a crafter with the inputs for several makes them in turn.
         private int _craftTurn;
@@ -166,6 +175,7 @@ public sealed partial class BotSwarm
             Crafts = true;
             _book = book;
             _craftTargets = CraftPlan.Targets(CraftPlan.Lines[index % CraftPlan.Lines.Length]);
+            _lineTargets = _craftTargets;
             _craftKeeps = CraftPlan.Keeps(book, _craftTargets);
             _craftUri = new Uri(_missionsUri, "/swg/craft");
             _brain.Crafts = true;
@@ -176,21 +186,34 @@ public sealed partial class BotSwarm
         {
             if (_trades)
             {
-                _repairsDue = MarketPlan.RepairsDue(gear, held);
+                _repairsDue = MarketPlan.RepairsDue(gear, held, CraftPlan.Blaster, MarketPlan.Band(_brain.CombatLevel));
             }
 
             CraftJob job = null;
+            var up = NoRefines;
+            var forJob = held;
             if (Crafts)
             {
+                // What it cannot craft at Mk III it refines Mk II into (CraftPlan.RefineUp), its craft planned from what the refines leave.
                 var parts = CraftPlan.PartsOf(gear);
-                job = CraftPlan.Next(_book, _craftTargets, _craftTurn, held, parts);
+                var turn = _craftTargets.Length > 0 ? _craftTargets[_craftTurn % _craftTargets.Length] : (ushort)0;
+                up = turn != 0 ? CraftPlan.RefineUp(_book, turn, held, _prices) : NoRefines;
+                forJob = up.Count > 0 ? CraftPlan.Without(held, up) : held;
+                var upUses = new HashSet<(ushort, int)>();
+                foreach (var (template, mk, _) in up)
+                {
+                    upUses.Add((template, mk));
+                }
+
+                _refineUses = upUses;
+                job = CraftPlan.Next(_book, _craftTargets, _craftTurn, forJob, parts, _lootedOnly);
                 _craftJob = job;
 
                 // Only an input it can buy — one the vendor sells; Hide and Bone it hunts — and not again soon after a visit that bought none.
                 var wanted = false;
-                if (_craftJob == null)
+                if (_craftJob == null && turn != 0 && (!_lootedOnly.Contains(turn) || CraftPlan.HoldsLootedCore(_book, turn, forJob)))
                 {
-                    foreach (var (template, _) in CraftPlan.Deficits(_book, _craftTargets[_craftTurn % _craftTargets.Length], held, parts))
+                    foreach (var (template, _) in CraftPlan.Deficits(_book, turn, forJob, parts))
                     {
                         wanted |= MarketPlan.VendorSells(template);
                     }
@@ -204,8 +227,14 @@ public sealed partial class BotSwarm
             if (_trades)
             {
                 var band = MarketPlan.Band(_brain.CombatLevel);
-                _refinesDue = RefinePlan.Due(held, band, job != null ? CraftPlan.Uses(_book, job) : null);
-                _packsDue = CratePlan.Packs(gear, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster, held));
+                var due = RefinePlan.Due(forJob, band, job != null ? CraftPlan.Uses(_book, job) : null);
+                if (up.Count > 0)
+                {
+                    due.InsertRange(0, up);
+                }
+
+                _refinesDue = due;
+                _packsDue = CratePlan.Packs(gear, MarketPlan.NextToWear(gear, band, CraftPlan.Blaster, held), GearPlan.Spare(gear, CraftPlan.Blaster, held, band));
             }
         }
 
@@ -410,14 +439,33 @@ public sealed partial class BotSwarm
         /// A crafter's stacks as the bazaar plan sees them (§ 6, Surplus): its recipes' inputs are kept — neither listed nor sold to the vendor — so what
         /// it loots and buys is crafted with (<see cref="CraftPlan.Tradeable"/>).
         /// </summary>
-        private List<HeldStack> Tradeable(List<HeldStack> held) =>
-            Crafts ? CraftPlan.Tradeable(held, _craftKeeps, CraftPlan.Uses(_book, _craftJob)) : held;
+        private List<HeldStack> Tradeable(List<HeldStack> held)
+        {
+            if (!Crafts)
+            {
+                return held;
+            }
+
+            // What its craft and its refines up are waiting for: never sold from under them.
+            var uses = CraftPlan.Uses(_book, _craftJob);
+            uses.UnionWith(_refineUses);
+            return CraftPlan.Tradeable(held, _craftKeeps, uses);
+        }
 
         /// <summary>The input its next target lacks first, to buy at this visit's bazaar; null for a bot that does not craft or lacks nothing.</summary>
-        private BookSlot? CraftWant() =>
-            Crafts && _craftTargets.Length > 0
-                ? CraftPlan.Wants(_book, _craftTargets[_craftTurn % _craftTargets.Length], _held, CraftPlan.PartsOf(_gear))
-                : null;
+        private BookSlot? CraftWant()
+        {
+            if (!Crafts || _craftTargets.Length == 0)
+            {
+                return null;
+            }
+
+            // A target glutted at Mk I wants a looted core, not the Mk I inputs (CraftPlan.MkIGlutted): the core buy is the trade's own (CoreMks).
+            var turn = _craftTargets[_craftTurn % _craftTargets.Length];
+            return _lootedOnly.Contains(turn) && !CraftPlan.HoldsLootedCore(_book, turn, _held)
+                ? null
+                : CraftPlan.Wants(_book, turn, _held, CraftPlan.PartsOf(_gear));
+        }
     }
 }
 

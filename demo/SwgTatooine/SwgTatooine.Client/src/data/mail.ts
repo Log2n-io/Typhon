@@ -5,7 +5,7 @@ import type { ChatCategory } from './chat-tabs';
  */
 
 /** A mail's kind, as the server names it. */
-export type MailKind = 'player' | 'hopperfull' | 'upkeeplow' | 'stopped' | 'sold' | 'expired' | 'unknown';
+export type MailKind = 'player' | 'hopperfull' | 'upkeeplow' | 'stopped' | 'sold' | 'expired' | 'horde' | 'unknown';
 
 /** One row of the inbox. */
 export interface MailItem {
@@ -37,7 +37,7 @@ export interface Inbox {
 export const MAIL_SUBJECT_MAX = 63;
 export const MAIL_TEXT_MAX = 1000;
 
-const KINDS: readonly MailKind[] = ['player', 'hopperfull', 'upkeeplow', 'stopped', 'sold', 'expired'];
+const KINDS: readonly MailKind[] = ['player', 'hopperfull', 'upkeeplow', 'stopped', 'sold', 'expired', 'horde'];
 
 /** The numbers a `MailNotice` carries a kind as, the server's `MailKind`: 1 player … 6 expired. */
 export function kindOfNumber(kind: number): MailKind {
@@ -97,6 +97,8 @@ export function senderOf(m: Pick<MailItem, 'kind' | 'from'>): string {
     case 'sold':
     case 'expired':
       return 'The bazaar';
+    case 'horde':
+      return 'The garrison';
     default:
       return 'Tatooine';
   }
@@ -104,7 +106,13 @@ export function senderOf(m: Pick<MailItem, 'kind' | 'from'>): string {
 
 /** The chat category a mail's arrival is said under (client.md C44). */
 export function mailCategory(kind: MailKind): ChatCategory {
-  return kind === 'player' ? 'tells' : kind === 'sold' || kind === 'expired' ? 'economy' : 'structures';
+  return kind === 'player'
+    ? 'tells'
+    : kind === 'sold' || kind === 'expired'
+      ? 'economy'
+      : kind === 'horde' || kind === 'unknown'
+        ? 'system'
+        : 'structures';
 }
 
 /** How long ago, as the list says it: `just now`, `12 min ago`, `3 h ago`, `2 days ago`. */

@@ -40,6 +40,8 @@ export interface UiLayout {
    * without the panel, and the next toggle widened it again.
    */
   readonly inventoryPreview: boolean;
+  /** Whether the bazaar's preview panel is open, kept with the window's rect as the inventory's is; open by default (Loïc, 2026-11-05). */
+  readonly bazaarPreview: boolean;
 }
 
 /** The layout of a first visit: nothing moved, the bars locked, the debug layer shown only to a session with no player (the god camera). */
@@ -54,6 +56,7 @@ export function defaultLayout(playing: boolean): UiLayout {
     navHidden: [],
     chatTabs: DEFAULT_TABS,
     inventoryPreview: false,
+    bazaarPreview: true,
   };
 }
 
@@ -146,6 +149,7 @@ export function parseLayout(raw: string | null, fallback: UiLayout): UiLayout {
       : fallback.navHidden,
     chatTabs: v.chatTabs === undefined ? fallback.chatTabs : parseTabs(v.chatTabs),
     inventoryPreview: typeof v.inventoryPreview === 'boolean' ? v.inventoryPreview : fallback.inventoryPreview,
+    bazaarPreview: typeof v.bazaarPreview === 'boolean' ? v.bazaarPreview : fallback.bazaarPreview,
   };
 }
 

@@ -1,6 +1,7 @@
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { ACTION_SLOTS } from '../app/action-bar';
 import { equipped } from '../data/items';
+import { STIM_COOLDOWN_MS, stimDoses } from '../data/potions';
 import { levelTitle, xpPercent } from '../data/progress';
 import { SpeedClass } from '../data/source';
 import { useItems } from '../state/items-store';
@@ -67,9 +68,13 @@ export function ActionBar() {
   const pressSlot = useUi((s) => s.pressSlot);
   const riding = useStats((s) => s.stats?.gait === SpeedClass.swoop);
   const inventory = useItems((s) => s.snapshot);
+  const stimReadyAt = useUi((s) => s.stimReadyAt);
   if (!playing) {
     return null;
   }
+
+  // The stims held, in doses (crafting-catalog.md § 5.4): the slot's count; none, and it is off.
+  const doses = inventory === null ? null : stimDoses(inventory.items);
 
   // A stance fights with what is worn (crafting-build.md C1): the fist always, the others only with their weapon on. The server refuses the rest; the
   // bar says so first. Before the first inventory read every slot is offered.
@@ -81,16 +86,18 @@ export function ActionBar() {
       {bar.grip}
       <div className="slots">
         {ACTION_SLOTS.map((slot) => {
-          const on = slot.kind === 'mount' ? riding : stance === slot.key;
-          const usable = slot.kind === 'mount' || armed(slot.asset, slot.key);
+          const drink = slot.kind === 'consume';
+          const on = slot.kind === 'mount' ? riding : !drink && stance === slot.key;
+          const usable = slot.kind === 'mount' || (drink ? doses === null || doses > 0 : armed(slot.asset, slot.key));
           const icon = icons[slot.asset];
+          const why = drink ? 'no stim held — craft or buy one' : 'equip one first';
           return (
             <button
               key={slot.key}
               className={on ? 'slot on' : usable ? 'slot' : 'slot off'}
               style={{ '--slot': slot.color } as CSSProperties}
               disabled={!usable && !on}
-              title={usable ? `${slot.label} (${String(slot.key)})` : `${slot.label} — equip one first`}
+              title={usable ? `${slot.label} (${String(slot.key)})` : `${slot.label} — ${why}`}
               // Not focusable by the mouse: a focused button would take Space and Enter from the game.
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -101,12 +108,37 @@ export function ActionBar() {
             >
               {icon === undefined ? null : <img className="slot-icon" src={icon} alt="" draggable={false} />}
               <span className="slot-key">{slot.key}</span>
+              {drink && doses !== null ? <span className="slot-count">{doses}</span> : null}
+              {drink ? <StimCooldown key={stimReadyAt} readyAt={stimReadyAt} /> : null}
               {used?.key === slot.key ? <span key={used.seq} className="slot-flash" /> : null}
             </button>
           );
         })}
       </div>
     </div>
+  );
+}
+
+/**
+ * The stim slot's wait: a shade that drains from the top over the cooldown, started by the heal itself. One CSS animation, remounted by the heal's time and
+ * started as far into it as the wait already is — a component that ticks would re-render the bar sixty times a second.
+ */
+function StimCooldown({ readyAt }: { readonly readyAt: number }) {
+  // When it mounted: remounted by each heal (its key), so this is how far into the wait the bar was drawn.
+  const [mountedAt] = useState(() => performance.now());
+  const left = readyAt - mountedAt;
+  if (readyAt === 0 || left <= 0) {
+    return null;
+  }
+
+  return (
+    <span
+      className="slot-cooldown"
+      style={{
+        animationDuration: `${String(STIM_COOLDOWN_MS)}ms`,
+        animationDelay: `${String(-(STIM_COOLDOWN_MS - left))}ms`,
+      }}
+    />
   );
 }
 

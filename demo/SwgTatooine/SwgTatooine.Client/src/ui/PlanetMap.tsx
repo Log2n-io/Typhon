@@ -9,6 +9,8 @@ import type { TerrainBaked } from '../terrain/terrain.worker';
 import { formatDistance } from './NavPane';
 import { WindowFrame } from './WindowFrame';
 import { useWaypoints } from '../state/waypoints-store';
+import { useHorde } from '../state/horde-store';
+import { RALLY_COLOR } from '../data/horde';
 import { colorOf, cssColor, GROUP_COLORS, NAMED_COLORS, WAYPOINT_NAME_MAX_BYTES } from '../data/waypoints';
 
 /** How long a press on the map is held before it offers a waypoint there, ms (client.md C25: a long press opens what something offers). */
@@ -65,6 +67,8 @@ function PlanetMapWindow() {
   const player = useMap((s) => s.player);
   const journal = useMissions((s) => s.journal);
   const waypoints = useWaypoints((s) => s.list);
+  const horde = useHorde((s) => s.status);
+  const radar = useHorde((s) => s.radar);
   const focus = useMap((s) => s.focus);
   // A long press on the map: the place a waypoint is offered at, and the form's name and colour (C38).
   const [pending, setPending] = useState<{ readonly x: number; readonly z: number } | null>(null);
@@ -200,6 +204,43 @@ function PlanetMapWindow() {
       label(ctx, missionTitle(mission.name), at.px, at.py - 10, '#ffd2a8', '12px system-ui, sans-serif');
     }
 
+    // A horde under way or announced (horde.md § 6): its fortress, and the rally point it marches on — for everyone.
+    if (horde !== null && (horde.phase === 'incoming' || horde.phase === 'active')) {
+      const fort = toCanvas(view, size, horde.fortX, horde.fortZ);
+      ctx.fillStyle = cssColor(RALLY_COLOR);
+      ctx.fillRect(fort.px - 6, fort.py - 6, 12, 12);
+      ctx.strokeStyle = '#2a0b08';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(fort.px - 6, fort.py - 6, 12, 12);
+      label(ctx, 'Raider fortress', fort.px, fort.py - 9, '#ffb4a0', 'bold 12px system-ui, sans-serif');
+      const rally = toCanvas(view, size, horde.x, horde.z);
+      ctx.beginPath();
+      ctx.arc(rally.px, rally.py, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = cssColor(RALLY_COLOR);
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      label(ctx, 'Rally point', rally.px, rally.py - 11, '#ffb4a0', 'bold 12px system-ui, sans-serif');
+
+      // The town hall the raiders break (horde.md § 10), and the radar: where they are, a blob a cluster sized by its count.
+      if ((horde.hallX ?? 0) !== 0 || (horde.hallZ ?? 0) !== 0) {
+        const hall = toCanvas(view, size, horde.hallX ?? 0, horde.hallZ ?? 0);
+        ctx.fillStyle = '#ffd54f';
+        ctx.fillRect(hall.px - 5, hall.py - 5, 10, 10);
+        label(ctx, 'Town hall', hall.px, hall.py - 8, '#ffe8a0', 'bold 12px system-ui, sans-serif');
+      }
+
+      if (radar !== null && radar.event === horde.event) {
+        for (const b of radar.blips) {
+          const at = toCanvas(view, size, b.x, b.z);
+          ctx.beginPath();
+          ctx.arc(at.px, at.py, 4 + Math.min(14, Math.sqrt(b.n) * 1.6), 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(224, 64, 42, 0.45)';
+          ctx.fill();
+          label(ctx, String(b.n), at.px, at.py + 4, '#ffd0c4', '11px system-ui, sans-serif');
+        }
+      }
+    }
+
     // The player's own waypoints (C38), each in its colour; the active one ringed.
     for (const w of waypoints ?? []) {
       const at = toCanvas(view, size, w.x, w.z);
@@ -251,7 +292,7 @@ function PlanetMapWindow() {
       ctx.stroke();
       ctx.restore();
     }
-  }, [view, size, half, baked, journal, player, waypoints, pending]);
+  }, [view, size, half, baked, journal, player, waypoints, horde, radar, pending]);
 
   const centreOnPlayer = (): void => {
     if (player !== null) {

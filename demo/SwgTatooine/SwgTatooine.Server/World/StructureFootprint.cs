@@ -113,6 +113,8 @@ public static class StructureFootprint
         // its ramp's foot 17.75 m in front, and a square centred on the origin has to reach the ramp. The 8 m it reserves behind the back wall is the price
         // of the one rule every structure keeps — its box is centred where it stands — which collision, the push-out and the layout checks all read.
         StructureKind.TownHall => 17.8f,
+        // The fortress asked for: about the town hall's 30 x 27 m (horde.md D8). Placed in the open, far from anything, so it reserves nobody's ground.
+        StructureKind.HordeFortress => 16f,
         _ => 9f,
     };
 }
