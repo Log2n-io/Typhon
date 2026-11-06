@@ -1693,6 +1693,12 @@ internal sealed unsafe partial class SessionTable : IDisposable
         }
     }
 
+    /// <summary>
+    /// What a slot's recycling tells its owner of per-slot resources (the frame assembler's pooled frame blocks): called once a recycled slot can no longer
+    /// be read by any send, before the slot is handed out again. Set once, at wiring.
+    /// </summary>
+    internal ISessionSlotRecycler SlotRecycler { get; set; }
+
     /// <summary>Gives a slot back, with the next generation on it.</summary>
     /// <param name="slot">The slot.</param>
     /// <returns><see langword="false"/> while a send is still in flight; the slot is retried next tick.</returns>
@@ -1720,6 +1726,11 @@ internal sealed unsafe partial class SessionTable : IDisposable
         }
 
         var generation = NextGeneration(SessionId.FromValue(GateId(observed)).Generation);
+
+        // What the slot still holds of the session's frames goes back now: the gate is closed with no send in flight and the identity is gone, so no link can
+        // read those bytes any more and no new send can start — the one safe point. Without it every close kept up to two frame blocks for good, and 4 000
+        // sessions closing together drained the frame pool for every session after them (2026-11-05, SUB-40).
+        SlotRecycler?.Recycled(slot);
 
         _sessionKinds[slot] = null;
         _profileNames[slot] = null;

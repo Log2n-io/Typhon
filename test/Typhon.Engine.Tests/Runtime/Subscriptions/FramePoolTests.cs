@@ -243,6 +243,44 @@ unsafe class FramePoolTests
         });
     }
 
+    /// <summary>
+    /// A class the budget would refuse takes back the idle slabs of the one-block classes first (2026-11-05: a burst of large frames committed the budget,
+    /// and every later small frame was refused with nothing rented anywhere) — never a slab whose block is lent.
+    /// </summary>
+    [Test]
+    public void AClassShortOfBudget_TakesBackTheIdleLargeSlabs_NeverALentOne()
+    {
+        const int Large = 256 * 1024;
+        long largeSlab;
+        using (var probe = NewPool(AmpleBudget, "Probe"))
+        {
+            Assert.That(probe.TryRent(Large, out _), Is.True);
+            largeSlab = probe.CommittedBytes;
+        }
+
+        using var pool = NewPool(largeSlab * 3);
+        Assert.That(pool.TryRent(Large, out var lent), Is.True);
+        Assert.That(pool.TryRent(Large, out var idleA), Is.True);
+        Assert.That(pool.TryRent(Large, out var idleB), Is.True);
+        Assert.That(pool.TryRent(512, out _), Is.False, "the premise: three large slabs leave no room for a small one while all are lent");
+        pool.Return(idleA);
+        pool.Return(idleB);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(pool.TryRent(512, out var small), Is.True, "a free large slab gave way to the small class");
+            Assert.That(small.IsValid, Is.True);
+            Assert.That(pool.SlabsReleasedCount, Is.EqualTo(1), "one slab was enough, so one went");
+            Assert.That(pool.CommittedBytes, Is.LessThanOrEqualTo(pool.BudgetBytes));
+            Assert.That(pool.BlocksInClass(5), Is.EqualTo(2), "the lent block and one idle one stay");
+            Assert.That(_allocator.PinnedLiveBlocks, Is.EqualTo(3), "two large slabs and the small one");
+        });
+
+        // The lent block is still the pool's to take back, and still whole: no rent can have reused it.
+        pool.Return(lent);
+        Assert.That(pool.FreeInClass(5), Is.EqualTo(2));
+    }
+
     /// <summary>Zero is a legal budget and means exactly "produce no frames" — the subsystem is disabled rather than broken.</summary>
     [Test]
     public void AZeroBudgetPoolNeverRentsAndNeverThrows()

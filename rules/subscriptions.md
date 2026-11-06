@@ -1621,6 +1621,18 @@
     Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
     PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.
 
+### SUB-40: A recycled session slot holds no frame-pool block `[fatal][silent]`
+  invariant when the session table recycles a slot — its gate closed with no send in flight, its identity cleared — the frame assembler returns both
+            frame blocks the slot's send state holds to the frame pool and empties the slots, before the slot is handed to another session
+  invariant a slot with a send in flight keeps its blocks: the recycle waits for the send to end, and the blocks go back with it
+  never zero a slot's send state (SessionSendState.Initialize) while it still names a block: the block is lost to the pool for good (asserted in Debug)
+  scope: SessionTable.TryRecycle, ISessionSlotRecycler, FrameAssembler.ReturnIfValid, SessionSendState.BlockInSlot, SessionSendState.ClearSlot,
+    SessionSendState.Initialize
+  on_violation: silent. Every close keeps up to two blocks; the budget drains with the churn, and once it is spent every session is refused frames —
+    an empty world, then a close as lagging (the live SWG server after 4 000 sessions dropped at once, 2026-11-05)
+  verified: SessionChurnLeakTests.ClosedSessionsGiveTheirFrameBlocksBack_ThroughMoreChurnThanTheBudgetHolds,
+            SessionChurnLeakTests.ASendInFlight_KeepsItsBlocksUntilItEnds [VerifiesRule]
+
 ### SUB-39: One session-request segment, one appender, and requests apply in call order `[fatal][silent]`
   invariant a system reaches a session-request segment only through `ctx.Subscriptions`, its worker slot's view: slot 0 is the off-worker `Commands`, slot
             w + 1 worker w, so one segment has one appender. The log holds a segment for every slot from the runtime's start, the dispatcher's included

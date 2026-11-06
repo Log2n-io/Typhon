@@ -764,7 +764,7 @@ internal sealed class SessionFrameState
 /// state outright.
 /// </para>
 /// </remarks>
-internal sealed unsafe partial class FrameAssembler : IDisposable
+internal sealed unsafe partial class FrameAssembler : IDisposable, ISessionSlotRecycler
 {
     private readonly SubscriptionsOptions _options;
     private readonly CompiledProjectionPlan[] _plans;
@@ -1085,6 +1085,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _options = options;
         _plans = plans;
         _sessions = sessions;
+
+        // A recycled slot's frame blocks come back to the pool (SUB-40): the table knows when, this object knows the pool.
+        sessions.SlotRecycler = this;
         _states = new SessionFrameState[options.MaxSessions];
         _followed = new Vector3D[options.MaxSessions];
         _followedGeneration = new uint[options.MaxSessions];
@@ -2082,6 +2085,27 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         if (TelemetryConfig.SubscriptionsFrameProducedActive)
         {
             TyphonEvent.EmitSubscriptionsFrameProduced(session.Value, sequence, length, reset ? (byte)1 : (byte)0, (byte)state.DegradeLevel);
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The session's two slots each keep the last block they encoded into, reused from frame to frame (<see cref="FramePool.TryRentOrKeep"/>): a closed
+    /// session's are given back here, and the slots emptied so nothing can give them back twice. Before it, nothing did — every close kept up to two blocks,
+    /// and 4 000 sessions closing together left the pool refusing every session after them (2026-11-05).
+    /// </remarks>
+    void ISessionSlotRecycler.Recycled(int slot)
+    {
+        if (_disposed || (uint)slot >= (uint)_states.Length)
+        {
+            return;
+        }
+
+        ref var send = ref SendStateOf(slot);
+        for (var i = 0; i < 2; i++)
+        {
+            ReturnIfValid(send.BlockInSlot(i));
+            send.ClearSlot(i);
         }
     }
 

@@ -139,6 +139,8 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
 
     private long _committedBytes;
     private long _peakCommittedBytes;
+    private long _slabsReleased;
+    private int _slabSerial;
     private long _rentTotal;
     private long _budgetSkips;
     private long _oversizeRefusals;
@@ -221,6 +223,9 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
     /// </summary>
     public long OversizeRefusalCount => Interlocked.Read(ref _oversizeRefusals);
 
+    /// <summary>Slabs given back to the allocator so another class could grow (<see cref="ReleaseIdleSlabs"/>). Monotonic.</summary>
+    public long SlabsReleasedCount => Interlocked.Read(ref _slabsReleased);
+
     /// <summary>Fraction of the budget committed. Crossing 0.8 is the resource graph's default health threshold.</summary>
     public double Utilization => _budgetBytes <= 0 ? 0d : (double)Volatile.Read(ref _committedBytes) / _budgetBytes;
 
@@ -296,7 +301,9 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
                 return false;
             }
 
-            if (_freeHeads[classIndex] == FreeListEnd && !TryGrow(classIndex))
+            // Short of budget for this class: the idle slabs of the others go back first, then one more try — a burst that committed the budget in one class
+            // left every other class refused for good, with no block rented anywhere (the live 4K reconnect, 2026-11-05).
+            if (_freeHeads[classIndex] == FreeListEnd && !TryGrow(classIndex) && !(ReleaseIdleSlabs(classIndex) && TryGrow(classIndex)))
             {
                 _budgetSkips++;
                 block = default;
@@ -434,6 +441,7 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
         writer.WriteThroughput("FramesRented", Interlocked.Read(ref _rentTotal));
         writer.WriteThroughput("BudgetSkips", Interlocked.Read(ref _budgetSkips));
         writer.WriteThroughput("OversizeRefusals", Interlocked.Read(ref _oversizeRefusals));
+        writer.WriteThroughput("SlabsReleased", Interlocked.Read(ref _slabsReleased));
     }
 
     /// <inheritdoc />
@@ -456,7 +464,8 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
 
         // zeroed: false — the header is written below and the payload is overwritten by the frame that rents it. Zeroing whole slabs would touch every frame
         // byte for no benefit, and a frame is only ever read up to the length its session published.
-        var slab = _allocator.AllocatePinned($"Slab-{classIndex}-{_slabs.Count}", this, slabBytes, false, SlabAlignment);
+        // Named by a serial, not by the slab count: a slab released (ReleaseIdleSlabs) would hand its name to the next, and a child id must be unique.
+        var slab = _allocator.AllocatePinned($"Slab-{classIndex}-{_slabSerial++}", this, slabBytes, false, SlabAlignment);
         _slabs.Add(slab);
 
         Volatile.Write(ref _committedBytes, _committedBytes + slabBytes);
@@ -484,6 +493,62 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
         _freeCounts[classIndex] += _blocksPerSlab[classIndex];
         Volatile.Write(ref _blockCount, _blockCount + _blocksPerSlab[classIndex]);
         return true;
+    }
+
+    /// <summary>
+    /// Gives back the idle slabs of the other classes until <paramref name="classIndex"/> can grow one slab, or reports that it cannot. Only the classes of
+    /// one block a slab (128 KiB and 256 KiB): a free block there is a whole slab, so it is freed outright; a small class's slab holds blocks that may be
+    /// rented, and finding one wholly free would mean a walk of every block for little memory.
+    /// </summary>
+    /// <remarks>
+    /// The cold path of a rent the budget refused — never the per-frame one, which <see cref="TryRentOrKeep"/> keeps off the lock. Caller holds
+    /// <see cref="_lock"/>. Nothing rented is touched: only blocks on a free list, which no session holds and no send reads.
+    /// </remarks>
+    private bool ReleaseIdleSlabs(int classIndex)
+    {
+        var need = _slabBytes[classIndex];
+        if (need > _budgetBytes || _keepSlabsForOutstandingSends != 0)
+        {
+            return false;
+        }
+
+        var released = false;
+        for (var k = SizeClassBytes.Length - 1; k >= 0 && _committedBytes + need > _budgetBytes; k--)
+        {
+            if (k == classIndex || _blocksPerSlab[k] != 1)
+            {
+                continue;
+            }
+
+            while (_freeHeads[k] != FreeListEnd && _committedBytes + need > _budgetBytes)
+            {
+                var header = (FrameBlockHeader*)_freeHeads[k];
+                _freeHeads[k] = header->NextFree;
+                var at = -1;
+                for (var i = 0; i < _slabs.Count && at < 0; i++)
+                {
+                    at = _slabs[i].DataAsPointer == (byte*)header ? i : -1;
+                }
+
+                if (at < 0)
+                {
+                    continue;   // not one of this pool's slab starts: cannot happen for a one-block class, and never freed blindly
+                }
+
+                var slab = _slabs[at];
+                _slabs[at] = _slabs[^1];
+                _slabs.RemoveAt(_slabs.Count - 1);
+                slab.Dispose();
+                _blockCounts[k]--;
+                _freeCounts[k]--;
+                Volatile.Write(ref _blockCount, _blockCount - 1);
+                Volatile.Write(ref _committedBytes, _committedBytes - _slabBytes[k]);
+                _slabsReleased++;
+                released = true;
+            }
+        }
+
+        return released && _committedBytes + need <= _budgetBytes;
     }
 
     /// <summary>Non-zero once <see cref="KeepSlabsForOutstandingSends"/> has been called: the slabs are deliberately never freed.</summary>

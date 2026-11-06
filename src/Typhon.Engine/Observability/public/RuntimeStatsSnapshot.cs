@@ -139,6 +139,9 @@ public sealed class RuntimeStatsSnapshot
     /// <summary>Frames the engine denied a session, by cause. <b>Cumulative</b>: difference two reads for a rate.</summary>
     public FrameSkipCounts FramesSkipped { get; init; }
 
+    /// <summary>The frame pool every encoded frame is lent from: its budget and what it holds — <c>default</c> with no replication.</summary>
+    public FramePoolStats FramePool { get; init; }
+
     /// <summary>
     /// Frames given up for a <c>RESET</c> because a session's frames owed more enters than their cap — four enter budgets. <b>Cumulative.</b>
     /// </summary>
@@ -336,3 +339,12 @@ public readonly record struct SessionCloseCounts(
 /// <param name="OwedReset">More was owed than a frame holds; a <c>RESET</c> repairs the view.</param>
 [PublicAPI]
 public readonly record struct FrameSkipCounts(long Gated, long Lagging, long InFlightFull, long Oversize, long PoolRefused, long OwedReset);
+
+/// <summary>
+/// The frame pool as last read (2026-11-05: its exhaustion was a code dive to find, one read of these would have shown it): the budget, the bytes committed in
+/// slabs, the blocks carved and lent, the rents the budget refused and the slabs given back so another class could grow — cumulative — and, by size class
+/// (512 B, 2, 8, 32, 128, 256 KiB), the blocks carved and those free.
+/// </summary>
+[PublicAPI]
+public readonly record struct FramePoolStats(long BudgetBytes, long CommittedBytes, int Blocks, int Rented, long BudgetSkips, long SlabsReleased,
+    int[] ClassBlocks, int[] ClassFree);
