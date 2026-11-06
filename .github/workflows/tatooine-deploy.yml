@@ -1,7 +1,7 @@
 # I6 + I9 + I10 — deploy a payload to a Tatooine stack over SSM, with no SSH and no stored keys.
 #
 # Manual only. Nothing about the game deploys on a push: 08-hosting § 11.2's prod is "off by default, started on demand",
-# and an ephemeral stack is created by tatooine-ephemeral.yml, which calls this.
+# and an ephemeral stack, which used to be created by tatooine-ephemeral.yml (removed), is applied by hand.
 #
 #   build  -> publish both payloads, upload to S3 under a key naming the commit
 #   deploy -> stage the release, then (prod) snapshot + schema gate, then swap the symlink and restart
