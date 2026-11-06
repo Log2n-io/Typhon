@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -189,20 +190,28 @@ public static class MailEndpoints
     /// </summary>
     private static string TextOf(Transaction tx, MailCore mail)
     {
-        Span<byte> utf8 = stackalloc byte[Mail.TextMaxBytes];
-        var n = 0;
-        foreach (ref readonly var b in tx.GetReadOnlyCollectionEnumerator(ref mail.Text))
+        // Pooled rather than on the stack: AC-20's check keeps stack buffers out of the blueprint, where they would mean bytes being packed.
+        var utf8 = ArrayPool<byte>.Shared.Rent(Mail.TextMaxBytes);
+        try
         {
-            // Never past what a text may hold (Mail.CleanText): a longer one is cut rather than overrun.
-            if (n == utf8.Length)
+            var n = 0;
+            foreach (ref readonly var b in tx.GetReadOnlyCollectionEnumerator(ref mail.Text))
             {
-                break;
+                // Never past what a text may hold (Mail.CleanText): a longer one is cut rather than overrun.
+                if (n == Mail.TextMaxBytes)
+                {
+                    break;
+                }
+
+                utf8[n++] = b;
             }
 
-            utf8[n++] = b;
+            return n == 0 ? string.Empty : Encoding.UTF8.GetString(utf8, 0, n);
         }
-
-        return n == 0 ? string.Empty : Encoding.UTF8.GetString(utf8[..n]);
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(utf8);
+        }
     }
 
     /// <summary>How long ago, seconds of world time, a mail sent at <paramref name="sentTick"/> was: what the client says it by.</summary>

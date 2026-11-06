@@ -49,10 +49,9 @@ public static class MailKind
 /// <c>EW-02</c>, and a mail is what a player expects to find again.
 /// </para>
 /// <para>
-/// <b>The text is a collection, out of the cluster.</b> A <c>String1024</c> field would make the entity 1 136 bytes, and a cluster holds eight at least on an
-/// 8 000-byte page (<c>ArchetypeClusterInfo.SelectClusterSize</c>), so no archetype can carry one. A collection is the engine's variable-sized field: the
-/// cluster keeps its four-byte handle, the bytes live in its buffer segment, and the list, which reads this component, never touches them. 102 bytes, under the
-/// 112 a spawn carries inline (TYPHON013).
+/// <b>The text is a collection, out of the cluster.</b> Chosen when a <c>String1024</c> was inline and would have made the entity 1 136 bytes; since #1094 it
+/// is a four-byte handle too, so either fits. A collection is the engine's variable-sized field: the cluster keeps its four-byte handle, the bytes live in its
+/// buffer segment, and the list, which reads this component, never touches them. 102 bytes, under the 112 a spawn carries inline (TYPHON013).
 /// </para>
 /// </remarks>
 [Component("Swg.MailCore", 1, StorageMode = StorageMode.Versioned)]
