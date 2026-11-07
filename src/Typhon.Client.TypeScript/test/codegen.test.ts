@@ -220,6 +220,8 @@ describe('typhon-codegen', () => {
     expect([...byCatalog.keys()].sort()).toEqual([
       'catalog-coll',
       'catalog-exact',
+      // A ground mover's segment is the interpreter's (#1616): its module's decoder is null, and the comparison proves the fallback.
+      'catalog-ground',
       'catalog-kitchen-sink',
       'catalog-wide',
     ]);

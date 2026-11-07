@@ -30,7 +30,8 @@ const client = new ReconnectingClient({
 
 - **Store**: per-archetype columns of what the server says this session holds (`applier.world`).
 - **Motion**, **commands** (`CommandQueue`), **groups** (`GroupSubscriptions`, `applier.groups`), **events**, **aggregates**.
-- `typhon-codegen` generates typed accessors from a server's catalog.
+- `typhon-codegen` generates, from a server's catalog, specialised decoders, a typed record and encoder per command
+  (`queue.enqueueTyped(commands.MoveCmd, record)`), the catalog's enums, and typed column getters per archetype.
 
 ## Learn more
 

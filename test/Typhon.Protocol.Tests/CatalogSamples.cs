@@ -453,6 +453,116 @@ internal static class CatalogSamples
         ],
     };
 
+    /// <summary>
+    /// catalog-commands (#1614): the typed send path's commands — MMORPG's <c>MoveCmd</c> (i8, i8, u8, f32, f32); <c>Probe</c> with every scalar kind a
+    /// struct field supplies (bool and an enum into the pack, angle, unorm, u16, vari, f64, i64, u64 under a renamed wire name); a <c>latest</c>,
+    /// rate-limited <c>Pulse</c>; <c>Say</c> with a <c>str</c>; <c>Hold</c>'s single u32 — and one archetype with a numeric, a 64-bit and a text column
+    /// for the generated accessors. Declared out of wire order, so canonicalization is what orders the fields.
+    /// </summary>
+    internal static Catalog Commands() => new()
+    {
+        Protocol = new CatalogProtocolVersion { Major = 3 },
+        App = new CatalogApp { Name = "Commands", Revision = 1 },
+        Tick = new CatalogTick { PeriodUs = 33_333, PingHz = 4 },
+        Limits = new CatalogLimits { FrameBytes = 65_536, ClientMessageBytes = 1024 },
+        Enums = new Dictionary<string, string[]> { ["Gait"] = ["walk", "run", "sprint"] },
+        Archetypes =
+        [
+            new CatalogArchetype
+            {
+                Name = "Walker",
+                Groups = ["vitals"],
+                Fields =
+                [
+                    new CatalogField { Name = "speed", Codec = new CatalogCodec { Kind = CodecKind.F32 }, Group = "vitals" },
+                    new CatalogField { Name = "name", Codec = new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 24 }, OnEnter = true },
+                    new CatalogField { Name = "account", Codec = new CatalogCodec { Kind = CodecKind.U64 }, OnEnter = true },
+                    new CatalogField { Name = "hp", Codec = new CatalogCodec { Kind = CodecKind.U16 }, Group = "vitals" },
+                ],
+            },
+        ],
+        Commands =
+        [
+            new CatalogCommand
+            {
+                Name = "MoveCmd", Delivery = CatalogCommand.QueuedDelivery,
+                Fields =
+                [
+                    new CatalogField { Name = "Forward", Codec = new CatalogCodec { Kind = CodecKind.I8 } },
+                    new CatalogField { Name = "Strafe", Codec = new CatalogCodec { Kind = CodecKind.I8 } },
+                    new CatalogField { Name = "Buttons", Codec = new CatalogCodec { Kind = CodecKind.U8 } },
+                    new CatalogField { Name = "Fx", Codec = new CatalogCodec { Kind = CodecKind.F32 } },
+                    new CatalogField { Name = "Fz", Codec = new CatalogCodec { Kind = CodecKind.F32 } },
+                ],
+            },
+            new CatalogCommand
+            {
+                Name = "Probe", Delivery = CatalogCommand.QueuedDelivery,
+                Fields =
+                [
+                    new CatalogField { Name = "Exact", Codec = new CatalogCodec { Kind = CodecKind.F64 } },
+                    new CatalogField { Name = "Heading", Codec = new CatalogCodec { Kind = CodecKind.Angle, Bits = 16 } },
+                    new CatalogField { Name = "Boost", Codec = new CatalogCodec { Kind = CodecKind.Bool } },
+                    new CatalogField { Name = "Speed", Codec = new CatalogCodec { Kind = CodecKind.Unorm, Bits = 8 } },
+                    new CatalogField { Name = "Gait", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 2 }, Enum = "Gait" },
+                    new CatalogField { Name = "Budget", Codec = new CatalogCodec { Kind = CodecKind.U16 } },
+                    new CatalogField { Name = "Delta", Codec = new CatalogCodec { Kind = CodecKind.Vari } },
+                    new CatalogField { Name = "Big", Codec = new CatalogCodec { Kind = CodecKind.I64 } },
+                    new CatalogField { Name = "id", Codec = new CatalogCodec { Kind = CodecKind.U64 } },
+                ],
+            },
+            new CatalogCommand
+            {
+                Name = "Pulse", Delivery = CatalogCommand.LatestDelivery, Rate = new CatalogCommandRate { PerSec = 2, Burst = 2 },
+                Fields = [new CatalogField { Name = "Budget", Codec = new CatalogCodec { Kind = CodecKind.U16 } }],
+            },
+            new CatalogCommand
+            {
+                Name = "Say", Delivery = CatalogCommand.QueuedDelivery,
+                Fields =
+                [
+                    new CatalogField { Name = "channel", Codec = new CatalogCodec { Kind = CodecKind.U8 } },
+                    new CatalogField { Name = "text", Codec = new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 32 } },
+                ],
+            },
+            new CatalogCommand
+            {
+                Name = "Hold", Delivery = CatalogCommand.QueuedDelivery,
+                Fields = [new CatalogField { Name = "Item", Codec = new CatalogCodec { Kind = CodecKind.U32 } }],
+            },
+        ],
+    };
+
+    /// <summary>
+    /// catalog-ground (#1616): one ground-clamped walker — a linear pos3 motion whose grounded segments omit the z axis (up = 2, the kitchen frame's narrow
+    /// one) — with one state field.
+    /// </summary>
+    internal static Catalog Ground() => new()
+    {
+        Protocol = new CatalogProtocolVersion { Major = 3 },
+        App = new CatalogApp { Name = "Ground", Revision = 1 },
+        Tick = new CatalogTick { PeriodUs = 33_333, PingHz = 4 },
+        Limits = new CatalogLimits { FrameBytes = 65_536, ClientMessageBytes = 1024 },
+        Archetypes =
+        [
+            new CatalogArchetype
+            {
+                Name = "Walker",
+                Groups = ["vitals"],
+                Position = new CatalogPosition
+                {
+                    Kind = CatalogPosition.MotionKind,
+                    Model = CatalogPosition.LinearModel,
+                    Pos = new CatalogCodec { Kind = CodecKind.Pos3 },
+                    Vel = new CatalogCodec { Kind = CodecKind.Vel3, Bits = 16, UnitExp = -8 },
+                    Ground = true,
+                    Up = 2,
+                },
+                Fields = [new CatalogField { Name = "hp", Codec = new CatalogCodec { Kind = CodecKind.U8 }, Group = "vitals" }],
+            },
+        ],
+    };
+
     private static CatalogPosition MovingLinear() => new()
     {
         Kind = CatalogPosition.MotionKind,

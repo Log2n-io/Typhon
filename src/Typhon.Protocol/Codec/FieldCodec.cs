@@ -349,6 +349,70 @@ public static class FieldCodec
         }
     }
 
+    /// <summary>
+    /// The height a grounded segment decodes to (#1616): the positive quiet NaN, <c>0x7FF8000000000000</c> — the pattern JavaScript and C++ produce, where
+    /// .NET's <see cref="double.NaN"/> is <c>0xFFF8000000000000</c>. One bit pattern in every SDK keeps the golden vectors byte-comparable.
+    /// </summary>
+    public static readonly double GroundedHeight = BitConverter.Int64BitsToDouble(0x7FF8000000000000);
+
+    /// <summary>
+    /// Decodes a grounded segment's position or velocity (#1616): every axis of a <c>pos3</c> or <c>vel3</c> but <paramref name="up"/>, which is NaN for a
+    /// position and 0 for a velocity — the client derives the height from its terrain.
+    /// </summary>
+    /// <param name="reader">The reader.</param>
+    /// <param name="field">The position or velocity codec.</param>
+    /// <param name="destination">Receives three values.</param>
+    /// <param name="up">The omitted axis, 0 to 2.</param>
+    /// <param name="frame">The realm frame, for a position.</param>
+    public static void ReadGroundAxes(ref WireReader reader, FieldPlan field, scoped Span<double> destination, int up, RealmFrame frame = null)
+    {
+        var position = field.Kind is CodecKind.Pos3;
+        var f = position ? frame ?? throw NoRealm(field) : null;
+        for (var i = 0; i < 3; i++)
+        {
+            if (i == up)
+            {
+                destination[i] = position ? GroundedHeight : 0d;
+            }
+            else if (position)
+            {
+                destination[i] = WireMath.DecodeQuantWithStep(reader.ReadUnsigned(f.PositionBits), f.Min[i], f.Step[i]);
+            }
+            else
+            {
+                destination[i] = WireMath.DecodeVel(reader.ReadSigned(field.Codec.Bits), field.VelocityUnitExp, field.Codec.Bits);
+            }
+        }
+    }
+
+    /// <summary>Encodes a grounded segment's position or velocity (#1616): every axis but <paramref name="up"/>.</summary>
+    /// <param name="writer">The writer.</param>
+    /// <param name="field">The position or velocity codec.</param>
+    /// <param name="components">Three values; the up one is ignored.</param>
+    /// <param name="up">The omitted axis, 0 to 2.</param>
+    /// <param name="frame">The realm frame, for a position.</param>
+    public static void WriteGroundAxes(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<double> components, int up, RealmFrame frame = null)
+    {
+        var position = field.Kind is CodecKind.Pos3;
+        var f = position ? frame ?? throw new InvalidOperationException($"position '{field.Name}' needs a realm frame to encode over") : null;
+        for (var i = 0; i < 3; i++)
+        {
+            if (i == up)
+            {
+                continue;
+            }
+
+            if (position)
+            {
+                writer.WriteBits(WireMath.EncodeQuant(components[i], f.Min[i], f.Max[i], f.PositionBits), f.PositionBits);
+            }
+            else
+            {
+                writer.WriteBits((uint)WireMath.EncodeVel(components[i], field.VelocityUnitExp, field.Codec.Bits), field.Codec.Bits);
+            }
+        }
+    }
+
     /// <summary>Decodes one 64-bit integer field (W32) into <paramref name="destination"/>, as bit patterns.</summary>
     /// <param name="reader">The reader.</param>
     /// <param name="field">A <c>u64</c>, <c>i64</c>, <c>varu64</c> or <c>vari64</c> field.</param>
@@ -402,7 +466,7 @@ public static class FieldCodec
 
     // A 64-bit field handed doubles: each must be an integer in the codec's range, which a double holds exactly only up to 2^53 — beyond that the caller
     // has already lost the value, and refusing a non-integer is the most this can check.
-    private static void WriteInteger64FromNumbers(ref WireWriter writer, FieldPlan field, ReadOnlySpan<double> numbers)
+    internal static void WriteInteger64FromNumbers(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<double> numbers)
     {
         Span<ulong> bits = stackalloc ulong[ProtocolConstants.MaxCount];
         var signed = field.Kind is CodecKind.I64 or CodecKind.Vari64;

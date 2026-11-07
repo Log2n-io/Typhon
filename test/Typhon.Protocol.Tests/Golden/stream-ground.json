@@ -1,0 +1,197 @@
+{
+  "description": "Three TICK frames against catalog-ground (#1616), each framed as u32 length \u002B message, with the replica after each: a RESET entering one walker grounded (no z on the wire; the replica\u0027s height is the quiet NaN 7ff8000000000000) and one airborne; then the first jumps (a full pos3 segment) as the second lands; then the first lands and the second leaves.",
+  "catalog": "catalog-ground",
+  "snapshots": [
+    {
+      "tick": 500,
+      "flags": 3,
+      "periodUs": 0,
+      "archetypes": {
+        "Walker": {
+          "entities": [
+            {
+              "netId": 1,
+              "position": [
+                "4025000000000000",
+                "c034400000000000",
+                "nan"
+              ],
+              "velocity": [
+                "3fd0000000000000",
+                "bfc0000000000000",
+                "0000000000000000"
+              ],
+              "t0": 499,
+              "epoch": 0,
+              "fields": {
+                "hp": [
+                  "4056800000000000"
+                ]
+              }
+            },
+            {
+              "netId": 2,
+              "position": [
+                "4014000000000000",
+                "4018000000000000",
+                "400c000000000000"
+              ],
+              "velocity": [
+                "3fc0000000000000",
+                "0000000000000000",
+                "3fb0000000000000"
+              ],
+              "t0": 500,
+              "epoch": 3,
+              "fields": {
+                "hp": [
+                  "4044000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [
+            1,
+            2
+          ],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "groups": [],
+      "completeGroups": [],
+      "aggregates": [],
+      "metrics": {},
+      "anomalies": 0
+    },
+    {
+      "tick": 501,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Walker": {
+          "entities": [
+            {
+              "netId": 1,
+              "position": [
+                "4025800000000000",
+                "c034600000000000",
+                "3ff4000000000000"
+              ],
+              "velocity": [
+                "3fd0000000000000",
+                "bfc0000000000000",
+                "3fe0000000000000"
+              ],
+              "t0": 501,
+              "epoch": 0,
+              "fields": {
+                "hp": [
+                  "4056800000000000"
+                ]
+              }
+            },
+            {
+              "netId": 2,
+              "position": [
+                "4014800000000000",
+                "4018000000000000",
+                "nan"
+              ],
+              "velocity": [
+                "3fc0000000000000",
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 501,
+              "epoch": 3,
+              "fields": {
+                "hp": [
+                  "4044000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 1,
+              "groups": 0,
+              "moved": true
+            },
+            {
+              "netId": 2,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "groups": [],
+      "completeGroups": [],
+      "aggregates": [],
+      "metrics": {},
+      "anomalies": 0
+    },
+    {
+      "tick": 502,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Walker": {
+          "entities": [
+            {
+              "netId": 1,
+              "position": [
+                "4026000000000000",
+                "c034800000000000",
+                "nan"
+              ],
+              "velocity": [
+                "3fd0000000000000",
+                "bfc0000000000000",
+                "0000000000000000"
+              ],
+              "t0": 502,
+              "epoch": 0,
+              "fields": {
+                "hp": [
+                  "4056800000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 1,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": [
+            2
+          ]
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "groups": [],
+      "completeGroups": [],
+      "aggregates": [],
+      "metrics": {},
+      "anomalies": 0
+    }
+  ]
+}

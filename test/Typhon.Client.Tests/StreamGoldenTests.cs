@@ -70,6 +70,128 @@ public class StreamGoldenTests
         });
     }
 
+    /// <summary>
+    /// #1616: a ground-clamped walker's segments, grounded and airborne — the grounded ones without their z axis — and the replica after each frame, its
+    /// grounded height NaN. Every SDK replays this stream to the same store, bit for bit.
+    /// </summary>
+    [Test]
+    public void GroundStream()
+    {
+        var plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(GoldenFiles.ReadBin("catalog-ground")));
+        var walker = plan.ArchetypeByName("Walker");
+        var nan = FieldCodec.GroundedHeight;
+
+        // The kitchen frame's bounds (z the narrow axis, the walker's up), in the default realm kind: catalog-ground declares no other.
+        var frame = new RealmFrame(3, 7, 0, 0xC0FFEE, 24, 256, deep: true, [-8192, -8192, -64], [8192, 8192, 64]);
+        var frames = new List<byte[]>();
+        var buffer = new byte[4096];
+
+        // Frame 1 — RESET: walker 1 enters grounded, walker 2 airborne.
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, 500, TickFlags.Reset | TickFlags.ViewComplete);
+        TickWriter.WriteRealm(ref w, frame);
+        TickWriter.WriteEntities(ref w, 500, walker,
+        [
+            new EnterRecord { NetId = 1, Position = [10.5, -20.25, nan], Velocity = [0.25, -0.125, 0], T0 = 499, Epoch = 0, Values = Values(("hp", 90)) },
+            new EnterRecord { NetId = 2, Position = [5, 6, 3.5], Velocity = [0.125, 0, 0.0625], T0 = 500, Epoch = 3, Values = Values(("hp", 40)) },
+        ], [], [], [], frame);
+        frames.Add(w.Written.ToArray());
+
+        // Frame 2 — walker 1 jumps (airborne, full 3D), walker 2 lands (grounded, no z).
+        w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, 501, TickFlags.None);
+        TickWriter.WriteEntities(ref w, 501, walker, [],
+        [
+            new SegmentRecord { NetId = 1, Position = [10.75, -20.375, 1.25], Velocity = [0.25, -0.125, 0.5], T0 = 501, Epoch = 0 },
+            new SegmentRecord { NetId = 2, Position = [5.125, 6, nan], Velocity = [0.125, 0, 0], T0 = 501, Epoch = 3 },
+        ], [], [], frame);
+        frames.Add(w.Written.ToArray());
+
+        // Frame 3 — walker 1 lands again; walker 2 leaves.
+        w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, 502, TickFlags.None);
+        TickWriter.WriteEntities(ref w, 502, walker, [],
+            [new SegmentRecord { NetId = 1, Position = [11, -20.5, nan], Velocity = [0.25, -0.125, 0], T0 = 502, Epoch = 0 }], [], [2], frame);
+        frames.Add(w.Written.ToArray());
+
+        var store = new WorldStore(plan);
+        var recorder = new EventRecorder(store);
+        var applier = new FrameApplier(store, recorder);
+        var snapshots = new JsonArray();
+        var stream = new List<byte>();
+        foreach (var message in frames)
+        {
+            recorder.Events.Clear();
+            applier.Apply(message);
+            snapshots.Add(StreamSnapshot.Render(store, recorder.Events));
+            var length = new byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(length, (uint)message.Length);
+            stream.AddRange(length);
+            stream.AddRange(message);
+        }
+
+        store.TryLocate(1, out var archetype, out var slot);
+        var walkers = store.Archetypes[archetype];
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.Anomalies, Is.Zero);
+            Assert.That(double.IsNaN(walkers.HeadPosition(slot)[2]), Is.True, "walker 1 ends grounded: its height is the client's terrain");
+            Assert.That(frames[1].Length, Is.GreaterThan(frames[2].Length), "an airborne segment carries more than a grounded one");
+        });
+
+        GoldenFiles.Assert("stream-ground", stream.ToArray(), new JsonObject
+        {
+            ["description"] = "Three TICK frames against catalog-ground (#1616), each framed as u32 length + message, with the replica after each: a RESET "
+                + "entering one walker grounded (no z on the wire; the replica's height is the quiet NaN 7ff8000000000000) and one airborne; then the first "
+                + "jumps (a full pos3 segment) as the second lands; then the first lands and the second leaves.",
+            ["catalog"] = "catalog-ground",
+            ["snapshots"] = snapshots,
+        });
+    }
+
+    /// <summary>
+    /// #1616: evaluating a ground-clamped archetype fills a grounded entity's height from the application's terrain — called with the two horizontal
+    /// axes (x, y when z is up) — and leaves an airborne one's, and every velocity, as decoded; without a callback the height stays NaN.
+    /// </summary>
+    [Test]
+    public void EvaluatingAGroundedEntityTakesItsHeightFromTheTerrain()
+    {
+        var plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(GoldenFiles.ReadBin("catalog-ground")));
+        var store = new WorldStore(plan);
+        var applier = new FrameApplier(store, new EventRecorder(store));
+        var stream = GoldenFiles.ReadBin("stream-ground");
+        var frames = 0;
+        for (var at = 0; frames < 2; frames++)
+        {
+            // After frame 2: walker 1 airborne, walker 2 grounded.
+            var length = (int)BinaryPrimitives.ReadUInt32LittleEndian(stream.AsSpan(at));
+            applier.Apply(stream.AsSpan(at + 4, length));
+            at += 4 + length;
+        }
+
+        var walkers = store.Archetypes[plan.ArchetypeByName("Walker").Idx];
+        Span<double> raw = stackalloc double[walkers.LiveCount * walkers.MotionStride];
+        Span<double> grounded = stackalloc double[raw.Length];
+        MotionEvaluator.EvaluateLive(walkers, 501, 0.5, raw);
+        MotionEvaluator.EvaluateLive(walkers, 501, 0.5, grounded, static (x, y) => 100 + x + (1000 * y));
+        for (var i = 0; i < walkers.LiveCount; i++)
+        {
+            var netId = walkers.NetIds[walkers.Live[i]];
+            var o = i * walkers.MotionStride;
+            if (netId == 2)
+            {
+                Assert.That(double.IsNaN(raw[o + 2]), Is.True, "without a callback a grounded height stays NaN");
+                Assert.That(grounded[o + 2], Is.EqualTo(100 + grounded[o] + (1000 * grounded[o + 1])), "the terrain at (x, y) is the height");
+                Assert.That(grounded[o + 5], Is.Zero, "a grounded segment carries no vertical velocity");
+            }
+            else
+            {
+                Assert.That(grounded.Slice(o, walkers.MotionStride).ToArray(), Is.EqualTo(raw.Slice(o, walkers.MotionStride).ToArray()),
+                    "an airborne entity is evaluated as decoded");
+            }
+        }
+    }
+
     private static IEnumerable<uint> Netids(JsonObject snapshot, string archetype) =>
         snapshot["archetypes"]![archetype]!["entities"]!.AsArray().Select(e => e!["netId"]!.GetValue<uint>());
 

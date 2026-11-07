@@ -347,9 +347,18 @@ internal static unsafe class ProjectionPass
             velocityColumn = StoreFor(clusterLayout, transientBase, clusterBase, position.VelocityComponentSlot) + position.VelocityComponentOffsetInCluster;
         }
 
+        // A ground-clamped motion's grounded bool (#1616), read per slot by the rule.
+        byte* groundedColumn = null;
+        if (motion.Enabled && motion.Ground && position.GroundedComponentOffsetInCluster >= 0)
+        {
+            groundedColumn = StoreFor(clusterLayout, transientBase, clusterBase, position.GroundedComponentSlot) + position.GroundedComponentOffsetInCluster;
+        }
+
         Span<double> motionScratch = stackalloc double[MotionTracker.ScratchDoubles];
         var segmentsEmitted = 0;
         var shadowSegments = 0;
+        Span<int> headCopies = stackalloc int[BandTolerances.MaxHeads];
+        headCopies.Clear();
 
         var visited = 0;
         var records = 0;
@@ -448,7 +457,7 @@ internal static unsafe class ProjectionPass
                 // GroupTicks[0]: a position that changed is not a segment, and stamping the tick for every change would send one to every client every tick,
                 // which is the traffic segments exist to remove.
                 MotionTracker.Update(in motion, hot, coldBytes, quantizedSlot, velocityColumn, slot, initialize, tick, motionScratch, ref segmentsEmitted,
-                    ref shadowSegments);
+                    ref shadowSegments, headCopies, groundedColumn);
 
                 if (moved)
                 {
@@ -725,7 +734,7 @@ internal static unsafe class ProjectionPass
         block->ProjectedWatchedMask = watched & ~(unresolved | collectionUnresolved);
         block->ProjectedOccupancy = *(ulong*)clusterBase;
         state.NoteProjected(blocks: 1, slots: visited, records: records, releases: released);
-        state.NoteSegments(segmentsEmitted, shadowSegments);
+        state.NoteSegments(segmentsEmitted, shadowSegments, headCopies);
     }
 
     // ── Column walk ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

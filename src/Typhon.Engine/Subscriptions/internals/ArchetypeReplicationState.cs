@@ -625,6 +625,16 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     public long ShadowSegmentsEmitted => Volatile.Read(ref _shadowSegments);
 
     /// <summary>
+    /// The copies band head <paramref name="head"/> (1-based) took of the base segment, cumulative (#1615): beside <see cref="SegmentsEmitted"/>, how much
+    /// less often a band's sessions are sent motion than a near one's.
+    /// </summary>
+    /// <param name="head">The head, 1 … <see cref="BandTolerances.MaxHeads"/>.</param>
+    /// <returns>The copies.</returns>
+    public long HeadCopies(int head) => (uint)(head - 1) < (uint)_headCopies.Length ? Volatile.Read(ref _headCopies[head - 1]) : 0;
+
+    private readonly long[] _headCopies = new long[BandTolerances.MaxHeads];
+
+    /// <summary>
     /// Carries a watched entity's replication entry from the slot it left to the slot it arrived in.
     /// </summary>
     /// <param name="srcChunkId">The cluster it left.</param>
@@ -1299,8 +1309,17 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>Accumulates one block's motion segments, and what the rejected trigger would have emitted over the same block.</summary>
     /// <param name="emitted">Segments this rule emitted.</param>
     /// <param name="shadow">Segments the rejected "the quantized velocity changed" trigger would have emitted.</param>
-    public void NoteSegments(int emitted, int shadow)
+    /// <param name="headCopies">Per band head, the copies it took of the base segment (#1615).</param>
+    public void NoteSegments(int emitted, int shadow, ReadOnlySpan<int> headCopies = default)
     {
+        for (var h = 0; h < headCopies.Length && h < _headCopies.Length; h++)
+        {
+            if (headCopies[h] != 0)
+            {
+                Interlocked.Add(ref _headCopies[h], headCopies[h]);
+            }
+        }
+
         if (emitted != 0)
         {
             Interlocked.Add(ref _segmentsEmitted, emitted);

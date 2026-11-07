@@ -17,17 +17,23 @@ namespace typhon::client {
 // The largest ArchetypeStore::MotionStride(): a buffer this long fits any archetype's evaluated motion.
 inline constexpr int MaxMotionStride = 6;
 
+// #1616: the terrain height under a ground-clamped entity, at the two horizontal coordinates (the axes other than the up axis, in axis order).
+using HeightAt = double (*)(double a, double b, void* user);
+
 // Ring entry of the segment that applies at `renderTick`.
 int SegmentEntryAt(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick);
 
 // Position and velocity of one slot at render time: p[dims] then v[dims] into `out`. Throws std::logic_error when not spatial.
-void EvaluateSlot(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick, double frac, std::span<double> out);
+void EvaluateSlot(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick, double frac, std::span<double> out,
+                  HeightAt heightAt = nullptr, void* user = nullptr);
 
 // Motion epoch of the segment that applies at `renderTick`: a change means the entity teleported.
 std::uint8_t EpochAt(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick);
 
 // Evaluates every live entity, in live order: entry i describes Live()[i]. `out` holds LiveCount() x MotionStride() doubles.
-void EvaluateLive(const ArchetypeStore& store, std::int64_t renderTick, double frac, std::span<double> out);
+// A grounded entity's height (#1616), which its segment does not carry, is `heightAt`'s; NaN without it.
+void EvaluateLive(const ArchetypeStore& store, std::int64_t renderTick, double frac, std::span<double> out, HeightAt heightAt = nullptr,
+                  void* user = nullptr);
 
 // Heading in radians of a velocity in a plane, atan2(u, v); `fallback` when both are zero.
 double HeadingOf(double u, double v, double fallback);

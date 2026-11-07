@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -270,6 +271,32 @@ double ReadScalar(WireReader& r, const FieldPlan& f, std::uint32_t frameTick)
 }
 
 }  // namespace
+
+void ReadGroundAxes(WireReader& r, const FieldPlan& f, double* out, int up, const RealmFrame* frame)
+{
+    const bool position = f.kind == CodecKind::Pos3;
+    if (position && frame == nullptr)
+    {
+        NoRealm(f);
+    }
+
+    for (int i = 0; i < 3; i++)
+    {
+        const auto a = static_cast<std::size_t>(i);
+        if (i == up)
+        {
+            out[i] = position ? std::numeric_limits<double>::quiet_NaN() : 0.0;
+        }
+        else if (position)
+        {
+            out[i] = math::DecodeQuant(r.Unsigned(frame->positionBits), frame->min[a], frame->step[a]);
+        }
+        else
+        {
+            out[i] = math::DecodeVel(r.Signed(f.bits), f.velocityUnit, f.limit);
+        }
+    }
+}
 
 void ReadNumber(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, double* out, const RealmFrame* frame)
 {

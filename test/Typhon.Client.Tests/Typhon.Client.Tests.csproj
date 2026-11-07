@@ -29,6 +29,8 @@
         <!-- With -p:TyphonProtocolTfm=netstandard2.1 too, Typhon.Protocol is the netstandard2.1 build as well — the pair Unity loads. Without it, the
              netstandard2.1 client runs against the net10.0 protocol: a netstandard2.1 library in a .NET app, which the IsExternalInit forward is for. -->
         <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" Condition="'$(TyphonProtocolTfm)' != ''" SetTargetFramework="TargetFramework=$(TyphonProtocolTfm)" />
+        <!-- The typed command tests (#1614) send [ReplicatedMessage] structs as a contracts assembly would: through the generator's real output. -->
+        <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
     </ItemGroup>
 
 </Project>

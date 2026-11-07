@@ -208,7 +208,7 @@ internal readonly struct ReplicationBlockLayout
 
     private ReplicationBlockLayout(int slotCount, int segmentBytes, int packedStateBytes, int prevPositionBytes, int runStartBytes, int ownerEntrySize,
         int enterPositionBytes, int enterBodyBytes, int visibilityPositionBytes = 0, int headingBytes = 0, int referenceBytes = 0, int groupKeyBytes = 0,
-        int tagMaskBytes = 0)
+        int tagMaskBytes = 0, int motionHeads = 0)
     {
         // A zero or negative slot count yields a block with no entries, which the pool would happily carve and hand out forever; a negative owner entry size
         // shrinks the block below its own regions. Both are construction-time mistakes, so they fail here rather than as arithmetic nonsense later.
@@ -233,6 +233,7 @@ internal readonly struct ReplicationBlockLayout
         ArgumentOutOfRangeException.ThrowIfNegative(referenceBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(groupKeyBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(tagMaskBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(motionHeads);
 
         SlotCount = slotCount;
         OwnerEntrySize = ownerEntrySize;
@@ -247,11 +248,12 @@ internal readonly struct ReplicationBlockLayout
         ReferenceBytes = referenceBytes;
         GroupKeyBytes = groupKeyBytes;
         TagMaskBytes = tagMaskBytes;
+        MotionHeads = segmentBytes > 0 ? motionHeads : 0;
 
         // The strides are the whole point of sizing here rather than in a struct declaration: an entry that straddles two cache lines costs the per-hit passes
         // a second line on every read, so the stride is rounded UP to whole lines rather than packed. An archetype whose regions fit one line keeps AC-5's
         // 64 B; one that does not pays 128 B knowingly, and the layout is where that becomes visible.
-        HotStride = RoundUpTo(HotFixedBytes + segmentBytes + packedStateBytes, HotEntrySize);
+        HotStride = RoundUpTo(HotFixedBytes + segmentBytes + packedStateBytes + (MotionHeads * MotionHeadStride), HotEntrySize);
         ColdStride = RoundUpTo(ColdFixedBytes + prevPositionBytes + runStartBytes + visibilityPositionBytes + enterPositionBytes + enterBodyBytes + headingBytes
             + referenceBytes + groupKeyBytes + tagMaskBytes, ColdEntrySize);
 
@@ -299,7 +301,7 @@ internal readonly struct ReplicationBlockLayout
         PrevPositionBytes == 0 || VisibilityPositionBytes > 0
             ? this
             : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
-                EnterBodyBytes, PrevPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, TagMaskBytes);
+                EnterBodyBytes, PrevPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, TagMaskBytes, MotionHeads);
 
     /// <summary>
     /// This layout with the keys of <paramref name="sets"/> group sets in every cold entry (14 § 3.8): eight bytes each, the key the entity's last push read,
@@ -311,7 +313,7 @@ internal readonly struct ReplicationBlockLayout
         sets <= 0
             ? this
             : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
-                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, 8 * sets, TagMaskBytes);
+                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, 8 * sets, TagMaskBytes, MotionHeads);
 
     /// <summary>
     /// This layout with the entity's visibility tag mask in every cold entry (14 § 6): four bytes, the mask its last push read, for an archetype that declares
@@ -322,7 +324,46 @@ internal readonly struct ReplicationBlockLayout
         TagMaskBytes > 0
             ? this
             : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
-                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, 4);
+                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, 4, MotionHeads);
+
+    /// <summary>
+    /// This layout with <paramref name="heads"/> band segment heads in every hot entry (#1615): per distinct band tolerance a session may be served at, the
+    /// segment its clients hold — a copy of the base segment taken when this head's own extrapolation error passed its tolerance — and the tick it was taken.
+    /// </summary>
+    /// <param name="heads">The archetype's head count, 0 to 3; ignored for an archetype that does not move.</param>
+    /// <returns>The widened layout.</returns>
+    public ReplicationBlockLayout WithMotionHeads(int heads) =>
+        heads <= 0 || SegmentBytes == 0 || MotionHeads == heads
+            ? this
+            : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
+                EnterBodyBytes, VisibilityPositionBytes, HeadingBytes, ReferenceBytes, GroupKeyBytes, TagMaskBytes, heads);
+
+    /// <summary>
+    /// How many band segment heads every hot entry carries beside the base segment (#1615): one per distinct band tolerance, 0 when no Sphere declares one
+    /// or the archetype does not move.
+    /// </summary>
+    public int MotionHeads { get; }
+
+    /// <summary>
+    /// Bytes of one band head: the <c>u32</c> absolute start tick of the segment it holds (the copied base segment's), the <c>u32</c> tick it last changed —
+    /// the stamp a session's gather compares against — then the segment, <see cref="SegmentBytes"/>.
+    /// </summary>
+    public int MotionHeadStride => 8 + SegmentBytes;
+
+    /// <summary>Byte offset of head <paramref name="head"/> (1-based) inside one hot entry.</summary>
+    public int MotionHeadOffset(int head) => MotionHeadsOffsetInHotEntry + ((head - 1) * MotionHeadStride);
+
+    /// <summary>Byte offset of the first band head inside one hot entry: after the packed state body.</summary>
+    public int MotionHeadsOffsetInHotEntry => HotFixedBytes + SegmentBytes + PackedStateBytes;
+
+    /// <summary>
+    /// Byte offset, inside one hot entry, of the segment a session is sent for head <paramref name="head"/>: the base segment for 0, a band head's for 1 …
+    /// <see cref="MotionHeads"/>.
+    /// </summary>
+    /// <param name="head">The head index.</param>
+    /// <returns>The offset.</returns>
+    public int SegmentOffsetForHead(int head) =>
+        head <= 0 || head > MotionHeads ? SegmentOffsetInHotEntry : MotionHeadOffset(head) + 8;
 
     /// <summary>The archetype's cluster slot count, <c>N</c>.</summary>
     public int SlotCount { get; }

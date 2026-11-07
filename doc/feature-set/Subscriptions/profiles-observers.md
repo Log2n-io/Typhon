@@ -36,7 +36,7 @@ what it holds.
   the next frame; a session's own mask change resets its view.
 - **Refinements**: a **leave radius** (hysteresis — an entity pacing on the boundary never flaps); a **run-time range**
   (`max:` + `ctx.Subscriptions.SetRadius`, no reset); **distance bands** (`.Bands(b => b.Every(2, beyond: 0.5).Every(4, beyond: 0.75))`:
-  far updates every N ticks); **cadence** (`.Every(2 | 4)`: serve the profile one tick in N, replaying missed ticks).
+  far updates every N ticks — and, with `tolerance: k`, far motion re-sent only past k times the archetype's tolerance, encoded once per band); **cadence** (`.Every(2 | 4)`: serve the profile one tick in N, replaying missed ticks).
 
 ## 💻 Usage
 

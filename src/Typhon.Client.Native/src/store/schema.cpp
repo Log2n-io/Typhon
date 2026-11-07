@@ -144,7 +144,7 @@ WorldSchema WorldSchemaFromCatalog(const CatalogPlan& plan)
         if (a->position != nullptr)
         {
             archetype.position = PositionSchema{a->position->moving, a->position->moving && a->position->linear,
-                                                a->position->dims == 3 ? 3 : 2};
+                                                a->position->dims == 3 ? 3 : 2, a->position->ground ? a->position->upAxis : -1};
         }
 
         schema.archetypes.push_back(std::move(archetype));

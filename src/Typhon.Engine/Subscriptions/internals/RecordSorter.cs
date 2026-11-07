@@ -34,6 +34,12 @@ internal struct FrameRecord
     /// <summary>For a state record, the groups it carries as the wire's <c>u8</c> mask (W14); zero otherwise.</summary>
     public byte GroupMask;
 
+    /// <summary>
+    /// For a segment or an enter of a moving entity, the motion head its bytes are read from (#1615): 0 for the base segment, 1 … 3 for a band head — the
+    /// head of the band the session sees the entity in. Fits the struct's padding.
+    /// </summary>
+    public byte SegmentHead;
+
 }
 
 /// <summary>Orders records by netId, which is what the wire's gap encoding requires.</summary>

@@ -316,6 +316,13 @@ TYPHON_API typhon_status typhon_interpolate_quat3(const double* from, const doub
 TYPHON_API typhon_status typhon_motion_evaluate_slot(const typhon_client* client, uint32_t archetype, uint32_t slot, double* out,
                                                      size_t out_len);
 TYPHON_API typhon_status typhon_motion_evaluate_live(const typhon_client* client, uint32_t archetype, double* out, size_t out_len);
+/* A ground-clamped archetype (#1616): a grounded entity's segment carries no height, which the two calls above leave NaN; these fill it from
+ * height_at(a, b, user), the application's terrain at the two horizontal coordinates (the axes other than the catalog's up axis, in order). */
+typedef double (*typhon_height_at)(double a, double b, void* user);
+TYPHON_API typhon_status typhon_motion_evaluate_slot_ground(const typhon_client* client, uint32_t archetype, uint32_t slot, double* out,
+                                                            size_t out_len, typhon_height_at height_at, void* user);
+TYPHON_API typhon_status typhon_motion_evaluate_live_ground(const typhon_client* client, uint32_t archetype, double* out, size_t out_len,
+                                                            typhon_height_at height_at, void* user);
 
 /* Commands: queued (copied), then sent in one batch per rendered frame. */
 /* Asks for one key of an explicit group set, or gives it back (14 § 4, P13); *request_id names its answer. It goes with the next

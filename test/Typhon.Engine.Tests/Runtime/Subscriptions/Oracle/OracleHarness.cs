@@ -358,6 +358,27 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <summary>How many frames were produced across every session.</summary>
     public long FramesProduced => _harness.Assembler.FramesProduced;
 
+    /// <summary>The bytes every session's client has applied: the run's wire cost, as clients measure it.</summary>
+    public long BytesReceived
+    {
+        get
+        {
+            var total = 0L;
+            foreach (var session in _sessions)
+            {
+                total += _harness.Replica(session).BytesApplied;
+            }
+
+            return total;
+        }
+    }
+
+    /// <summary>The creature archetype's replication state: its segment and band head counters.</summary>
+    public ArchetypeReplicationState CreatureReplication => _harness.Replication.ClusterStateAt(_creatureIndex).ReplicationState;
+
+    // The declared bands, for a band's motion tolerance (#1615); empty without bands.
+    private DistanceBand[] _bands = [];
+
     /// <summary>
     /// How many entity-to-entity comparisons the oracle has actually made.
     /// </summary>
@@ -438,6 +459,12 @@ internal sealed unsafe class OracleHarness : IDisposable
             {
                 _budgeted = nearBudget > 0,
             };
+            if (bands != null)
+            {
+                var declared = new BandBuilder();
+                bands(declared);
+                oracle._bands = [.. declared.Bands];
+            }
             if (tags)
             {
                 oracle.EnableTags();
@@ -1059,8 +1086,8 @@ internal sealed unsafe class OracleHarness : IDisposable
             actual = replica.Position(plan, netId);
         }
 
-        var tolerance = moving ? MotionToleranceM : StaticToleranceM;
         double[] truth = [(bounds.Bounds.MinX + bounds.Bounds.MaxX) * 0.5, (bounds.Bounds.MinY + bounds.Bounds.MaxY) * 0.5];
+        var tolerance = moving ? MotionToleranceM + ((BandToleranceAt(session, truth) - 1d) * ProjectionTestSchema.CreatureToleranceM) : StaticToleranceM;
         for (var axis = 0; axis < truth.Length; axis++)
         {
             if (Math.Abs(actual[axis] - truth[axis]) > tolerance)
@@ -1069,6 +1096,32 @@ internal sealed unsafe class OracleHarness : IDisposable
                     + $"server (tolerance {tolerance:F4})");
             }
         }
+    }
+
+    /// <summary>
+    /// The motion tolerance multiplier a session sees an entity at <paramref name="point"/> with (#1615): the band's, measured from the viewpoint pushed
+    /// outward by the anchor's slack and the base tolerance — the anchor trails the viewpoint, so the coarser of the two bands near a boundary is allowed.
+    /// </summary>
+    private double BandToleranceAt(int session, double[] point)
+    {
+        if (_bands.Length == 0)
+        {
+            return 1d;
+        }
+
+        var dx = point[0] - _viewpoints[session].X;
+        var dy = point[1] - _viewpoints[session].Y;
+        var fraction = (Math.Sqrt((dx * dx) + (dy * dy)) + _anchorSlack[session] + MotionToleranceM) / _sessionRadius[session];
+        var multiplier = 1d;
+        foreach (var band in _bands)
+        {
+            if (fraction > band.Beyond)
+            {
+                multiplier = band.Tolerance;
+            }
+        }
+
+        return multiplier;
     }
 
     private static void Check(SessionReplica replica, int session, int plan, string name, uint netId, string field, double expected, double tolerance,

@@ -239,7 +239,25 @@ public sealed class PositionPlan
             // An absolute unit (W5, typhon.3): nothing of the position codec — whose bounds are a realm's — enters the velocity decode.
             Vel = new FieldPlan("velocity", null, position.Vel);
         }
+
+        // The validator refuses anything else; compilation is the decoder's trust boundary all the same.
+        Ground = Moving && Dims == 3 && position.Ground;
+        if (position.Ground && (!Ground || position.Up is < 0 or > 2))
+        {
+            throw new CatalogException(["a ground position is a pos3 motion with an up axis of 0, 1 or 2"]);
+        }
+
+        UpAxis = Ground ? position.Up : -1;
     }
+
+    /// <summary>
+    /// Whether segments are ground-clamped (#1616): each starts with a grounded byte, and a grounded one omits the <see cref="UpAxis"/> of its position and
+    /// velocity — decoded as NaN and 0.
+    /// </summary>
+    public bool Ground { get; }
+
+    /// <summary>For a ground position, the vertical axis a grounded segment omits; -1 otherwise.</summary>
+    public int UpAxis { get; }
 
     /// <summary>Whether segments are replicated (<c>motion</c>) rather than a single position on enter (<c>static</c>).</summary>
     public bool Moving { get; }

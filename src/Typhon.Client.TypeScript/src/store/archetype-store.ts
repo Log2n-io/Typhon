@@ -82,6 +82,8 @@ export class ArchetypeStore {
   readonly hasPosition: boolean;
   /** Position dimensions: 0 when not spatial, else 2 or 3. */
   readonly dims: number;
+  /** For a ground-clamped mover (#1616), the vertical axis whose grounded height is the application's terrain; -1 otherwise. */
+  readonly upAxis: number;
   /** Segments are replicated (`motion`), rather than one position on enter (`static`). */
   readonly moving: boolean;
   /** Segments carry a velocity and are extrapolated; otherwise they are samples, interpolated between. */
@@ -158,6 +160,7 @@ export class ArchetypeStore {
     const position = schema.position;
     this.hasPosition = position !== undefined;
     this.dims = position?.dims ?? 0;
+    this.upAxis = position?.up ?? -1;
     this.moving = position?.kind === 'motion';
     this.linear = this.moving && position?.model !== 'none';
     this.segmentHistory = segmentHistory;
@@ -207,6 +210,16 @@ export class ArchetypeStore {
     const array = index === undefined ? undefined : this.integers[index];
     if (array === undefined || array === null) {
       throw new Error(`Archetype '${this.schema.name}' has no 64-bit field '${name}'`);
+    }
+
+    return array;
+  }
+
+  /** A 64-bit integer field's column, by its index in the schema: the indexed form of {@link field64}. */
+  field64At(index: number): Integer64FieldArray {
+    const array = this.integers[index];
+    if (array === undefined || array === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no 64-bit field #${index}`);
     }
 
     return array;

@@ -136,6 +136,9 @@ void ReadSection(WireReader& r, const SectionPlan& section, std::uint32_t frameT
 // Decodes one numeric value of a byte-aligned field (or list element, or position codec) into `out`: field.components values.
 void ReadNumber(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, double* out, const RealmFrame* frame = nullptr);
 
+// #1616: a grounded segment's position or velocity — every axis of a pos3 or vel3 but `up`, which is NaN for a position and 0 for a velocity.
+void ReadGroundAxes(WireReader& r, const FieldPlan& f, double* out, int up, const RealmFrame* frame = nullptr);
+
 // Decodes a 64-bit integer field (W32) into `out`: field.components bit patterns.
 void ReadInteger64(WireReader& r, const FieldPlan& f, std::uint64_t* out);
 

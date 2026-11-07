@@ -39,6 +39,34 @@ std::uint32_t RunLength(WireReader& r)
     return n;
 }
 
+// #1616: a ground position's p0 and velocity — the grounded byte, then a full pos3 segment's, or, grounded, all but the up axis (height NaN, vertical
+// velocity 0). t0 and the epoch follow, read by the caller. A byte other than 0 or 1 is malformed.
+void ReadGroundHead(WireReader& r, const PositionPlan& position, std::uint32_t tick, double* p, double* v, const RealmFrame* frame)
+{
+    const std::uint8_t grounded = r.U8();
+    if (grounded > 1)
+    {
+        throw Malformed("a ground segment's grounded byte is 0 or 1, not " + std::to_string(grounded));
+    }
+
+    if (grounded == 0)
+    {
+        ReadNumber(r, *position.pos, tick, p, frame);
+        if (position.vel != nullptr)
+        {
+            ReadNumber(r, *position.vel, tick, v);
+        }
+
+        return;
+    }
+
+    ReadGroundAxes(r, *position.pos, p, position.upAxis, frame);
+    if (position.vel != nullptr)
+    {
+        ReadGroundAxes(r, *position.vel, v, position.upAxis);
+    }
+}
+
 // netIds in a run are ascending: each is the previous plus one plus a varu gap, starting from -1.
 std::uint32_t NextNetId(WireReader& r, std::int64_t prev)
 {
@@ -307,14 +335,21 @@ void TickReader::ReadEntities(std::uint32_t tick, TickSink& sink)
             std::uint8_t epoch = 0;
             if (position != nullptr)
             {
-                ReadNumber(r, *position->pos, tick, p, frame);
-                if (position->moving)
+                if (position->ground)
                 {
-                    if (position->vel != nullptr)
+                    ReadGroundHead(r, *position, tick, p, v, frame);
+                }
+                else
+                {
+                    ReadNumber(r, *position->pos, tick, p, frame);
+                    if (position->moving && position->vel != nullptr)
                     {
                         ReadNumber(r, *position->vel, tick, v);
                     }
+                }
 
+                if (position->moving)
+                {
                     t0 = T0(tick, r.U16());
                     epoch = r.U8();
                 }
@@ -342,10 +377,17 @@ void TickReader::ReadEntities(std::uint32_t tick, TickSink& sink)
         for (std::uint32_t n = RunLength(r); n > 0; n--)
         {
             prev = NextNetId(r, prev);
-            ReadNumber(r, *position->pos, tick, p, frame);
-            if (position->vel != nullptr)
+            if (position->ground)
             {
-                ReadNumber(r, *position->vel, tick, v);
+                ReadGroundHead(r, *position, tick, p, v, frame);
+            }
+            else
+            {
+                ReadNumber(r, *position->pos, tick, p, frame);
+                if (position->vel != nullptr)
+                {
+                    ReadNumber(r, *position->vel, tick, v);
+                }
             }
 
             const std::uint32_t t0 = T0(tick, r.U16());

@@ -491,6 +491,17 @@ public static class CatalogValidator
                 problems.Add($"{where} position: kind must be 'motion' or 'static'");
                 break;
         }
+
+        // A ground position (#1616): a pos3 mover whose grounded segments omit one axis. Without ground, up must be absent (0), or two catalogs that mean
+        // the same would hash apart.
+        if (p.Ground && (p.Kind != CatalogPosition.MotionKind || dims != 3 || p.Up is < 0 or > 2))
+        {
+            problems.Add($"{where} position: ground needs a pos3 motion and an up axis of 0, 1 or 2");
+        }
+        else if (!p.Ground && p.Up != 0)
+        {
+            problems.Add($"{where} position: up is only meaningful on a ground position");
+        }
     }
 
     private static void CheckMetric(CatalogMetric m, List<string> problems)

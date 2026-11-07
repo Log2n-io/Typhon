@@ -34,6 +34,16 @@ public sealed class MotionAttribute : Attribute
 
     /// <summary>The heartbeat bounding velocity-rounding drift, seconds; NaN keeps the builder's default (5 s).</summary>
     public double MaxAgeS { get; set; } = double.NaN;
+
+    /// <summary>
+    /// The name of a <see cref="byte"/> (or <see cref="bool"/>) field of this component, non-zero while the entity stands on the ground (#1616,
+    /// <c>.Grounded</c>): grounded segments then omit the <see cref="Up"/> axis and the client derives the height from its terrain. <see langword="null"/>
+    /// for an ordinary motion.
+    /// </summary>
+    public string Grounded { get; set; }
+
+    /// <summary>For a <see cref="Grounded"/> motion, the vertical axis: 0, 1 (the default, y up) or 2.</summary>
+    public int Up { get; set; } = 1;
 }
 
 /// <summary>
@@ -247,4 +257,110 @@ public interface IReplicatedMessage
     /// <summary>The fields whose codec the attributes declare.</summary>
     /// <returns>The declarations, in field order.</returns>
     MessageFieldDeclaration[] ReplicatedFields();
+
+    /// <summary>
+    /// Every public instance field — attributed or not — with the wire name it travels under by default and its CLR type: what a client binds against the
+    /// negotiated catalog to send the struct itself (<see cref="MessageBinding{T}"/>).
+    /// </summary>
+    /// <returns>The layout, in field declaration order; the same array on every call.</returns>
+    MessageFieldLayout[] FieldLayout();
+
+    /// <summary>One field's value, by its index in <see cref="FieldLayout"/>, widened without loss.</summary>
+    /// <param name="index">The field's index in <see cref="FieldLayout"/>.</param>
+    /// <returns>The value.</returns>
+    MessageFieldValue ReadField(int index);
+}
+
+/// <summary>A message field's CLR type, as the typed send path reads it (an enum is its underlying integer type).</summary>
+public enum MessageFieldType : byte
+{
+    /// <summary>A type the typed send path cannot read: a binding that needs the field is refused.</summary>
+    Unsupported,
+
+    /// <summary><see cref="bool"/>.</summary>
+    Bool,
+
+    /// <summary><see cref="sbyte"/>.</summary>
+    SByte,
+
+    /// <summary><see cref="byte"/>.</summary>
+    Byte,
+
+    /// <summary><see cref="short"/>.</summary>
+    Int16,
+
+    /// <summary><see cref="ushort"/>.</summary>
+    UInt16,
+
+    /// <summary><see cref="int"/>.</summary>
+    Int32,
+
+    /// <summary><see cref="uint"/>.</summary>
+    UInt32,
+
+    /// <summary><see cref="long"/>.</summary>
+    Int64,
+
+    /// <summary><see cref="ulong"/>.</summary>
+    UInt64,
+
+    /// <summary><see cref="float"/>.</summary>
+    Single,
+
+    /// <summary><see cref="double"/>.</summary>
+    Double,
+}
+
+/// <summary>One public instance field of a <see cref="ReplicatedMessageAttribute"/> type, as the generator saw it.</summary>
+/// <param name="Field">The CLR field name.</param>
+/// <param name="Name">The wire name it travels under unless a builder call renames it: its attribute's <c>Name</c>, else the field's own.</param>
+/// <param name="Type">Its CLR type.</param>
+/// <param name="IsEnum">Whether the CLR type is an enum (<paramref name="Type"/> is then its underlying type).</param>
+public readonly record struct MessageFieldLayout(string Field, string Name, MessageFieldType Type, bool IsEnum);
+
+/// <summary>
+/// One message field's value, widened without loss: every type up to 32 bits and both floating types as a <see cref="double"/> (exact — a
+/// <see cref="float"/> widens and narrows back to the same bits), a 64-bit integer as its bits.
+/// </summary>
+public readonly struct MessageFieldValue
+{
+    private readonly double _number;
+    private readonly ulong _bits;
+    private readonly byte _kind; // 0 number, 1 signed 64-bit, 2 unsigned 64-bit
+
+    private MessageFieldValue(double number, ulong bits, byte kind)
+    {
+        _number = number;
+        _bits = bits;
+        _kind = kind;
+    }
+
+    /// <summary>A value of 32 bits or fewer, or a floating one.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The field value.</returns>
+    public static MessageFieldValue Of(double value) => new(value, 0, 0);
+
+    /// <summary>A signed 64-bit value.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The field value.</returns>
+    public static MessageFieldValue Of(long value) => new(0, unchecked((ulong)value), 1);
+
+    /// <summary>An unsigned 64-bit value.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The field value.</returns>
+    public static MessageFieldValue Of(ulong value) => new(0, value, 2);
+
+    /// <summary>Whether the value is a 64-bit integer.</summary>
+    public bool IsInteger64 => _kind != 0;
+
+    /// <summary>The value as a number: exact for every type but a 64-bit integer, which rounds as a <c>(double)</c> cast does.</summary>
+    public double Number => _kind switch
+    {
+        0 => _number,
+        1 => unchecked((long)_bits),
+        _ => _bits,
+    };
+
+    /// <summary>A 64-bit integer's bits (two's complement for a signed one); 0 for a number.</summary>
+    public ulong Integer64Bits => _bits;
 }

@@ -31,6 +31,11 @@ public class GoldenMessageTests
             ("catalog-coll", CatalogSamples.Collections(),
                 "Collections (W34) on a public group, an onEnter field and an owner group; elements with a pack (bool, bits), a str, an entityRef, a u64 "
                 + "and an f32 × 2 point, declared out of wire order."),
+            ("catalog-commands", CatalogSamples.Commands(),
+                "The typed send path (#1614): MoveCmd (i8, i8, u8, f32, f32), Probe with every scalar kind a struct field supplies, a latest rate-limited "
+                + "Pulse, Say with a str, Hold's u32, and an archetype with numeric, 64-bit and text columns; declared out of wire order."),
+            ("catalog-ground", CatalogSamples.Ground(),
+                "A ground-clamped walker (#1616): linear pos3 motion whose grounded segments omit the up axis (z), vel3 at 16 bits, one state field."),
         })
         {
             var bytes = CatalogSerializer.ToCanonicalUtf8(catalog);

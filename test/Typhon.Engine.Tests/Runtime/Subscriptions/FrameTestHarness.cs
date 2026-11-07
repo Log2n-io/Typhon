@@ -893,7 +893,11 @@ sealed class SessionReplica
     {
         Events.BeginFrame();
         _applier.Apply(frame);
+        BytesApplied += frame.Length;
     }
+
+    /// <summary>The bytes of every message applied: the wire cost of the session, as a client measures it.</summary>
+    public long BytesApplied { get; private set; }
 
     /// <summary>The netIds the replica holds for an archetype, ascending.</summary>
     /// <param name="archetype">The archetype's wire index.</param>

@@ -45,10 +45,36 @@ public static class CommandsMessage
         w.WriteVaru((uint)commands.Count);
         foreach (var (type, seq, values) in commands)
         {
-            w.WriteVaru((uint)type.Idx);
-            w.WriteU16(seq);
-            FieldCodec.WriteSection(ref w, type.Body, values.For, frame?.ForCommands);
+            WriteCommand(ref w, type, seq, values, frame?.ForCommands);
         }
+    }
+
+    /// <summary>Writes one command of a <c>COMMANDS</c> message — <c>varu cmdTypeIdx | u16 seq | fields</c> — for a caller that writes the header itself.</summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="type">The command type.</param>
+    /// <param name="seq">Its sequence number.</param>
+    /// <param name="values">Its field values, by name.</param>
+    /// <param name="commandFrame">The realm frame at command width (<see cref="RealmFrame.ForCommands"/>), or <see langword="null"/>.</param>
+    public static void WriteCommand(ref WireWriter w, MessagePlan type, ushort seq, RecordValues values, RealmFrame commandFrame)
+    {
+        w.WriteVaru((uint)type.Idx);
+        w.WriteU16(seq);
+        FieldCodec.WriteSection(ref w, type.Body, values.For, commandFrame);
+    }
+
+    /// <summary>Writes one command of a <c>COMMANDS</c> message from its struct, through a <see cref="MessageBinding{T}"/>: no name lookup, no allocation.</summary>
+    /// <typeparam name="T">The command struct.</typeparam>
+    /// <param name="w">The writer.</param>
+    /// <param name="binding">The struct bound to the catalog's command.</param>
+    /// <param name="seq">Its sequence number.</param>
+    /// <param name="command">The command.</param>
+    /// <param name="commandFrame">The realm frame at command width (<see cref="RealmFrame.ForCommands"/>), or <see langword="null"/>.</param>
+    public static void WriteCommand<T>(ref WireWriter w, MessageBinding<T> binding, ushort seq, in T command, RealmFrame commandFrame)
+        where T : unmanaged, IReplicatedMessage
+    {
+        w.WriteVaru((uint)binding.Plan.Idx);
+        w.WriteU16(seq);
+        binding.WriteBody(ref w, command, commandFrame);
     }
 
     /// <summary>Validates, then decodes, a whole <c>COMMANDS</c> message, type byte included.</summary>

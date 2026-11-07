@@ -64,6 +64,11 @@ export interface PositionSchema {
   readonly model?: 'linear' | 'none';
   /** 2 or 3. */
   readonly dims: 2 | 3;
+  /**
+   * For a ground-clamped mover (#1616), the vertical axis a grounded segment omits — its height decodes as NaN, and
+   * `evaluateLive`'s `heightAt` fills it from the application's terrain. Absent otherwise.
+   */
+  readonly up?: number;
 }
 
 export interface ArchetypeSchema {

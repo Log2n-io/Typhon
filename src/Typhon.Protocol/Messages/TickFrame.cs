@@ -487,10 +487,17 @@ public static class TickReader
                 if (position != null)
                 {
                     dims = position.Dims;
-                    FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
-                    if (position.Moving)
+                    if (position.Ground)
                     {
-                        velDims = ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
+                        velDims = ReadGroundSegment(ref r, position, tick, p, v, frame, out t0, out epoch);
+                    }
+                    else
+                    {
+                        FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
+                        if (position.Moving)
+                        {
+                            velDims = ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
+                        }
                     }
                 }
 
@@ -516,8 +523,19 @@ public static class TickReader
             for (var n = ReadRunLength(ref r); n > 0; n--)
             {
                 var netId = NextNetId(ref r, ref prev);
-                FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
-                var velDims = ReadSegmentTail(ref r, position, tick, v, out var t0, out var epoch);
+                uint t0;
+                byte epoch;
+                int velDims;
+                if (position.Ground)
+                {
+                    velDims = ReadGroundSegment(ref r, position, tick, p, v, frame, out t0, out epoch);
+                }
+                else
+                {
+                    FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
+                    velDims = ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
+                }
+
                 sink.Segment(netId, p[..position.Dims], v[..velDims], t0, epoch);
             }
         }
@@ -577,6 +595,38 @@ public static class TickReader
         }
 
         return n;
+    }
+
+    /// <summary>
+    /// A ground position's segment (#1616): the grounded byte, then a full one — or, grounded, one without the up axis, whose height is NaN and vertical
+    /// velocity 0. A byte other than 0 or 1 is malformed.
+    /// </summary>
+    private static int ReadGroundSegment(ref WireReader r, PositionPlan position, uint tick, scoped Span<double> p, scoped Span<double> v, RealmFrame frame,
+        out uint t0, out byte epoch)
+    {
+        var grounded = r.ReadU8();
+        if (grounded > 1)
+        {
+            throw WireFormatException.Malformed($"a ground segment's grounded byte is 0 or 1, not {grounded}");
+        }
+
+        if (grounded == 0)
+        {
+            FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
+            return ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
+        }
+
+        FieldCodec.ReadGroundAxes(ref r, position.Pos, p, position.UpAxis, frame);
+        var velDims = 0;
+        if (position.Linear)
+        {
+            FieldCodec.ReadGroundAxes(ref r, position.Vel, v, position.UpAxis);
+            velDims = position.Dims;
+        }
+
+        t0 = WireMath.DecodeTickLo(r.ReadU16(), tick);
+        epoch = r.ReadU8();
+        return velDims;
     }
 
     private static int ReadSegmentTail(ref WireReader r, PositionPlan position, uint tick, scoped Span<double> v, out uint t0, out byte epoch)
@@ -902,10 +952,17 @@ public static class TickWriter
             WriteGap(ref w, ref prev, e.NetId);
             if (position != null)
             {
-                FieldCodec.WriteNumber(ref w, position.Pos, e.Position, frame);
-                if (position.Moving)
+                if (position.Ground)
                 {
-                    WriteSegmentTail(ref w, frameTick, position, e.Velocity, e.T0, e.Epoch);
+                    WriteGroundSegment(ref w, frameTick, position, e.Position, e.Velocity, e.T0, e.Epoch, frame);
+                }
+                else
+                {
+                    FieldCodec.WriteNumber(ref w, position.Pos, e.Position, frame);
+                    if (position.Moving)
+                    {
+                        WriteSegmentTail(ref w, frameTick, position, e.Velocity, e.T0, e.Epoch);
+                    }
                 }
             }
 
@@ -926,8 +983,15 @@ public static class TickWriter
         foreach (var s in segments)
         {
             WriteGap(ref w, ref prev, s.NetId);
-            FieldCodec.WriteNumber(ref w, position.Pos, s.Position, frame);
-            WriteSegmentTail(ref w, frameTick, position, s.Velocity, s.T0, s.Epoch);
+            if (position.Ground)
+            {
+                WriteGroundSegment(ref w, frameTick, position, s.Position, s.Velocity, s.T0, s.Epoch, frame);
+            }
+            else
+            {
+                FieldCodec.WriteNumber(ref w, position.Pos, s.Position, frame);
+                WriteSegmentTail(ref w, frameTick, position, s.Velocity, s.T0, s.Epoch);
+            }
         }
 
         WriteRunHeader(ref w, states.Count);
@@ -1213,6 +1277,34 @@ public static class TickWriter
 
         var max = kind == CodecKind.F16 ? 65504.0 : float.MaxValue;
         return double.IsNaN(x) ? 0 : x > max ? max : x < -max ? -max : x;
+    }
+
+    // A ground position's segment (#1616): grounded — written without the up axis — when the position's up component is NaN, the form a decoder gives it.
+    private static void WriteGroundSegment(ref WireWriter w, uint frameTick, PositionPlan position, double[] p, double[] velocity, uint t0, byte epoch,
+        RealmFrame frame)
+    {
+        var grounded = double.IsNaN(p[position.UpAxis]);
+        w.WriteU8(grounded ? (byte)1 : (byte)0);
+        if (!grounded)
+        {
+            FieldCodec.WriteNumber(ref w, position.Pos, p, frame);
+            WriteSegmentTail(ref w, frameTick, position, velocity, t0, epoch);
+            return;
+        }
+
+        if (t0 > frameTick || frameTick - t0 >= 65536)
+        {
+            throw new ArgumentException($"segment start tick {t0} is not within the 2¹⁶ ticks before frame tick {frameTick}");
+        }
+
+        FieldCodec.WriteGroundAxes(ref w, position.Pos, p, position.UpAxis, frame);
+        if (position.Linear)
+        {
+            FieldCodec.WriteGroundAxes(ref w, position.Vel, velocity, position.UpAxis);
+        }
+
+        w.WriteU16((ushort)(t0 & 0xFFFF));
+        w.WriteU8(epoch);
     }
 
     private static void WriteSegmentTail(ref WireWriter w, uint frameTick, PositionPlan position, double[] velocity, uint t0, byte epoch)

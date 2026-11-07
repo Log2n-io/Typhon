@@ -3,9 +3,11 @@
 // engine's own encoder; and § 6's motion evaluation, bit for bit.
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <span>
 #include <sstream>
+#include <vector>
 
 #include "apply/frame_applier.hpp"
 #include "golden_support.hpp"
@@ -498,4 +500,42 @@ TEST(Groups_ARecordNamingAnUndeclaredSetIsMalformed)
     FrameApplier applier(plan);
     const auto message = GroupsFrame(1, 0, {{SourceStatus::GroupComplete, static_cast<std::uint32_t>(plan->GroupSets().size()), 1}});
     CHECK_THROWS(WireFormatError, applier.Apply(message));
+}
+
+// #1616: a ground-clamped archetype's grounded segments carry no height. The replica holds NaN there, and EvaluateLive's height callback fills it
+// from the application's terrain - called with the two horizontal axes, x and y when z is up - while an airborne entity evaluates as decoded.
+TEST(GroundMotion_AGroundedHeightComesFromTheTerrainAndAnAirborneOneAsDecoded)
+{
+    const auto plan = PlanOf("catalog-ground");
+    FrameApplier applier(plan);
+    const auto messages = Unframe(GoldenBin("stream-ground"));
+    // After frame 2: walker 1 airborne, walker 2 grounded.
+    applier.Apply(messages[0]);
+    applier.Apply(messages[1]);
+
+    const ArchetypeStore& walkers = applier.World().Archetype(0);
+    CHECK_EQ(walkers.UpAxis(), 2);
+    const auto stride = static_cast<std::size_t>(walkers.MotionStride());
+    std::vector<double> raw(walkers.LiveCount() * stride);
+    std::vector<double> grounded(raw.size());
+    EvaluateLive(walkers, 501, 0.5, raw);
+    EvaluateLive(walkers, 501, 0.5, grounded, [](double x, double y, void*) { return 100 + x + (1000 * y); });
+    for (std::size_t i = 0; i < walkers.LiveCount(); i++)
+    {
+        const std::uint32_t netId = walkers.NetIds()[walkers.Live()[i]];
+        const std::size_t o = i * stride;
+        if (netId == 2)
+        {
+            CHECK(std::isnan(raw[o + 2]));
+            CHECK_EQ(grounded[o + 2], 100 + grounded[o] + (1000 * grounded[o + 1]));
+            CHECK_EQ(grounded[o + 5], 0.0);
+        }
+        else
+        {
+            for (std::size_t k = 0; k < stride; k++)
+            {
+                CHECK_EQ(grounded[o + k], raw[o + k]);
+            }
+        }
+    }
 }

@@ -787,6 +787,43 @@ typhon_status typhon_motion_evaluate_live(const typhon_client* client, uint32_t 
                  });
 }
 
+typhon_status typhon_motion_evaluate_slot_ground(const typhon_client* client, uint32_t archetype, uint32_t slot, double* out, size_t out_len,
+                                                 typhon_height_at height_at, void* user)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     capi::RequireOut(out);
+                     const ArchetypeStore& s = capi::StoreOf(client, archetype);
+                     if (!s.IsLive(slot))
+                     {
+                         throw std::invalid_argument("slot " + std::to_string(slot) + " is not live");
+                     }
+
+                     const Clock& clock = *const_cast<typhon_client*>(client)->client->RenderClock();
+                     EvaluateSlot(s, slot, clock.RenderTick(), clock.RenderFrac(), {out, out_len}, height_at, user);
+                     return TYPHON_OK;
+                 });
+}
+
+typhon_status typhon_motion_evaluate_live_ground(const typhon_client* client, uint32_t archetype, double* out, size_t out_len,
+                                                 typhon_height_at height_at, void* user)
+{
+    return Guard(const_cast<typhon_client*>(client),
+                 [&]
+                 {
+                     const ArchetypeStore& s = capi::StoreOf(client, archetype);
+                     if (out == nullptr && s.LiveCount() > 0)
+                     {
+                         throw std::invalid_argument("a null output buffer");
+                     }
+
+                     const Clock& clock = *const_cast<typhon_client*>(client)->client->RenderClock();
+                     EvaluateLive(s, clock.RenderTick(), clock.RenderFrac(), {out, out_len}, height_at, user);
+                     return TYPHON_OK;
+                 });
+}
+
 namespace {
 
 typhon_status Subscribe(typhon_client* client, uint32_t set, int64_t key, uint16_t* requestId, std::uint8_t op)

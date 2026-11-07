@@ -1,0 +1,5 @@
+{
+  "description": "A ground-clamped walker (#1616): linear pos3 motion whose grounded segments omit the up axis (z), vel3 at 16 bits, one state field.",
+  "hash": "8b28bd147dfaa5f8",
+  "byteCount": 527
+}

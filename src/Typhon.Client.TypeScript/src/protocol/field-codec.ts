@@ -203,6 +203,64 @@ export function readNumber(
   }
 }
 
+/**
+ * Decodes a grounded segment's position or velocity (#1616) into `out[offset .. offset + 3)`: every axis of a `pos3` or
+ * `vel3` but `up`, which is NaN for a position and 0 for a velocity — the client derives the height from its terrain.
+ */
+export function readGroundAxes(
+  r: WireReader,
+  f: FieldPlan,
+  out: Float64Array,
+  offset: number,
+  up: number,
+  frame: RealmFrame | null = null,
+): void {
+  const position = f.kind === CodecKind.Pos3;
+  if (position && frame === null) {
+    throw noRealm(f);
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const at = offset + i;
+    if (i === up) {
+      out[at] = position ? NaN : 0;
+    } else if (position) {
+      r.unsignedInto(frame!.positionBits, out, at);
+      out[at] = frame!.min[i]! + out[at]! * frame!.step[i]!;
+    } else {
+      r.signedInto(f.bits, out, at);
+      const q = out[at]!;
+      out[at] = (q < -f.limit ? -f.limit : q) * f.velocityUnit;
+    }
+  }
+}
+
+/** Encodes a grounded segment's position or velocity (#1616): every axis but `up`. */
+export function writeGroundAxes(
+  w: WireWriter,
+  f: FieldPlan,
+  c: ArrayLike<number>,
+  up: number,
+  frame: RealmFrame | null = null,
+): void {
+  const position = f.kind === CodecKind.Pos3;
+  if (position && frame === null) {
+    throw new Error(`position '${f.name}' is realm-framed (typhon.3) and no realm frame was given to encode it over`);
+  }
+
+  for (let i = 0; i < 3; i++) {
+    if (i === up) {
+      continue;
+    }
+
+    if (position) {
+      w.bits(encodeQuant(c[i]!, frame!.min[i]!, frame!.step[i]!, frame!.top), frame!.positionBits);
+    } else {
+      w.bits(encodeVel(c[i]!, f.velocityUnit, f.limit), f.bits);
+    }
+  }
+}
+
 /** Decodes a 64-bit integer field (W32) into `out[at ..]` as lo/hi words, one pair per component. */
 export function readInteger64(r: WireReader, f: FieldPlan, out: Uint32Array, at: number): void {
   for (let i = 0; i < f.components; i++) {
@@ -438,7 +496,71 @@ export function writeSection(
 
   for (let i = section.packedCount; i < fields.length; i++) {
     const f = fields[i]!;
-    const value = ownValue(values, f.name);
+    writeFieldValue(w, f, ownValue(values, f.name), strictEnums, frame);
+  }
+}
+
+/**
+ * The code a packed field (`bool`, `bits`) stores for `value`, as {@link writeSection} computes it: a `bits` value must be
+ * an integer in range and, with `strictEnums`, within its enum's names. Generated command encoders call it (#1614).
+ */
+export function packedCode(f: FieldPlan, value: number | boolean, strictEnums = true): number {
+  const v = typeof value === 'boolean' ? (value ? 1 : 0) : value;
+  if (f.kind === CodecKind.Bool) {
+    return v !== 0 ? 1 : 0;
+  }
+
+  const code = toUnsigned(v, (1 << f.bitCount) - 1, f);
+  if (strictEnums) {
+    refuseEnum(f, code);
+  }
+
+  return code;
+}
+
+/**
+ * Encodes one scalar numeric value of a byte-aligned field — a `count` of 1, no shape — from `source[at]`, exactly as
+ * {@link writeSection} does. Generated command encoders call it (#1614) with a scratch `Float64Array`: a number passed as
+ * an argument to a call that is not inlined is boxed, a number read from a typed array is not.
+ */
+export function writeNumberValue(
+  w: WireWriter,
+  f: FieldPlan,
+  source: Float64Array,
+  at: number,
+  strictEnums = true,
+): void {
+  if (f.components !== 1 || f.valueKind !== ValueKind.Number) {
+    throw new RangeError(`field '${f.name}' is not a scalar number`);
+  }
+
+  if (strictEnums && f.enumNames !== null) {
+    refuseEnum(f, source[at]!);
+  }
+
+  // The floating codecs read the value inside the writer, so a fractional number never crosses a call; an integer codec's value is a small
+  // integer, which crosses unboxed. (A u32 past 2^30 and the quantizing codecs still box once per value: their arithmetic takes a double.)
+  if (f.kind === CodecKind.F32) {
+    w.f32At(source, at);
+  } else if (f.kind === CodecKind.F64) {
+    w.f64At(source, at);
+  } else {
+    writeScalar(w, f, source[at]!);
+  }
+}
+
+/**
+ * Encodes one byte-aligned field of a section from its value — the per-field step of {@link writeSection}, for a caller
+ * that walks the fields itself (a generated command encoder, for the fields it does not specialize).
+ */
+export function writeFieldValue(
+  w: WireWriter,
+  f: FieldPlan,
+  value: FieldValue | undefined,
+  strictEnums = false,
+  frame: RealmFrame | null = null,
+): void {
+  {
     switch (f.valueKind) {
       case ValueKind.Number:
         if (strictEnums && f.enumNames !== null) {

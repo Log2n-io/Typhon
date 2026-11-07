@@ -38,9 +38,40 @@ export class WireWriter {
     this.pos = 0;
   }
 
-  /** A view of the bytes written so far; valid until the next write or {@link reset}. */
+  /** Rewinds to `position`, dropping what was written after it (a partly written record that failed). */
+  truncate(position: number): void {
+    if (!(position >= 0 && position <= this.pos)) {
+      throw new RangeError(`cannot truncate to ${position}: ${this.pos} B written`);
+    }
+
+    this.pos = position;
+  }
+
+  /**
+   * A view of the bytes written so far; valid until the next write or {@link reset}. The same view object is handed back
+   * while the length and the backing array are unchanged, so a sender writing same-sized messages each frame — the usual
+   * case for a client's commands — allocates no view per message.
+   */
   written(): Uint8Array {
-    return this.buffer.subarray(0, this.pos);
+    const last = this.lastWritten;
+    if (last !== null && last.length === this.pos && last.buffer === this.buffer.buffer) {
+      return last;
+    }
+
+    return (this.lastWritten = this.buffer.subarray(0, this.pos));
+  }
+
+  private lastWritten: Uint8Array | null = null;
+
+  /** Appends `source[start .. end)`, without the view a {@link raw} of a sub-range would need. */
+  rawRange(source: Uint8Array, start: number, end: number): void {
+    const count = end - start;
+    this.ensure(count);
+    for (let i = 0; i < count; i++) {
+      this.buffer[this.pos + i] = source[start + i]!;
+    }
+
+    this.pos += count;
   }
 
   /** A copy of the bytes written so far. */
@@ -161,6 +192,33 @@ export class WireWriter {
     }
 
     this.varu64Words(zlo, zhi);
+  }
+
+  /** {@link f32} of `source[at]`, read here: a double passed to a call that is not inlined is boxed, one in a typed array is not. */
+  f32At(source: Float64Array, at: number): void {
+    this.ensure(4);
+    const value = source[at]!;
+    if (value !== value) {
+      this.view.setUint32(this.pos, 0x7fc00000, true);
+    } else {
+      this.view.setFloat32(this.pos, value, true);
+    }
+
+    this.pos += 4;
+  }
+
+  /** {@link f64} of `source[at]`, read here (see {@link f32At}). */
+  f64At(source: Float64Array, at: number): void {
+    this.ensure(8);
+    const value = source[at]!;
+    if (value !== value) {
+      this.view.setUint32(this.pos, 0, true);
+      this.view.setUint32(this.pos + 4, 0x7ff80000, true);
+    } else {
+      this.view.setFloat64(this.pos, value, true);
+    }
+
+    this.pos += 8;
   }
 
   /**

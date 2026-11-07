@@ -18,6 +18,12 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON011 | Error | Component struct's managed and marshalled layouts differ (`bool` / `char`) — the schema cannot describe it correctly |
 | TYPHON012 | Error | Non-readonly member of `EntityRef` / `EntityRefMut` called on a read-only receiver — a hidden ~200-byte defensive copy |
 | TYPHON014 | Error | A type inferred to own a must-dispose resource, or to hold a no-copy struct, is not marked `[MustDispose]` / `[NoCopy]` |
+| TYPHON015 | Warning | A command sent by name (`TyphonClient.SendCommandAsync("MoveCmd", values)`) while its `[ReplicatedMessage]` struct is in reach — send it typed with `Enqueue(in cmd)` (#1614) |
+
+TYPHON015 binds on `Typhon.Client.TyphonClient`, so it does nothing in the engine; a client or bot project gets it by referencing this project as an
+analyzer (`OutputItemType="Analyzer" ReferenceOutputAssembly="false"`). It fires only when the name — a literal or a `nameof` — is that of a
+`[ReplicatedMessage]` struct in the compilation or an assembly it references, so built-ins (`ClientRegion`) and commands with no contracts struct on
+the client's side stay on the name-keyed path silently.
 
 ## Ownership: which types the rules track (#1538)
 

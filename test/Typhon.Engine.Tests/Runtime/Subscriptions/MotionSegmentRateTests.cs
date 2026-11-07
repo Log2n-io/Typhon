@@ -122,6 +122,84 @@ unsafe class MotionSegmentRateTests : TestBase<MotionSegmentRateTests>
         });
     }
 
+    /// <summary>
+    /// #1615: band heads refit less often the coarser their tolerance. On a steady arc the extrapolation error grows with the square of the time since the
+    /// last segment, so the refit interval grows with the square root of the tolerance: a ×4 head refits about half as often as the base segment, a ×16 one
+    /// about a quarter — what a session seeing the entity in such a band is sent, against what a near one is.
+    /// </summary>
+    [Test]
+    public void BandHeadsRefitLessOftenTheCoarserTheyAre()
+    {
+        using var harness = FrameHarness.Create(
+            ProjectionTestSchema.SetupEngine(ServiceProvider),
+            subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile(Profile, p => p.Sphere(200).Bands(b => b.Every(1, beyond: 0.3, tolerance: 4).Every(2, beyond: 0.6, tolerance: 16))
+                    .Of<ProjCreature>());
+            },
+            nameof(BandHeadsRefitLessOftenTheCoarserTheyAre));
+
+        Populate(harness);
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.RunFence = true;
+        harness.RunTick(1);
+        harness.Deliver(session);
+
+        var state = harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjCreature))];
+        var baseBefore = state.SegmentsEmitted;
+        var x4Before = state.HeadCopies(1);
+        var x16Before = state.HeadCopies(2);
+        for (var tick = 2L; tick <= Ticks + 1; tick++)
+        {
+            AdvanceOnArc(harness, tick);
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        var baseCount = state.SegmentsEmitted - baseBefore;
+        var x4 = state.HeadCopies(1) - x4Before;
+        var x16 = state.HeadCopies(2) - x16Before;
+        TestContext.Out.WriteLine($"over {Ticks} ticks on a {ArcRadiusM} m arc: base {baseCount}, ×4 head {x4} ({100d * x4 / baseCount:F0} %), "
+            + $"×16 head {x16} ({100d * x16 / baseCount:F0} %)");
+        Assert.Multiple(() =>
+        {
+            Assert.That(baseCount, Is.GreaterThan(Creatures * 10), "the arc emitted too few base segments to compare against");
+            Assert.That(x4, Is.LessThan(baseCount * 0.7), "a ×4 head refit nearly as often as the base segment");
+            Assert.That(x16, Is.LessThan(x4 * 0.7), "a ×16 head refit nearly as often as a ×4 one");
+            Assert.That(x16, Is.GreaterThan(0), "the ×16 head never refit: the arc did not exercise it");
+        });
+    }
+
+    /// <summary>The arc's radius: a creature walking at <see cref="SpeedMps"/> turns through it continuously, the case where a coarser tolerance pays.</summary>
+    private const double ArcRadiusM = 20d;
+
+    private static void AdvanceOnArc(FrameHarness harness, long tick)
+    {
+        var angle = tick * (SpeedMps / TickHz) / ArcRadiusM;
+        using var tx = harness.Engine.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        var index = 0;
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                var x = (float)(100d + (index * 50d) + (ArcRadiusM * Math.Cos(angle)));
+                var y = (float)(100d + (ArcRadiusM * Math.Sin(angle)));
+                index++;
+                cluster.WriteSpatial(
+                    ProjCreature.Bounds,
+                    slot,
+                    new ProjBounds { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x + 1f, MaxY = y + 1f }, Speed = (float)SpeedMps });
+            }
+        }
+
+        tx.Commit();
+    }
+
     private static void Populate(FrameHarness harness)
     {
         using var tx = harness.Engine.CreateQuickTransaction();

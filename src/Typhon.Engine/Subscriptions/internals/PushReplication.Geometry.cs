@@ -191,6 +191,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         public readonly int N1, N2, N3;
         public readonly int W1, W2, W3;
 
+        /// <summary>Each band's motion head (#1615): 0 for the base segment, 1 … 3 for a band head.</summary>
+        public readonly byte H1, H2, H3;
+
         public Ball(double x, double y, double z, double r) : this(x, y, z, r, default)
         {
         }
@@ -212,7 +215,23 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             W1 = bands.W1;
             W2 = bands.W2;
             W3 = bands.W3;
+            H1 = bands.H1;
+            H2 = bands.H2;
+            H3 = bands.H3;
         }
+
+        /// <summary>Whether any band serves a coarser motion head (#1615).</summary>
+        public bool HasHeads => (H1 | H2 | H3) != 0;
+
+        /// <summary>A band's motion head: 0 — the base segment — for the near band and a band at the archetype's own tolerance.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int HeadOf(int band) => band switch
+        {
+            0 => 0,
+            1 => H1,
+            2 => H2,
+            _ => H3,
+        };
 
         /// <summary>The innermost boundary squared: inside it every entity is near. <see cref="R2"/> without bands.</summary>
         public double Inner2 => BandCount > 0 ? B1 : R2;
@@ -929,6 +948,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         float ox, float oy, float oz, float nx, float ny, float nz, bool maskChanged = false)
     {
         var groups = 0;
+        var headChanged = false;
         if (hot != null && (uint)archetype < (uint)_encodePlans.Length)
         {
             var plan = _encodePlans[archetype];
@@ -937,6 +957,10 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 flags |= PushEvent.Segment;
             }
+
+            // A band head that changed this tick (#1615) is news to the sessions of its band even when the base segment did not move: the event stays, so
+            // the gather, the fold and a catch-up meet it. It sets no Segment flag — the base segment's sessions have nothing new.
+            headChanged = plan.Moving && HeadsSince(archetype, (byte*)hot, tick - 1);
 
             for (var g = 0; g < plan.GroupCount; g++)
             {
@@ -965,7 +989,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
         var arrived = (flags & PushEvent.Arrived) != 0;
         flags &= unchecked((byte)~PushEvent.Arrived);
-        if (!arrived && !maskChanged && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged)) == both && groups == 0 && ox == nx && oy == ny
+        if (!arrived && !maskChanged && !headChanged && (flags & (both | PushEvent.Segment | PushEvent.KeyChanged)) == both && groups == 0 && ox == nx && oy == ny
             && (!TEvent.Deep || oz == nz))
         {
             // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
@@ -2334,7 +2358,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         if (!tagged || Sees(slotIndex, tagsIs))
                         {
                             EmitUpdateLod(ref e, e.OldX, e.OldY, e.OldZ, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, in aBall,
-                                in nBall, lod, scratch, ref updates);
+                                in nBall, lod, scratch, ref updates, since: tick - 1);
                         }
 
                         continue;
@@ -2362,13 +2386,17 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         if (!was)
                         {
                             scratch.Add(e.Archetype, FrameListKind.Enter,
-                                new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
+                                new FrameRecord
+                                {
+                                    NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype,
+                                    SegmentHead = HeadAt(in nBall, e.Archetype, e.NewX, e.NewY, e.NewZ),
+                                });
                             enters++;
                         }
                         else
                         {
                             EmitUpdateLod(ref e, e.OldX, e.OldY, e.OldZ, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, in aBall,
-                                in nBall, lod, scratch, ref updates);
+                                in nBall, lod, scratch, ref updates, since: tick - 1);
                         }
                     }
                     else if (was)
@@ -2418,6 +2446,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             // Distance LOD: the inner crescent. A held entity the anchor's move brought inward across a band's boundary may have changes it was never
             // sent — they wait for a flush of its old band, which its new band does not share — so it gets them now. One with an event since the last
             // frame is the event's. A cell wholly in the last band now, or wholly near before, holds no such entity.
+            var heads = aBall.HasHeads || nBall.HasHeads;
             for (var lz = 0; lod && lz < planes; lz++)
             {
                 for (var ly = 0; ly < Window; ly++)
@@ -2436,7 +2465,12 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                             continue;
                         }
 
-                        if (CellMin2(nBall, cx, cy, cz) > nBall.Outer2 || CellMax2(aBall, cx, cy, cz) <= aBall.Inner2)
+                        // With band heads (#1615) an entity carried OUTWARD into a coarser head needs that head's segment too: only a cell in one band
+                        // throughout — near before and now, or past the last boundary before and now — holds nobody to tell.
+                        if (heads
+                                ? (CellMax2(aBall, cx, cy, cz) <= aBall.Inner2 && CellMax2(nBall, cx, cy, cz) <= nBall.Inner2)
+                                    || (CellMin2(aBall, cx, cy, cz) > aBall.Outer2 && CellMin2(nBall, cx, cy, cz) > nBall.Outer2)
+                                : CellMin2(nBall, cx, cy, cz) > nBall.Outer2 || CellMax2(aBall, cx, cy, cz) <= aBall.Inner2)
                         {
                             continue;
                         }
@@ -3024,9 +3058,17 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             if (!entry.Real)
             {
                 var bandBefore = a.BandOf(entry.OldX, entry.OldY, entry.OldZ);
-                if (lod && was && isIn && bandBefore > 0 && n.BandOf(e.NewX, e.NewY, e.NewZ) >= bandBefore)
+                var bandNow = n.BandOf(e.NewX, e.NewY, e.NewZ);
+                if (lod && was && isIn && bandBefore > 0 && bandNow >= bandBefore)
                 {
-                    EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, entry.FlushGroups, entry.FlushSegment, scratch, ref updates);
+                    // The session's segment is its band's head (#1615): what changed in it since the session's last frame. A crossing outward into a
+                    // coarser head is the anchor's, and a flush stamps no event, so the crescent sweep sends that head's segment — sending it here too would
+                    // put two segment records of one entity in the frame.
+                    var head = HeadFor(e.Archetype, n.HeadOf(bandNow));
+                    var segment = head == 0
+                        ? entry.FlushSegment
+                        : head == HeadFor(e.Archetype, a.HeadOf(bandBefore)) && MotionStamp(e.Archetype, e.Block, e.Slot, head) >= table.First;
+                    EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, entry.FlushGroups, segment, scratch, ref updates, head);
                 }
 
                 continue;
@@ -3034,14 +3076,18 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
             if (isIn && !was)
             {
-                scratch.Add(e.Archetype, FrameListKind.Enter, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
+                scratch.Add(e.Archetype, FrameListKind.Enter,
+                    new FrameRecord
+                    {
+                        NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype, SegmentHead = HeadAt(in n, e.Archetype, e.NewX, e.NewY, e.NewZ),
+                    });
                 enters++;
             }
             else if (isIn)
             {
                 var flushFlags = entry.Flushed ? (byte)(PushEvent.FarFlush | (entry.FlushSegment ? PushEvent.FlushSegment : 0)) : (byte)0;
                 EmitUpdateLod(ref e, entry.OldX, entry.OldY, entry.OldZ, entry.Groups, entry.Segment, entry.FlushGroups, flushFlags, in a, in n, lod,
-                    scratch, ref updates, live: false);
+                    scratch, ref updates, live: false, since: table.First - 1);
             }
             else if (was)
             {
@@ -3057,20 +3103,28 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     /// so changes withheld in its old band may be missing). Of <c>flags</c> only <see cref="PushEvent.FarFlush"/> and <see cref="PushEvent.FlushSegment"/>
     /// are read. <paramref name="live"/> is this tick's event; a catch-up's union has no single flush tick, so it sends every flushed group.
     /// </summary>
+    /// <remarks>
+    /// <b>Band heads (#1615).</b> A session that sees the entity in a band with a coarser motion tolerance holds that band's head, never the base segment: its
+    /// segment is the head's, sent when the head changed since <paramref name="since"/>, and at once — whatever the band's period — when the entity went
+    /// outward into a coarser head, because the finer segment the client holds would otherwise drift unchecked: the coarser head refits against its own.
+    /// </remarks>
     private void EmitUpdateLod(ref TEvent e, float oldX, float oldY, float oldZ, int groups, bool segment, int flushGroups, byte flags, in Ball a, in Ball n,
-        bool lod, FrameWorkerScratch scratch, ref long updates, bool live = true)
+        bool lod, FrameWorkerScratch scratch, ref long updates, bool live = true, uint since = 0)
     {
+        var head = 0;
         if (lod)
         {
             var bandNow = n.BandOf(e.NewX, e.NewY, e.NewZ);
             var bandBefore = a.BandOf(oldX, oldY, oldZ);
+            head = HeadFor(e.Archetype, n.HeadOf(bandNow));
+            var outward = head != 0 && head != HeadFor(e.Archetype, a.HeadOf(bandBefore)) && bandNow > bandBefore;
             if (bandNow < bandBefore)
             {
                 var plan = _encodePlans[e.Archetype];
                 groups = (1 << plan.GroupCount) - 1;
                 segment = plan.Moving;
             }
-            else if (bandBefore > 0)
+            else if (bandBefore > 0 && a.EveryOf(bandBefore) > 1)
             {
                 // Outward or in place: the old band's period, the more frequent of the two, is the schedule every change so far was held to; its window is
                 // the history the flush carries.
@@ -3078,6 +3132,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 if ((flags & PushEvent.FarFlush) == 0 || (live && ((e.NetId % (uint)every) + (_tick % (uint)every)) % (uint)every != 0))
                 {
                     scratch.Deferred++;
+                    if (outward)
+                    {
+                        EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, 0, true, scratch, ref updates, head);
+                    }
+
                     return;
                 }
 
@@ -3085,18 +3144,25 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 segment = (flags & PushEvent.FlushSegment) != 0;
                 if (live)
                 {
-                    FlushSince(ref e, WindowFloor(_tick, a.WindowOf(bandBefore)), ref groups, ref segment);
-
-                    // Nothing stamped in the window — an arrival that changed no byte, flagged by an older change: there is no record to send.
-                    if (groups == 0 && !segment)
-                    {
-                        return;
-                    }
+                    FlushSince(ref e, WindowFloor(_tick, a.WindowOf(bandBefore)), ref groups, ref segment, head);
                 }
+
+                segment |= outward;
+
+                // Nothing stamped in the window — an arrival that changed no byte, flagged by an older change: there is no record to send.
+                if (live && groups == 0 && !segment)
+                {
+                    return;
+                }
+            }
+            else if (head != 0)
+            {
+                // Sent every tick (near before, or a band that only coarsens motion): the groups as they are, the segment when the band's head moved.
+                segment = outward || MotionStamp(e.Archetype, e.Block, e.Slot, head) > since;
             }
         }
 
-        EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, groups, segment, scratch, ref updates);
+        EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, groups, segment, scratch, ref updates, head);
     }
 
     /// <summary>The tick a window of <paramref name="ticks"/> ending at <paramref name="tick"/> starts after, wrap-safe: 0 in the run's first ticks.</summary>
@@ -3108,10 +3174,16 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     /// stamped in its last N ticks — the rest went out in its previous flushes.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void FlushSince(ref TEvent e, uint since, ref int groups, ref bool segment)
+    private void FlushSince(ref TEvent e, uint since, ref int groups, ref bool segment, int head = 0)
     {
         if (e.Block == 0 || FarWindow <= 1)
         {
+            // No window to narrow to; a band head's flush is still its own stamp's (#1615).
+            if (head != 0)
+            {
+                segment = MotionStamp(e.Archetype, e.Block, e.Slot, head) > since;
+            }
+
             return;
         }
 
@@ -3126,7 +3198,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             }
         }
 
-        segment &= plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > since;
+        // A band head is its own stamp, not the base segment's (#1615): the fold flags a flush for either.
+        segment = head == 0 ? segment && plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > since : MotionStamp(e.Archetype, e.Block, e.Slot, head) > since;
     }
 
     /// <summary>Distance LOD: this tick's flush entries in the sphere, to a session that held the entity before this frame and holds it in a band now.</summary>
@@ -3173,6 +3246,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                 var band = Math.Max(bandBefore, 1);
                 var every = a.EveryOf(band);
+
+                // A band that only coarsens motion holds nothing back: there is nothing to flush (#1615).
+                if (every == 1)
+                {
+                    continue;
+                }
+
                 if (((f.NetId % (uint)every) + (_tick % (uint)every)) % (uint)every != 0)
                 {
                     continue;
@@ -3180,10 +3260,18 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                 var groups = (int)f.FlushGroups;
                 var segment = (f.Flags & PushEvent.FlushSegment) != 0;
-                FlushSince(ref f, WindowFloor(_tick, a.WindowOf(band)), ref groups, ref segment);
+                var head = HeadFor(f.Archetype, n.HeadOf(bandNow));
+                FlushSince(ref f, WindowFloor(_tick, a.WindowOf(band)), ref groups, ref segment, head);
+
+                // Carried outward into a coarser head by the anchor (#1615): the crescent sweep sends that head's segment; this sends the groups.
+                if (head != 0 && bandNow > bandBefore && head != HeadFor(f.Archetype, a.HeadOf(bandBefore)))
+                {
+                    segment = false;
+                }
+
                 if (groups != 0 || segment)
                 {
-                    EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, groups, segment, scratch, ref updates);
+                    EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, groups, segment, scratch, ref updates, head);
                 }
             }
         }
@@ -3202,9 +3290,15 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             return;
         }
 
-        // A box wholly in the last band now, or wholly near before, holds nobody who came inward.
+        // A box wholly in the last band now, or wholly near before, holds nobody who came inward. With band heads (#1615) an outward crossing counts as well,
+        // and only a box in one band throughout — near before and now, or past the last boundary before and now — holds nobody.
         var nearN = Math.Sqrt(n.Outer2);
         var nearA = Math.Sqrt(a.Inner2);
+        var heads = a.HasHeads || n.HasHeads;
+        var innerA = Math.Sqrt(a.Inner2);
+        var innerN = Math.Sqrt(n.Inner2);
+        var outerA = Math.Sqrt(a.Outer2);
+        var outerN = Math.Sqrt(n.Outer2);
         foreach (var arch in _pushIndices)
         {
             if (!archetypes.Contains(arch))
@@ -3243,8 +3337,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
                 // A box wholly past the outermost boundary of the new anchor, or wholly within the innermost of the old one, holds nobody who came inward.
                 if (!double.IsInfinity(bx0) && !double.IsInfinity(bx1) && (!hasZ || (!double.IsInfinity(bz0) && !double.IsInfinity(bz1)))
-                    && (BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (nearN + margin) * (nearN + margin)
-                        || (nearA > margin && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (nearA - margin) * (nearA - margin))))
+                    && (heads
+                        ? (innerA > margin && innerN > margin && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (innerA - margin) * (innerA - margin)
+                                && BoxMax2(n, bx0, by0, bz0, bx1, by1, bz1) <= (innerN - margin) * (innerN - margin))
+                            || (BoxMin2(a, bx0, by0, bz0, bx1, by1, bz1) > (outerA + margin) * (outerA + margin)
+                                && BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (outerN + margin) * (outerN + margin))
+                        : BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (nearN + margin) * (nearN + margin)
+                            || (nearA > margin && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (nearA - margin) * (nearA - margin))))
                 {
                     continue;
                 }
@@ -3280,7 +3379,19 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
 
                     var bandBefore = a.BandOf(px, py, pz);
-                    if (n.BandOf(px, py, pz) >= bandBefore || !SeesNow(local, arch, (nint)block, slot))
+                    var bandNow = n.BandOf(px, py, pz);
+                    var headNow = HeadFor((ushort)arch, n.HeadOf(bandNow));
+                    var headBefore = HeadFor((ushort)arch, a.HeadOf(bandBefore));
+                    if (bandNow > bandBefore && headNow != 0 && headNow != headBefore && Within(n, px, py, pz) && SeesNow(local, arch, (nint)block, slot))
+                    {
+                        // Carried outward into a coarser head (#1615): the client holds a finer segment the coarser head never measures against, so it is
+                        // given the head's now. Always: equal bytes now say nothing of what the client holds, which is the finer head as of its last frame
+                        // — or older, in a band with a period.
+                        EmitRecord(hot->NetId, (nint)block, (byte)slot, (ushort)arch, 0, true, scratch, ref updates, headNow);
+                        continue;
+                    }
+
+                    if (bandNow >= bandBefore || !SeesNow(local, arch, (nint)block, slot))
                     {
                         continue;
                     }
@@ -3299,8 +3410,16 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     }
 
                     Interlocked.Increment(ref FarCrescentStates);
-                    EmitRecord(hot->NetId, (nint)block, (byte)slot, (ushort)arch, groups, plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo,
-                        scratch, ref updates);
+
+                    // Inward into a finer head (#1615), the client holds a coarser segment: the finer head's is sent whatever its stamp.
+                    var moved = headNow == 0 ? hot->GroupTicks[plan.MotionTickSlot] > lo
+                        : headNow != headBefore || MotionTracker.HeadStamp(in layout, (byte*)hot, headNow) > lo;
+                    if (headNow == 0 && headBefore != 0)
+                    {
+                        moved = true;
+                    }
+
+                    EmitRecord(hot->NetId, (nint)block, (byte)slot, (ushort)arch, groups, plan.Moving && moved, scratch, ref updates, headNow);
                 }
             }
         }
@@ -3468,7 +3587,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         }
                     }
 
-                    var segment = plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo;
+                    // A band head that changed in the window is news to its band's sessions (#1615): FlushSince narrows the flag to each session's head.
+                    var segment = plan.Moving && (hot->GroupTicks[plan.MotionTickSlot] > lo || HeadsSince(e.Archetype, (byte*)hot, lo));
                     if (groups == 0 && !segment)
                     {
                         continue;
@@ -3708,12 +3828,54 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     // ══ Records, cell delivery and sweep ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+    // ── Band motion heads (#1615) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>The head a session is served for an archetype: the band's, or the base segment's when the archetype does not move or keeps no heads.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void EmitRecord(uint netId, nint block, byte slot, ushort archetype, int groups, bool segment, FrameWorkerScratch scratch, ref long updates)
+    private int HeadFor(ushort archetype, int head) =>
+        head == 0 || !_encodePlans[archetype].Moving || head > _states[archetype].Layout.MotionHeads ? 0 : head;
+
+    /// <summary>The head of the band a point is in, for an enter record.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private byte HeadAt(in Ball n, ushort archetype, double x, double y, double z) =>
+        n.HasHeads ? (byte)HeadFor(archetype, n.HeadOf(n.BandOf(x, y, z))) : (byte)0;
+
+    /// <summary>The tick a session served at <paramref name="head"/> compares against: the base segment's for 0, the band head's change tick otherwise.</summary>
+    private uint MotionStamp(ushort archetype, nint block, byte slot, int head)
+    {
+        if (block == 0)
+        {
+            return 0;
+        }
+
+        var layout = _states[archetype].Layout;
+        var hot = (byte*)block + layout.HotOffset + (slot * layout.HotStride);
+        return head == 0 ? ((ReplicationHotEntry*)hot)->GroupTicks[_encodePlans[archetype].MotionTickSlot] : MotionTracker.HeadStamp(in layout, hot, head);
+    }
+
+    /// <summary>Whether any band head of the entry changed after <paramref name="since"/>.</summary>
+    private bool HeadsSince(int archetype, byte* hot, uint since)
+    {
+        var layout = _states[archetype].Layout;
+        for (var h = 1; h <= layout.MotionHeads; h++)
+        {
+            if (MotionTracker.HeadStamp(in layout, hot, h) > since)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EmitRecord(uint netId, nint block, byte slot, ushort archetype, int groups, bool segment, FrameWorkerScratch scratch, ref long updates,
+        int head = 0)
     {
         if (segment)
         {
-            scratch.Add(archetype, FrameListKind.Segment, new FrameRecord { NetId = netId, Block = block, Slot = slot, Archetype = archetype });
+            scratch.Add(archetype, FrameListKind.Segment,
+                new FrameRecord { NetId = netId, Block = block, Slot = slot, Archetype = archetype, SegmentHead = (byte)head });
             updates++;
         }
 
@@ -3812,7 +3974,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                         continue;
                     }
 
-                    scratch.Add(a, FrameListKind.Enter, new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)a });
+                    scratch.Add(a, FrameListKind.Enter,
+                        new FrameRecord
+                        {
+                            NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)a, SegmentHead = HeadAt(in n, (ushort)a, px, py, pz),
+                        });
                     scratch.FillSpent += MeterEnter(a, (nint)block, slot);
                     entered++;
                 }
@@ -3920,7 +4086,11 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                     if (isIn && !was)
                     {
                         scratch.Add(arch, FrameListKind.Enter,
-                            new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)arch });
+                            new FrameRecord
+                            {
+                                NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)arch,
+                                SegmentHead = HeadAt(in n, (ushort)arch, px, py, pz),
+                            });
                         enters++;
                     }
                     else if (was && !isIn)

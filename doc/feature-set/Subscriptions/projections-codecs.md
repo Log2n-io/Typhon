@@ -18,8 +18,10 @@ tick. A projection names only what travels, quantizes it to what the client can 
 
 - **Position.** `Motion(comp, …)` for movers: sent as **motion segments** — a start point, a velocity, a start tick — that the client
   extrapolates. A new segment is sent when the extrapolation would drift past `Tolerance` (5 cm by default), on a teleport (a jump faster
-  than `Teleport(maxSpeedMps)`, which is required and also sizes the velocity codec), or as a `MaxAge` heartbeat (5 s). `Position(comp)`
-  for things that never move. The component must hold the archetype's `[SpatialIndex]` field; positions are quantized to 24 bits per axis
+  than `Teleport(maxSpeedMps)`, which is required and also sizes the velocity codec), or as a `MaxAge` heartbeat (5 s).
+  `.Grounded(comp, x => x.OnGround, up)` ground-clamps a 3D mover: while the flag is set, segments omit the vertical axis, the client
+  derives the height from its own terrain (`heightAt` in every SDK's evaluator), and bumps and slopes trigger no segment; leaving the
+  ground sends a full 3D one. `Position(comp)` for things that never move. The component must hold the archetype's `[SpatialIndex]` field; positions are quantized to 24 bits per axis
   over the spatial world's bounds.
 - **Fields** travel under a `Codec` and in a **change group** (the default one when unnamed): an update record carries only the groups
   that changed.
