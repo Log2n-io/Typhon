@@ -197,6 +197,7 @@ jobs:
             sdk:
               - 'src/Typhon.Protocol/**'
               - 'src/Typhon.Generators.Protocol/**'
+              - 'src/Typhon.Generators/**'
               - 'src/Typhon.Client/**'
               - 'src/Typhon.Client.TypeScript/**'
               - 'test/Typhon.Client.Tests/**'
