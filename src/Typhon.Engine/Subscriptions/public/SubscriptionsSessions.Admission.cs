@@ -212,6 +212,27 @@ public readonly struct SessionEvent
         Resumable = resumable;
     }
 
+    /// <summary>
+    /// A session event built by hand: what a unit test hands an application's session-lifecycle code, through
+    /// <see cref="RecordingSessionRequests.Raise"/>, to drive it without sockets.
+    /// </summary>
+    /// <param name="kind">What happened.</param>
+    /// <param name="session">Which session.</param>
+    /// <param name="appData">What the admission hook attached.</param>
+    /// <param name="resumedFrom">For an <see cref="SessionEventKind.Opened"/> that resumed one, the session it resumed.</param>
+    /// <param name="resumable">For a <see cref="SessionEventKind.Closed"/>, whether the client may come back within the grace period.</param>
+    /// <param name="reason">For a <see cref="SessionEventKind.Closed"/>, why.</param>
+    /// <param name="role">The role admission gave it.</param>
+    /// <param name="sessionKind">The application-declared kind the client presented.</param>
+    /// <param name="closeCode">For a <see cref="SessionEventKind.Closed"/>, the close code.</param>
+    /// <param name="realm">For a <see cref="SessionEventKind.RealmClosed"/>, the realm removed.</param>
+    /// <param name="degradeLevel">For a <see cref="SessionEventKind.Degraded"/>, the level.</param>
+    /// <returns>The event, as the engine would deliver it.</returns>
+    public static SessionEvent Create(SessionEventKind kind, SessionId session, object appData = null, SessionId resumedFrom = default,
+        bool resumable = false, SessionCloseReason reason = default, SessionRole role = default, string sessionKind = null, ushort closeCode = 0,
+        RealmId realm = default, int degradeLevel = 0)
+        => new(kind, session, role, null, appData, sessionKind, null, null, resumedFrom, reason, closeCode, resumable, realm, degradeLevel);
+
     /// <summary>What happened.</summary>
     public SessionEventKind Kind { get; }
 

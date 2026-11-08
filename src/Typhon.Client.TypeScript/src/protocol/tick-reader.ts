@@ -611,7 +611,7 @@ export function readGroundSegment(
 ): void {
   const grounded = r.u8();
   if (grounded > 1) {
-    throw malformed(`a ground segment's grounded byte is 0 or 1, not ${grounded}`);
+    throw groundedByte(grounded);
   }
 
   if (grounded === 0) {
@@ -627,6 +627,11 @@ export function readGroundSegment(
   if (position.vel !== null) {
     readGroundAxes(r, position.vel, v, 0, position.upAxis);
   }
+}
+
+/** The error for a ground segment's grounded byte other than 0 or 1 (#1616). */
+export function groundedByte(grounded: number): Error {
+  return malformed(`a ground segment's grounded byte is 0 or 1, not ${grounded}`);
 }
 
 /** The error for segments in the block of an archetype that does not move. */

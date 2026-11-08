@@ -305,7 +305,7 @@ public readonly struct CommandBatch<T> where T : unmanaged
 /// </para>
 /// </remarks>
 [PublicAPI]
-public sealed class SubscriptionsCommands
+public sealed class SubscriptionsCommands : ISessionRequests
 {
     private readonly SubscriptionsIngress _ingress;
     private readonly EventHub _events;

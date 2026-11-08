@@ -3,6 +3,7 @@ import {
   type ArchetypePlan,
   type CatalogPlan,
   type FieldPlan,
+  type PositionPlan,
   type SectionPlan,
 } from '../protocol/catalog.js';
 import { CodecKind } from '../protocol/codec-kinds.js';
@@ -104,10 +105,9 @@ export function generateDecoders(plan: CatalogPlan, canonicalBytes: Uint8Array, 
   const names: string[] = [];
   for (const archetype of plan.archetypes) {
     // A list is a message's, and a collection (W34) is decoded by the interpreter: neither is generated.
-    // Nor is a ground-clamped mover's segment (#1616), whose shape depends on its grounded byte: the interpreter reads it.
-    const decodable =
-      archetype.position?.ground !== true &&
-      archetype.fields.every((f) => f.valueKind !== ValueKind.List && f.valueKind !== ValueKind.Collection);
+    const decodable = archetype.fields.every(
+      (f) => f.valueKind !== ValueKind.List && f.valueKind !== ValueKind.Collection,
+    );
     if (!decodable) {
       names.push('null');
       continue;
@@ -122,9 +122,8 @@ export function generateDecoders(plan: CatalogPlan, canonicalBytes: Uint8Array, 
   const imports = [...new Set([...gen.values, ...api.values])].sort();
   const types = [
     ...new Set([
-      'EntitiesTarget',
+      ...(gen.decodes ? ['EntitiesTarget', 'WireReader'] : []),
       'GeneratedDecoders',
-      'WireReader',
       ...(gen.usesColumns ? ['FieldArray'] : []),
       ...(gen.usesRealm ? ['RealmFrame'] : []),
       ...api.types,
@@ -432,15 +431,22 @@ function lit(x: number): string {
 
 class Generator {
   /** Value imports the module needs. */
-  readonly values = new Set<string>(['nextNetId', 'runLength']);
+  /** Empty until a decoder is generated: a module of none imports nothing it does not use (consumers' `noUnusedLocals`). */
+  readonly values = new Set<string>();
   /** The scratch arrays the decoders use: `T`, `T0`, `NONE`, and position and velocity views `P2`, `P3`, `V2`, `V3`. */
-  private readonly scratch = new Set<string>(['T0']);
+  private readonly scratch = new Set<string>();
+  /** Whether any decoder was generated: what the reader's and target's types are imported for. */
+  decodes = false;
   usesColumns = false;
   /** Whether a decoder reads a position, and so the realm frame it decodes over (`typhon.3`). */
   usesRealm = false;
   private temp = 0;
 
   archetype(a: ArchetypePlan, name: string): string {
+    this.decodes = true;
+    this.values.add('nextNetId');
+    this.values.add('runLength');
+    this.scratch.add('T0');
     const out: string[] = [];
     const emit = (depth: number, line: string): void => {
       out.push('  '.repeat(depth) + line);
@@ -512,16 +518,13 @@ class Generator {
     emit(2, 'for (let n = runLength(r); n > 0; n--) {');
     emit(3, 'prev = nextNetId(r, prev);');
     if (position !== null) {
-      this.number(position.pos, (i, e) => `${p}[${i}] = ${e};`, 3, emit);
       if (position.moving) {
-        if (position.vel !== null) {
-          this.number(position.vel, (i, e) => `${v}[${i}] = ${e};`, 3, emit);
-        }
-
+        this.segmentHead(position, p, v, 3, emit);
         emit(3, 'const low = r.u16();');
         emit(3, 'T0[0] = tick - ((tick - low) & 0xffff);');
         emit(3, `${enterSlot}x.enterSlot(prev, ${p}, ${v}, T0, r.u8());`);
       } else {
+        this.number(position.pos, (i, e) => `${p}[${i}] = ${e};`, 3, emit);
         emit(3, 'T0[0] = 0;');
         emit(3, `${enterSlot}x.enterSlot(prev, ${p}, ${v}, T0, 0);`);
       }
@@ -558,11 +561,7 @@ class Generator {
       emit(2, 'let prev = -1;');
       emit(2, 'for (let n = runLength(r); n > 0; n--) {');
       emit(3, 'prev = nextNetId(r, prev);');
-      this.number(position.pos, (i, e) => `${p}[${i}] = ${e};`, 3, emit);
-      if (position.vel !== null) {
-        this.number(position.vel, (i, e) => `${v}[${i}] = ${e};`, 3, emit);
-      }
-
+      this.segmentHead(position, p, v, 3, emit);
       emit(3, 'const low = r.u16();');
       emit(3, 'T0[0] = tick - ((tick - low) & 0xffff);');
       emit(3, `x.segmentAt(prev, ${p}, ${v}, T0, r.u8());`);
@@ -628,7 +627,10 @@ class Generator {
       lines.push('const W = new Uint32Array(2);');
     }
 
-    lines.push('const T0 = new Uint32Array(1);');
+    if (s.has('T0')) {
+      lines.push('const T0 = new Uint32Array(1);');
+    }
+
     if (s.has('NONE')) {
       lines.push('const NONE = new Float64Array(0);');
     }
@@ -744,11 +746,46 @@ class Generator {
    * One numeric value, component by component: each read and dequantized as `readNumber` does, then handed to `store`
    * as an expression, which returns the statement that consumes it. A wide read goes through the scratch `T`.
    */
+  /**
+   * A segment's `p0` and velocity. A ground position's (#1616) starts with its grounded byte: 0 is a full `pos3`
+   * segment, 1 all but the up axis — the height NaN, the vertical velocity 0 — as `readGroundSegment` reads it.
+   */
+  private segmentHead(
+    position: PositionPlan,
+    p: string,
+    v: string,
+    depth: number,
+    emit: (depth: number, line: string) => void,
+  ): void {
+    const head = (skip: number, at: number): void => {
+      this.number(position.pos, (i, e) => `${p}[${i}] = ${e};`, at, emit, skip);
+      if (position.vel !== null) {
+        this.number(position.vel, (i, e) => `${v}[${i}] = ${e};`, at, emit, skip);
+      }
+    };
+    if (!position.ground) {
+      head(-1, depth);
+      return;
+    }
+
+    this.values.add('groundedByte');
+    const g = this.name('g');
+    emit(depth, `const ${g} = r.u8();`);
+    emit(depth, `if (${g} === 0) {`);
+    head(-1, depth + 1);
+    emit(depth, `} else if (${g} === 1) {`);
+    head(position.upAxis, depth + 1);
+    emit(depth, '} else {');
+    emit(depth + 1, `throw groundedByte(${g});`);
+    emit(depth, '}');
+  }
+
   private number(
     f: FieldPlan,
     store: (component: number, expr: string) => string,
     depth: number,
     emit: (depth: number, line: string) => void,
+    skip = -1,
   ): void {
     const unsigned = (bits: number, slot: number): string => {
       switch (bits) {
@@ -843,6 +880,11 @@ class Generator {
         // The frame's width, read into the scratch so a 32-bit code is never boxed; decodeQuant: min + q × step.
         this.scratch.add('T');
         for (let i = 0; i < f.components; i++) {
+          if (i === skip) {
+            emit(depth, store(i, 'NaN'));
+            continue;
+          }
+
           emit(depth, 'r.unsignedInto(fb, T, 0);');
           emit(depth, store(i, `fm[${i}]! + T[0]! * fs[${i}]!`));
         }
@@ -859,6 +901,11 @@ class Generator {
       case CodecKind.Vel2:
       case CodecKind.Vel3:
         for (let i = 0; i < f.components; i++) {
+          if (i === skip) {
+            emit(depth, store(i, '0'));
+            continue;
+          }
+
           const code = q(signed(f.bits, 0));
           emit(depth, store(i, `(${code} < ${-f.limit} ? ${-f.limit} : ${code}) * ${lit(f.velocityUnit)}`));
         }

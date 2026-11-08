@@ -156,6 +156,7 @@ export {
 } from './protocol/field-codec.js';
 export {
   BlockMask,
+  groundedByte,
   invalidStateMask,
   nextNetId,
   runLength,

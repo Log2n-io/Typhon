@@ -220,7 +220,6 @@ describe('typhon-codegen', () => {
     expect([...byCatalog.keys()].sort()).toEqual([
       'catalog-coll',
       'catalog-exact',
-      // A ground mover's segment is the interpreter's (#1616): its module's decoder is null, and the comparison proves the fallback.
       'catalog-ground',
       'catalog-kitchen-sink',
       'catalog-wide',
@@ -243,6 +242,29 @@ describe('typhon-codegen', () => {
       applyBoth(interpreter, gen, messages.slice(1), name);
       expect(interpreter.world.anomalies).toBe(0);
     }
+  });
+
+  it('generates a ground mover, both segment shapes and a bad grounded byte as the interpreter reads them', async () => {
+    const catalog = goldenBin('catalog-ground');
+    const { decoders } = await generated('catalog-ground', catalog);
+    expect(
+      decoders.entities.every((d) => d !== null),
+      'a ground archetype is generated (#1616), not left to the interpreter',
+    ).toBe(true);
+
+    const messages = unframe(goldenBin('stream-ground'));
+    let refused = 0;
+    for (const [i, bad] of corruptions(messages, 200, 20261108).entries()) {
+      const [interpreter, gen] = pair(catalog, decoders);
+      applyBoth(interpreter, gen, [bad], `ground corruption ${i}`);
+      try {
+        new FrameApplier(interpreter.plan).apply(bad);
+      } catch {
+        refused++;
+      }
+    }
+
+    expect(refused).toBeGreaterThan(20);
   });
 
   it('refuses a corrupted frame exactly as the interpreter does, or applies it identically', async () => {
@@ -357,7 +379,15 @@ describe('typhon-codegen', () => {
 
   it('generates modules that type-check under the SDK’s strict settings', async () => {
     const files: string[] = [];
-    for (const catalog of ['catalog-kitchen-sink', 'catalog-wide', 'catalog-swg']) {
+    // catalog-coll's module generates no decoder, so it must import nothing a decoder would (noUnusedLocals).
+    for (const catalog of [
+      'catalog-kitchen-sink',
+      'catalog-wide',
+      'catalog-swg',
+      'catalog-ground',
+      'catalog-coll',
+      'catalog-commands',
+    ]) {
       files.push((await generated(catalog, goldenBin(catalog))).file);
     }
 
