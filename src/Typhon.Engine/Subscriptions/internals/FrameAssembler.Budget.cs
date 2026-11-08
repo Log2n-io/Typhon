@@ -42,6 +42,9 @@ internal struct OwedRecord
 
     /// <summary>An update's motion segment.</summary>
     public bool Segment;
+
+    /// <summary>The band head the segment (or the enter's) is read from (#1615): the latest record's, as its value is the slot's when it is sent.</summary>
+    public byte SegmentHead;
 }
 
 internal sealed unsafe partial class FrameAssembler
@@ -518,6 +521,7 @@ internal sealed unsafe partial class FrameAssembler
             if (kind == FrameListKind.Segment)
             {
                 e.Segment = true;
+                e.SegmentHead = r.SegmentHead;
             }
             else
             {
@@ -578,7 +582,7 @@ internal sealed unsafe partial class FrameAssembler
     // An owed record, put back into this frame's lists: an enter, or an update's segment and state records.
     private static void Carry(FrameWorkerScratch scratch, in OwedRecord e, Span<bool> appended)
     {
-        var record = new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype };
+        var record = new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype, SegmentHead = e.SegmentHead };
         if (e.Kind == OwedKind.Enter)
         {
             scratch.Add(e.Archetype, FrameListKind.Enter, in record);
@@ -594,6 +598,7 @@ internal sealed unsafe partial class FrameAssembler
 
         if (e.Mask != 0)
         {
+            record.SegmentHead = 0;
             record.GroupMask = e.Mask;
             scratch.Add(e.Archetype, FrameListKind.State, in record);
             appended[(e.Archetype * 4) + (int)FrameListKind.State] = true;
@@ -685,6 +690,7 @@ internal sealed unsafe partial class FrameAssembler
             // The entity's other update record was owed already: one record, both parts.
             ref var e = ref scratch.PendingOwed[at];
             e.Segment |= kind == FrameListKind.Segment;
+            e.SegmentHead = kind == FrameListKind.Segment ? r.SegmentHead : e.SegmentHead;
             e.Mask |= kind == FrameListKind.State ? r.GroupMask : (byte)0;
             return;
         }
@@ -699,6 +705,7 @@ internal sealed unsafe partial class FrameAssembler
             Kind = kind == FrameListKind.Enter ? OwedKind.Enter : OwedKind.Update,
             Mask = kind == FrameListKind.State ? r.GroupMask : (byte)0,
             Segment = kind == FrameListKind.Segment,
+            SegmentHead = kind == FrameListKind.State ? (byte)0 : r.SegmentHead,
         };
         scratch.FileOwed(scratch.AppendOwed(in record));
     }

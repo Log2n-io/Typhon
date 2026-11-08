@@ -543,6 +543,16 @@ function checkPosition(where: string, position: CatalogPosition, problems: strin
   } else {
     problems.push(`${where} position: kind must be 'motion' or 'static'`);
   }
+
+  // A ground position (#1616): a pos3 mover whose grounded segments omit one axis; up absent (0) otherwise, so one meaning hashes one way.
+  const up = position.up ?? 0;
+  if (position.ground === true) {
+    if (position.kind !== 'motion' || posKind !== CodecKind.Pos3 || up < 0 || up > 2) {
+      problems.push(`${where} position: ground needs a pos3 motion and an up axis of 0, 1 or 2`);
+    }
+  } else if (up !== 0) {
+    problems.push(`${where} position: up is only meaningful on a ground position`);
+  }
 }
 
 function checkMetric(m: CatalogMetric, problems: string[]): void {

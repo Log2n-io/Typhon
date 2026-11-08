@@ -168,6 +168,14 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
                     Append(motion, attr, "ToleranceM", ".Tolerance");
                     Append(motion, attr, "TeleportMps", ".Teleport");
                     Append(motion, attr, "MaxAgeS", ".MaxAge");
+                    if (Named(attr, "Grounded") is string { Length: > 0 } grounded)
+                    {
+                        // #1616: a bool field of the motion component; the compiler checks it exists and is a bool, naming it.
+                        var up = Named(attr, "Up") is int u ? u : 1;
+                        motion.Append(".Grounded(").Append(compRef).Append(", (").Append(componentFqn).Append(" x) => x.").Append(Id(grounded))
+                            .Append(", ").Append(up.ToString(CultureInfo.InvariantCulture)).Append(')');
+                    }
+
                     body.Add(motion.Length == 0 ? $"archetype.Motion({compRef});" : $"archetype.Motion({compRef}, m => m{motion});");
                 }
                 else if (name == PositionFqn)
@@ -378,6 +386,8 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
         }
 
         var entries = new List<string>();
+        var layout = new List<string>();
+        var reads = new List<string>();
         foreach (var member in symbol.GetMembers())
         {
             ct.ThrowIfCancellationRequested();
@@ -385,6 +395,23 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
             {
                 continue;
             }
+
+            // The typed send path (MessageBinding<T>): every public instance field, attributed or not, with its default wire name and a lossless read.
+            string wireName = null;
+            foreach (var attr in BoundAttributes(field))
+            {
+                if (MessageAttributes.Contains(attr.AttributeClass.ToDisplayString()) && Named(attr, "Name") is string { Length: > 0 } renamed)
+                {
+                    wireName = renamed;
+                }
+            }
+
+            var (fieldType, isEnum) = MessageFieldTypeOf(field.Type);
+            var index = layout.Count.ToString(CultureInfo.InvariantCulture);
+            layout.Add("new global::Typhon.Protocol.MessageFieldLayout(" + SymbolDisplay.FormatLiteral(field.Name, true)
+                + ", " + SymbolDisplay.FormatLiteral(wireName ?? field.Name, true)
+                + ", global::Typhon.Protocol.MessageFieldType." + fieldType + ", " + (isEnum ? "true" : "false") + ")");
+            reads.Add("case " + index + ": " + (fieldType == "Unsupported" ? string.Empty : "return ") + ReadExpression(fieldType, isEnum, field) + ";");
 
             var at = LocationOf(field, decl.Identifier.GetLocation());
             foreach (var attr in BoundAttributes(field))
@@ -425,9 +452,89 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
         members.AddRange(entries.Select(e => "    " + e + ","));
         members.Add("};");
 
+        // One array for the type's lifetime: a client binds once per session, and FieldLayout() promises the same array on every call.
+        members.Add(string.Empty);
+        members.Add("private static readonly global::Typhon.Protocol.MessageFieldLayout[] __typhonFieldLayout = new global::Typhon.Protocol.MessageFieldLayout[]");
+        members.Add("{");
+        members.AddRange(layout.Select(e => "    " + e + ","));
+        members.Add("};");
+        members.Add(string.Empty);
+        members.Add("global::Typhon.Protocol.MessageFieldLayout[] global::Typhon.Protocol.IReplicatedMessage.FieldLayout() => __typhonFieldLayout;");
+        members.Add(string.Empty);
+        members.Add("readonly global::Typhon.Protocol.MessageFieldValue global::Typhon.Protocol.IReplicatedMessage.ReadField(int index)");
+        members.Add("{");
+        members.Add("    switch (index)");
+        members.Add("    {");
+        members.AddRange(reads.Select(r => "        " + r));
+        members.Add("        default: throw new global::System.ArgumentOutOfRangeException(nameof(index));");
+        members.Add("    }");
+        members.Add("}");
+
         output.HintName = HintName(symbol, "ReplicatedMessage");
         output.Source = EmitPartial(symbol, symbol.IsRecord ? "record struct" : "struct", "global::Typhon.Protocol.IReplicatedMessage", members);
         return output;
+    }
+
+    // A field's type as the typed send path reads it: an enum is its underlying integer, anything else not listed is unsupported — not a compile error,
+    // because the struct may only ever be received or declared server-side; MessageBinding<T> refuses it at run time, naming the field.
+    private static (string Type, bool IsEnum) MessageFieldTypeOf(ITypeSymbol type)
+    {
+        var isEnum = false;
+        if (type is INamedTypeSymbol { TypeKind: TypeKind.Enum, EnumUnderlyingType: { } underlying })
+        {
+            type = underlying;
+            isEnum = true;
+        }
+
+        var name = type.SpecialType switch
+        {
+            SpecialType.System_Boolean => "Bool",
+            SpecialType.System_SByte => "SByte",
+            SpecialType.System_Byte => "Byte",
+            SpecialType.System_Int16 => "Int16",
+            SpecialType.System_UInt16 => "UInt16",
+            SpecialType.System_Int32 => "Int32",
+            SpecialType.System_UInt32 => "UInt32",
+            SpecialType.System_Int64 => "Int64",
+            SpecialType.System_UInt64 => "UInt64",
+            SpecialType.System_Single => "Single",
+            SpecialType.System_Double => "Double",
+            _ => "Unsupported",
+        };
+        return (name, isEnum && name != "Unsupported");
+    }
+
+    private static string ReadExpression(string fieldType, bool isEnum, IFieldSymbol field)
+    {
+        var access = "this." + Id(field.Name);
+        switch (fieldType)
+        {
+            case "Unsupported":
+                return "throw new global::System.NotSupportedException(" + SymbolDisplay.FormatLiteral(
+                    $"'{field.ContainingType.Name}.{field.Name}' has a type the typed send path cannot read", true) + ")";
+            case "Bool":
+                return "global::Typhon.Protocol.MessageFieldValue.Of(" + access + " ? 1d : 0d)";
+            case "Int64":
+                return "global::Typhon.Protocol.MessageFieldValue.Of((long)" + access + ")";
+            case "UInt64":
+                return "global::Typhon.Protocol.MessageFieldValue.Of((ulong)" + access + ")";
+            default:
+            {
+                // Every other type widens to double exactly; an enum goes through its underlying type first.
+                var clr = fieldType switch
+                {
+                    "SByte" => "sbyte",
+                    "Byte" => "byte",
+                    "Int16" => "short",
+                    "UInt16" => "ushort",
+                    "Int32" => "int",
+                    "UInt32" => "uint",
+                    "Single" => "float",
+                    _ => "double",
+                };
+                return "global::Typhon.Protocol.MessageFieldValue.Of((double)" + (isEnum ? "(" + clr + ")" : string.Empty) + access + ")";
+            }
+        }
     }
 
     // ── placement and shape ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

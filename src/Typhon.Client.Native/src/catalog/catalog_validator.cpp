@@ -659,6 +659,16 @@ void CheckPosition(const std::string& where, const CatalogPosition& position, Pr
     {
         p.push_back(where + " position: kind must be 'motion' or 'static'");
     }
+
+    // #1616: a ground position is a pos3 mover whose grounded segments omit one axis; up is absent (0) otherwise, so one meaning hashes one way.
+    if (position.ground && (position.kind != "motion" || dims != 3 || position.up < 0 || position.up > 2))
+    {
+        p.push_back(where + " position: ground needs a pos3 motion and an up axis of 0, 1 or 2");
+    }
+    else if (!position.ground && position.up != 0)
+    {
+        p.push_back(where + " position: up is only meaningful on a ground position");
+    }
 }
 
 void CheckArchetype(const CatalogArchetype& a, const Catalog& c, long long maxBytes, Problems& p)

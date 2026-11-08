@@ -1202,6 +1202,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             var f = fold;
             var inSet = archetypes.Contains(f.Archetype);
             bool geoWas, geoIs;
+            byte headWas = 0, headIs = 0;
             if (log != null)
             {
                 // A catch-up: the fold above holds only the events filed under held keys, so its first and last may not be the window's. The geometric
@@ -1214,6 +1215,8 @@ internal sealed unsafe partial class PushReplication<TEvent>
                         && Held(o, oOriginX, oOriginY, oOriginZ, entry.OldKey);
                     geoIs = (entry.Last.Flags & PushEvent.HasNew) != 0 && Within(n, entry.Last.NewX, entry.Last.NewY, entry.Last.NewZ)
                         && Held(d, nOriginX, nOriginY, nOriginZ, entry.Last.NewKey);
+                    headWas = geoWas ? HeadAt(in a, f.Archetype, entry.OldX, entry.OldY, entry.OldZ) : (byte)0;
+                    headIs = geoIs ? HeadAt(in n, f.Archetype, entry.Last.NewX, entry.Last.NewY, entry.Last.NewZ) : (byte)0;
                 }
                 else
                 {
@@ -1225,6 +1228,8 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 geoWas = inSet && (f.FirstFlags & PushEvent.HasOld) != 0 && Within(a, f.OldX, f.OldY, f.OldZ)
                     && Held(o, oOriginX, oOriginY, oOriginZ, f.OldCell);
                 geoIs = inSet && (f.LastFlags & PushEvent.HasNew) != 0 && Within(n, f.NewX, f.NewY, f.NewZ) && Held(d, nOriginX, nOriginY, nOriginZ, f.NewCell);
+                headWas = geoWas ? HeadAt(in a, f.Archetype, f.OldX, f.OldY, f.OldZ) : (byte)0;
+                headIs = geoIs ? HeadAt(in n, f.Archetype, f.NewX, f.NewY, f.NewZ) : (byte)0;
             }
 
             if (geoWas && geoIs)
@@ -1245,12 +1250,15 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 && (!tagged || Sees(local, tagsIs));
             if (isIn && !was)
             {
-                scratch.Add(f.Archetype, FrameListKind.Enter, new FrameRecord { NetId = netId, Block = f.Block, Slot = f.Slot, Archetype = f.Archetype });
+                scratch.Add(f.Archetype, FrameListKind.Enter,
+                    new FrameRecord { NetId = netId, Block = f.Block, Slot = f.Slot, Archetype = f.Archetype, SegmentHead = headIs });
                 entered++;
             }
             else if (isIn)
             {
-                EmitRecord(netId, f.Block, f.Slot, f.Archetype, f.Groups, f.Segment, scratch, ref updates);
+                // A geometry <-> key hand-off changes the band head it is served at (a key holds it at the base segment): the client holds the other
+                // head's segment, so the new one's is sent (#1615).
+                EmitRecord(netId, f.Block, f.Slot, f.Archetype, f.Groups, f.Segment || headWas != headIs, scratch, ref updates, headIs);
             }
             else if (was)
             {

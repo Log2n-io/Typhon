@@ -100,6 +100,56 @@ internal sealed unsafe class ArchetypeEncodePlan
     /// <summary>The motion segment's length: <see cref="ReplicationBlockLayout.SegmentBytes"/>.</summary>
     public int SegmentBytes { get; private init; }
 
+    /// <summary>For a ground-clamped mover (#1616), the axis a grounded segment omits on the wire; -1 for every other archetype.</summary>
+    public int GroundUpAxis { get; init; } = -1;
+
+    /// <summary>Bytes of one velocity axis in a segment; 0 without a velocity.</summary>
+    public int SegmentVelocityAxisBytes { get; init; }
+
+    /// <summary>
+    /// Writes one stored segment as the wire carries it: whole, except a ground mover's grounded segment (#1616), whose up axis of <c>p0</c> and of the
+    /// velocity the hot entry keeps and the wire omits — the client derives the height from its terrain.
+    /// </summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="segment">The stored segment: the grounded byte first, for a ground mover.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSegment(ref WireWriter w, byte* segment)
+    {
+        if (GroundUpAxis < 0 || segment[0] == 0)
+        {
+            w.WriteBytes(new ReadOnlySpan<byte>(segment, SegmentBytes));
+            return;
+        }
+
+        w.WriteU8(1);
+        var axis = PositionAxisBytes;
+        var at = segment + 1;
+        for (var a = 0; a < 3; a++)
+        {
+            if (a != GroundUpAxis)
+            {
+                w.WriteBytes(new ReadOnlySpan<byte>(at + (a * axis), axis));
+            }
+        }
+
+        at += 3 * axis;
+        var vel = SegmentVelocityAxisBytes;
+        for (var a = 0; a < 3 && vel > 0; a++)
+        {
+            if (a != GroundUpAxis)
+            {
+                w.WriteBytes(new ReadOnlySpan<byte>(at + (a * vel), vel));
+            }
+        }
+
+        // t0 (tickLo) and the epoch, unchanged.
+        w.WriteBytes(new ReadOnlySpan<byte>(at + (3 * vel), 3));
+    }
+
+    /// <summary>The offset in a hot entry of motion head <paramref name="head"/>'s segment (#1615): the base segment's for 0.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int SegmentOffsetFor(int head) => head == 0 ? SegmentOffset : _layout.SegmentOffsetForHead(head);
+
     /// <summary>Whether the archetype declares a position at all.</summary>
     public bool HasPosition { get; init; }
 
@@ -421,7 +471,7 @@ internal static unsafe class EntitiesEncoder
                 // because a static position reserves no segment at all (03 § 5's `enterPos`).
                 if (plan.Moving)
                 {
-                    w.WriteBytes(new ReadOnlySpan<byte>(hot + layout.SegmentOffsetInHotEntry, layout.SegmentBytes));
+                    plan.WriteSegment(ref w, hot + plan.SegmentOffsetFor(record.SegmentHead));
                 }
                 else
                 {
@@ -445,7 +495,7 @@ internal static unsafe class EntitiesEncoder
         for (var i = 0; i < segments.Length; i++)
         {
             ref readonly var record = ref segments[i];
-            WriteSegmentRecord(ref w, plan, ref prev, record.NetId, record.Block, record.Slot);
+            WriteSegmentRecord(ref w, plan, ref prev, record.NetId, record.Block, record.Slot, record.SegmentHead);
         }
 
         // ── state records ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -499,16 +549,17 @@ internal static unsafe class EntitiesEncoder
     /// <param name="netId">The entity.</param>
     /// <param name="block">The replication block.</param>
     /// <param name="slot">The slot.</param>
+    /// <param name="head">The motion head whose segment is written (#1615): 0 for the base segment.</param>
     /// <remarks>
     /// <b>One writer, two callers, and that is a correctness property rather than tidiness.</b> A per-session frame and a run encoded once per cluster have
     /// to produce the same bytes for the same slot, or a client would see one entity described two ways depending on which path its session happened to
     /// take. Sharing the statement that does the writing makes that true by construction instead of by a comparison test that can only sample.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void WriteSegmentRecord(ref WireWriter w, ArchetypeEncodePlan plan, ref long prev, uint netId, nint block, int slot)
+    public static void WriteSegmentRecord(ref WireWriter w, ArchetypeEncodePlan plan, ref long prev, uint netId, nint block, int slot, int head = 0)
     {
         WriteGap(ref w, ref prev, netId);
-        w.WriteBytes(new ReadOnlySpan<byte>(plan.Hot(block, slot) + plan.SegmentOffset, plan.SegmentBytes));
+        plan.WriteSegment(ref w, plan.Hot(block, slot) + plan.SegmentOffsetFor(head));
     }
 
     /// <summary>

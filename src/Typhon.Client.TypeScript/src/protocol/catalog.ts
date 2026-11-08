@@ -94,6 +94,13 @@ export interface CatalogPosition {
   readonly pos: CatalogCodec;
   /** `vel2` or `vel3` matching {@link pos}, for the linear model. */
   readonly vel?: CatalogCodec;
+  /**
+   * A ground-clamped mover (#1616, `pos3` motion only): every segment starts with a `u8`, 1 when on the ground; a grounded
+   * one omits the {@link up} axis of `p0` and of the velocity — decoded as NaN and 0, the height being the client's terrain.
+   */
+  readonly ground?: boolean;
+  /** For a ground position, the vertical axis a grounded segment omits: 0, 1 or 2. */
+  readonly up?: number;
 }
 
 /** The owner-only section (W17): values only the controlling session receives, in `SELF`. */
@@ -324,6 +331,22 @@ function readArchetype(a: JsonObject, where: string, p: string[]): CatalogArchet
 
     if (present(o.vel)) {
       position.vel = readCodec(o.vel, `${at}.vel`, p);
+    }
+
+    if (present(o.ground)) {
+      if (typeof o.ground !== 'boolean') {
+        p.push(`${at}.ground: expected a boolean`);
+      } else {
+        position.ground = o.ground;
+      }
+    }
+
+    if (present(o.up)) {
+      if (typeof o.up !== 'number' || !Number.isInteger(o.up)) {
+        p.push(`${at}.up: expected an integer`);
+      } else {
+        position.up = o.up;
+      }
     }
 
     archetype.position = position;
@@ -932,6 +955,10 @@ export class PositionPlan {
   readonly dims: number;
   readonly pos: FieldPlan;
   readonly vel: FieldPlan | null;
+  /** Ground-clamped (#1616): each segment starts with a grounded byte, and a grounded one omits {@link upAxis}. */
+  readonly ground: boolean;
+  /** For a ground position, the vertical axis a grounded segment omits; -1 otherwise. */
+  readonly upAxis: number;
 
   constructor(position: CatalogPosition, enums: Catalog['enums']) {
     this.moving = position.kind === 'motion';
@@ -956,6 +983,14 @@ export class PositionPlan {
     } else {
       this.vel = null;
     }
+
+    this.ground = this.moving && this.dims === 3 && position.ground === true;
+    const up = position.up ?? 0;
+    if (position.ground === true && (!this.ground || up < 0 || up > 2)) {
+      throw refuse('a ground position is a pos3 motion with an up axis of 0, 1 or 2');
+    }
+
+    this.upAxis = this.ground ? up : -1;
   }
 }
 

@@ -51,6 +51,8 @@ public:
     bool HasPosition() const { return dims_ > 0; }
     // Position dimensions: 0 when not spatial, else 2 or 3.
     int Dims() const { return dims_; }
+    // #1616: for a ground-clamped mover, the vertical axis whose grounded height is the application's terrain; -1 otherwise.
+    int UpAxis() const { return schema_.position.has_value() ? schema_.position->up : -1; }
     bool Moving() const { return moving_; }
     bool Linear() const { return linear_; }
     int SegmentHistory() const { return history_; }

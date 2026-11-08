@@ -1,0 +1,5 @@
+{
+  "description": "The typed send path (#1614): MoveCmd (i8, i8, u8, f32, f32), Probe with every scalar kind a struct field supplies, a latest rate-limited Pulse, Say with a str, Hold\u0027s u32, and an archetype with numeric, 64-bit and text columns; declared out of wire order.",
+  "hash": "cb70c776dab826d0",
+  "byteCount": 1637
+}

@@ -24,16 +24,23 @@ and send commands in the server's encoding — without being regenerated every t
   and per-frame entered/updated/left lists; `SelfState`, acks, events and `AggregateGrid`s beside them.
 - `Clock` + `evaluateLive(store, renderTick, frac, out)` — render time and motion-segment extrapolation, including tick-period changes under
   overload.
-- `CommandQueue` (one batch per rendered frame) and `RegionSender` (`ClientRegion` footprints, ≤ 5 Hz).
+- `CommandQueue` (one batch per rendered frame) and `RegionSender` (`ClientRegion` footprints, ≤ 5 Hz). `enqueueTyped(commands.MoveCmd, record)`
+  sends a command through its generated encoder: a misspelled field is a compile error, and a steady frame allocates nothing.
 - `GroupSubscriptions` — `subscribe(set, key)` / `unsubscribe(set, key)` for an explicit group set, each a promise of its answer: `pump(queue)`
   before each flush, `observe(applier)` after each frame, `reset()` on close ([groups](./groups.md)).
 - `StreamRecorder` / `replayStream` — record and replay a session.
-- `typhon-codegen` — compiles a specialised decoder from `/typhon/catalog.json` for the hot path.
+- `typhon-codegen` — one module from `/typhon/catalog.json`: specialised decoders for the hot path, a typed record and encoder per command
+  (`commands`, checked against the session's catalog hash), the catalog's `enums`, and per archetype a class of typed column getters
+  (`CreatureColumns.of(world).hp`).
 
 **.NET** (`Typhon.Client`):
 
-- `TyphonClient` over `ws://`, `wss://` or `tcp://`: connect, reconnect policy, `SendCommandAsync(name, values)`, a `WorldStore` with
-  per-archetype columns and `SelfState`, a `Recorder`. Built for bots, tools, load tests and integration tests.
+- `TyphonClient` over `ws://`, `wss://` or `tcp://`: connect, reconnect policy, a `WorldStore` with per-archetype columns and `SelfState`,
+  a `Recorder`. Built for bots, tools, load tests and integration tests.
+- Commands: `Enqueue(in cmd)` then `FlushCommandsAsync()` once a frame — the `[ReplicatedMessage]` struct of the shared contracts assembly,
+  sent as itself. It is bound once per session against the negotiated catalog (a renamed, ignored or retyped field is a `MessageBindingException`
+  naming every mismatch, before anything is sent) and allocates nothing per command. `SendCommandAsync(name, values)` remains for built-ins
+  and commands with no contracts struct; analyzer TYPHON015 flags it where the struct is in reach.
 - `SubscribeAsync(set, key)` / `UnsubscribeAsync(set, key)` — a key of an explicit group set, settling with the server's answer
   (`SubscribeResult`); paced by the command's rate, sent again when the server still refuses it for the rate, dropped when the session ends.
 - `EventCollector` — an `IEventHandler` that keeps each frame's events as `ReceivedEvent` values (fields by wire name); take them in `FrameApplied`.
@@ -83,11 +90,9 @@ await using var bot = new TyphonClient(new ClientOptions
     Kind = "player",
 });
 await bot.ConnectAsync();
-await bot.SendCommandAsync("MoveTo", new RecordValues
-{
-    ["X"] = FieldValue.Of(10.0),
-    ["Z"] = FieldValue.Of(20.0),
-});
+// MoveCmd: a [ReplicatedMessage] struct of the contracts assembly the server declared the command from.
+bot.Enqueue(new MoveCmd { Forward = 1, Fx = 0f, Fz = -1f });
+await bot.FlushCommandsAsync();
 ```
 
 ## ⚠️ Guarantees & limits

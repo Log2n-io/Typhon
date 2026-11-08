@@ -125,11 +125,29 @@ int SegmentEntryAt(const ArchetypeStore& store, std::uint32_t slot, std::int64_t
     return entry;
 }
 
-void EvaluateSlot(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick, double frac, std::span<double> out)
+// #1616: a grounded segment's height evaluates to NaN; the terrain under the entity takes its place, and its vertical velocity is 0. An airborne height is
+// kept, so a landing moves from it to the terrain's in one frame.
+static void Ground(int up, int dims, HeightAt heightAt, void* user, double* out)
+{
+    if (up < 0 || !std::isnan(out[up]))
+    {
+        return;
+    }
+
+    out[dims + up] = 0;
+    if (heightAt != nullptr)
+    {
+        out[up] = heightAt(out[up == 0 ? 1 : 0], out[up == 2 ? 1 : 2], user);
+    }
+}
+
+void EvaluateSlot(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick, double frac, std::span<double> out, HeightAt heightAt,
+                  void* user)
 {
     RequirePosition(store);
     RequireOut(out, static_cast<std::size_t>(store.MotionStride()));
     Evaluate(store, slot, SegmentEntryAt(store, slot, renderTick), renderTick, frac, out.data());
+    Ground(store.UpAxis(), store.MotionStride() / 2, heightAt, user, out.data());
 }
 
 std::uint8_t EpochAt(const ArchetypeStore& store, std::uint32_t slot, std::int64_t renderTick)
@@ -138,16 +156,19 @@ std::uint8_t EpochAt(const ArchetypeStore& store, std::uint32_t slot, std::int64
     return store.EpochOf(slot, SegmentEntryAt(store, slot, renderTick));
 }
 
-void EvaluateLive(const ArchetypeStore& store, std::int64_t renderTick, double frac, std::span<double> out)
+void EvaluateLive(const ArchetypeStore& store, std::int64_t renderTick, double frac, std::span<double> out, HeightAt heightAt, void* user)
 {
     RequirePosition(store);
     const std::size_t stride = static_cast<std::size_t>(store.MotionStride());
     const auto live = store.Live();
     RequireOut(out, live.size() * stride);
+    const int up = store.UpAxis();
+    const int dims = static_cast<int>(stride / 2);
     for (std::size_t i = 0; i < live.size(); i++)
     {
         const std::uint32_t slot = live[i];
         Evaluate(store, slot, SegmentEntryAt(store, slot, renderTick), renderTick, frac, out.data() + i * stride);
+        Ground(up, dims, heightAt, user, out.data() + i * stride);
     }
 }
 

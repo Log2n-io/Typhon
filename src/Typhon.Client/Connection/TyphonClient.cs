@@ -41,8 +41,26 @@ public sealed class TyphonClient : IAsyncDisposable
     private FrameApplier _applier;
     private ushort _commandSeq;
 
-    // One command on the wire at a time, its seq taken inside: two callers on two threads would otherwise send their seqs out of order.
+    // One flush on the wire at a time: commands are queued with their seq under _outboxLock, and a flush swaps the whole queue out under the gate, so seqs
+    // reach the wire in the order they were taken whichever threads queued and flushed.
     private readonly SemaphoreSlim _sendGate = new(1, 1);
+
+    // The command queue (Enqueue<T>, SendCommandAsync, SubscribeRequest), double-buffered so a flush sends one while callers fill the other.
+#if NET9_0_OR_GREATER
+    private readonly Lock _outboxLock = new();
+#else
+    private readonly object _outboxLock = new();
+#endif
+    private CommandOutbox _outbox = new();
+    private CommandOutbox _flushing = new();
+    private byte[] _sendBuffer = [];
+
+    // Typed command bindings by CommandTypeSlot<T>.Index, valid for _typedPlan only: a new catalog rebinds every type on its next enqueue.
+    private object[] _typed = new object[8];
+    private CatalogPlan _typedPlan;
+
+    // varu cmdTypeIdx (≤ 5 B) | u16 seq.
+    private const int CommandHeaderMaxBytes = 7;
 
     // SubscribeRequest (14 § 4): the requests, their bucket and their callers, under one lock — called from the application, pumped from the receive and
     // ping loops.
@@ -315,7 +333,7 @@ public sealed class TyphonClient : IAsyncDisposable
             while (true)
             {
                 var transport = _transport;
-                byte[] message = null;
+                var queued = false;
                 lock (_subscribeLock)
                 {
                     if (_subscriptions == null || _subscriptions.QueuedCount == 0 || transport is not { IsConnected: true })
@@ -323,6 +341,7 @@ public sealed class TyphonClient : IAsyncDisposable
                         return;
                     }
 
+                    // Through the command queue, behind whatever the application queued before it: one seq space, in order on the wire.
                     _subscriptions.Pump((command, values) =>
                     {
                         if (!_subscribeBucket.Take(NowMs()))
@@ -330,20 +349,26 @@ public sealed class TyphonClient : IAsyncDisposable
                             return -1;
                         }
 
-                        var seq = unchecked((ushort)(_commandSeq + 1));
-                        var tick = LastAppliedTick;
-                        message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(command, seq, values)], null));
-                        _commandSeq = seq;
-                        return seq;
+                        lock (_outboxLock)
+                        {
+                            // Not between a reconnect's transport and its WELCOME: the request waits, as it would for its rate.
+                            if (!_sessionOpen)
+                            {
+                                return -1;
+                            }
+
+                            queued = true;
+                            return EnqueueValues(command, values);
+                        }
                     }, max: 1);
                 }
 
-                if (message == null)
+                if (!queued)
                 {
                     return;
                 }
 
-                await transport.SendAsync(message, CancellationToken.None).ConfigureAwait(false);
+                await FlushUnderGateAsync(CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception exception)
@@ -378,9 +403,37 @@ public sealed class TyphonClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Commands queued and not yet flushed (tests).</summary>
+    internal int QueuedCommandCount
+    {
+        get
+        {
+            lock (_outboxLock)
+            {
+                return _outbox.Count;
+            }
+        }
+    }
+
+    // A session ended or a new one began: what was queued belongs to the old one — its seqs will never be acknowledged and its type indices name the old
+    // catalog's commands — so it is dropped, never sent on the next session.
+    private void DropQueuedCommands(bool open = false)
+    {
+        lock (_outboxLock)
+        {
+            _outbox.Clear();
+            _sessionOpen = open;
+        }
+    }
+
+    // Under _outboxLock: whether a session's WELCOME was applied and it has not ended. Commands are queued and flushed only then — never between a
+    // reconnect's transport and its WELCOME, where the old catalog's indices and seqs would reach the new session, or before its HELLO.
+    private bool _sessionOpen;
+
     // The session is over: every request still waiting ends Dropped. A new catalog starts a fresh set of requests.
     private void ResetSubscriptions(CatalogPlan plan)
     {
+        DropQueuedCommands();
         lock (_subscribeLock)
         {
             _subscriptions?.Reset();
@@ -404,41 +457,79 @@ public sealed class TyphonClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends one command to the server.
+    /// Queues one command for the next <see cref="FlushCommandsAsync"/>, encoded now from the struct itself: the typed, allocation-free send path.
     /// </summary>
-    /// <param name="name">The command's catalog name — a built-in such as <c>ClientRegion</c>, or one the application declared.</param>
-    /// <param name="values">The command's fields, by name.</param>
-    /// <param name="ct">Cancels the send.</param>
-    /// <returns>The sequence the command was sent under, which an <c>ACKS</c> rejection would name.</returns>
+    /// <typeparam name="T">
+    /// A <see cref="ReplicatedMessageAttribute"/> struct — the one the server declared the command from, out of the shared contracts assembly. Its catalog
+    /// name is its type name.
+    /// </typeparam>
+    /// <param name="command">The command.</param>
+    /// <returns>
+    /// The sequence it will travel under; <see cref="CommandRefused.RateLimited"/> when the local bucket for its type is empty, or
+    /// <see cref="CommandRefused.NotConnected"/> when no session is open.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">No session has negotiated a catalog yet, or the catalog declares no command named after <typeparamref name="T"/>.</exception>
+    /// <exception cref="MessageBindingException">
+    /// The struct and the catalog's command disagree — a field renamed, ignored or retyped by the server's declaration — listing every disagreement. Thrown on
+    /// the first enqueue of the type per session, before anything is sent: a contract drift is a loud failure at connect, never a field silently zero.
+    /// </exception>
+    /// <exception cref="ArgumentException">A value outside its codec's range, as the name-keyed path refuses it.</exception>
     /// <remarks>
-    /// One command per message today. Batching several into one <c>COMMANDS</c> is what the wire is shaped for and what a real client should do per frame;
-    /// nothing in Phase 1 sends enough commands for the difference to be measurable, and a batching API nobody exercises is a worse bet than an obvious one.
+    /// <para>
+    /// <b>Batch a frame, then flush once.</b> Every command queued between two flushes leaves in one <c>COMMANDS</c> message (split only at the catalog's
+    /// <c>limits.clientMessageBytes</c>), stamped with the newest applied tick at flush time (§ 10). Steady state allocates nothing: the struct is read
+    /// through its generated accessors, its type's binding is found in an array, and its bytes land in a buffer reused across frames.
+    /// </para>
+    /// <para>
+    /// <b>Delivery.</b> A command the catalog delivers <c>latest</c> replaces the pending one of its type. The catalog's <c>rate</c> is pre-checked locally
+    /// per type, so the client drops its own excess instead of having the server count a drop; the server's bucket stays the authority.
+    /// </para>
+    /// <para>
+    /// Thread-safe. A session that ends, or a new <c>WELCOME</c>, drops what was queued and not yet flushed: its seqs would never be acknowledged and its type
+    /// indices name the old catalog's commands.
+    /// </para>
     /// </remarks>
-    public async Task<ushort> SendCommandAsync(string name, RecordValues values, CancellationToken ct = default)
+    public int Enqueue<T>(in T command) where T : unmanaged, IReplicatedMessage
     {
-        ArgumentException.ThrowIfNullOrEmpty(name);
-        ArgumentNullException.ThrowIfNull(values);
-
-        var plan = Plan?.CommandByName(name)
-            ?? throw new InvalidOperationException($"the catalog this session negotiated declares no command named '{name}'");
-
-        var transport = _transport;
-        if (transport is not { IsConnected: true })
+        lock (_outboxLock)
         {
-            return 0;
-        }
+            var slot = TypedCommand<T>();
+            if (!_sessionOpen || _transport is not { IsConnected: true })
+            {
+                return CommandRefused.NotConnected;
+            }
 
+            // Encoded and checked first, the token taken last: a command refused for its value or its size spends no rate.
+            var seq = unchecked((ushort)(_commandSeq + 1));
+            var w = new WireWriter(_outbox.Reserve(CommandHeaderMaxBytes + slot.Binding.MaxBytes));
+            CommandsMessage.WriteCommand(ref w, slot.Binding, seq, command, Store?.Realm?.ForCommands);
+            RefuseOversized(slot.Binding.Plan, w.Written.Length);
+            if (!slot.Bucket.Take(NowMs()))
+            {
+                return CommandRefused.RateLimited;
+            }
+
+            CommitCommand(slot.Binding.Plan, w.Written.Length, slot.Latest);
+            _commandSeq = seq;
+            return seq;
+        }
+    }
+
+    /// <summary>
+    /// Sends every queued command, in queue order, as few <c>COMMANDS</c> messages as the catalog's message limit allows.
+    /// </summary>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The messages sent; 0 when nothing was queued or no session is open (what was queued is then dropped).</returns>
+    /// <remarks>Call once per client frame, after its commands were queued. Allocates nothing when the transport completes the send synchronously.</remarks>
+#if NET6_0_OR_GREATER
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+#endif
+    public async ValueTask<int> FlushCommandsAsync(CancellationToken ct = default)
+    {
         await _sendGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // The seq is spent only once the command encodes: one that cannot (a realm-framed field while the session holds no realm) leaves no gap.
-            var seq = unchecked((ushort)(_commandSeq + 1));
-            var tick = LastAppliedTick;
-            var frame = Store?.Realm;
-            var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)], frame));
-            _commandSeq = seq;
-            await transport.SendAsync(message, ct).ConfigureAwait(false);
-            return seq;
+            return await FlushUnderGateAsync(ct).ConfigureAwait(false);
         }
         finally
         {
@@ -446,11 +537,215 @@ public sealed class TyphonClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Queues one typed command and flushes at once: <see cref="Enqueue{T}"/> then <see cref="FlushCommandsAsync"/>, for a caller with one command.</summary>
+    /// <typeparam name="T">A <see cref="ReplicatedMessageAttribute"/> struct.</typeparam>
+    /// <param name="command">The command.</param>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The sequence it travelled under, or a <see cref="CommandRefused"/> value.</returns>
+    /// <remarks>
+    /// A client sending several commands a frame should queue them all and flush once: each flush is a message. A cancellation while waiting for the send
+    /// leaves the command queued: the next flush sends it.
+    /// </remarks>
+#if NET6_0_OR_GREATER
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+#endif
+    public async ValueTask<int> SendCommandAsync<T>(T command, CancellationToken ct = default) where T : unmanaged, IReplicatedMessage
+    {
+        var seq = Enqueue(in command);
+        if (seq >= 0)
+        {
+            await FlushCommandsAsync(ct).ConfigureAwait(false);
+        }
+
+        return seq;
+    }
+
+    /// <summary>
+    /// Sends one command to the server, by catalog name — the untyped path, for a built-in command or one with no contracts struct on this side.
+    /// </summary>
+    /// <param name="name">The command's catalog name — a built-in such as <c>ClientRegion</c>, or one the application declared.</param>
+    /// <param name="values">The command's fields, by name.</param>
+    /// <param name="ct">Cancels the send.</param>
+    /// <returns>The sequence the command was sent under, which an <c>ACKS</c> rejection would name; 0 when no session is open.</returns>
+    /// <remarks>
+    /// Goes out through the same queue as <see cref="Enqueue{T}"/>, flushing whatever was queued before it, so seqs reach the wire in order. Prefer the
+    /// typed path where a contracts struct exists: this one finds fields by name at run time, so a misspelled one is found only when it is sent, and it
+    /// allocates per call. The catalog's rate is not pre-checked here. A cancellation while waiting for the send leaves the command queued: the next flush
+    /// sends it.
+    /// </remarks>
+    public async Task<ushort> SendCommandAsync(string name, RecordValues values, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(values);
+
+        ushort seq;
+        lock (_outboxLock)
+        {
+            // Resolved under the lock: a WELCOME applies its catalog behind it, so the plan and the open session are the same session's.
+            var plan = Plan?.CommandByName(name)
+                ?? throw new InvalidOperationException($"the catalog this session negotiated declares no command named '{name}'");
+            if (!_sessionOpen || _transport is not { IsConnected: true })
+            {
+                return 0;
+            }
+
+            seq = EnqueueValues(plan, values);
+        }
+
+        await FlushCommandsAsync(ct).ConfigureAwait(false);
+        return seq;
+    }
+
+    // Under _outboxLock. The seq is spent only once the command encodes: one that cannot (a realm-framed field while the session holds no realm) leaves no gap.
+    private ushort EnqueueValues(MessagePlan plan, RecordValues values)
+    {
+        var seq = unchecked((ushort)(_commandSeq + 1));
+        var w = new WireWriter(_outbox.Reserve(ClientMessageBytes));
+        try
+        {
+            CommandsMessage.WriteCommand(ref w, plan, seq, values, Store?.Realm?.ForCommands);
+        }
+        catch (InvalidOperationException) when (w.Written.Length >= ClientMessageBytes - CommandHeaderMaxBytes)
+        {
+            // The reservation is the message limit: a command that overruns it is the caller's, as RefuseOversized says, not a broken buffer.
+            throw new ArgumentException($"command '{plan.Name}' does not fit the catalog's {ClientMessageBytes} B message limit");
+        }
+
+        RefuseOversized(plan, w.Written.Length);
+        CommitCommand(plan, w.Written.Length, IsLatest(plan));
+        _commandSeq = seq;
+        return seq;
+    }
+
+    // Refuses a command no message could carry.
+    private void RefuseOversized(MessagePlan plan, int length)
+    {
+        if (CommandOutbox.HeaderBytes(1) + length > ClientMessageBytes)
+        {
+            throw new ArgumentException($"command '{plan.Name}' needs {length} B, above the catalog's {ClientMessageBytes} B message limit");
+        }
+    }
+
+    // Under _outboxLock: keeps the command just written, after RefuseOversized.
+    private void CommitCommand(MessagePlan plan, int length, bool latest)
+    {
+        if (_outbox.Commit(plan.Idx, length, latest))
+        {
+            CommandsCoalesced++;
+        }
+    }
+
+    // Under _sendGate: swaps the queue out under its lock, so commands queued meanwhile wait for the next flush, and sends it in order.
+    private async ValueTask<int> FlushUnderGateAsync(CancellationToken ct)
+    {
+        IClientTransport transport;
+        lock (_outboxLock)
+        {
+            (_outbox, _flushing) = (_flushing, _outbox);
+
+            // Read with the swap: what was swapped out belongs to the session open now, or to none.
+            transport = _sessionOpen ? _transport : null;
+        }
+
+        var pending = _flushing;
+        try
+        {
+            if (pending.Count == 0 || transport is not { IsConnected: true })
+            {
+                return 0;
+            }
+
+            var limit = ClientMessageBytes;
+            if (_sendBuffer.Length < limit)
+            {
+                _sendBuffer = new byte[limit];
+            }
+
+            var tick = LastAppliedTick;
+            var messages = 0;
+            var from = 0;
+            while (from < pending.Count)
+            {
+                var length = pending.WriteMessage(ref from, tick, _sendBuffer.AsSpan(0, limit));
+                await transport.SendAsync(_sendBuffer.AsMemory(0, length), ct).ConfigureAwait(false);
+                messages++;
+            }
+
+            return messages;
+        }
+        finally
+        {
+            // Emptied however the flush ends: a send that throws midway must not leave the batch to go out a second time, with seqs the server already ran.
+            pending.Clear();
+        }
+    }
+
+    // Under _outboxLock: the type's binding, bucket and delivery mode for the current catalog, made on first use per session.
+    private TypedCommandSlot<T> TypedCommand<T>() where T : unmanaged, IReplicatedMessage
+    {
+        var plan = Plan ?? throw new InvalidOperationException("no catalog yet: connect first");
+        if (!ReferenceEquals(_typedPlan, plan))
+        {
+            Array.Clear(_typed, 0, _typed.Length);
+            _typedPlan = plan;
+        }
+
+        var index = CommandTypeSlot<T>.Index;
+        return index < _typed.Length && _typed[index] is TypedCommandSlot<T> slot ? slot : BindTypedCommand<T>(plan, index);
+    }
+
+    // The cold path, kept out of TypedCommand: nothing here may run per send. (A lambda capturing a local here once allocated its closure on every call,
+    // cache hit included — C# creates a display class when the scope that declares the captured local is entered.)
+    private TypedCommandSlot<T> BindTypedCommand<T>(CatalogPlan plan, int index) where T : unmanaged, IReplicatedMessage
+    {
+        var command = plan.CommandByName(typeof(T).Name)
+            ?? throw new InvalidOperationException($"the catalog this session negotiated declares no command named '{typeof(T).Name}'");
+        var slot = new TypedCommandSlot<T>(MessageBinding<T>.Bind(command), new CommandBucket(Declared(command)?.Rate), IsLatest(command));
+        if (index >= _typed.Length)
+        {
+            Array.Resize(ref _typed, Math.Max(index + 1, _typed.Length * 2));
+        }
+
+        _typed[index] = slot;
+        return slot;
+    }
+
+    private CatalogCommand Declared(MessagePlan command)
+    {
+        foreach (var c in Plan.Catalog.Commands ?? [])
+        {
+            if (c.Idx == command.Idx)
+            {
+                return c;
+            }
+        }
+
+        return null;
+    }
+
+    private bool IsLatest(MessagePlan command) => Declared(command)?.Delivery == CatalogCommand.LatestDelivery;
+
+    private int ClientMessageBytes => Plan.Catalog.Limits.ClientMessageBytes;
+
+    /// <summary>Queued commands a newer one of the same <c>latest</c> type replaced before they were sent.</summary>
+    public long CommandsCoalesced { get; private set; }
+
+    private sealed class TypedCommandSlot<T>(MessageBinding<T> binding, CommandBucket bucket, bool latest) where T : unmanaged, IReplicatedMessage
+    {
+        public MessageBinding<T> Binding { get; } = binding;
+
+        public CommandBucket Bucket { get; } = bucket;
+
+        public bool Latest { get; } = latest;
+    }
+
     /// <summary>Sends a <c>BYE</c> and closes.</summary>
     /// <param name="code">1000, or a code in 4000-4999.</param>
     /// <returns>The close.</returns>
     public async Task CloseAsync(ushort code = CloseCodes.Normal)
     {
+        // Unflushed commands go with the session the caller is ending; flush first to send them.
+        DropQueuedCommands();
         var transport = _transport;
         if (transport != null)
         {
@@ -544,6 +839,8 @@ public sealed class TyphonClient : IAsyncDisposable
     {
         var transport = _transportFactory();
         await transport.ConnectAsync(ct).ConfigureAwait(false);
+        // No command is queued or flushed until this session's WELCOME is applied (ApplyWelcome below opens it).
+        DropQueuedCommands();
         _transport = transport;
 
         var hello = new HelloMessage
@@ -580,6 +877,9 @@ public sealed class TyphonClient : IAsyncDisposable
 
         var welcome = WelcomeMessage.Parse(message);
         ApplyWelcome(welcome);
+
+        // The session is open: commands queue and flush against the catalog the WELCOME just applied.
+        DropQueuedCommands(open: true);
         _options.Recorder?.Record(message);
         _policy.NoteConnected();
 
@@ -601,6 +901,7 @@ public sealed class TyphonClient : IAsyncDisposable
     private void ApplyWelcome(WelcomeMessage welcome)
     {
         RoundTrip.Reset();
+        DropQueuedCommands();
         CapsGranted = welcome.CapsGranted;
         SessionId = welcome.SessionId;
         ResumeToken = welcome.ResumeToken;

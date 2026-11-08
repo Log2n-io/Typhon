@@ -190,6 +190,8 @@ internal static class CatalogBuilder
             // Realm-framed (typhon.3): the width and bounds are the REALM block's, so the catalog names the kind alone.
             Pos = new CatalogCodec { Kind = position.Pos.Kind },
             Vel = position.Linear ? position.Vel : null,
+            Ground = position.Ground,
+            Up = position.Ground ? position.UpAxis : 0,
         };
     }
 

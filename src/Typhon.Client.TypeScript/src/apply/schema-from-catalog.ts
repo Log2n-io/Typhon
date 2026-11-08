@@ -101,6 +101,7 @@ export function worldSchemaFromCatalog(catalog: Catalog | CatalogPlan): WorldSch
                 kind: position.moving ? 'motion' : 'static',
                 ...(position.moving ? { model: position.linear ? 'linear' : 'none' } : {}),
                 dims: position.dims === 3 ? 3 : 2,
+                ...(position.ground ? { up: position.upAxis } : {}),
               },
             }),
       };

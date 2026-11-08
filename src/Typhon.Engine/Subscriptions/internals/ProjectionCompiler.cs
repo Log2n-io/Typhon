@@ -79,6 +79,27 @@ internal static class ProjectionCompiler
             plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier, slack, registry.Options.FrameBytes);
         }
 
+        // Band motion heads (#1615): one segment per distinct band tolerance, in every moving archetype's hot entry, each refit at its multiple of the
+        // archetype's own tolerance. Declared on the profiles, which see every archetype, so every mover keeps them all.
+        var bandTolerances = BandTolerances.Of(registry);
+        if (bandTolerances.Length > 0)
+        {
+            foreach (var plan in plans)
+            {
+                if (plan?.Position is { Moving: true } position)
+                {
+                    plan.BlockLayout = plan.BlockLayout.WithMotionHeads(bandTolerances.Length);
+                    var metres = new double[bandTolerances.Length];
+                    for (var h = 0; h < metres.Length; h++)
+                    {
+                        metres[h] = position.ToleranceMetres * bandTolerances[h];
+                    }
+
+                    position.HeadToleranceMetres = metres;
+                }
+            }
+        }
+
         return plans;
     }
 
@@ -712,8 +733,38 @@ internal static class ProjectionCompiler
                 .OffsetInComponentStorage;
         }
 
-        // p0 | v (linear only) | t0 (tickLo, 2 B) | epoch (1 B) — § 5's segment grammar, sized here so the block layout and the record arena agree on it.
-        var segmentBytes = (dims * (bits / 8)) + (vel == null ? 0 : dims * (vel.Bits / 8)) + 3;
+        // A ground-clamped motion (#1616): the grounded bool, resolved like a declared velocity, on a 3D mover only.
+        var ground = moving && motion?.GroundedFieldName != null;
+        var groundedSlot = NoSlot;
+        var groundedComponentOffset = -1;
+        var groundedComponentSize = 0;
+        var groundedOffset = -1;
+        if (ground)
+        {
+            if (dims != 3)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' ground-clamps its motion, which omits the vertical axis of a 3D position; its position is {dims}D.");
+            }
+
+            groundedSlot = ResolveSlot(projection, meta, motion.GroundedComponentTypeId, motion.GroundedComponentName, "the grounded state");
+            groundedComponentOffset = layout.ComponentOffset(groundedSlot);
+            groundedComponentSize = layout.ComponentSize(groundedSlot);
+            var groundedField = ResolveField(projection, ResolveDefinition(meta, groundedSlot, engine), motion.GroundedFieldName, "the grounded state");
+            // One byte, non-zero on the ground: a byte, or a bool where a component may hold one.
+            if (groundedField.DotNetType != typeof(byte) && groundedField.DotNetType != typeof(bool))
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' reads its grounded state from '{motion.GroundedComponentName}.{motion.GroundedFieldName}', which is a "
+                    + $"'{groundedField.DotNetType?.Name}': it must be a byte (or a bool), non-zero while the entity stands on the ground.");
+            }
+
+            groundedOffset = groundedField.OffsetInComponentStorage;
+        }
+
+        // [grounded (ground only, 1 B)] | p0 | v (linear only) | t0 (tickLo, 2 B) | epoch (1 B) — § 5's segment grammar, sized here so the block layout and
+        // the record arena agree on it. The hot entry holds the full segment; a grounded one travels without its up axis.
+        var segmentBytes = (ground ? 1 : 0) + (dims * (bits / 8)) + (vel == null ? 0 : dims * (vel.Bits / 8)) + 3;
         return new CompiledPosition
         {
             Moving = moving,
@@ -738,6 +789,12 @@ internal static class ProjectionCompiler
             VelocityComponentOffsetInCluster = velocityComponentOffset,
             VelocityComponentSize = velocityComponentSize,
             VelocityFieldOffsetInComponent = velocityOffset,
+            Ground = ground,
+            UpAxis = ground ? motion.UpAxis : -1,
+            GroundedComponentSlot = groundedSlot,
+            GroundedComponentOffsetInCluster = groundedComponentOffset,
+            GroundedComponentSize = groundedComponentSize,
+            GroundedFieldOffsetInComponent = groundedOffset,
             SegmentBytes = moving ? segmentBytes : dims * (bits / 8),
         };
     }

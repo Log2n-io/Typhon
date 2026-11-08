@@ -53,6 +53,8 @@ struct PositionSchema {
     bool linear = true;
     // 2 or 3.
     int dims = 2;
+    // #1616: for a ground-clamped mover, the vertical axis a grounded segment omits (its height decodes as NaN); -1 otherwise.
+    int up = -1;
 };
 
 struct ArchetypeSchema {

@@ -280,6 +280,14 @@ PositionPlan::PositionPlan(const CatalogPosition& position, const Catalog& catal
             throw Refuse("the linear model needs a vel codec matching pos's dimensions");
         }
     }
+
+    ground = moving && dims == 3 && position.ground;
+    if (position.ground && (!ground || position.up < 0 || position.up > 2))
+    {
+        throw Refuse("a ground position is a pos3 motion with an up axis of 0, 1 or 2");
+    }
+
+    upAxis = ground ? position.up : -1;
 }
 
 ArchetypePlan::ArchetypePlan(const CatalogArchetype& a, const Catalog& catalog) : archetype(&a), idx(a.idx), name(a.name), groups(a.groups)

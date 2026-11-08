@@ -64,8 +64,15 @@ export function segmentEntryAt(store: ArchetypeStore, slot: number, renderTick: 
 }
 
 /**
+ * The terrain height under a ground-clamped entity (#1616): the application's own terrain, sampled at the two horizontal
+ * coordinates — the evaluated position's axes other than the archetype's up axis, in axis order (x and z for y up).
+ */
+export type HeightAt = (a: number, b: number) => number;
+
+/**
  * Position and velocity of one slot at render time, into `out` at `offset`: `p[dims]` then `v[dims]`
- * ({@link ArchetypeStore.motionStride} values).
+ * ({@link ArchetypeStore.motionStride} values). For a ground-clamped archetype, `heightAt` gives a grounded entity its
+ * height, which its segment does not carry (#1616); without it the height stays NaN.
  */
 export function evaluateSlot(
   store: ArchetypeStore,
@@ -74,9 +81,26 @@ export function evaluateSlot(
   frac: number,
   out: Float64Array,
   offset: number,
+  heightAt: HeightAt | null = null,
 ): void {
   requirePosition(store);
   evaluate(store, slot, segmentEntryAt(store, slot, renderTick), renderTick, frac, out, offset);
+  ground(store.upAxis, store.motionStride >> 1, heightAt, out, offset);
+}
+
+/**
+ * A grounded segment's height evaluates to NaN (#1616): the terrain under the entity takes its place, and its vertical
+ * velocity is 0. An airborne height is kept, so a landing moves from it to the terrain's in one frame.
+ */
+function ground(up: number, dims: number, heightAt: HeightAt | null, out: Float64Array, offset: number): void {
+  if (up < 0 || !Number.isNaN(out[offset + up]!)) {
+    return;
+  }
+
+  out[offset + dims + up] = 0;
+  if (heightAt !== null) {
+    out[offset + up] = heightAt(out[offset + (up === 0 ? 1 : 0)]!, out[offset + (up === 2 ? 1 : 2)]!);
+  }
 }
 
 /** Motion epoch of the segment that applies at `renderTick`: a change means the entity teleported. */
@@ -88,10 +112,28 @@ export function epochAt(store: ArchetypeStore, slot: number, renderTick: number)
 
 /**
  * Evaluates every live entity of an archetype, in live order: entry `i` describes `store.live[i]`. `out` must hold
- * `liveCount × store.motionStride` doubles.
+ * `liveCount × store.motionStride` doubles. For a ground-clamped archetype, `heightAt` gives each grounded entity its
+ * height (#1616); without it the height stays NaN.
  */
-export function evaluateLive(store: ArchetypeStore, renderTick: number, frac: number, out: Float64Array): void {
+export function evaluateLive(
+  store: ArchetypeStore,
+  renderTick: number,
+  frac: number,
+  out: Float64Array,
+  heightAt: HeightAt | null = null,
+): void {
   requirePosition(store);
+  evaluateLiveRaw(store, renderTick, frac, out);
+  const up = store.upAxis;
+  if (up >= 0) {
+    const stride = store.motionStride;
+    for (let i = 0; i < store.liveCount; i++) {
+      ground(up, stride >> 1, heightAt, out, i * stride);
+    }
+  }
+}
+
+function evaluateLiveRaw(store: ArchetypeStore, renderTick: number, frac: number, out: Float64Array): void {
   const live = store.live;
   const count = store.liveCount;
   const stride = store.motionStride;

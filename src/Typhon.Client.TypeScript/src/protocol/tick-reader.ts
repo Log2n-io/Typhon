@@ -5,11 +5,12 @@ import {
   type GridPlan,
   type MessagePlan,
   type MetricPlan,
+  type PositionPlan,
 } from './catalog.js';
 import { CodecKind } from './codec-kinds.js';
 import { BlockType, MessageType, ProtocolConstants, SourceStatus, TickFlags } from './constants.js';
 import { malformed, protocolError } from './errors.js';
-import { readNumber, readSection, type FieldSink } from './field-codec.js';
+import { readGroundAxes, readNumber, readSection, type FieldSink } from './field-codec.js';
 import { bigintOf, HIGH_WORD, LOW_WORD } from './int64.js';
 import { WireReader } from './reader.js';
 import { RealmFrame } from './realm-frame.js';
@@ -417,12 +418,16 @@ export class TickReader {
         t0[0] = 0;
         let epoch = 0;
         if (position !== null) {
-          readNumber(r, position.pos, tick, p, 0, frame);
-          if (position.moving) {
-            if (position.vel !== null) {
+          if (position.ground) {
+            readGroundSegment(r, position, tick, p, v, frame);
+          } else {
+            readNumber(r, position.pos, tick, p, 0, frame);
+            if (position.moving && position.vel !== null) {
               readNumber(r, position.vel, tick, v, 0);
             }
+          }
 
+          if (position.moving) {
             // decodeTickLo, written out: its result would be boxed crossing the call once the tick passes 2^30.
             const low = r.u16();
             t0[0] = tick - ((tick - low) & 0xffff);
@@ -448,9 +453,13 @@ export class TickReader {
       let prev = -1;
       for (let n = runLength(r); n > 0; n--) {
         prev = nextNetId(r, prev);
-        readNumber(r, position!.pos, tick, p, 0, frame);
-        if (position!.vel !== null) {
-          readNumber(r, position!.vel, tick, v, 0);
+        if (position!.ground) {
+          readGroundSegment(r, position!, tick, p, v, frame);
+        } else {
+          readNumber(r, position!.pos, tick, p, 0, frame);
+          if (position!.vel !== null) {
+            readNumber(r, position!.vel, tick, v, 0);
+          }
         }
 
         const low = r.u16();
@@ -585,6 +594,39 @@ export function runLength(r: WireReader): number {
   }
 
   return n;
+}
+
+/**
+ * A ground position's `p0` and velocity (#1616): the grounded byte, then a full `pos3` segment's — or, grounded, all but
+ * the up axis, whose height is NaN and vertical velocity 0. `t0` and the epoch follow, read by the caller. A byte other
+ * than 0 or 1 is malformed.
+ */
+export function readGroundSegment(
+  r: WireReader,
+  position: PositionPlan,
+  tick: number,
+  p: Float64Array,
+  v: Float64Array,
+  frame: RealmFrame | null,
+): void {
+  const grounded = r.u8();
+  if (grounded > 1) {
+    throw malformed(`a ground segment's grounded byte is 0 or 1, not ${grounded}`);
+  }
+
+  if (grounded === 0) {
+    readNumber(r, position.pos, tick, p, 0, frame);
+    if (position.vel !== null) {
+      readNumber(r, position.vel, tick, v, 0);
+    }
+
+    return;
+  }
+
+  readGroundAxes(r, position.pos, p, 0, position.upAxis, frame);
+  if (position.vel !== null) {
+    readGroundAxes(r, position.vel, v, 0, position.upAxis);
+  }
 }
 
 /** The error for segments in the block of an archetype that does not move. */

@@ -63,6 +63,10 @@ struct CatalogPosition {
     std::optional<std::string> model;
     CatalogCodec pos;
     std::optional<CatalogCodec> vel;
+    // #1616: a ground-clamped pos3 mover. Each segment starts with a u8, 1 when grounded; a grounded one omits the `up` axis of p0 and of the velocity,
+    // decoded as NaN and 0 (the height is the client's terrain).
+    bool ground = false;
+    int up = 0;
 };
 
 struct CatalogOwner {

@@ -47,6 +47,7 @@ namespace Typhon.Engine
         public MotionBuilder Tolerance(double metres) => this;
         public MotionBuilder Teleport(double maxSpeedMps) => this;
         public MotionBuilder MaxAge(double seconds) => this;
+        public MotionBuilder Grounded<TC, TF>(Comp<TC> c, System.Linq.Expressions.Expression<Func<TC, TF>> selector, int up = 1) where TC : unmanaged => this;
     }
     public sealed class OwnerBuilder
     {
@@ -119,6 +120,29 @@ namespace Typhon.Engine
 ";
 
     // ── emission ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>#1616: <c>[Motion(Grounded = …, Up = …)]</c> becomes a <c>.Grounded</c> call over the motion component's field.</summary>
+    [Test]
+    public void AGroundedMotionAttributeBecomesItsBuilderCall()
+    {
+        var (source, diagnostics, errors) = Run(@"
+[Component(""Body"", 1)] public struct Body { [Field] public float X; [Field] public byte OnGround; }
+namespace Game
+{
+    [Archetype, Replicated] public partial class Walker : Archetype<Walker>
+    {
+        [Motion(TeleportMps = 9, Grounded = nameof(Body.OnGround), Up = 2)] public static readonly Comp<Body> Bounds = Register<Body>();
+    }
+}");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(diagnostics, Is.Empty);
+            Assert.That(errors, Is.Empty, "the emitted source compiles against the builder's signatures");
+            Assert.That(source, Does.Contain(
+                "archetype.Motion(global::Game.Walker.Bounds, m => m.Teleport(9d).Grounded(global::Game.Walker.Bounds, (global::Body x) => x.OnGround, 2));"));
+        });
+    }
 
     [Test]
     public void AnArchetypesAttributesBecomeItsBuilderCalls()
@@ -207,7 +231,47 @@ public partial class Outer
                 + "global::Typhon.Protocol.CodecKind.EntityRef, 0, 0d, 0d, 0d, 0, null, false)"));
             Assert.That(source, Does.Contain("new global::Typhon.Protocol.MessageFieldDeclaration(\"Speed\", "
                 + "global::Typhon.Protocol.CodecKind.U16, 0, 0d, 0d, 0d, 0, \"spd\", false)"));
-            Assert.That(source, Does.Not.Contain("\"Plain\""), "an unattributed field is the builder's default, not the descriptor's");
+            Assert.That(source, Does.Not.Contain("MessageFieldDeclaration(\"Plain\""), "an unattributed field is the builder's default, not the descriptor's");
+        });
+    }
+
+    /// <summary>
+    /// #1614: every public instance field — attributed or not — gets a layout entry with its default wire name and a lossless read, so a client sends the
+    /// struct itself. An enum reads through its underlying type, a 64-bit integer as its bits, an unsupported type throws naming the field.
+    /// </summary>
+    [Test]
+    public void AMessageGetsALayoutAndATypedReadForEveryPublicField()
+    {
+        var (source, diagnostics, errors) = Run(@"
+public enum Gait : byte { Walk, Run }
+public struct Opaque { public int A; }
+[ReplicatedMessage] public partial struct Move
+{
+    public sbyte Forward;
+    public float Fx;
+    public bool Jump;
+    public Gait Gait;
+    [Codec(CodecKind.U64, Name = ""id"")] public ulong Key;
+    public long Big;
+    public Opaque Blob;
+    internal int Hidden;
+}");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(diagnostics, Is.Empty);
+            Assert.That(errors, Is.Empty, "the emitted layout and reads compile");
+            Assert.That(source, Does.Contain("new global::Typhon.Protocol.MessageFieldLayout(\"Forward\", \"Forward\", global::Typhon.Protocol.MessageFieldType.SByte, false)"));
+            Assert.That(source, Does.Contain("new global::Typhon.Protocol.MessageFieldLayout(\"Gait\", \"Gait\", global::Typhon.Protocol.MessageFieldType.Byte, true)"));
+            Assert.That(source, Does.Contain("new global::Typhon.Protocol.MessageFieldLayout(\"Key\", \"id\", global::Typhon.Protocol.MessageFieldType.UInt64, false)"),
+                "the attribute's wire name");
+            Assert.That(source, Does.Contain("new global::Typhon.Protocol.MessageFieldLayout(\"Blob\", \"Blob\", global::Typhon.Protocol.MessageFieldType.Unsupported, false)"));
+            Assert.That(source, Does.Not.Contain("\"Hidden\""), "only public instance fields travel");
+            Assert.That(source, Does.Contain("case 1: return global::Typhon.Protocol.MessageFieldValue.Of((double)this.Fx);"));
+            Assert.That(source, Does.Contain("case 2: return global::Typhon.Protocol.MessageFieldValue.Of(this.Jump ? 1d : 0d);"));
+            Assert.That(source, Does.Contain("case 3: return global::Typhon.Protocol.MessageFieldValue.Of((double)(byte)this.Gait);"));
+            Assert.That(source, Does.Contain("case 5: return global::Typhon.Protocol.MessageFieldValue.Of((long)this.Big);"));
+            Assert.That(source, Does.Contain("case 6: throw new global::System.NotSupportedException("), "fails at run time, naming the field");
         });
     }
 

@@ -126,6 +126,23 @@ private:
                 position.vel = ReadCodec(o.Find("vel"), at + ".vel", false);
             }
 
+            if (Present(o.Find("ground")))
+            {
+                if (o.Find("ground")->IsBool())
+                {
+                    position.ground = o.Find("ground")->AsBool();
+                }
+                else
+                {
+                    p_.push_back(at + ".ground must be a boolean");
+                }
+            }
+
+            if (Present(o.Find("up")))
+            {
+                position.up = Int(o, "up", at);
+            }
+
             archetype.position = std::move(position);
         }
 

@@ -1323,8 +1323,11 @@
   invariant ∀ push archetype, ∀ live slot s: cold LastEventTick(s) = the tick of the latest PushEvent recorded for the entity in s
   invariant ∀ change to an entity's projected state or motion in tick T: a PushEvent for it is recorded in T, and it names the block and slot the
     entity is in at the end of T — an arrival by migration included, even when no byte changed
-  invariant distance bands (09 § 9) are declared per Sphere profile — at most three, periods N ∈ {2, 4, 8} growing outward — and folded once: at the
-    smallest declared period's phase ticks, over the largest's window. For a session holding an entity in band b before and not nearer after, the entity's
+  invariant distance bands (09 § 9) are declared per Sphere profile — at most three, periods N ∈ {1, 2, 4, 8} never shrinking outward — and folded once:
+    at the smallest declared period above one's phase ticks, over the largest's window. A band with a motion tolerance above one (#1615) serves the
+    band head of that tolerance: a session holding the entity in it is sent that head's segment when the head changed since its last frame, and at once
+    when the entity went outward into a coarser head (in the live step, or by the anchor's move, through the crescent sweep); a head change is a change,
+    so it makes an event even when the base segment did not move. For a session holding an entity in band b before and not nearer after, the entity's
     update is sent only at its flush tick for b, p with ((netId mod N_b + p mod N_b) mod N_b = 0), and carries every group whose stamp is in (p − N_b, p]
   invariant an entity a session's anchor or radius brings inward across any band's boundary, with no event since the session's last frame, gets every
     group stamped in its old band's last N ticks before that frame, gap included (the inner crescent); a catch-up's flush-only replay never speaks for

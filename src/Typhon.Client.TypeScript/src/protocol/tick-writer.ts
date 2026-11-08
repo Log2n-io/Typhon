@@ -1,7 +1,7 @@
 import type { ArchetypePlan, CatalogPlan, GridPlan, MessagePlan, PositionPlan } from './catalog.js';
 import { CodecKind } from './codec-kinds.js';
 import { BlockType, MessageType, SourceStatus, TickFlags } from './constants.js';
-import { writeNumber, writeSection, type FieldValues } from './field-codec.js';
+import { writeGroundAxes, writeNumber, writeSection, type FieldValues } from './field-codec.js';
 import { HIGH_WORD, LOW_WORD, wordsOf } from './int64.js';
 import { uintInRange } from './range.js';
 import { RealmFrame } from './realm-frame.js';
@@ -127,9 +127,14 @@ export function writeEntitiesBlock(
   for (const e of enters) {
     prev = writeGap(w, prev, e.netId);
     if (position !== null) {
-      writeNumber(w, position.pos, e.position ?? NO_VALUES, 0, frame);
+      if (position.ground) {
+        writeGroundHead(w, position, e.position ?? NO_VALUES, e.velocity ?? NO_VALUES, frame);
+      } else {
+        writeNumber(w, position.pos, e.position ?? NO_VALUES, 0, frame);
+      }
+
       if (position.moving) {
-        writeSegmentTail(w, frameTick, position, e.velocity ?? NO_VALUES, e.t0 ?? 0, e.epoch ?? 0);
+        writeSegmentTail(w, frameTick, position, e.velocity ?? NO_VALUES, e.t0 ?? 0, e.epoch ?? 0, position.ground);
       }
     }
 
@@ -147,8 +152,13 @@ export function writeEntitiesBlock(
   prev = -1;
   for (const s of segments) {
     prev = writeGap(w, prev, s.netId);
-    writeNumber(w, position!.pos, s.position, 0, frame);
-    writeSegmentTail(w, frameTick, position!, s.velocity ?? NO_VALUES, s.t0, s.epoch);
+    if (position!.ground) {
+      writeGroundHead(w, position!, s.position, s.velocity ?? NO_VALUES, frame);
+    } else {
+      writeNumber(w, position!.pos, s.position, 0, frame);
+    }
+
+    writeSegmentTail(w, frameTick, position!, s.velocity ?? NO_VALUES, s.t0, s.epoch, position!.ground);
   }
 
   writeRunHeader(w, states.length);
@@ -368,6 +378,35 @@ export function writeExtBlock(w: WireWriter, appTypeId: number, payload: Uint8Ar
   endBlock(w, mark);
 }
 
+/**
+ * A ground position's segment head (#1616): the grounded byte — 1 when the position's up component is NaN, the form a
+ * decoder gives it — then `p0` and the velocity, without the up axis when grounded. `t0` and the epoch follow.
+ */
+function writeGroundHead(
+  w: WireWriter,
+  position: PositionPlan,
+  p: ArrayLike<number>,
+  velocity: ArrayLike<number>,
+  frame: RealmFrame | null,
+): void {
+  const grounded = Number.isNaN(p[position.upAxis]!);
+  w.u8(grounded ? 1 : 0);
+  if (!grounded) {
+    // Airborne: full 3D, its velocity included — writeSegmentTail writes none for a ground archetype.
+    writeNumber(w, position.pos, p, 0, frame);
+    if (position.vel !== null) {
+      writeNumber(w, position.vel, velocity);
+    }
+
+    return;
+  }
+
+  writeGroundAxes(w, position.pos, p, position.upAxis, frame);
+  if (position.vel !== null) {
+    writeGroundAxes(w, position.vel, velocity, position.upAxis);
+  }
+}
+
 function writeSegmentTail(
   w: WireWriter,
   frameTick: number,
@@ -375,6 +414,7 @@ function writeSegmentTail(
   velocity: ArrayLike<number>,
   t0: number,
   epoch: number,
+  ground = false,
 ): void {
   // W9: tickLo is exact only for a past tick less than 2^16 old; a stale segment would decode 65 536 ticks off.
   uintInRange(frameTick, 0xffffffff, 'frame tick');
@@ -382,7 +422,8 @@ function writeSegmentTail(
     throw new RangeError(`segment start tick ${t0} is not within the 2^16 ticks up to frame tick ${frameTick}`);
   }
 
-  if (position.vel !== null) {
+  // A ground segment's velocity went with its head (writeGroundHead): grounded without its up axis.
+  if (position.vel !== null && !ground) {
     writeNumber(w, position.vel, velocity);
   }
 

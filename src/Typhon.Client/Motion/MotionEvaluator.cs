@@ -3,6 +3,15 @@ using System;
 namespace Typhon.Client;
 
 /// <summary>
+/// The terrain height under a ground-clamped entity (#1616): the application's own terrain, sampled at the two horizontal coordinates — the evaluated
+/// position's axes other than the catalog's up axis, in axis order (x and z for y up).
+/// </summary>
+/// <param name="a">The first horizontal coordinate.</param>
+/// <param name="b">The second horizontal coordinate.</param>
+/// <returns>The height.</returns>
+public delegate double HeightAt(double a, double b);
+
+/// <summary>
 /// Evaluates motion segments (03-wire-protocol § 6) in 2 or 3 dimensions: where an entity is at render time, and how fast it is going.
 /// </summary>
 /// <remarks>
@@ -69,7 +78,11 @@ public static class MotionEvaluator
     /// <param name="destination">At least <see cref="ArchetypeStore.MotionStride"/> doubles; only that many are written.</param>
     /// <exception cref="InvalidOperationException">The archetype has no position.</exception>
     /// <exception cref="ArgumentException">The destination is too short.</exception>
-    public static void EvaluateSlot(ArchetypeStore store, int slot, long renderTick, double frac, Span<double> destination)
+    /// <param name="heightAt">
+    /// For a ground-clamped archetype (#1616), the terrain height under a grounded entity — whose segment carries no height — or <see langword="null"/> to
+    /// leave it NaN.
+    /// </param>
+    public static void EvaluateSlot(ArchetypeStore store, int slot, long renderTick, double frac, Span<double> destination, HeightAt heightAt = null)
     {
         RequirePosition(store);
         if (destination.Length < store.MotionStride)
@@ -79,6 +92,7 @@ public static class MotionEvaluator
 
         var ring = store.Segments;
         Evaluate(ring, store.Linear || !store.Moving, slot, EntryOf(ring, slot, renderTick), renderTick, frac, destination);
+        Ground(UpAxisOf(store), store.MotionStride / 2, heightAt, destination);
     }
 
     /// <summary>
@@ -90,7 +104,8 @@ public static class MotionEvaluator
     /// <param name="destination"><see cref="ArchetypeStore.LiveCount"/> × <see cref="ArchetypeStore.MotionStride"/> doubles.</param>
     /// <exception cref="InvalidOperationException">The archetype has no position.</exception>
     /// <exception cref="ArgumentException">The destination is too short.</exception>
-    public static void EvaluateLive(ArchetypeStore store, long renderTick, double frac, Span<double> destination)
+    /// <param name="heightAt">For a ground-clamped archetype (#1616), the terrain height under a grounded entity, or <see langword="null"/> to leave it NaN.</param>
+    public static void EvaluateLive(ArchetypeStore store, long renderTick, double frac, Span<double> destination, HeightAt heightAt = null)
     {
         RequirePosition(store);
         var stride = store.MotionStride;
@@ -103,10 +118,34 @@ public static class MotionEvaluator
         var ring = store.Segments;
         var extrapolating = store.Linear || !store.Moving;
         var live = store.Live;
+        var up = UpAxisOf(store);
         for (var i = 0; i < count; i++)
         {
             var slot = live[i];
-            Evaluate(ring, extrapolating, slot, EntryOf(ring, slot, renderTick), renderTick, frac, destination.Slice(i * stride, stride));
+            var one = destination.Slice(i * stride, stride);
+            Evaluate(ring, extrapolating, slot, EntryOf(ring, slot, renderTick), renderTick, frac, one);
+            Ground(up, stride / 2, heightAt, one);
+        }
+    }
+
+    private static int UpAxisOf(ArchetypeStore store) => store.Plan.Position?.UpAxis ?? -1;
+
+    /// <summary>
+    /// A grounded segment carries no height (#1616): its position's up axis evaluates to NaN, and the terrain under the entity takes its place; its vertical
+    /// velocity is 0, whatever an evaluation across an airborne segment made of it. An airborne entity's evaluated height is finite and kept — so a jump
+    /// that lands moves from its own height to the terrain's in one frame, by however far the two disagree.
+    /// </summary>
+    private static void Ground(int up, int dims, HeightAt heightAt, Span<double> destination)
+    {
+        if (up < 0 || !double.IsNaN(destination[up]))
+        {
+            return;
+        }
+
+        destination[dims + up] = 0;
+        if (heightAt != null)
+        {
+            destination[up] = heightAt(destination[up == 0 ? 1 : 0], destination[up == 2 ? 1 : 2]);
         }
     }
 

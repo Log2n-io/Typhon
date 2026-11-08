@@ -127,6 +127,36 @@ public sealed class MotionBuilder
         _motion.IgnoresTickDilation = true;
         return this;
     }
+
+    /// <summary>
+    /// Ground-clamps the motion (#1616): while the field <paramref name="selector"/> names is non-zero, segments omit the <paramref name="up"/> axis — the
+    /// client derives the height from the terrain it holds — and only the horizontal extrapolation error triggers a new one. While it is false (jumping,
+    /// falling, flying), segments are full 3D. A change of state is a new segment.
+    /// </summary>
+    /// <typeparam name="TComponent">The component holding the grounded state.</typeparam>
+    /// <typeparam name="TField">A <see cref="byte"/> — non-zero while on the ground — or a <see cref="bool"/>, checked at <c>Start</c>.</typeparam>
+    /// <param name="component">The component handle.</param>
+    /// <param name="selector">Selects the grounded field.</param>
+    /// <param name="up">The vertical axis: 0, 1 (the default, y up) or 2.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// The engine stays terrain-agnostic: the simulation, which already knows whether a body stands on the ground, says so, and the server's height
+    /// remains the truth for every rule — only the wire omits it. A 3D motion only.
+    /// </remarks>
+    public MotionBuilder Grounded<TComponent, TField>(Comp<TComponent> component, Expression<Func<TComponent, TField>> selector, int up = 1)
+        where TComponent : unmanaged
+    {
+        if (up is < 0 or > 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(up), up, "The up axis is 0 (x), 1 (y) or 2 (z).");
+        }
+
+        _motion.GroundedComponentName = typeof(TComponent).Name;
+        _motion.GroundedFieldName = SubscriptionsNames.SelectorField(selector, "Grounded");
+        _motion.GroundedComponentTypeId = SubscriptionsNames.ComponentTypeId(component);
+        _motion.UpAxis = up;
+        return this;
+    }
 }
 
 /// <summary>
@@ -155,4 +185,16 @@ public sealed class MotionProjection
 
     /// <summary>The velocity field's component type id, for the projection compiler.</summary>
     internal int VelocityComponentTypeId { get; set; }
+
+    /// <summary>The component holding the grounded state (#1616), or <see langword="null"/> when the motion is not ground-clamped.</summary>
+    public string GroundedComponentName { get; internal set; }
+
+    /// <summary>The grounded bool field, or <see langword="null"/>.</summary>
+    public string GroundedFieldName { get; internal set; }
+
+    /// <summary>For a ground-clamped motion, the vertical axis a grounded segment omits.</summary>
+    public int UpAxis { get; internal set; } = 1;
+
+    /// <summary>The grounded field's component type id, for the projection compiler.</summary>
+    internal int GroundedComponentTypeId { get; set; }
 }

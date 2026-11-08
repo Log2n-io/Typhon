@@ -380,6 +380,25 @@ internal sealed class CompiledPosition
     /// <summary>The extrapolation error, in metres, at which a new segment is sent. Server policy: it never reaches the catalog.</summary>
     public double ToleranceMetres { get; init; }
 
+    /// <summary>
+    /// Each band motion head's tolerance, in metres (#1615): head h (1-based) refits when its own extrapolation is off by more than <c>[h − 1]</c>. Empty when
+    /// no band coarsens motion. Server policy: it never reaches the catalog.
+    /// </summary>
+    public double[] HeadToleranceMetres
+    {
+        get => _headToleranceMetres;
+        internal set
+        {
+            _headToleranceMetres = value ?? [];
+            HeadToleranceSquared = Array.ConvertAll(_headToleranceMetres, static t => t * t);
+        }
+    }
+
+    private double[] _headToleranceMetres = [];
+
+    /// <summary><see cref="HeadToleranceMetres"/>, squared: what the motion rule compares a squared error against.</summary>
+    public double[] HeadToleranceSquared { get; private set; } = [];
+
     /// <summary>The teleport threshold in metres per second. Server policy, and the number the velocity width is derived from.</summary>
     public double TeleportMaxSpeedMps { get; init; }
 
@@ -406,6 +425,26 @@ internal sealed class CompiledPosition
 
     /// <summary>Whether <c>VelocityFrom</c> replaced the measurement.</summary>
     public bool VelocityIsDeclared => VelocityFieldOffsetInComponent >= 0;
+
+    /// <summary>
+    /// Whether the motion is ground-clamped (#1616): every segment starts with a grounded byte, and a grounded one travels without <see cref="UpAxis"/>.
+    /// </summary>
+    public bool Ground { get; init; }
+
+    /// <summary>For a ground motion, the vertical axis; -1 otherwise.</summary>
+    public int UpAxis { get; init; } = -1;
+
+    /// <summary>For a ground motion, the slot of the component holding the grounded bool.</summary>
+    public byte GroundedComponentSlot { get; init; }
+
+    /// <summary>That component's offset in the cluster.</summary>
+    public int GroundedComponentOffsetInCluster { get; init; } = -1;
+
+    /// <summary>That component's stride.</summary>
+    public int GroundedComponentSize { get; init; }
+
+    /// <summary>The grounded bool's offset inside its component.</summary>
+    public int GroundedFieldOffsetInComponent { get; init; } = -1;
 
     /// <summary>
     /// Bytes of one pre-encoded motion segment: <c>p0</c> (dims × pos bytes), <c>v</c> when linear (dims × vel bytes), <c>t0</c> (2) and <c>epoch</c> (1).

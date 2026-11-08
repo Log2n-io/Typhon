@@ -97,6 +97,36 @@ internal readonly struct MotionPolicy
     /// <summary>The declared velocity column's stride, when <c>VelocityFrom</c> named one.</summary>
     public int VelocityComponentSize { get; }
 
+    /// <summary>Whether the motion is ground-clamped (#1616): a grounded byte leads every segment.</summary>
+    public bool Ground { get; }
+
+    /// <summary>For a ground motion, the vertical axis a grounded segment omits; -1 otherwise.</summary>
+    public int UpAxis { get; }
+
+    /// <summary>Byte offset of <c>p0</c> <b>within the segment</b>: 1 for a ground motion (after the grounded byte), else 0.</summary>
+    public int SegmentPosOffset { get; }
+
+    /// <summary>For a ground motion, the grounded bool's component stride.</summary>
+    public int GroundedComponentSize { get; }
+
+    /// <summary>For a ground motion, the grounded bool's offset inside its component.</summary>
+    public int GroundedFieldOffset { get; }
+
+    /// <summary>How many band motion heads every hot entry carries (#1615); 0 when no band coarsens motion.</summary>
+    public int HeadCount { get; }
+
+    /// <summary>Byte offset of the first band head inside one hot entry.</summary>
+    public int HeadsOffset { get; }
+
+    /// <summary>Bytes of one band head: start tick, stamp, segment.</summary>
+    public int HeadStride { get; }
+
+    /// <summary>Bytes of one segment.</summary>
+    public int SegmentBytes { get; }
+
+    /// <summary>Each band head's tolerance, squared, in head order.</summary>
+    public double[] HeadToleranceSquared { get; }
+
     /// <summary>Byte offset of the declared velocity value inside its component.</summary>
     public int VelocityFieldOffset { get; }
 
@@ -139,13 +169,25 @@ internal readonly struct MotionPolicy
         // The three below are offsets WITHIN the segment, not within the hot entry: every use of them is against a pointer that already carries
         // SegmentOffset, and folding it in twice put the velocity, t0 and epoch of every entity 32 bytes past their own entry.
         SegmentOffset = layout.SegmentOffsetInHotEntry;
-        SegmentVelocityOffset = Dims * PosBytes;
+        Ground = position.Ground;
+        UpAxis = position.Ground ? position.UpAxis : -1;
+        SegmentPosOffset = position.Ground ? 1 : 0;
+        GroundedComponentSize = position.GroundedComponentSize;
+        GroundedFieldOffset = position.GroundedFieldOffsetInComponent;
+        SegmentVelocityOffset = SegmentPosOffset + (Dims * PosBytes);
         SegmentTickOffset = SegmentVelocityOffset + (Dims * VelBytes);
         SegmentEpochOffset = SegmentTickOffset + 2;
 
         PrevPositionOffset = layout.PrevPositionOffsetInColdEntry;
         RunStartOffset = layout.RunStartOffsetInColdEntry;
         RunStartTickOffset = RunStartOffset + (Dims * PosBytes);
+
+        SegmentBytes = layout.SegmentBytes;
+        // Read from the compiled position, never built here: a policy is derived per block per tick, and an array per block is an allocation per tick.
+        HeadToleranceSquared = position.HeadToleranceSquared;
+        HeadCount = Math.Min(layout.MotionHeads, HeadToleranceSquared.Length);
+        HeadsOffset = layout.MotionHeadsOffsetInHotEntry;
+        HeadStride = layout.MotionHeadStride;
     }
 
     /// <summary>
@@ -243,13 +285,109 @@ internal static unsafe class MotionTracker
     /// <param name="scratch">At least <see cref="ScratchDoubles"/> doubles, carved once per block by the caller.</param>
     /// <param name="segments">Accumulates the segments this rule emitted.</param>
     /// <param name="shadow">Accumulates what the rejected "the quantized velocity changed" trigger would have emitted (AC-21).</param>
+    /// <param name="headCopies">Accumulates, per band head, the copies it took (#1615); at least <see cref="BandTolerances.MaxHeads"/> long, or empty.</param>
+    /// <param name="groundedColumn">
+    /// For a ground motion (#1616), the grounded bool's component column in this cluster; <see langword="null"/> otherwise.
+    /// </param>
     public static void Update(in MotionPolicy policy, ReplicationHotEntry* hot, byte* coldBytes, byte* current, byte* velocityColumn, int slot,
-        bool initialize, uint tick, Span<double> scratch, ref int segments, ref int shadow)
+        bool initialize, uint tick, Span<double> scratch, ref int segments, ref int shadow, Span<int> headCopies = default, byte* groundedColumn = null)
     {
         if (!policy.Enabled || hot == null || coldBytes == null || current == null)
         {
             return;
         }
+
+        var grounded = policy.Ground && groundedColumn != null
+            && groundedColumn[(slot * policy.GroundedComponentSize) + policy.GroundedFieldOffset] != 0;
+        UpdateBase(in policy, hot, coldBytes, current, velocityColumn, slot, initialize, tick, scratch, ref segments, ref shadow, grounded);
+        if (policy.HeadCount > 0)
+        {
+            UpdateHeads(in policy, hot, current, initialize, tick, scratch, headCopies);
+        }
+    }
+
+    /// <summary>
+    /// The band heads (#1615), after the base segment is settled for the tick: each holds the segment its band's clients hold, and takes a copy of the base
+    /// segment when its own extrapolation is off by more than its tolerance, when its moving segment is older than <c>MaxAge</c>, and on an initialization or
+    /// a teleport (the base's epoch moved). A copy is a segment the server already fitted and encoded, so a head costs no fit and no encode: a comparison
+    /// per tick, and 8 + segment bytes per entity.
+    /// </summary>
+    /// <remarks>
+    /// A head's error is measured against <b>its own</b> segment, which is what its clients extrapolate; the base segment is within the archetype's tolerance,
+    /// so the copy is never worse than that. Each copy stamps the head's tick, which is what a session in its band is sent a segment for.
+    /// </remarks>
+    private static void UpdateHeads(in MotionPolicy policy, ReplicationHotEntry* hot, byte* current, bool initialize, uint tick, Span<double> scratch,
+        Span<int> headCopies)
+    {
+        var hotBytes = (byte*)hot;
+        var baseSegment = hotBytes + policy.SegmentOffset;
+        var baseStart = hot->GroupTicks[0];
+        var baseEpoch = baseSegment[policy.SegmentEpochOffset];
+        var dims = policy.Dims;
+        var posBytes = policy.PosBytes;
+        var segmentBytes = policy.SegmentBytes;
+        var p = scratch;
+        for (var a = 0; a < dims; a++)
+        {
+            p[a] = ReadCode(current + (a * posBytes), posBytes) * policy.Step[a];
+        }
+
+        for (var h = 0; h < policy.HeadCount; h++)
+        {
+            var head = hotBytes + policy.HeadsOffset + (h * policy.HeadStride);
+            var segment = head + 8;
+            // A grounded flip is a change of what the segment means (the client derives the height, or stops deriving it): no tolerance applies to it.
+            var copy = initialize || segment[policy.SegmentEpochOffset] != baseEpoch || (policy.Ground && segment[0] != baseSegment[0]);
+            if (!copy)
+            {
+                var age = tick - ReadTick(head);
+                var error = 0d;
+                var moving = false;
+                var skip = policy.Ground && segment[0] != 0 ? policy.UpAxis : -1;
+                for (var a = 0; a < dims; a++)
+                {
+                    if (a == skip)
+                    {
+                        continue;
+                    }
+
+                    var velocity = 0d;
+                    if (policy.Linear)
+                    {
+                        var code = ReadVelocity(segment + policy.SegmentVelocityOffset + (a * policy.VelBytes), policy.VelBytes);
+                        velocity = WireMath.DecodeVel(code, policy.VelUnitExp, policy.VelBits);
+                        moving |= code != 0;
+                    }
+
+                    var off = (ReadCode(segment + policy.SegmentPosOffset + (a * posBytes), posBytes) * policy.Step[a]) + (velocity * age) - p[a];
+                    error += off * off;
+                }
+
+                // A copy of what the head already holds would change nothing a client holds: no stamp, so no session is sent it again.
+                copy = (error > policy.HeadToleranceSquared[h] || (moving && age >= policy.MaxAgeTicks))
+                    && !new ReadOnlySpan<byte>(segment, segmentBytes).SequenceEqual(new ReadOnlySpan<byte>(baseSegment, segmentBytes));
+            }
+
+            if (copy)
+            {
+                new ReadOnlySpan<byte>(baseSegment, segmentBytes).CopyTo(new Span<byte>(segment, segmentBytes));
+                WriteCode(head, 4, baseStart);
+                WriteCode(head + 4, 4, tick);
+                if (h < headCopies.Length)
+                {
+                    headCopies[h]++;
+                }
+            }
+        }
+    }
+
+    /// <summary>The tick band head <paramref name="head"/> (1-based) last changed at: what a session in its band is sent a segment for.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint HeadStamp(in ReplicationBlockLayout layout, byte* hotBytes, int head) => ReadTick(hotBytes + layout.MotionHeadOffset(head) + 4);
+
+    private static void UpdateBase(in MotionPolicy policy, ReplicationHotEntry* hot, byte* coldBytes, byte* current, byte* velocityColumn, int slot,
+        bool initialize, uint tick, Span<double> scratch, ref int segments, ref int shadow, bool grounded)
+    {
 
         var hotBytes = (byte*)hot;
         var segment = hotBytes + policy.SegmentOffset;
@@ -265,7 +403,7 @@ internal static unsafe class MotionTracker
             // and the first measurement happens on its second projected tick. The epoch is whatever the entry already carried — zero on a fresh or reused
             // slot, because the entry was cleared, and unchanged for an entity that was merely not pushed for a tick.
             StartRun(policy, runStart, runTick, current, tick);
-            EmitSegment(policy, segment, current, default, tick, segment[policy.SegmentEpochOffset]);
+            EmitSegment(policy, segment, current, default, tick, segment[policy.SegmentEpochOffset], grounded);
             hot->GroupTicks[0] = tick;
             segments++;
             shadow++;
@@ -296,7 +434,7 @@ internal static unsafe class MotionTracker
         {
             var epoch = unchecked((byte)(segment[policy.SegmentEpochOffset] + 1));
             StartRun(policy, runStart, runTick, current, tick);
-            EmitSegment(policy, segment, current, default, tick, epoch);
+            EmitSegment(policy, segment, current, default, tick, epoch, grounded);
             hot->GroupTicks[0] = tick;
             segments++;
             shadow++;
@@ -342,8 +480,17 @@ internal static unsafe class MotionTracker
         var error = 0d;
         var segmentMoving = false;
         var shadowFires = false;
+
+        // A grounded segment's client derives the height from its terrain (#1616): the vertical error is not the wire's to correct.
+        var heldGrounded = policy.Ground && segment[0] != 0;
+        var skip = heldGrounded ? policy.UpAxis : -1;
         for (var a = 0; a < dims; a++)
         {
+            if (a == skip)
+            {
+                continue;
+            }
+
             var axisStep = policy.Step[a];
             var velocity = 0d;
             if (policy.Linear)
@@ -357,7 +504,7 @@ internal static unsafe class MotionTracker
                 shadowFires |= WireMath.EncodeVel(step[a], policy.VelUnitExp, policy.VelBits) != code;
             }
 
-            var origin = ReadCode(segment + (a * posBytes), posBytes) * axisStep;
+            var origin = ReadCode(segment + policy.SegmentPosOffset + (a * posBytes), posBytes) * axisStep;
             var off = origin + (velocity * elapsed) - p[a];
             error += off * off;
         }
@@ -367,7 +514,8 @@ internal static unsafe class MotionTracker
             shadow++;
         }
 
-        var refit = error > policy.ToleranceSquared;
+        // Leaving or reaching the ground changes what the client must evaluate: a new segment, whatever the error.
+        var refit = error > policy.ToleranceSquared || (policy.Ground && heldGrounded != grounded);
         var heartbeat = segmentMoving && age >= policy.MaxAgeTicks;
         if (!refit && !heartbeat)
         {
@@ -399,7 +547,13 @@ internal static unsafe class MotionTracker
             fit[..dims].Clear();
         }
 
-        EmitSegment(policy, segment, current, fit, tick, segment[policy.SegmentEpochOffset]);
+        if (grounded)
+        {
+            // On the ground the height is the terrain's: no vertical velocity travels, and none is extrapolated.
+            fit[policy.UpAxis] = 0;
+        }
+
+        EmitSegment(policy, segment, current, fit, tick, segment[policy.SegmentEpochOffset], grounded);
         hot->GroupTicks[0] = tick;
         segments++;
 
@@ -432,7 +586,27 @@ internal static unsafe class MotionTracker
             return false;
         }
 
-        var velocity = hotBytes + policy.SegmentOffset + policy.SegmentVelocityOffset;
+        if (Moving(in policy, hotBytes + policy.SegmentOffset))
+        {
+            return true;
+        }
+
+        // A band head still extrapolating keeps its clients moving even when the base segment stopped (#1615): it refits only while the entity is pushed.
+        for (var h = 0; h < policy.HeadCount; h++)
+        {
+            if (Moving(in policy, hotBytes + policy.HeadsOffset + (h * policy.HeadStride) + 8))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Moving(in MotionPolicy policy, byte* segment)
+    {
+        var velocity = segment + policy.SegmentVelocityOffset;
         for (var a = 0; a < policy.Dims; a++)
         {
             if (ReadVelocity(velocity + (a * policy.VelBytes), policy.VelBytes) != 0)
@@ -454,12 +628,19 @@ internal static unsafe class MotionTracker
     /// <param name="velocity">Metres per tick per axis, or an empty span for a stationary segment.</param>
     /// <param name="tick">The segment's absolute start tick.</param>
     /// <param name="epoch">The motion epoch this segment belongs to.</param>
-    private static void EmitSegment(in MotionPolicy policy, byte* segment, byte* position, Span<double> velocity, uint tick, byte epoch)
+    /// <param name="grounded">For a ground motion (#1616), whether the entity stands on the ground: the segment's leading byte.</param>
+    private static void EmitSegment(in MotionPolicy policy, byte* segment, byte* position, Span<double> velocity, uint tick, byte epoch,
+        bool grounded = false)
     {
+        if (policy.Ground)
+        {
+            segment[0] = grounded ? (byte)1 : (byte)0;
+        }
+
         var bytes = policy.Dims * policy.PosBytes;
         for (var i = 0; i < bytes; i++)
         {
-            segment[i] = position[i];
+            segment[policy.SegmentPosOffset + i] = position[i];
         }
 
         if (policy.Linear)

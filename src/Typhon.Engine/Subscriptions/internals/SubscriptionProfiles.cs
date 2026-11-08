@@ -101,6 +101,12 @@ internal sealed class SubscriptionProfiles
     private readonly string[] _realmKinds;
     private readonly int _declaredCount;
 
+    // The runtime's distinct band tolerances (#1615), which a band's motion head indexes into.
+    private readonly double[] _bandTolerances;
+
+    /// <summary>The runtime's distinct band tolerances, ascending (#1615): head h serves tolerance <c>[h − 1]</c>.</summary>
+    public double[] MotionHeadTolerances => _bandTolerances;
+
     /// <summary>Resolves every declared profile, and every variant of one, against the compiled plans.</summary>
     /// <param name="plans">The compiled plans.</param>
     /// <param name="registry">The declarations.</param>
@@ -119,6 +125,7 @@ internal sealed class SubscriptionProfiles
         _groupSets = registry.GroupSets;
         _realmKinds = realmKinds is { Length: > 0 } ? realmKinds : [""];
         var declared = registry.Profiles;
+        _bandTolerances = BandTolerances.Of(registry);
         _declaredCount = declared.Count;
         var total = declared.Count;
         foreach (var declaration in declared)
@@ -279,7 +286,7 @@ internal sealed class SubscriptionProfiles
                 : ViewpointSource.Placed,
             BoundEntity = observer.BoundEntity,
             Placement = observer.Placement ?? default,
-            Bands = observer.Kind == ObserverKind.Sphere ? new LodBands(observer.Bands) : default,
+            Bands = observer.Kind == ObserverKind.Sphere ? new LodBands(observer.Bands, _bandTolerances) : default,
             Automatic = owner.PushDetection == PushDetection.Automatic,
             TickDivisor = owner.TickDivisor,
             AggregateTileM = aggregate?.TileM ?? 0d,
@@ -572,12 +579,14 @@ internal sealed class SubscriptionProfiles
             var window = 0;
             foreach (var profile in _profiles)
             {
-                if (profile.Bands.Count == 0)
+                // A profile whose bands only coarsen motion (period 1) holds nothing back: it sets no phase (#1615).
+                var every = profile.Bands.MinEvery;
+                if (every == 0)
                 {
                     continue;
                 }
 
-                phase = phase == 0 ? profile.Bands.MinEvery : Math.Min(phase, profile.Bands.MinEvery);
+                phase = phase == 0 ? every : Math.Min(phase, every);
                 window = Math.Max(window, profile.Bands.MaxEvery);
             }
 

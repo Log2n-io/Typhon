@@ -93,6 +93,9 @@ struct PositionPlan {
     int dims = 0;
     std::unique_ptr<FieldPlan> pos;
     std::unique_ptr<FieldPlan> vel;
+    // #1616: ground-clamped segments, and the axis a grounded one omits (-1 when not ground).
+    bool ground = false;
+    int upAxis = -1;
 };
 
 struct ArchetypePlan {

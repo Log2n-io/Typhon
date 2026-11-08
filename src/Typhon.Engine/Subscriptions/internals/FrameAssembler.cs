@@ -2204,6 +2204,8 @@ internal sealed unsafe partial class FrameAssembler : IDisposable, ISessionSlotR
                 MaxSelfBytes = 24 + plan.MaxOwnerBodyBytes,
                 MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + plan.OnEnter.MaxBodyBytes + plan.MaxStateBodyBytes,
                 MaxSegmentBytes = EntitiesEncoder.MaxGapBytes + layout.SegmentBytes,
+                GroundUpAxis = moving && plan.Position.Ground ? plan.Position.UpAxis : -1,
+                SegmentVelocityAxisBytes = moving && plan.Position.Linear ? plan.Position.Vel.Bits / 8 : 0,
                 MaxStateBytes = EntitiesEncoder.MaxGapBytes + 1 + plan.MaxStateBodyBytes,
             };
         }

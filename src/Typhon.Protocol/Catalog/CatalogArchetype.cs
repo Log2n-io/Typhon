@@ -38,6 +38,18 @@ public sealed class CatalogPosition
     /// <summary>The velocity codec — <see cref="CodecKind.Vel2"/> or <see cref="CodecKind.Vel3"/>, matching <see cref="Pos"/> — for the linear model.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public CatalogCodec Vel { get; init; }
+
+    /// <summary>
+    /// A ground-clamped mover (#1616, <c>pos3</c> motion only): every segment starts with a <c>u8</c>, 1 when the entity is on the ground, 0 when it is not.
+    /// A grounded segment omits the <see cref="Up"/> axis of <c>p0</c> and of the velocity: the client derives the height from the terrain it holds, and a
+    /// decoder reports it as NaN with a vertical velocity of 0. An airborne one is a full <c>pos3</c> segment.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Ground { get; init; }
+
+    /// <summary>For a <see cref="Ground"/> position, the vertical axis a grounded segment omits: 0, 1 or 2 (x, y, z).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int Up { get; init; }
 }
 
 /// <summary>

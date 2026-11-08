@@ -26,7 +26,15 @@ export {
 } from './store/archetype-store.js';
 export { archetypeOf, NOT_FOUND, slotOf, WorldStore, type WorldStoreOptions } from './store/world-store.js';
 export { CollectionValue } from './store/collection-value.js';
-export { epochAt, evaluateLive, evaluateSlot, headingOf, MAX_MOTION_STRIDE, segmentEntryAt } from './motion/motion.js';
+export {
+  epochAt,
+  evaluateLive,
+  evaluateSlot,
+  headingOf,
+  MAX_MOTION_STRIDE,
+  segmentEntryAt,
+  type HeightAt,
+} from './motion/motion.js';
 export { Clock, type ClockOptions } from './clock/clock.js';
 export { monotonicNow } from './clock/now.js';
 export { AggregateGrid, type GridSchema } from './aggregates/aggregate-grid.js';
@@ -130,13 +138,16 @@ export { bigintOf, hex64, HIGH_WORD, LOW_WORD, wordsOf } from './protocol/int64.
 export { checkCanonical, validateCatalog } from './protocol/catalog-validator.js';
 export {
   MAX_LIST_COMPONENTS,
+  packedCode,
   readInteger64,
   readNumber,
   readPackedBits,
   readSection,
+  writeFieldValue,
   writeInteger64,
   writeInteger64Words,
   writeNumber,
+  writeNumberValue,
   writePackedBits,
   writeSection,
   type FieldSink,
@@ -250,7 +261,13 @@ export {
   type ReconnectingClientOptions,
 } from './net/reconnect.js';
 export { forEachMessage, replayStream, StreamRecorder, type FrameConsumer } from './net/recorder.js';
-export { CommandQueue, CommandRefused, type CommandQueueOptions } from './commands/queue.js';
+export {
+  CommandQueue,
+  CommandRefused,
+  type CommandQueueOptions,
+  type GeneratedCommand,
+  type GeneratedCommands,
+} from './commands/queue.js';
 export {
   GroupSubscriptions,
   SubscribeOp,

@@ -164,6 +164,9 @@ static class ProjectionTestSchema
     /// <summary>The teleport threshold the fixtures declare, and the one the reported SWG velocity width comes from.</summary>
     public const double MaxSpeedMps = 20.0;
 
+    /// <summary>The creature's motion tolerance, as its declarations name it: the base a band's tolerance multiplies (#1615).</summary>
+    public const double CreatureToleranceM = 0.05;
+
     /// <summary>The nominal tick period the fixtures compile against: 10 Hz, as the demo's catalog declares.</summary>
     public const double TickPeriodSeconds = 0.1;
 
@@ -212,6 +215,7 @@ static class ProjectionTestSchema
         dbe.RegisterComponentFromAccessor<ProjVitals>();
         dbe.RegisterComponentFromAccessor<ProjWallet>();
         dbe.RegisterComponentFromAccessor<ProjVisibility>();
+        dbe.RegisterComponentFromAccessor<ProjGait>();
         dbe.ConfigureSpatialGrid(spatial);
         dbe.InitializeArchetypes();
         return dbe;
@@ -242,6 +246,7 @@ static class ProjectionTestSchema
         dbe.RegisterComponentFromAccessor<ProjVitals>();
         dbe.RegisterComponentFromAccessor<ProjWallet>();
         dbe.RegisterComponentFromAccessor<ProjVisibility>();
+        dbe.RegisterComponentFromAccessor<ProjGait>();
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-WorldExtentM, -WorldExtentM),
             worldMax: new Vector2(WorldExtentM, WorldExtentM),
