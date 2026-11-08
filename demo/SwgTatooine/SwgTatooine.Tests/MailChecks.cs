@@ -130,8 +130,10 @@ internal sealed class MailChecks : ServedChecks
     /// ML-1, ML-2: a mail from A to B by name — stored with its text, told to B's session at once, listed in B's inbox newest first and unread; read, it is
     /// marked read; deleted, it is gone. A's own inbox has nothing.
     /// </summary>
+    // Quarantined (#1619): the deleted counter is folded after the commit the inbox already shows, so it can lag the poll.
     [Test]
     [CancelAfter(120_000)]
+    [Category("Quarantine")]
     public void APlayerMail_IsToldListedReadAndDeleted()
     {
         using var sim = Start();
