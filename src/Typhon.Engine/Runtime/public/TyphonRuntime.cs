@@ -3914,10 +3914,6 @@ public sealed partial class TyphonRuntime : IDisposable
     internal (long IndexSort, long MapSort, long DirtySort) LastFenceChunkSortTicks => _fenceMigrateExec?.ChunkSortTicks ?? default;
 
     /// <summary>
-    /// Wraps a tick phase with paired profiler boundary events. When <see cref="TelemetryConfig.ProfilerActive"/> is false the JIT folds both Emit calls to
-    /// no-ops — this method compiles to just <c>action()</c>.
-    /// </summary>
-    /// <summary>
     /// Aggregate per-system telemetry by tier for <see cref="TierBudgetMetrics"/> (issue #234). Each system's <see cref="SystemTelemetry.DurationUs"/> is
     /// attributed to the tier(s) in its <see cref="SystemDefinition.TierFilter"/>. Multi-tier systems contribute equally to each matching tier.
     /// </summary>
