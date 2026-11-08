@@ -728,16 +728,16 @@ internal sealed class BotMarketDeskChecks : ServedChecks
     private const int Quests = 8;
     private const int KillsPerQuest = 16;
 
-    // Slots each bot holds parts in, which no plan sells and no drop adds to: the grid grew to 40 (crafting-build.md O-9), and this keeps the 30 this
+    // Slots each bot holds parts in, which no plan sells and no drop adds to: whatever the grid (50 since 2026-11-05), this keeps the 30 this
     // measure was tuned on — and BotBrain.MarketStacks' ten slots left.
     private const int PartSlots = ItemLedger.Slots - 30;
 
     // The parts and kits that stay stacks, worth nothing to the vendor: the extractor's modules (36, 38, 39) became instances with a grade in C5a, and a
-    // stack grant of one lands nowhere — the bots never held their ten. Nine such templates, none with a Mk: the first is granted one unit past a full
-    // stack, which takes two slots.
+    // stack grant of one lands nowhere — the bots never held their ten. Nine such templates, none with a Mk: the first is granted one unit past enough
+    // full stacks to fill the slots the other eight leave of PartSlots.
     private static readonly (ushort Template, int Count)[] Parts =
     [
-        (37, ItemLedger.StackMax + 1), (40, 1), (41, 1), (42, 1), (43, 1), (ItemCatalog.KitWeaponRepair, 1), (ItemCatalog.KitArmorRepair, 1), (64, 1), (65, 1),
+        (37, ((PartSlots - 9) * ItemLedger.StackMax) + 1), (40, 1), (41, 1), (42, 1), (43, 1), (ItemCatalog.KitWeaponRepair, 1), (ItemCatalog.KitArmorRepair, 1), (64, 1), (65, 1),
     ];
 
     private long LostOverQuests(bool market, string dir, out (bool Ok, string Why) audits)
