@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.IO;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Protocol;
@@ -115,7 +116,7 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
             return ValueTask.CompletedTask;
         }
 
-        return new ValueTask(SendFramedAsync(message, ct));
+        return SendFramedAsync(message, ct);
     }
 
     /// <inheritdoc />
@@ -178,7 +179,20 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
         {
             while (!IsClosing && !ct.IsCancellationRequested)
             {
-                var headerRead = await ReadUpToAsync(_receiveHeader, ct).ConfigureAwait(false);
+                // Read inline, in this one long-lived state machine (#1623): a nested async read method boxed its own on every message that waited, which
+                // was nearly all of a busy server's steady-state allocation.
+                var headerRead = 0;
+                while (headerRead < FrameHeaderBytes)
+                {
+                    var read = await ReceiveSomeAsync(_receiveHeader.AsMemory(headerRead), ct).ConfigureAwait(false);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    headerRead += read;
+                }
+
                 if (headerRead == 0)
                 {
                     // A FIN between messages: the peer went away without a BYE, which on TCP is as orderly as it gets.
@@ -209,7 +223,18 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
                 }
 
                 var body = EnsureReceiveBuffer((int)length).AsMemory(0, (int)length);
-                var bodyRead = await ReadUpToAsync(body, ct).ConfigureAwait(false);
+                var bodyRead = 0;
+                while (bodyRead < body.Length)
+                {
+                    var read = await ReceiveSomeAsync(body[bodyRead..], ct).ConfigureAwait(false);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    bodyRead += read;
+                }
+
                 if (bodyRead != body.Length)
                 {
                     BeginClose(CloseCodes.Normal, new EndOfStreamException("the peer disappeared inside a message"));
@@ -246,7 +271,10 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
 
     // ── framing ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private async Task SendFramedAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
+    // Pooled (#1623): a send that waits on the gate or the socket boxes its state machine, once per frame per session at the tick's rate. The callers
+    // await each send once (SendPump, SubscriptionConnection.Send), which is the one rule a pooled ValueTask asks for.
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask SendFramedAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
     {
         await _sendGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -279,6 +307,7 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
         }
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask WriteAllAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct)
     {
         if (_stream != null)
@@ -303,15 +332,13 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
     /// <param name="buffer">Where to read into.</param>
     /// <param name="ct">Cancels the read.</param>
     /// <returns>How many bytes were read: the buffer's length, zero for a clean end, or something between for a truncated one.</returns>
+    /// <remarks>The preamble's read. The receive loop reads inline instead (#1623): a nested async method per read boxes its state machine every time.</remarks>
     private async ValueTask<int> ReadUpToAsync(Memory<byte> buffer, CancellationToken ct)
     {
         var total = 0;
         while (total < buffer.Length)
         {
-            var read = _stream != null
-                ? await _stream.ReadAsync(buffer[total..], ct).ConfigureAwait(false)
-                : await _socket.ReceiveAsync(buffer[total..], SocketFlags.None, ct).ConfigureAwait(false);
-
+            var read = await ReceiveSomeAsync(buffer[total..], ct).ConfigureAwait(false);
             if (read <= 0)
             {
                 return total;
@@ -322,6 +349,13 @@ internal sealed class TcpSubscriptionLink : ISubscriptionLink, IAdmissionObserve
 
         return total;
     }
+
+    /// <summary>One receive into <paramref name="buffer"/>: the socket's (or the TLS stream's) own value task, which completes without allocating.</summary>
+    /// <param name="buffer">Where to read into.</param>
+    /// <param name="ct">Cancels the read.</param>
+    /// <returns>How many bytes arrived; zero at the peer's end of stream.</returns>
+    private ValueTask<int> ReceiveSomeAsync(Memory<byte> buffer, CancellationToken ct)
+        => _stream != null ? _stream.ReadAsync(buffer, ct) : _socket.ReceiveAsync(buffer, SocketFlags.None, ct);
 
     /// <summary>The send-side scratch, allocated on the first small message and held for the link's life. Touched only under the send gate.</summary>
     /// <returns>The scratch view.</returns>

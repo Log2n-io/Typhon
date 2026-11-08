@@ -101,6 +101,57 @@ partial class TcpTransportTests : TestBase<TcpTransportTests>
         });
     }
 
+    // ── allocation ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// #1623: a steady stream of inbound messages allocates nothing on the link. Each message is sent only after the previous one arrived, so every read waits
+    /// on the socket, which is the path that boxed a nested async method's state machine per read (~125 KB a tick on a 500-bot shard).
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void InboundMessagesAllocateNothingOnTheLink()
+    {
+        var acceptor = new RecordingAcceptor();
+        var endpoint = StartTransport(acceptor);
+        using var client = Connect(endpoint);
+        var connection = Handshake(client, acceptor);
+        connection.CountOnly = true;
+
+        Span<byte> message = stackalloc byte[32];
+        message.Fill(0x5A);
+        var sent = 0;
+
+        // No assertion inside the measured loop: NUnit's constraints allocate. A message that never arrives stops the loop and fails the count below.
+        static bool SendAndWait(TestClient c, ReadOnlySpan<byte> m, RecordingConnection to, ref int count)
+        {
+            c.SendFramed(m);
+            count++;
+            var deadline = Environment.TickCount64 + TimeoutMs;
+            while (to.Counted < count && Environment.TickCount64 < deadline)
+            {
+                Thread.Yield();
+            }
+
+            return to.Counted == count;
+        }
+
+        for (var i = 0; i < 200 && SendAndWait(client, message, connection, ref sent); i++)
+        {
+        }
+
+        const int Measured = 2000;
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        for (var i = 0; i < Measured && SendAndWait(client, message, connection, ref sent); i++)
+        {
+        }
+
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        Assert.That(connection.Counted, Is.EqualTo(200 + Measured), "every message arrived");
+
+        // Process-wide, so a stray allocation elsewhere is tolerated; a box per read would be ≥ 2 × 100 B × 2000 = 400 KB.
+        Assert.That(allocated, Is.LessThan(16 * 1024), $"{allocated} B over {Measured} inbound messages ({allocated / (double)Measured:F1} B each)");
+    }
+
     // ── inbound framing ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A declared length of zero is a framing error — 1002 — and no body is waited for.</summary>
@@ -863,8 +914,21 @@ partial class TcpTransportTests : TestBase<TcpTransportTests>
         /// <summary>The first close's error.</summary>
         public Exception CloseError { get; private set; }
 
+        /// <summary>When set, messages are counted, not copied: what an allocation measurement needs from its connection.</summary>
+        public volatile bool CountOnly;
+
+        private int _counted;
+
+        public int Counted => Volatile.Read(ref _counted);
+
         public void OnMessage(ReadOnlySpan<byte> message)
         {
+            if (CountOnly)
+            {
+                Interlocked.Increment(ref _counted);
+                return;
+            }
+
             if (Interlocked.Exchange(ref _inMessage, 1) != 0)
             {
                 Interlocked.Increment(ref _overlaps);
