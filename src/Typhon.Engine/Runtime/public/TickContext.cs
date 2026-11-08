@@ -73,7 +73,7 @@ public struct TickContext
     /// <c>IsAlive</c> before acting on one after a destroy. A cluster walk through <see cref="Transaction"/> does skip its own destroys (CLUSTERWALK-04); with
     /// per-chunk transactions, a destroy made by another chunk's transaction stays visible until it commits.</para>
     /// </summary>
-    public IReadOnlyCollection<EntityId> Entities { get; init; }
+    public TickEntities Entities { get; init; }
 
     /// <summary>
     /// Event queues this system consumes. Null if the system has no consumed queues.

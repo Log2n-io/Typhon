@@ -2885,7 +2885,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var hasChangeFilter = _systemChangeFilterTables[sysIdx] != null;
         var sys = Scheduler.Systems[sysIdx];
 
-        IReadOnlyCollection<EntityId> entities;
+        TickEntities entities;
         int clusterStart = 0, clusterEnd = 0;
         int[] clusterIdArray = null;
         ref var plan = ref _queryPlans[sysIdx][chunkIndex];
@@ -2937,7 +2937,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 var rangeView = GetOrCreateTierRangeView(sysIdx, workerId);
 #pragma warning restore TYPHON004
                 rangeView.Reset(cs, cs.ClusterSegment, tierIds, clusterStart, clusterEnd);
-                entities = rangeView;
+                entities = TickEntities.Of(rangeView);
             }
             else
             {
@@ -2953,7 +2953,7 @@ public sealed partial class TyphonRuntime : IDisposable
             // (ChunksPerWorker > 1) allows chunkIndex >= workerCount. Reset() reconfigures the view for this chunk's slice.
             var partView = _partitionViews[sysIdx][workerId];
             partView.Reset(_systemViews[sysIdx].EntityIdsInternal, chunkIndex, totalChunks);
-            entities = partView;
+            entities = TickEntities.Of(partView);
 
             // Cluster-aware parallel dispatch: partition ActiveClusterIds range for this chunk.
             // Systems that use GetClusterEnumerator(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex) get
@@ -4063,7 +4063,7 @@ public sealed partial class TyphonRuntime : IDisposable
         installed = tx;
 
         // #197: Build entity set based on input View and change filter
-        IReadOnlyCollection<EntityId> entities;
+        TickEntities entities;
         var hasChangeFilter = _systemViews[sysIdx] != null && _systemChangeFilterTables[sysIdx] != null;
         if (hasChangeFilter)
         {
@@ -4084,7 +4084,7 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // #198: Record entity counts into per-system telemetry
         ref var metrics = ref Scheduler.GetCurrentSystemMetrics(sysIdx);
-        var entityCount = entities is PooledEntityList pel ? pel.Count : 0;
+        var entityCount = entities.Count;
         metrics.EntitiesProcessed = entityCount;
         if (hasChangeFilter && _systemViews[sysIdx] != null)
         {

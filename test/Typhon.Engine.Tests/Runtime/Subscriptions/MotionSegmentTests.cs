@@ -213,6 +213,8 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
 
         public long Segments => State.SegmentsEmitted;
 
+        public const int SettleTicksForTest = MotionTracker.SettleTicks;
+
         public long Shadow => State.ShadowSegmentsEmitted;
 
         // ── Construction ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -321,6 +323,54 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
     /// A straight run at constant speed refits at most once per <c>MaxAge</c>: the heartbeat is the only thing that fires, because the run-start window makes
     /// the fitted velocity good enough that the 5 cm tolerance is never reached.
     /// </summary>
+    [Test]
+    public void AWalkThatSettlesAfterARampGetsItsVelocityAtOnce_AndNoSegmentAfter()
+    {
+        // #1632: a stop, a short ramp, then a constant walk. The refit during the ramp fits a partial velocity; without the settle test that segment was
+        // kept until the extrapolation had drifted a whole tolerance (seconds, metres under a band head). Now the settled run's velocity is sent within a
+        // few ticks of settling, and nothing more until the heartbeat. A 1 m tolerance, as a band head or a coarse player rule has: under it the error test
+        // alone keeps the ramp's partial velocity for many ticks, which is the case.
+        using var harness = Harness.Create(ServiceProvider, m => m.Tolerance(1.0).Teleport(TeleportMps).MaxAge(MaxAgeSeconds));
+        const double speed = 0.1;
+        var x = 100.0;
+        uint t = 1;
+        for (; t <= 10; t++)
+        {
+            harness.PlaceAt(0, x, 200);
+            harness.Tick(t);
+        }
+
+        foreach (var ramp in new[] { 0.02, 0.05, 0.08 })
+        {
+            x += ramp;
+            harness.PlaceAt(0, x, 200);
+            harness.Tick(t++);
+        }
+
+        var settledAt = t;
+        for (; t < settledAt + Harness.SettleTicksForTest + 3; t++)
+        {
+            x += speed;
+            harness.PlaceAt(0, x, 200);
+            harness.Tick(t);
+        }
+
+        var segmentsAfterSettle = harness.Segments;
+        var velocityAfterSettle = harness.Velocity(0, 0);
+        for (; t < settledAt + (MaxAgeTicks / 2); t++)
+        {
+            x += speed;
+            harness.PlaceAt(0, x, 200);
+            harness.Tick(t);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(velocityAfterSettle, Is.EqualTo(speed).Within(PositionStepM), "the settled velocity is sent within a few ticks of settling");
+            Assert.That(harness.Segments, Is.EqualTo(segmentsAfterSettle), "and nothing more before the heartbeat: the extrapolation is right");
+        });
+    }
+
     [Test]
     public void AStraightRunRefitsAtMostOncePerMaxAge()
     {

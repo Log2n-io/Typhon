@@ -702,7 +702,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             {
                 if (entitiesTypeName == null)
                 {
-                    entitiesTypeName = ctx.Entities.GetType().Name;
+                    // TickEntities is one value type now (#1623 residual); the path shows as whether it carries the materialized array or a view.
+                    entitiesTypeName = ctx.Entities.IsArrayBacked ? "PooledEntitySlice" : "ClusterRangeEntityView";
                 }
             }, input: () => view, parallel: true, tier: SimTier.Tier0,
                 changeFilter: [typeof(TierPos)], after: "Writer");

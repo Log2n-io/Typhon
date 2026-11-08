@@ -299,10 +299,10 @@ internal static unsafe class MotionTracker
 
         var grounded = policy.Ground && groundedColumn != null
             && groundedColumn[(slot * policy.GroundedComponentSize) + policy.GroundedFieldOffset] != 0;
-        UpdateBase(in policy, hot, coldBytes, current, velocityColumn, slot, initialize, tick, scratch, ref segments, ref shadow, grounded);
+        var settled = UpdateBase(in policy, hot, coldBytes, current, velocityColumn, slot, initialize, tick, scratch, ref segments, ref shadow, grounded);
         if (policy.HeadCount > 0)
         {
-            UpdateHeads(in policy, hot, current, initialize, tick, scratch, headCopies);
+            UpdateHeads(in policy, hot, current, initialize, tick, scratch, headCopies, settled);
         }
     }
 
@@ -317,7 +317,7 @@ internal static unsafe class MotionTracker
     /// so the copy is never worse than that. Each copy stamps the head's tick, which is what a session in its band is sent a segment for.
     /// </remarks>
     private static void UpdateHeads(in MotionPolicy policy, ReplicationHotEntry* hot, byte* current, bool initialize, uint tick, Span<double> scratch,
-        Span<int> headCopies)
+        Span<int> headCopies, bool settled)
     {
         var hotBytes = (byte*)hot;
         var baseSegment = hotBytes + policy.SegmentOffset;
@@ -342,6 +342,7 @@ internal static unsafe class MotionTracker
             {
                 var age = tick - ReadTick(head);
                 var error = 0d;
+                var velocityGap = 0d;
                 var moving = false;
                 var skip = policy.Ground && segment[0] != 0 ? policy.UpAxis : -1;
                 for (var a = 0; a < dims; a++)
@@ -357,6 +358,9 @@ internal static unsafe class MotionTracker
                         var code = ReadVelocity(segment + policy.SegmentVelocityOffset + (a * policy.VelBytes), policy.VelBytes);
                         velocity = WireMath.DecodeVel(code, policy.VelUnitExp, policy.VelBits);
                         moving |= code != 0;
+                        var baseCode = ReadVelocity(baseSegment + policy.SegmentVelocityOffset + (a * policy.VelBytes), policy.VelBytes);
+                        var dv = velocity - WireMath.DecodeVel(baseCode, policy.VelUnitExp, policy.VelBits);
+                        velocityGap += dv * dv;
                     }
 
                     var off = (ReadCode(segment + policy.SegmentPosOffset + (a * posBytes), posBytes) * policy.Step[a]) + (velocity * age) - p[a];
@@ -364,7 +368,11 @@ internal static unsafe class MotionTracker
                 }
 
                 // A copy of what the head already holds would change nothing a client holds: no stamp, so no session is sent it again.
-                copy = (error > policy.HeadToleranceSquared[h] || (moving && age >= policy.MaxAgeTicks))
+                // #1632: the base settled at a velocity this head's would drift from past its own tolerance before the heartbeat — the copy is inevitable,
+                // and a far client otherwise walks metres off a body moving perfectly straight before its correction lands.
+                var remaining = (double)policy.MaxAgeTicks - age;
+                var settledAway = settled && remaining > 0 && velocityGap * remaining * remaining > policy.HeadToleranceSquared[h];
+                copy = (error > policy.HeadToleranceSquared[h] || settledAway || (moving && age >= policy.MaxAgeTicks))
                     && !new ReadOnlySpan<byte>(segment, segmentBytes).SequenceEqual(new ReadOnlySpan<byte>(baseSegment, segmentBytes));
             }
 
@@ -385,7 +393,42 @@ internal static unsafe class MotionTracker
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static uint HeadStamp(in ReplicationBlockLayout layout, byte* hotBytes, int head) => ReadTick(hotBytes + layout.MotionHeadOffset(head) + 4);
 
-    private static void UpdateBase(in MotionPolicy policy, ReplicationHotEntry* hot, byte* coldBytes, byte* current, byte* velocityColumn, int slot,
+    /// <summary>Ticks a run must hold without a departure before its mean counts as the velocity the body settled at (#1632).</summary>
+    internal const int SettleTicks = 3;
+
+    /// <summary>
+    /// Whether the current run has settled at a velocity whose gap to the segment's would breach the tolerance before the next heartbeat (#1632).
+    /// </summary>
+    private static bool VelocitySettledAway(in MotionPolicy policy, byte* segment, byte* runStart, byte* runTick, Span<double> p, uint tick, uint age,
+        int skipAxis)
+    {
+        var started = ReadTick(runTick);
+        var span = (double)(tick - started);
+        var remaining = (double)policy.MaxAgeTicks - age;
+        if (span < SettleTicks || remaining <= 0)
+        {
+            return false;
+        }
+
+        var gap = 0d;
+        for (var a = 0; a < policy.Dims; a++)
+        {
+            if (a == skipAxis)
+            {
+                continue;
+            }
+
+            var runMean = (p[a] - (ReadCode(runStart + (a * policy.PosBytes), policy.PosBytes) * policy.Step[a])) / span;
+            var code = ReadVelocity(segment + policy.SegmentVelocityOffset + (a * policy.VelBytes), policy.VelBytes);
+            var off = runMean - WireMath.DecodeVel(code, policy.VelUnitExp, policy.VelBits);
+            gap += off * off;
+        }
+
+        return gap * remaining * remaining > policy.ToleranceSquared;
+    }
+
+    /// <returns>Whether this tick's refit was the settle test's (#1632): the band heads then test their own velocity against the settled one.</returns>
+    private static bool UpdateBase(in MotionPolicy policy, ReplicationHotEntry* hot, byte* coldBytes, byte* current, byte* velocityColumn, int slot,
         bool initialize, uint tick, Span<double> scratch, ref int segments, ref int shadow, bool grounded)
     {
 
@@ -407,7 +450,7 @@ internal static unsafe class MotionTracker
             hot->GroupTicks[0] = tick;
             segments++;
             shadow++;
-            return;
+            return false;
         }
 
         var p = scratch;
@@ -438,7 +481,7 @@ internal static unsafe class MotionTracker
             hot->GroupTicks[0] = tick;
             segments++;
             shadow++;
-            return;
+            return false;
         }
 
         // ── 2. The run-departure test, which restarts the run and emits nothing ─────────────────────────────────────────────────────────────────────
@@ -516,10 +559,24 @@ internal static unsafe class MotionTracker
 
         // Leaving or reaching the ground changes what the client must evaluate: a new segment, whatever the error.
         var refit = error > policy.ToleranceSquared || (policy.Ground && heldGrounded != grounded);
+
+        // ── 3b. A settled velocity away from the segment's (#1632) ──────────────────────────────────────────────────────────────────────────────────
+        //
+        // A segment fitted mid-ramp (a body accelerating after a stop) keeps its partial velocity, and the error test above only notices once the
+        // extrapolation has drifted a whole tolerance — seconds later, and metres under a band head's tolerance. Once the run has settled (SettleTicks
+        // without a departure) its mean is the velocity the body now holds; when the gap to the segment's would breach the tolerance before the next
+        // heartbeat anyway, the refit is inevitable, and making it now costs one segment instead of a late, large correction. A gentle curve breaches no
+        // sooner than the error test would see it, so this brings refits forward rather than adding them.
+        var settledRefit = false;
+        if (!refit && policy.Linear)
+        {
+            refit = settledRefit = VelocitySettledAway(in policy, segment, runStart, runTick, p, tick, age, skip);
+        }
+
         var heartbeat = segmentMoving && age >= policy.MaxAgeTicks;
         if (!refit && !heartbeat)
         {
-            return;
+            return false;
         }
 
         // ── 4. The refit, from the run start ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -563,6 +620,8 @@ internal static unsafe class MotionTracker
             // nothing of the kind and keeps the long window — which is the whole reason it is not a run restart.
             StartRun(policy, runStart, runTick, current, tick);
         }
+
+        return settledRefit;
     }
 
     /// <summary>
