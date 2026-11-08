@@ -1038,7 +1038,13 @@ public partial class DatabaseEngine
         // trivial. On-demand grow under _finalizeLock (ArchetypeClusterState.GrowFenceDirtyBitsForChunkId) remains as a safety net for pathological cases.
         // Branch 2's snapshot is a retained, padded buffer (#1594): its bound is the words the bitmap filled, never the buffer's length, which a resize
         // has already padded past them — read as the length, the bound outgrew the buffer every tick, and the buffer with it.
-        var existingLen = clusterState.FenceBranchPath == 2 ? clusterState.FenceDirtyWords : clusterState.FenceDirtyBits?.Length ?? 0;
+        // Branch 1's change list is the retained buffer too (#1623 residual), sized from PrimarySegmentCapacity: its length carries no other information.
+        var existingLen = clusterState.FenceBranchPath switch
+        {
+            2 => clusterState.FenceDirtyWords,
+            1 => 0,
+            _ => clusterState.FenceDirtyBits?.Length ?? 0,
+        };
         var upperBound = Math.Max(clusterState.PrimarySegmentCapacity, existingLen) + 2 * clusterState.PendingMigrationCount + 64;
         // The per-cell indexes are sized per destination realm inside, from each realm's grid (Realms C1).
         var preSizeStart = Stopwatch.GetTimestamp();
@@ -1700,8 +1706,11 @@ public partial class DatabaseEngine
                         long[] spatialBits = null;
                         if (!clusterState.SpatialBarrierOnly)
                         {
+                            // The change list is branch 1's, so it is the retained branch-1 buffer, cleared, rather than a fresh array per archetype per
+                            // tick: that was most of a steady server's allocation (#1623 residual), and the grow the Migrate pre-size ran on it every tick.
                             var wordCount = clusterState.PrimarySegmentCapacity;
-                            spatialBits = new long[Math.Max(wordCount, 1)];
+                            clusterState.FenceBranchPath = 1;
+                            spatialBits = clusterState.RentBranch1ChangeList(Math.Max(wordCount, 1));
 
                             BuildLegacyScanChangeList(clusterState, spatialBits, ref accessorLocal);
                         }

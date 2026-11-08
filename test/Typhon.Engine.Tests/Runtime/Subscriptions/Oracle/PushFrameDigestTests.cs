@@ -18,6 +18,10 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 /// runs, with this digest — except <see cref="WorldObserversPacedOverAFineGrid"/>, re-pinned by 1.5.3, whose pacing counts occupied cells only.
 /// </para>
 /// <para>
+/// <b>Re-pinned by #1632:</b> a moving archetype's velocity unit is the finest its width carries, and a run that settles away from its segment's velocity
+/// refits at once, so the segments of the paced and churning runs moved; the two runs whose bodies the change does not touch kept their values.
+/// </para>
+/// <para>
 /// <b>Re-pinned by <c>typhon.3</c> (Realms E1b, R5.3):</b> a session's first frame is now <c>RESET</c> and carries its <c>REALM</c>, both of which the digest
 /// folds (the flags and the block's identity). Every constant moved once for it, flat and deep alike, and nothing else changed.
 /// </para>
@@ -82,7 +86,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1502, [0, 60], nameof(PushFrameDigestTests),
             worldObserver: true, deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(3819234560863104122UL));
+        Assert.That(Run(oracle), Is.EqualTo(14085645620395864849UL));
     }
 
     /// <summary>
@@ -105,7 +109,7 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
             }
 
             // The deep implementation walks its keys in tile order, so where the enter budget splits a fill its frames differ from the flat row order's.
-            Assert.That(digest, Is.EqualTo(deep ? 651481155831991946UL : 12267079432801803586UL));
+            Assert.That(digest, Is.EqualTo(deep ? 16759867537228537457UL : 1755851389788424403UL));
         });
     }
 
@@ -126,6 +130,6 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1504, [0, 30], nameof(PushFrameDigestTests),
             worldObserver: world, every: 4, deterministicProjection: true, forceDeep: deep);
 
-        Assert.That(Run(oracle), Is.EqualTo(5726398522903001248UL));
+        Assert.That(Run(oracle), Is.EqualTo(15695893241147410561UL));
     }
 }

@@ -36,7 +36,7 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
     {
         Assert.Multiple(() =>
         {
-            Assert.That(CodecFor(1), Is.EqualTo((8, 0)));
+            Assert.That(CodecFor(1).Bits, Is.EqualTo(8));
             Assert.That(CodecFor(127).Bits, Is.EqualTo(8));
             Assert.That(CodecFor(128).Bits, Is.EqualTo(16));
             Assert.That(CodecFor(32_767).Bits, Is.EqualTo(16));
@@ -47,21 +47,55 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
     }
 
     /// <summary>
-    /// The unit is the largest power of two within <c>Tolerance / MaxAge</c> ticks, clamped to the protocol's legal exponents, and independent of speed.
+    /// The drift budget sets the COARSEST unit (the largest power of two within <c>Tolerance / MaxAge</c> ticks), which picks the width; the unit is then
+    /// the finest that width still carries (#1632): the width is paid for, and a coarser unit only adds a systematic drift to every straight walker.
     /// </summary>
     [Test]
-    public void UnitExp_IsTheLargestPowerOfTwoWithinTheDriftBudget()
+    public void UnitExp_IsTheFinestTheWidthCarries_NeverCoarserThanTheDriftBudget()
     {
+        static void Check(double speed, double period, double tolerance, double maxAge)
+        {
+            var (bits, exp) = ProjectionCompiler.VelocityCodec(speed, period, 1, tolerance, maxAge);
+            var budget = Math.Clamp(Math.ILogB(tolerance / Math.Max(1d, Math.Round(maxAge / period, MidpointRounding.AwayFromZero))),
+                ProtocolConstants.MinVelocityUnitExp, ProtocolConstants.MaxVelocityUnitExp);
+            var range = speed * period;
+            Assert.That(exp, Is.LessThanOrEqualTo(budget), $"{speed} m/s: never coarser than the drift budget");
+            Assert.That(Math.Ceiling(Math.ScaleB(range, -exp)), Is.LessThanOrEqualTo(WireMath.SymmetricLimit(bits)), $"{speed} m/s: the range still fits");
+            if (exp > ProtocolConstants.MinVelocityUnitExp)
+            {
+                Assert.That(Math.Ceiling(Math.ScaleB(range, -(exp - 1))), Is.GreaterThan(WireMath.SymmetricLimit(bits)),
+                    $"{speed} m/s: one step finer would overflow {bits} bits, so this is the finest");
+            }
+        }
+
         Assert.Multiple(() =>
         {
-            Assert.That(ProjectionCompiler.VelocityCodec(1, 1.0, 1, 1.0, 4.0).UnitExp, Is.EqualTo(-2), "1 m over 4 ticks is exactly 2^-2");
-            Assert.That(ProjectionCompiler.VelocityCodec(1, 1.0, 1, 1.0, 5.0).UnitExp, Is.EqualTo(-3), "0.2 m rounds DOWN to 2^-3, never up");
-            Assert.That(ProjectionCompiler.VelocityCodec(20, 0.02, 1, 0.05, 5.0).UnitExp, Is.EqualTo(-13),
-                "SWG's players: 5 cm over 250 ticks is 0.2 mm, 2^-13 m per tick");
-            Assert.That(ProjectionCompiler.VelocityCodec(20, 0.1, 1, 0.05, 5.0).UnitExp, Is.EqualTo(-10), "the same rule at 10 Hz: 50 ticks, 1 mm");
-            Assert.That(ProjectionCompiler.VelocityCodec(200, 0.1, 1, 0.05, 5.0).UnitExp, Is.EqualTo(-10), "a faster archetype buys width, not unit");
+            Check(1, 1.0, 1.0, 4.0);
+            Check(1, 1.0, 1.0, 5.0);
+            Check(20, 0.02, 0.05, 5.0);
+            Check(20, 0.1, 0.05, 5.0);
+            Check(200, 0.1, 0.05, 5.0);
+            Check(21, 1.0 / 30, 0.5, 5.0);
             Assert.That(ProjectionCompiler.VelocityCodec(1e-9, 1.0, 1, 1e-20, 1.0).UnitExp, Is.EqualTo(ProtocolConstants.MinVelocityUnitExp));
-            Assert.That(ProjectionCompiler.VelocityCodec(1, 1.0, 1, 1e9, 1.0).UnitExp, Is.EqualTo(ProtocolConstants.MaxVelocityUnitExp));
+        });
+    }
+
+    /// <summary>
+    /// The case #1632 measured: the MMORPG shard's players (0.5 m tolerance, 5 s heartbeat, 30 Hz, 21 m/s teleport) walking a constant 6 m/s. At the drift
+    /// budget's 2^-9 m/tick that read back as 5.977 m/s, a 0.12 m correction every heartbeat; at the width's finest unit it round-trips within 1 mm/s.
+    /// </summary>
+    [Test]
+    public void AStraightWalkersVelocityRoundTripsWithinAMillimetrePerSecond()
+    {
+        const double period = 1.0 / 30;
+        var (bits, exp) = ProjectionCompiler.VelocityCodec(21, period, 1, 0.5, 5.0);
+        var perTick = 6.0 * period;
+        var decoded = WireMath.DecodeVel(WireMath.EncodeVel(perTick, exp, bits), exp, bits) / period;
+        Assert.Multiple(() =>
+        {
+            Assert.That(bits, Is.EqualTo(16), "the width is unchanged: precision costs no byte");
+            Assert.That(Math.Abs(decoded - 6.0), Is.LessThan(0.001), $"6 m/s decodes as {decoded} m/s at 2^{exp}");
+            Assert.That(Math.Abs(decoded - 6.0) * 5.0, Is.LessThan(0.01), "under a centimetre of drift per heartbeat");
         });
     }
 
@@ -123,7 +157,8 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
             Assert.That(nominal.Position.SizedForTickMultiplier, Is.EqualTo(1), "the opt-out caps the multiplier at 1");
             Assert.That(nominal.Position.IgnoresTickDilation, Is.True);
             Assert.That(nominal.Position.Vel.Bits, Is.EqualTo(16), "the nominal rate needs 8 bits fewer here - 2 B per segment, forever");
-            Assert.That((dilated.Position.Vel.UnitExp, nominal.Position.Vel.UnitExp), Is.EqualTo((-10, -10)), "the unit is the drift budget's, not the width's");
+            Assert.That(dilated.Position.Vel.UnitExp, Is.LessThanOrEqualTo(-10), "never coarser than the drift budget");
+            Assert.That(nominal.Position.Vel.UnitExp, Is.LessThanOrEqualTo(-10), "never coarser than the drift budget, whatever the width");
         });
     }
 
@@ -160,7 +195,7 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
         Assert.Multiple(() =>
         {
             Assert.That(plan.Position.Vel.Kind, Is.EqualTo(CodecKind.Vel2), "a 2D position takes a 2D velocity");
-            Assert.That(plan.Position.Vel.UnitExp, Is.EqualTo(-10), "5 cm over 50 ticks: 2^-10 m per tick");
+            Assert.That(plan.Position.Vel.UnitExp, Is.EqualTo(-13), "5 cm over 50 ticks budgets 2^-10; 16 bits carry 2 m per tick down to 2^-13");
             Assert.That(plan.Position.Vel.Bits, Is.EqualTo(16), "2 m per tick is 2 048 codes");
             Assert.That(plan.Position.Pos.Kind, Is.EqualTo(CodecKind.Pos2));
             Assert.That(plan.Position.Pos.Bits, Is.EqualTo(24));

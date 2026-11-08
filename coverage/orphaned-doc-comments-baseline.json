@@ -26,6 +26,5 @@
   "test/Typhon.Engine.Tests/Profiler/IncrementalCacheBuilderTests.cs": 1,
   "test/Typhon.Engine.Tests/Runtime/Subscriptions/CatalogBuilderTests.cs": 1,
   "tools/Typhon.Workbench.Fixtures/MockTcpProfilerServer.cs": 1,
-  "tools/Typhon.Workbench/Sessions/EngineLifecycle.cs": 1,
   "tools/Typhon.Workbench/Sessions/TraceSessionRuntime.cs": 1
 }

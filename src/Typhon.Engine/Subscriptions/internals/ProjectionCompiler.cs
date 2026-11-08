@@ -104,8 +104,9 @@ internal static class ProjectionCompiler
     }
 
     /// <summary>
-    /// Derives a <c>vel</c> codec (W5, <c>typhon.3</c>, Realms D-3): its absolute unit <c>2^unitExp</c> metres per tick from the drift the motion rule
-    /// tolerates, then the narrowest of 8, 16, 24 and 32 bits that carries the widest displacement one tick allows below the teleport threshold.
+    /// Derives a <c>vel</c> codec (W5, <c>typhon.3</c>, Realms D-3): the coarsest unit <c>2^unitExp</c> metres per tick the drift the motion rule tolerates
+    /// allows, then the narrowest of 8, 16, 24 and 32 bits that carries the widest displacement one tick allows below the teleport threshold, then the
+    /// finest unit that width still carries (#1632).
     /// </summary>
     /// <param name="maxSpeedMps">The teleport threshold, in metres per second.</param>
     /// <param name="nominalTickPeriodSeconds">The nominal tick period.</param>
@@ -117,9 +118,10 @@ internal static class ProjectionCompiler
     /// <para>
     /// <b>The unit is physical, not a fraction of a position step.</b> The velocity quantum bounds how far extrapolation drifts between two segments: over
     /// <c>MaxAge</c> ticks a half-unit error accrues <c>(u/2)·MaxAge</c>, so <c>u</c> is the largest power of two ≤ <c>Tolerance / MaxAge</c> (ticks at the
-    /// nominal period) — the drift then stays within half the tolerance. Derived once per archetype, it is the same in every realm: a realm registered at run
-    /// time never changes it, and a cross-realm move re-encodes only the position. SWG's players (5 cm, 5 s at 50 Hz → 250 ticks) get 2⁻¹³ m per tick,
-    /// exactly the unit the position-relative codec gave them (2⁻¹⁰ m ÷ 8), so their bytes are unchanged.
+    /// nominal period) — the drift then stays within half the tolerance. That bound only picks the width: the width is then spent on precision, because a
+    /// coarse unit is a systematic drift every straight walker pays as periodic corrections (6 m/s read back as 5.977 at 2^-9) and a finer one in the same
+    /// width costs no byte. Derived once per archetype, it is the same in every realm: a realm registered at run time never changes it, and a cross-realm
+    /// move re-encodes only the position.
     /// </para>
     /// <para>
     /// <b>The multiplier is in the width because the teleport test uses the CURRENT tick period.</b> Under overload the engine ticks less often and each
@@ -133,11 +135,20 @@ internal static class ProjectionCompiler
         var ageTicks = Math.Max(1d, Math.Round(maxAgeSeconds / nominalTickPeriodSeconds, MidpointRounding.AwayFromZero));
         var exp = Math.ILogB(toleranceMetres / ageTicks);   // floor(log2): 2^exp <= tolerance / ageTicks
         exp = Math.Clamp(exp, ProtocolConstants.MinVelocityUnitExp, ProtocolConstants.MaxVelocityUnitExp);
-        var codes = Math.Ceiling(Math.ScaleB(maxSpeedMps * nominalTickPeriodSeconds * tickMultiplier, -exp));
+        var range = maxSpeedMps * nominalTickPeriodSeconds * tickMultiplier;
+        var codes = Math.Ceiling(Math.ScaleB(range, -exp));
         foreach (var bits in CodecWidths)
         {
             if (WireMath.SymmetricLimit(bits) >= codes)
             {
+                // The width is paid for: spend all of it on precision (#1632). The drift budget only sets the COARSEST unit; a finer one that the same width
+                // still carries costs no byte and removes the systematic drift a coarse unit gives every straight walker (6 m/s read as 5.977 at 2^-9).
+                var limit = WireMath.SymmetricLimit(bits);
+                while (exp > ProtocolConstants.MinVelocityUnitExp && Math.Ceiling(Math.ScaleB(range, -(exp - 1))) <= limit)
+                {
+                    exp--;
+                }
+
                 return (bits, exp);
             }
         }

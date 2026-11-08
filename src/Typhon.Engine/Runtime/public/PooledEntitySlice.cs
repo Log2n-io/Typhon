@@ -47,6 +47,10 @@ public readonly struct PooledEntitySlice : IReadOnlyCollection<EntityId>
     /// <summary>Value-type enumerator — no allocation.</summary>
     public Enumerator GetEnumerator() => new(_array, _start, _count);
 
+    internal EntityId[] BackingArray => _array;
+
+    internal int Start => _start;
+
     IEnumerator<EntityId> IEnumerable<EntityId>.GetEnumerator() => GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();

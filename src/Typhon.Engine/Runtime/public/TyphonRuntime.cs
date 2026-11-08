@@ -2885,7 +2885,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var hasChangeFilter = _systemChangeFilterTables[sysIdx] != null;
         var sys = Scheduler.Systems[sysIdx];
 
-        IReadOnlyCollection<EntityId> entities;
+        TickEntities entities;
         int clusterStart = 0, clusterEnd = 0;
         int[] clusterIdArray = null;
         ref var plan = ref _queryPlans[sysIdx][chunkIndex];
@@ -2937,7 +2937,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 var rangeView = GetOrCreateTierRangeView(sysIdx, workerId);
 #pragma warning restore TYPHON004
                 rangeView.Reset(cs, cs.ClusterSegment, tierIds, clusterStart, clusterEnd);
-                entities = rangeView;
+                entities = TickEntities.Of(rangeView);
             }
             else
             {
@@ -2953,7 +2953,7 @@ public sealed partial class TyphonRuntime : IDisposable
             // (ChunksPerWorker > 1) allows chunkIndex >= workerCount. Reset() reconfigures the view for this chunk's slice.
             var partView = _partitionViews[sysIdx][workerId];
             partView.Reset(_systemViews[sysIdx].EntityIdsInternal, chunkIndex, totalChunks);
-            entities = partView;
+            entities = TickEntities.Of(partView);
 
             // Cluster-aware parallel dispatch: partition ActiveClusterIds range for this chunk.
             // Systems that use GetClusterEnumerator(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex) get
@@ -3549,7 +3549,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 // read from, so the guarantee has to be that nothing is writing). ExclusiveWindow keeps a DEPTH rather than a flag precisely so this nests —
                 // the inner Open() takes it to 2 and back to 1, and the track still sees an open window.
                 using var window = Engine.EpochManager.FenceWindow.Open();
-                InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFenceNoClock(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
+                // Inline span, not InspectorPhase(lambda): a lambda capturing `scheduler` allocated its closure and delegate every tick (#1623 residual).
+                using (TyphonEvent.BeginRuntimePhase(TickPhase.WriteTickFence))
+                {
+                    Engine.WriteTickFenceNoClock(scheduler.CurrentTickNumber, _currentUow?.ChangeSet);
+                }
 
                 // The trap #955 closes. DispatchDeferredTracks had exactly ONE call site — inside RunParallelFence — so with EnableParallelFence = false
                 // every deferred track silently never executed. That was invisible while the Fence DAG was the only one, because it is not declared in
@@ -3576,7 +3580,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var flushStart = Stopwatch.GetTimestamp();
         try
         {
-            InspectorPhase(TickPhase.UowFlush, () =>
+            using (TyphonEvent.BeginRuntimePhase(TickPhase.UowFlush))
             {
                 try
                 {
@@ -3600,7 +3604,7 @@ public sealed partial class TyphonRuntime : IDisposable
                     // clients — and a verifier for it needs to see that the flush was reached at all.
                     _subscriptionsContext.NoteFlush();
                 }
-            });
+            }
         }
         finally
         {
@@ -3692,7 +3696,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // `TickPhase.WriteTickFence` brackets ONLY the serial prep — context reset, dormancy drain, and the serial component-table fences. This is the sole
         // genuinely-serial post-tick fence cost; the Fence DAG dispatched below is four chained systems on the Engine-Post track, each with its own per-system
         // telemetry. Pre-#354 the marker wrapped `DispatchDeferredTracks` too, so `writeTickFenceUs` double-counted the Fence systems' wall-time.
-        InspectorPhase(TickPhase.WriteTickFence, () =>
+        using (TyphonEvent.BeginRuntimePhase(TickPhase.WriteTickFence))
         {
             ctx.Reset(scheduler.CurrentTickNumber, _currentUow?.ChangeSet, scheduler.WorkerCount, Options.FenceChunkOversubscription, _liveFenceCost,
                 Options.EntityMapBulkMinEntriesPerBucket);
@@ -3723,7 +3727,7 @@ public sealed partial class TyphonRuntime : IDisposable
                     }
                 }
             }
-        });
+        }
 
         // Dispatch the deferred Engine-Post track (the Fence DAG) — OUTSIDE the WriteTickFence marker (see above). The scheduler walks Prep → Migrate →
         // AabbRefresh → Finalize via the declared `.After()` edges. Each phase's Prepare(ctx) builds its plan from FenceContext and sets RuntimeChunkCount;
@@ -3910,20 +3914,6 @@ public sealed partial class TyphonRuntime : IDisposable
     internal (long IndexSort, long MapSort, long DirtySort) LastFenceChunkSortTicks => _fenceMigrateExec?.ChunkSortTicks ?? default;
 
     /// <summary>
-    /// Wraps a tick phase with paired profiler boundary events. When <see cref="TelemetryConfig.ProfilerActive"/> is false the JIT folds both Emit calls to
-    /// no-ops — this method compiles to just <c>action()</c>.
-    /// </summary>
-    private void InspectorPhase(TickPhase phase, Action action)
-    {
-        // Real span (not paired instants) so child spans started inside the action — PageCacheFlush, BTreeInsert, ClusterMigration, etc. —
-        // attach via parentSpanId. The previous EmitPhaseStart/EmitPhaseEnd instant pair is gone: phases are now first-class spans rendered
-        // in the profiler's phase track. PhaseStart/PhaseEnd kinds are still defined in TraceEventKind.cs for old-trace decode compatibility,
-        // but no producer emits them anymore.
-        using var phaseScope = TyphonEvent.BeginRuntimePhase(phase);
-        action();
-    }
-
-    /// <summary>
     /// Aggregate per-system telemetry by tier for <see cref="TierBudgetMetrics"/> (issue #234). Each system's <see cref="SystemTelemetry.DurationUs"/> is
     /// attributed to the tier(s) in its <see cref="SystemDefinition.TierFilter"/>. Multi-tier systems contribute equally to each matching tier.
     /// </summary>
@@ -4069,7 +4059,7 @@ public sealed partial class TyphonRuntime : IDisposable
         installed = tx;
 
         // #197: Build entity set based on input View and change filter
-        IReadOnlyCollection<EntityId> entities;
+        TickEntities entities;
         var hasChangeFilter = _systemViews[sysIdx] != null && _systemChangeFilterTables[sysIdx] != null;
         if (hasChangeFilter)
         {
@@ -4090,7 +4080,7 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // #198: Record entity counts into per-system telemetry
         ref var metrics = ref Scheduler.GetCurrentSystemMetrics(sysIdx);
-        var entityCount = entities is PooledEntityList pel ? pel.Count : 0;
+        var entityCount = entities.Count;
         metrics.EntitiesProcessed = entityCount;
         if (hasChangeFilter && _systemViews[sysIdx] != null)
         {

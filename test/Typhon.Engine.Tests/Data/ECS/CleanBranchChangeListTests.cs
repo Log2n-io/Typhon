@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
@@ -305,6 +305,39 @@ class CleanBranchChangeListTests : TestBase<CleanBranchChangeListTests>
             Assert.That(ReferenceEquals(buffers[0], buffers[1]), Is.True,
                 "the change list was reallocated rather than reused, which is the large-object-heap allocation this change removes");
         });
+    }
+
+    [Test]
+    public void ALegacyArchetypesCleanBranchChangeListIsReusedAcrossTicks_AndHandedOutZeroed()
+    {
+        // #1623 residual: the legacy clean branch built its change list as a fresh long[PrimarySegmentCapacity] per archetype per tick, which was most of a
+        // steady MMORPG shard's allocation. It now rents the retained branch-1 buffer, so a settled archetype reuses one array, cleared each tick.
+        using var dbe = SetupEngine(barrierOnly: false);
+        Spawn(dbe, 20f, 20f);
+        dbe.WriteTickFence(1);
+        dbe.WriteTickFence(2);
+        var first = ClusterStateOf(dbe).FenceDirtyBits;
+
+        // Several settled ticks: the Migrate pre-size used to read the retained buffer's padded length as the bound and grow it every tick.
+        for (var t = 3; t <= 8; t++)
+        {
+            dbe.WriteTickFence(t);
+        }
+
+        var cs = ClusterStateOf(dbe);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(cs.FenceBranchPath, Is.EqualTo(1), "precondition: a settled spatial archetype takes the clean branch");
+            Assert.That(first, Is.Not.Null);
+            Assert.That(ReferenceEquals(first, cs.FenceDirtyBits), Is.True, "the clean branch's change list was reallocated rather than reused");
+        });
+
+        // Handed out zeroed: a stale bit from the last tick would make an untouched cluster read as dirty. Dirty the buffer, then let a settled tick rent it.
+        System.Array.Fill(cs.FenceDirtyBits, -1L);
+        dbe.WriteTickFence(9);
+        Assert.That(ReferenceEquals(first, ClusterStateOf(dbe).FenceDirtyBits), Is.True);
+        Assert.That(System.Array.TrueForAll(ClusterStateOf(dbe).FenceDirtyBits, w => w != -1L), Is.True, "the reused change list was not cleared before the scan");
     }
 
     [Test]
