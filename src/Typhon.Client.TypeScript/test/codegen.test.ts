@@ -379,7 +379,15 @@ describe('typhon-codegen', () => {
 
   it('generates modules that type-check under the SDK’s strict settings', async () => {
     const files: string[] = [];
-    for (const catalog of ['catalog-kitchen-sink', 'catalog-wide', 'catalog-swg']) {
+    // catalog-coll's module generates no decoder, so it must import nothing a decoder would (noUnusedLocals).
+    for (const catalog of [
+      'catalog-kitchen-sink',
+      'catalog-wide',
+      'catalog-swg',
+      'catalog-ground',
+      'catalog-coll',
+      'catalog-commands',
+    ]) {
       files.push((await generated(catalog, goldenBin(catalog))).file);
     }
 

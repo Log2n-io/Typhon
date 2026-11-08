@@ -122,9 +122,8 @@ export function generateDecoders(plan: CatalogPlan, canonicalBytes: Uint8Array, 
   const imports = [...new Set([...gen.values, ...api.values])].sort();
   const types = [
     ...new Set([
-      'EntitiesTarget',
+      ...(gen.decodes ? ['EntitiesTarget', 'WireReader'] : []),
       'GeneratedDecoders',
-      'WireReader',
       ...(gen.usesColumns ? ['FieldArray'] : []),
       ...(gen.usesRealm ? ['RealmFrame'] : []),
       ...api.types,
@@ -432,15 +431,22 @@ function lit(x: number): string {
 
 class Generator {
   /** Value imports the module needs. */
-  readonly values = new Set<string>(['nextNetId', 'runLength']);
+  /** Empty until a decoder is generated: a module of none imports nothing it does not use (consumers' `noUnusedLocals`). */
+  readonly values = new Set<string>();
   /** The scratch arrays the decoders use: `T`, `T0`, `NONE`, and position and velocity views `P2`, `P3`, `V2`, `V3`. */
-  private readonly scratch = new Set<string>(['T0']);
+  private readonly scratch = new Set<string>();
+  /** Whether any decoder was generated: what the reader's and target's types are imported for. */
+  decodes = false;
   usesColumns = false;
   /** Whether a decoder reads a position, and so the realm frame it decodes over (`typhon.3`). */
   usesRealm = false;
   private temp = 0;
 
   archetype(a: ArchetypePlan, name: string): string {
+    this.decodes = true;
+    this.values.add('nextNetId');
+    this.values.add('runLength');
+    this.scratch.add('T0');
     const out: string[] = [];
     const emit = (depth: number, line: string): void => {
       out.push('  '.repeat(depth) + line);
@@ -621,7 +627,10 @@ class Generator {
       lines.push('const W = new Uint32Array(2);');
     }
 
-    lines.push('const T0 = new Uint32Array(1);');
+    if (s.has('T0')) {
+      lines.push('const T0 = new Uint32Array(1);');
+    }
+
     if (s.has('NONE')) {
       lines.push('const NONE = new Float64Array(0);');
     }
