@@ -40,6 +40,7 @@ jobs:
       engine: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.engine }}
       workbench: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.workbench }}
       aux: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.aux }}
+      swg: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.swg }}
       sdk: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.sdk }}
       game_client: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.game_client }}
       native: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.native }}
@@ -162,29 +163,25 @@ jobs:
               - 'test/Typhon.Samples.Swg.Tests/**'
               - 'demo/AntHill/**'
               - 'demo/AsteroidField/**'
-              # The SWG demo's realm checks (Realms G1d) build the demo itself.
-              - 'demo/SwgTatooine/SwgTatooine.Server/**'
-              - 'demo/SwgTatooine/SwgTatooine.Tests/**'
-              # The bot fleet, and Typhon.Client through it (B5, 2026-10-14). SwgTatooine.Tests references the bots so
-              # one fixture can put a real provisioner against a real /auth host -- the thing worth testing is that a
-              # DERIVED password satisfies the SERVER's own rules, which needs both assemblies in one place. Adding
-              # that reference moved both paths into this job's closure, and check-gate-filters.py caught it: without
-              # these two lines a change to the bots would run no tests at all, which is the #774 class exactly.
-              - 'demo/SwgTatooine/SwgTatooine.Bots/**'
-              - 'src/Typhon.Client/**'
-              # The navigation library the server and the bots both plan routes with; in the suite's closure through both.
-              - 'demo/SwgTatooine/SwgTatooine.Navigation/**'
-              # The demo dashboard: the suite checks the bots' telemetry against its real /bots/report endpoint, so it references it.
-              - 'demo/SwgTatooine/SwgTatooine.Dashboard/**'
-              # The SWG suite runs through the engine's sharder, from its own plan.
-              - 'bench/aws/shard.py'
-              - 'bench/aws/shards-swg.json'
               # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
               # not by reading the csproj.
               - 'tools/Typhon.Workbench/**'
               - 'tools/Typhon.Workbench.Fixtures/**'
               - 'Directory.Build.props'
               - 'Typhon.slnx'
+            # The SWG Tatooine suite, gated on the DEMO ONLY (Loïc, 2026-11-08). Its build closure reaches the engine, the
+            # protocol, the client and the subscriptions host, but those changes no longer run it: the suite is the slowest
+            # on the free runner and the engine has its own. This is a deliberate exception to the closure rule — declared
+            # in scripts/gate-jobs.json (`closure_scope`) so check-gate-filters.py still holds the demo's own directories.
+            # The nightly does not read this filter.
+            swg:
+              - 'demo/SwgTatooine/SwgTatooine.Server/**'
+              - 'demo/SwgTatooine/SwgTatooine.Tests/**'
+              - 'demo/SwgTatooine/SwgTatooine.Bots/**'
+              - 'demo/SwgTatooine/SwgTatooine.Navigation/**'
+              - 'demo/SwgTatooine/SwgTatooine.Dashboard/**'
+              - 'bench/aws/shard.py'
+              - 'bench/aws/shards-swg.json'
             # The client SDKs (05-sdks § 6): the .NET client's build closure, the TypeScript SDK, and the golden vectors both
             # decode — a vector changed by a Protocol PR must re-run the decoders that consume it.
             # <b>The browser game client ran in NO workflow at all</b> (I11). 74 vitest cases, a typecheck and eslint, none of
@@ -873,7 +870,7 @@ jobs:
 
       # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
       # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
-      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, request correlation, anthill harness, swg realms
+      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, request correlation, anthill harness
         run: |
           set -uo pipefail
           rc=0
@@ -895,15 +892,6 @@ jobs:
             echo "::endgroup::"
           done
 
-          # The SWG demo's suite in four processes, the way the engine's runs (bench/aws/shards-swg.json): its
-          # process-static state rules out fixtures in parallel in one process, and most of its time is paced ticks,
-          # so four processes overlap almost freely — 103 s in one, 35 s in four, measured on a dev box. The sharder
-          # also brings the engine's retry policy and plan-integrity check. It runs --no-build, hence the build.
-          echo "::group::SwgTatooine.Tests (4 shards)"
-          dotnet build demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release || rc=1
-          SHARD_REPO="$PWD" SHARD_PROJECT=demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
-            SHARD_PLAN=bench/aws/shards-swg.json python3 bench/aws/shard.py run --results-dir TestResults/swg-shards || rc=1
-          echo "::endgroup::"
           exit $rc
 
       - name: Upload trx
@@ -913,7 +901,36 @@ jobs:
           name: aux-tests-trx
           path: |
             TestResults/*.trx
-            TestResults/swg-shards/*.trx
+          if-no-files-found: ignore
+
+  # ---- The SWG Tatooine suite: only when the demo itself changed (the `swg` filter). Free runner. ----
+  swg-tests:
+    needs: changes
+    if: needs.changes.outputs.swg == 'true' && needs.changes.outputs.skip_ut != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      # The SWG demo's suite in four processes, the way the engine's runs (bench/aws/shards-swg.json): its
+      # process-static state rules out fixtures in parallel in one process, and most of its time is paced ticks,
+      # so four processes overlap almost freely — 103 s in one, 35 s in four, measured on a dev box. The sharder
+      # also brings the engine's retry policy and plan-integrity check. It runs --no-build, hence the build.
+      - name: Test — SwgTatooine.Tests (4 shards)
+        run: |
+          set -euo pipefail
+          dotnet build demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj -c Release
+          SHARD_REPO="$PWD" SHARD_PROJECT=demo/SwgTatooine/SwgTatooine.Tests/SwgTatooine.Tests.csproj \
+            SHARD_PLAN=bench/aws/shards-swg.json python3 bench/aws/shard.py run --results-dir TestResults/swg-shards
+
+      - name: Upload trx
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: swg-tests-trx
+          path: TestResults/swg-shards/*.trx
           if-no-files-found: ignore
 
   # ---- The client SDKs: the .NET client suite and the TypeScript SDK, both against the golden vectors. Free runner. ----
@@ -1046,7 +1063,7 @@ jobs:
 
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, game-client, native-sdk, tla, rule-coverage, invariants,
+    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, swg-tests, subscriptions-sdk, game-client, native-sdk, tla, rule-coverage, invariants,
       closing-keywords]
     if: always()
     runs-on: ubuntu-latest
@@ -1063,10 +1080,11 @@ jobs:
           fork='${{ needs.changes.outputs.is_fork }}'
           # Hyphenated job names need bracket notation in an expression — `needs.aux-tests` parses as subtraction.
           auxt="${{ needs['aux-tests'].result }}"
+          swgt="${{ needs['swg-tests'].result }}"
           sdk="${{ needs['subscriptions-sdk'].result }}"
           client="${{ needs['game-client'].result }}"
           native="${{ needs['native-sdk'].result }}"
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  game-client=$client  native-sdk=$native  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  swg-tests=$swgt  subscriptions-sdk=$sdk  game-client=$client  native-sdk=$native  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -1076,6 +1094,8 @@ jobs:
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
           # aux-tests is path-gated like tla, so 'skipped' is legitimate; a failure is not (#942).
           case "$auxt" in failure|cancelled) echo "aux-tests failed"; fail=1 ;; esac
+          # swg-tests too: skipped unless the SWG demo itself changed.
+          case "$swgt" in failure|cancelled) echo "swg-tests failed"; fail=1 ;; esac
           # subscriptions-sdk is path-gated the same way.
           case "$sdk" in failure|cancelled) echo "subscriptions-sdk failed"; fail=1 ;; esac
           # game-client too: skipped when demo/SwgTatooine/SwgTatooine.Client/** is untouched (I11).

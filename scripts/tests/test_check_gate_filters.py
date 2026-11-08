@@ -137,6 +137,19 @@ class GateFilters(unittest.TestCase):
         r = self._run()
         self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
+    def test_closure_scope_exempts_outside_dirs(self):
+        """A declared closure_scope (swg-tests) only holds the suite's own tree: src/Lib may stay unfiltered."""
+        self._jobs({"suite-job": {"filters": ["engine"], "projects": ["test/Suite/Suite.csproj"], "closure_scope": ["test/"]}})
+        r = self._run()
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+
+    def test_closure_scope_still_holds_inside_dirs(self):
+        """The scope narrows the rule, it does not drop it: an uncovered directory inside it still fails."""
+        self._jobs({"suite-job": {"filters": ["engine"], "projects": ["test/Suite/Suite.csproj"], "closure_scope": ["src/"]}})
+        r = self._run()
+        self.assertEqual(1, r.returncode, r.stdout + r.stderr)
+        self.assertIn("src/Lib/", r.stdout)
+
     def test_ungated_suite_fails(self):
         """A real suite that no job runs, and no allow-list entry."""
         self._workflow(["              - 'test/Suite/**'", "              - 'src/Lib/**'"])
