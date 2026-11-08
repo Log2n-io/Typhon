@@ -48,6 +48,7 @@ internal sealed class StatsEncoder
         Unsourced = 0,
         TickP50,
         TickP99,
+        TickMax,
         SystemMean,
         ArchetypeEntities,
         Sessions,
@@ -185,8 +186,9 @@ internal sealed class StatsEncoder
         _track = track;
         _archetypeCatalogIds = LabelledArchetypeIds(plan, plans);
 
-        // One sample per tick of the window, and the window is at most what the ring can still hold.
-        _samples = new double[Math.Max(1, EmissionPeriodTicks)];
+        // One sample per tick of the longest window read: the percentile window, ten emissions deep.
+        PercentileWindowTicks = PercentileWindowOf(EmissionPeriodTicks);
+        _samples = new double[PercentileWindowTicks];
         _systemSums = new double[systemNames?.Count ?? 0];
     }
 
@@ -195,6 +197,20 @@ internal sealed class StatsEncoder
 
     /// <summary>The block's worst case in bytes, which a frame's upper bound has to include before the encode starts.</summary>
     public int MaxBlockBytes { get; }
+
+    /// <summary>The seconds a <c>*.p99</c> looks back over.</summary>
+    internal const int PercentileWindowSeconds = 10;
+
+    /// <summary>
+    /// Ticks a <c>*.p99</c> looks back over: <see cref="PercentileWindowSeconds"/> emissions' worth, so a p99 is a percentile of hundreds of ticks rather
+    /// than the maximum of one second's thirty. The rings clamp it to what they still hold.
+    /// </summary>
+    public int PercentileWindowTicks { get; }
+
+    /// <summary>The percentile window for an emission period of <paramref name="emissionPeriodTicks"/> ticks (one second's worth).</summary>
+    /// <param name="emissionPeriodTicks">Ticks per second, as <see cref="EmissionPeriodTicks"/> rounds them.</param>
+    /// <returns>Ticks.</returns>
+    internal static int PercentileWindowOf(int emissionPeriodTicks) => Math.Max(1, emissionPeriodTicks) * PercentileWindowSeconds;
 
     /// <summary>Whether this tick carries a block. Published by <see cref="BeginTick"/> and read by every assembling worker.</summary>
     public bool IsEmissionTick => Volatile.Read(ref _isEmissionTick) != 0;
@@ -303,16 +319,21 @@ internal sealed class StatsEncoder
             switch (binding.Source)
             {
                 case ServerSource.TickP50:
-                    _serverValues[at] = TickPercentile(telemetry, tick, window, 0.50);
+                    _serverValues[at] = TickPercentile(telemetry, tick, window, 0.50, _samples);
                     break;
+                // A p99 over one emission window is its maximum (30 samples at 30 Hz): it looks back PercentileWindowTicks instead, and the window's
+                // maximum is typhon.tick.max, named for what it is.
                 case ServerSource.TickP99:
-                    _serverValues[at] = TickPercentile(telemetry, tick, window, 0.99);
+                    _serverValues[at] = TickPercentile(telemetry, tick, PercentileWindowTicks, 0.99, _samples);
+                    break;
+                case ServerSource.TickMax:
+                    _serverValues[at] = TickMax(telemetry, tick, window);
                     break;
                 case ServerSource.TrackP99:
-                    _serverValues[at] = TrackPercentile(tick, window, 0.99);
+                    _serverValues[at] = TrackPercentile(tick, PercentileWindowTicks, 0.99);
                     break;
                 case ServerSource.DurabilityWaitP99:
-                    _serverValues[at] = DurabilityWaitPercentile(telemetry, tick, window, 0.99);
+                    _serverValues[at] = DurabilityWaitPercentile(telemetry, tick, PercentileWindowTicks, 0.99);
                     break;
                 case ServerSource.SystemMean:
                     SystemMeans(telemetry, tick, window, _serverValues.AsSpan(at, binding.ValueCount));
@@ -451,10 +472,38 @@ internal sealed class StatsEncoder
 
     // ── the numbers ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private double TickPercentile(TickTelemetryRing telemetry, long tick, int window, double q)
+    /// <summary>A percentile of the tick durations of the <paramref name="window"/> ticks before <paramref name="tick"/>, in ms.</summary>
+    /// <param name="telemetry">The runtime's ring, or <see langword="null"/>.</param>
+    /// <param name="tick">The tick in progress.</param>
+    /// <param name="window">How many ticks back; the ring and <paramref name="samples"/> clamp it.</param>
+    /// <param name="q">The percentile, in [0, 1].</param>
+    /// <param name="samples">Scratch, one slot per tick of the window.</param>
+    /// <returns>Milliseconds, or 0 with no telemetry.</returns>
+    internal static double TickPercentile(TickTelemetryRing telemetry, long tick, int window, double q, double[] samples)
     {
-        var count = FillTickSamples(telemetry, tick, window);
-        return Percentile(_samples, count, q);
+        var count = FillTickSamples(telemetry, tick, window, samples);
+        return Percentile(samples, count, q);
+    }
+
+    /// <summary>The longest tick of the <paramref name="window"/> ticks before <paramref name="tick"/>, in ms: <c>typhon.tick.max</c>.</summary>
+    /// <param name="telemetry">The runtime's ring, or <see langword="null"/>.</param>
+    /// <param name="tick">The tick in progress.</param>
+    /// <param name="window">How many ticks back: one emission's.</param>
+    /// <returns>Milliseconds, or 0 with no telemetry.</returns>
+    internal static double TickMax(TickTelemetryRing telemetry, long tick, int window)
+    {
+        if (telemetry == null || !telemetry.TryGetRange(tick - window, out var first, out var last))
+        {
+            return 0;
+        }
+
+        var max = 0d;
+        for (var t = first; t <= last; t++)
+        {
+            max = Math.Max(max, telemetry.GetTick(t).ActualDurationMs);
+        }
+
+        return max;
     }
 
     /// <summary>
@@ -519,7 +568,7 @@ internal sealed class StatsEncoder
         return Percentile(_samples, count, q);
     }
 
-    private int FillTickSamples(TickTelemetryRing telemetry, long tick, int window)
+    private static int FillTickSamples(TickTelemetryRing telemetry, long tick, int window, double[] samples)
     {
         if (telemetry == null)
         {
@@ -531,10 +580,12 @@ internal sealed class StatsEncoder
             return 0;
         }
 
+        // The newest samples when the window outgrows the scratch: the ring's range runs oldest first.
+        first = Math.Max(first, last - samples.Length + 1);
         var count = 0;
-        for (var t = first; t <= last && count < _samples.Length; t++)
+        for (var t = first; t <= last; t++)
         {
-            _samples[count++] = telemetry.GetTick(t).ActualDurationMs;
+            samples[count++] = telemetry.GetTick(t).ActualDurationMs;
         }
 
         return count;
@@ -678,6 +729,7 @@ internal sealed class StatsEncoder
     {
         "typhon.tick.p50" => ServerSource.TickP50,
         "typhon.tick.p99" => ServerSource.TickP99,
+        BuiltInMetrics.TickMax => ServerSource.TickMax,
         BuiltInMetrics.SystemMean => ServerSource.SystemMean,
         BuiltInMetrics.ArchetypeEntities => ServerSource.ArchetypeEntities,
         "typhon.sessions" => ServerSource.Sessions,

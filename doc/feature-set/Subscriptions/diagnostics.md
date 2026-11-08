@@ -17,11 +17,13 @@ tools need the server's own numbers alongside the stream, and developers need a 
 ## ⚙️ How it works (in brief)
 
 - **`STATS` capability.** A client that requests it receives, about once a second, a dense snapshot of the catalog's metrics: built-ins
-  (`typhon.tick.p50/p99`, `typhon.system.mean` per system, `typhon.archetype.entities`, `typhon.sessions`, `typhon.net.outBytesPerSec`,
+  (`typhon.tick.p50/p99/max`, `typhon.system.mean` per system, `typhon.archetype.entities`, `typhon.sessions`, `typhon.net.outBytesPerSec`,
   `typhon.subscriptions.track.p99`, `typhon.durability.wait.p99`, `typhon.sessions.closed` by reason and `typhon.frames.skipped` by cause,
   and per session `typhon.session.outBytesPerSec`, `skippedFrames`, `droppedCommands`) and your own. `typhon.durability.wait.p99` is the per-**tick** wait — the Unit-of-Work flush, which in WAL mode
   is `RequestFlush` + `WaitForDurable` for every record the tick produced together — and not a per-commit figure; read against
-  `typhon.tick.p99` it says how much of a tick goes to durability rather than to compute.
+  `typhon.tick.p99` it says how much of a tick goes to durability rather than to compute. Every `*.p99` is a percentile over the last **ten
+  seconds** of ticks (300 at 30 Hz); `typhon.tick.max` is the longest tick of the last second, and `typhon.tick.p50` the last second's median.
+  Over one second a p99 of 30 samples is simply the maximum, which is why the two are separate.
 - **Application metrics**: `subs.Metric(name, unit, codec, source)` (server scope, optionally labelled) and `subs.SessionMetric(…)` (per
   session); the server segment is encoded once for every subscriber.
 - **The same numbers without a client**: `TyphonRuntime.ReadStats()` returns tick p50/p99 against the target, the overrun count, the

@@ -50,8 +50,11 @@ internal sealed class SubscriptionsTelemetry
     /// <summary>How many stages a per-tick record holds.</summary>
     public const int StageCount = 3;
 
-    /// <summary>How many ticks of history the ring keeps. A power of two so the index is a mask, and more than a second at any sane rate.</summary>
-    public const int Depth = 256;
+    /// <summary>
+    /// How many ticks of history the ring keeps. A power of two so the index is a mask, and deep enough for <c>typhon.subscriptions.track.p99</c>'s ten-second
+    /// window up to 100 Hz (56 KB).
+    /// </summary>
+    public const int Depth = 1024;
 
     private static readonly double TicksToMicroseconds = 1_000_000.0 / Stopwatch.Frequency;
 

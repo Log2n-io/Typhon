@@ -32,7 +32,7 @@ struct BuiltInMetric {
     bool labelled;
 };
 
-constexpr std::array<BuiltInMetric, 13> BuiltInMetrics = {{
+constexpr std::array<BuiltInMetric, 14> BuiltInMetrics = {{
     {"typhon.tick.p50", "ms", CodecKind::F16, "gauge", "server", false},
     {"typhon.tick.p99", "ms", CodecKind::F16, "gauge", "server", false},
     {"typhon.system.mean", "ms", CodecKind::F16, "gauge", "server", true},
@@ -46,6 +46,7 @@ constexpr std::array<BuiltInMetric, 13> BuiltInMetrics = {{
     {"typhon.session.droppedCommands", "count", CodecKind::Varu, "counter", "session", false},
     {"typhon.sessions.closed", "count", CodecKind::Varu, "counter", "server", true},
     {"typhon.frames.skipped", "count", CodecKind::Varu, "counter", "server", true},
+    {"typhon.tick.max", "ms", CodecKind::F16, "gauge", "server", false},
 }};
 
 bool Less(const std::string& a, const std::string& b) { return utf8::CompareUtf16(a, b) < 0; }
