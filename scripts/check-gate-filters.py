@@ -253,15 +253,17 @@ def main():
     groups = {}
     for job, spec in JOBS.items():
         for proj in spec["projects"]:
-            groups.setdefault((tuple(spec["filters"]), proj), []).append(job)
+            groups.setdefault((tuple(spec["filters"]), proj, tuple(spec.get("closure_scope", ()))), []).append(job)
 
-    for (filter_names, proj), jobs in sorted(groups.items()):
+    for (filter_names, proj, scope), jobs in sorted(groups.items()):
         if not os.path.exists(os.path.join(REPO, proj)):
             continue
         patterns = [p for name in filter_names for p in filters.get(name, [])]
         for directory in sorted(closure_dirs(proj)):
             if not os.path.isdir(os.path.join(REPO, directory)):
                 continue  # a planned path is not a red gate
+            if scope and not any((directory.rstrip("/") + "/").startswith(pre) for pre in scope):
+                continue  # outside the job's declared closure_scope: a deliberate exception (gate-jobs.json)
             if not covered(directory, patterns):
                 violations.append(
                     f"{WORKFLOW}:{filters_line}: '{directory}' is in the build closure of {proj} "
