@@ -128,7 +128,20 @@ class BackupCaptureRoundTripTests : BackupTestBase<BackupCaptureRoundTripTests>
                 {
                     using (var scope = provider.CreateScope())
                     {
-                        var dbe = Open(scope);
+                        // A restore missing records it needs may not open at all: the load-time integrity check refuses a torn image, which depends on
+                        // what reached the file before the capture. That refusal is a finding like any mismatch, never an escape past the round trip's
+                        // own assertion, or the BKP-05 mutant reads red whenever the image tears instead of merely losing rows.
+                        DatabaseEngine dbe;
+                        try
+                        {
+                            dbe = Open(scope);
+                        }
+                        catch (InvalidOperationException e)
+                        {
+                            failures.Add($"{where}: the restored image did not open: {e.Message}");
+                            continue;
+                        }
+
                         if (!dbe.LastOpenRanCrashRecovery)
                         {
                             failures.Add($"{where}: the restored image did not open through the crash path");
