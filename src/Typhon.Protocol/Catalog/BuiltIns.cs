@@ -251,7 +251,14 @@ public static class BuiltInMetrics
         ("typhon.session.droppedCommands", "count", CodecKind.Varu, CatalogMetric.CounterKind, CatalogMetric.SessionScope, false),
         (SessionsClosed, "count", CodecKind.Varu, CatalogMetric.CounterKind, null, true),
         (FramesSkipped, "count", CodecKind.Varu, CatalogMetric.CounterKind, null, true),
+        (TickMax, "ms", CodecKind.F16, null, null, false),
     ];
+
+    /// <summary>
+    /// The longest tick of the last emission window (one second). <c>typhon.tick.p99</c> is a percentile over ten seconds; over one it was this maximum
+    /// under a percentile's name.
+    /// </summary>
+    public const string TickMax = "typhon.tick.max";
 
     /// <summary>Sessions closed since the server started, one value per reason in <see cref="SessionsClosedLabels"/> order. Cumulative.</summary>
     public const string SessionsClosed = "typhon.sessions.closed";

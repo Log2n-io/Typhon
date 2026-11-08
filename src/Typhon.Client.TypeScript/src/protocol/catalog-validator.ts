@@ -53,6 +53,7 @@ const BUILT_IN_METRICS: readonly (readonly [string, string, CodecKind, string, s
   ['typhon.session.droppedCommands', 'count', CodecKind.Varu, 'counter', 'session', false],
   ['typhon.sessions.closed', 'count', CodecKind.Varu, 'counter', 'server', true],
   ['typhon.frames.skipped', 'count', CodecKind.Varu, 'counter', 'server', true],
+  ['typhon.tick.max', 'ms', CodecKind.F16, 'gauge', 'server', false],
 ];
 
 /** The reserved index of a built-in command, or −1. */
