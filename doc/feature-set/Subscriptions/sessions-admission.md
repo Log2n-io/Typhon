@@ -48,6 +48,10 @@ foreach (ref readonly var e in ctx.Subscriptions.SessionEvents)
 }
 ```
 
+**Unit-testing the lifecycle.** Write the event loop against `ISessionRequests` (`SessionEvents`, `Session(id)`, `ControlledOf(id)`), which
+`ctx.Subscriptions` implements. In a test, pass a `RecordingSessionRequests`: raise events built with `SessionEvent.Create(kind, session, resumedFrom:,
+resumable:, …)`, step with `NextTick()`, and assert on the requests recorded (`ProfileOf`, `ControlledOf`, `RequestsOf`). No engine, no socket.
+
 | Setting | Default | Effect |
 |---|---|---|
 | `SubscriptionsOptions.MaxSessions` | 8 192 | Session table size (hard max 65 535); a full table refuses with 1013 |
@@ -64,6 +68,7 @@ foreach (ref readonly var e in ctx.Subscriptions.SessionEvents)
 ## 🧪 Tests
 
 - [HandshakeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/HandshakeTests.cs) — admission, the deadline, caps, close codes
+- [RecordingSessionRequestsTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/RecordingSessionRequestsTests.cs) — a resume lifecycle driven through the test seam
 - [SessionChurnLeakTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SessionChurnLeakTests.cs) — 10 000 connect/disconnect cycles leak nothing
 
 ## 🔗 Related
