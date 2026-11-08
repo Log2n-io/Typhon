@@ -868,7 +868,12 @@
     thread may not make that managed write (SUB-05)
   never hold a session's slot for the grace: a pending resume costs a record, and a reconnect storm that held slots would refuse the very clients
     it exists for
-  scope: SessionTable.TryConsumeResume, SessionTable.ArmResume, SessionTable.ExpireResumes, SessionTable.ClaimResumeRecord, SessionTable.ReportResumeAbandoned,
+  invariant a token presented while its session is still OPEN (the link died, the server has not noticed) takes that session over (#1620): the
+    tick closes it as LinkLost, resumable, with 4005 ResumedElsewhere, claims the record that close armed, and announces the new session as its
+    resume, Closed{s, resumable} then Opened{resumedFrom = s} in one batch. Never a fresh session beside the live one: that one would close
+    resumably later and hold its body for the whole grace, a ghost nobody can come back to. The claim is the same exchange as any consume, so a
+    second presentation, or the session closing on its own first, still yields exactly one resume
+  scope: SessionTable.TryConsumeResume, SessionTable.TryMatchLiveToken, SessionTable.ApplyTakeovers, SessionTable.ArmResume, SessionTable.ExpireResumes, SessionTable.ClaimResumeRecord, SessionTable.ReportResumeAbandoned,
     SessionTable.MintResumeToken, SessionTable.IsResumable, SessionTable.TryWriteResumeToken, SessionTable.TryAdmit, SessionTable.CloseCore,
     SessionTable.ApplyPendingCloses, SessionTable.BeginTick, SubscriptionConnection.HandleHello, SubscriptionConnection.SendWelcome
   on_violation: both events is the worse half. An application destroys on ResumeExpired what it re-bound on Opened — the avatar of the client that
