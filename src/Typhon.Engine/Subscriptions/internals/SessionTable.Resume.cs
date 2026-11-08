@@ -1,9 +1,11 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Threading;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -241,6 +243,133 @@ internal sealed unsafe partial class SessionTable
         finally
         {
             Exit();
+        }
+    }
+
+    /// <summary>
+    /// Whether a presented token is the one an OPEN session was issued: a client reconnecting before the server noticed its link die (#1620).
+    /// </summary>
+    /// <param name="token">The token the client presented.</param>
+    /// <param name="live">The session it names, when it does.</param>
+    /// <returns><see langword="true"/> when the token is that session's.</returns>
+    /// <remarks>
+    /// Link thread, reads only: the token words are acquire-read as <see cref="TryWriteResumeToken"/> reads them, and the gate names the session the slot
+    /// holds. The answer is a hint, not the decision: the tick re-checks the identity when it closes that session, and the record it claims is the arbiter.
+    /// </remarks>
+    internal bool TryMatchLiveToken(ReadOnlySpan<byte> token, out SessionId live)
+    {
+        live = SessionId.None;
+        if (!ResumeEnabled || token.Length != ResumeTokenBytes)
+        {
+            return false;
+        }
+
+        var lo = ReadUInt64(token);
+        var hi = ReadUInt64(token[sizeof(ulong)..]);
+        var slot = (int)(lo & ((1UL << ResumeTokenSlotBits) - 1));
+        if ((lo | hi) == 0 || slot >= _capacity || !TryEnter())
+        {
+            return false;
+        }
+
+        try
+        {
+            var words = OpenTokens.Slice(slot * 2, 2);
+            if (Volatile.Read(ref words[1]) != hi || words[0] != lo)
+            {
+                return false;
+            }
+
+            ref var row = ref Rows[slot];
+            var gate = Volatile.Read(ref row.Gate);
+            var session = SessionId.FromValue(GateId(gate));
+            var state = (SessionSlotState)Volatile.Read(ref row.State);
+            if (!GateNames(gate, session) || state is not (SessionSlotState.Admitted or SessionSlotState.Open))
+            {
+                return false;
+            }
+
+            live = session;
+            return true;
+        }
+        finally
+        {
+            Exit();
+        }
+    }
+
+    /// <summary>
+    /// Settles the takeovers link threads asked for (#1620): the session each token names is closed as link-dead and resumable, and the new session that
+    /// presented it is announced as its resume: <c>Closed{s, resumable}</c>, then <c>Opened{resumedFrom = s}</c>, in one batch. Tick side.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The record decides, as for every resume (SUB-12).</b> The close arms it and this claims it with the compare-exchange a link thread's consume uses,
+    /// so a second connection presenting the same token, or the old session closing on its own in between, loses the exchange and its session is announced
+    /// fresh. A session that closed non-resumably (kicked, evicted) has no record to claim: the client's session is fresh.
+    /// </para>
+    /// <para>The Opened is appended right after the claim, with nothing between that can fail, so a claimed record always has its Opened.</para>
+    /// </remarks>
+    private void ApplyTakeovers()
+    {
+        lock (_takeovers)
+        {
+            if (_takeovers.Count == 0)
+            {
+                return;
+            }
+
+            _settling.AddRange(_takeovers);
+            _takeovers.Clear();
+        }
+
+        foreach (var t in _settling)
+        {
+            CloseCore(t.Old, SessionCloseReason.LinkLost, CloseCodes.ResumedElsewhere, "resumed by another connection", resumable: true);
+
+            var resumed = false;
+            object resumedAppData = null;
+            if (ResumeEnabled)
+            {
+                ref var record = ref Resumes[t.Old.Slot];
+                var pending = _resumeAppData[t.Old.Slot];
+                if (Interlocked.CompareExchange(ref record.State, 0, t.Old.Value) == t.Old.Value)
+                {
+                    resumed = true;
+                    resumedAppData = pending;
+                }
+            }
+
+            var appData = t.AppData ?? resumedAppData;
+            _appData[t.Session.Slot] = appData;
+            _events.Append(new SessionEvent(SessionEventKind.Opened, t.Session, t.Role, t.Limits, appData, t.SessionKind, t.HelloPayload, null,
+                resumed ? t.Old : SessionId.None, default, 0, false));
+            if (TelemetryConfig.SubscriptionsSessionChangesActive)
+            {
+                TyphonEvent.EmitSubscriptionsSessionChanged(t.Session.Value, (byte)SessionChange.Opened, 0, 0, 0);
+            }
+        }
+
+        _settling.Clear();
+    }
+
+    /// <summary>A takeover a link thread asked for: the new session, the open one its token names, and the new session's Opened, held back.</summary>
+    private readonly record struct PendingTakeover(SessionId Session, SessionId Old, SessionRole Role, SessionLimits Limits, object AppData,
+        string SessionKind, byte[] HelloPayload);
+
+    // Link threads append under its lock; the tick moves them into _settling, which is its own.
+    private readonly List<PendingTakeover> _takeovers = [];
+    private readonly List<PendingTakeover> _settling = [];
+
+    /// <summary>Takeovers waiting for the tick, for tests.</summary>
+    internal int PendingTakeoverCount
+    {
+        get
+        {
+            lock (_takeovers)
+            {
+                return _takeovers.Count;
+            }
         }
     }
 

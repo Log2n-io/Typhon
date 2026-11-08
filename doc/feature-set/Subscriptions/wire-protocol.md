@@ -52,6 +52,7 @@ TypeScript.
 | 1013 | try later: server full, or lagging | yes, backoff |
 | 4001 / 4002 / 4003 | no acknowledgement / `HELLO` timeout / admission rejected | yes / yes / no |
 | 4004 | the client refused the stream (sent by the client in `BYE`, for a fault a browser cannot close with 1002/1007/1009) | — |
+| 4005 | resumed elsewhere: another connection took this session over with its resume token | no |
 | 4100–4999 | application (`Kick`, `Admission.Reject`) | app-declared |
 
 ## ⚠️ Guarantees & limits

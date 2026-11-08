@@ -137,6 +137,12 @@ public static class CloseCodes
     /// </summary>
     public const ushort ClientRefusedTheStream = 4004;
 
+    /// <summary>
+    /// Another connection resumed this session with its token while this one was still open (#1620): the session lives on there. Not a code to reconnect on
+    /// (a reconnect would take the session back from the client that just reclaimed it), and every SDK treats the engine range 4005-4099 as fatal.
+    /// </summary>
+    public const ushort ResumedElsewhere = 4005;
+
     /// <summary>The first code of the application range, <c>4100–4999</c>.</summary>
     public const ushort FirstApplicationCode = 4100;
 

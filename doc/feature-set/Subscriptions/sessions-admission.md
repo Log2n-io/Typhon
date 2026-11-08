@@ -63,7 +63,8 @@ resumable:, …)`, step with `NextTick()`, and assert on the requests recorded (
 - **One writer per session row** — the tick; transport threads touch only rings, leases and counters (SUB-05).
 - **A session the tick closes is told why before its link closes** (SUB-14).
 - **A session costs a few hundred bytes of geometry plus its frames and a 4 KiB inbound ring**, whatever it holds.
-- Neither transport authenticates: the token reaches `Admit` unexamined. A resume token (16 bytes, issued in `WELCOME`) lets a client reclaim its session within `SubscriptionsOptions.ResumeGraceMs` (default 60 s); a reconnect that arrives after the grace or without a token is a new session (SUB-12).
+- Neither transport authenticates: the token reaches `Admit` unexamined. A resume token (16 bytes, issued in `WELCOME`) lets a client reclaim its session within `SubscriptionsOptions.ResumeGraceMs` (default 60 s); a reconnect that arrives after the grace or without a token is a new session (SUB-12). A reconnect that beats the server's
+  notice of the dead link takes the still-open session over: it closes resumable (code 4005) and the new session is its resume, in the same tick.
 
 ## 🧪 Tests
 

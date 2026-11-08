@@ -417,6 +417,9 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// <param name="helloPayload">The client's payload; copied, because the transport's buffer is reused.</param>
     /// <param name="resumedFrom">The session this one resumed, or <see cref="SessionId.None"/>.</param>
     /// <param name="resumedAppData">The resumed session's application data, used when admission attached none of its own.</param>
+    /// <param name="takeoverOf">
+    /// The open session this one's resume token names (#1620), or <see cref="SessionId.None"/>: its Opened is then the tick's to announce.
+    /// </param>
     /// <exception cref="InvalidOperationException">The identity does not hold a lease — it was never leased, was already opened, or was released.</exception>
     /// <remarks>
     /// <para>
@@ -431,7 +434,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// </para>
     /// </remarks>
     public void Open(SessionId session, in Admission admission, string sessionKind, ReadOnlySpan<byte> helloPayload, SessionId resumedFrom = default,
-        object resumedAppData = null)
+        object resumedAppData = null, SessionId takeoverOf = default)
     {
         var slot = session.Slot;
         if (slot >= _capacity)
@@ -504,6 +507,18 @@ internal sealed unsafe partial class SessionTable : IDisposable
                     $"{session} lost its lease while it was being opened; a lease is released by its own thread or not at all.");
             }
 
+            // A takeover (#1620) is opened but not announced: its Opened waits for the tick, which closes the session the token names and resumes into it,
+            // so the application reads that session's Closed before this one's Opened, and learns only then whether it was a resume.
+            if (takeoverOf.IsValid)
+            {
+                lock (_takeovers)
+                {
+                    _takeovers.Add(new PendingTakeover(session, takeoverOf, admission.Role, limits, admission.AppData, sessionKind, payload));
+                }
+
+                return;
+            }
+
             _events.Append(new SessionEvent(SessionEventKind.Opened, session, admission.Role, limits, appData, sessionKind, payload, null,
                 resumedFrom, default, 0, false));
             if (TelemetryConfig.SubscriptionsSessionChangesActive)
@@ -563,9 +578,13 @@ internal sealed unsafe partial class SessionTable : IDisposable
         // after the LEASE, because a server-full refusal must not burn a single-use token the client could have spent on its next attempt.
         var resumed = TryConsumeResume(resumeToken, out var resumedFrom, out var resumedAppData);
 
+        // A token whose session has not closed yet (its link is dead and the server has not noticed) is early, not stale: the tick takes that session over
+        // (#1620). A fresh session here would leave the old one to close resumably later and hold its body for the whole grace, a ghost.
+        var takeover = !resumed && TryMatchLiveToken(resumeToken, out var live) ? live : SessionId.None;
+
         try
         {
-            Open(session, admission, request.Kind, request.HelloPayload, resumed ? resumedFrom : SessionId.None, resumedAppData);
+            Open(session, admission, request.Kind, request.HelloPayload, resumed ? resumedFrom : SessionId.None, resumedAppData, takeover);
         }
         catch
         {
@@ -1079,6 +1098,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
                 }
             }
 
+            ApplyTakeovers();
             return closed;
         }
         finally

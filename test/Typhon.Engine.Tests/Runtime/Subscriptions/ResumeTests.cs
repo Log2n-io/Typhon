@@ -743,4 +743,132 @@ class ResumeTests
             }
         });
     }
+
+    // ── a reconnect that beats the server's notice of the dead link (#1620) ──────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The client reconnects with its token before the server has noticed the old link die: the old session is still open, so no record is armed. Takeover:
+    /// the tick closes it as link-dead and resumable, and announces the new session as its resume, Closed first, in one batch.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-12")]
+    public void AReconnectWhileTheOldSessionIsStillOpenTakesItOver()
+    {
+        using var table = NewTable();
+        var first = Connect(table, out var token);
+
+        Assert.That(Admit(table, out var second, token), Is.True);
+        table.BeginTick();
+        Assert.That(Drain(table), Is.Empty, "a takeover's Opened waits for the tick that closes the session it takes over");
+        Assert.That(table.PendingTakeoverCount, Is.EqualTo(1));
+
+        table.ApplyPendingCloses();
+        table.BeginTick();
+        var events = Drain(table);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(events, Has.Count.EqualTo(2));
+            Assert.That(events[0].Kind, Is.EqualTo(SessionEventKind.Closed), "the old session's Closed comes first, so the application holds the body");
+            Assert.That(events[0].Session, Is.EqualTo(first));
+            Assert.That(events[0].Resumable, Is.True);
+            Assert.That(events[0].Reason, Is.EqualTo(SessionCloseReason.LinkLost));
+            Assert.That(events[0].CloseCode, Is.EqualTo(CloseCodes.ResumedElsewhere), "a superseded tab must not reconnect and take the session back");
+            Assert.That(events[1].Kind, Is.EqualTo(SessionEventKind.Opened));
+            Assert.That(events[1].Session, Is.EqualTo(second));
+            Assert.That(events[1].ResumedFrom, Is.EqualTo(first), "then the resume that re-binds it: no ghost held for the grace");
+            Assert.That(table.PendingResumeCount, Is.Zero, "the record the close armed is the one the resume spent");
+            Assert.That(table.IsOpen(second), Is.True);
+        });
+
+        _now += Ms(GraceMs * 2);
+        table.BeginTick();
+        Assert.That(Drain(table), Is.Empty, "exactly one of resumed and expired (SUB-12): no expiry after the grace");
+    }
+
+    [Test]
+    [VerifiesRule("SUB-12")]
+    public void TwoReconnectsPresentingOneLiveTokenResumeOnce()
+    {
+        using var table = NewTable();
+        var first = Connect(table, out var token);
+
+        Assert.That(Admit(table, out var a, token), Is.True);
+        Assert.That(Admit(table, out var b, token), Is.True);
+        table.ApplyPendingCloses();
+        table.BeginTick();
+
+        var opened = Drain(table).FindAll(e => e.Kind == SessionEventKind.Opened);
+        Assert.Multiple(() =>
+        {
+            Assert.That(opened, Has.Count.EqualTo(2));
+            Assert.That(opened.Find(e => e.Session == a).ResumedFrom, Is.EqualTo(first), "the first takeover resumes");
+            Assert.That(opened.Find(e => e.Session == b).ResumedFrom, Is.EqualTo(SessionId.None), "one token, one resume: the second is fresh");
+        });
+    }
+
+    [Test]
+    [VerifiesRule("SUB-12")]
+    public void AnOldSessionClosingOnItsOwnBeforeTheTakeoverIsStillResumed()
+    {
+        using var table = NewTable();
+        var first = Connect(table, out var token);
+
+        // The HELLO saw the session open; its link death is applied by the same tick, before the takeover.
+        Assert.That(Admit(table, out var second, token), Is.True);
+        Assert.That(table.RequestClose(first, SessionCloseReason.LinkLost, CloseCodes.GoingAway), Is.True);
+        table.ApplyPendingCloses();
+        table.BeginTick();
+        var events = Drain(table);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(events.FindAll(e => e.Kind == SessionEventKind.Closed), Has.Count.EqualTo(1), "closed once, by its own link loss");
+            Assert.That(events[0].CloseCode, Is.EqualTo(CloseCodes.GoingAway));
+            Assert.That(events[^1].Session, Is.EqualTo(second));
+            Assert.That(events[^1].ResumedFrom, Is.EqualTo(first), "the record its own close armed is the one the takeover claims");
+        });
+    }
+
+    [Test]
+    public void AnOldSessionKickedBeforeTheTakeoverLeavesAFreshSession()
+    {
+        using var table = NewTable();
+        var first = Connect(table, out var token);
+
+        Assert.That(Admit(table, out var second, token), Is.True);
+        Assert.That(table.Close(first, SessionCloseReason.Kicked, CloseCodes.FirstApplicationCode), Is.True);
+        table.ApplyPendingCloses();
+        table.BeginTick();
+        var opened = Single(table, SessionEventKind.Opened);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(opened.Session, Is.EqualTo(second));
+            Assert.That(opened.ResumedFrom, Is.EqualTo(SessionId.None), "a kick leaves no record: resume is not a way to survive one");
+            Assert.That(table.PendingResumeCount, Is.Zero);
+        });
+    }
+
+    [Test]
+    public void ATakeoverInheritsTheApplicationDataOnlyWhenAdmissionAttachedNone()
+    {
+        using var table = NewTable();
+        var account = new object();
+        _sessions.Admit = (in AdmissionRequest _) => Admission.Accept(SessionRole.Player, SessionLimits.Default, account);
+        var first = Connect(table, out var token);
+
+        _sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Player);
+        Assert.That(Admit(table, out var second, token), Is.True);
+        table.ApplyPendingCloses();
+        table.BeginTick();
+        var opened = Single(table, SessionEventKind.Opened);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(opened.ResumedFrom, Is.EqualTo(first));
+            Assert.That(opened.AppData, Is.SameAs(account));
+            Assert.That(table.AppData(second), Is.SameAs(account), "the row carries it too, as a resume's does");
+        });
+    }
 }
