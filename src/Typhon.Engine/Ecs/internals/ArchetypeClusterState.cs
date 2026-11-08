@@ -867,7 +867,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>
     /// Hand out a zeroed branch-1 change list of at least <paramref name="upperBound"/> words, reusing the retained buffer when it is large enough.
     /// </summary>
-    private long[] RentBranch1ChangeList(int upperBound)
+    internal long[] RentBranch1ChangeList(int upperBound)
     {
         Debug.Assert(FenceBranchPath == 1,
             "the retained change list is only safe on branch 1 — branch 2's array is published to the next tick as PreviousTickDirtySnapshot");
@@ -947,6 +947,11 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (FenceBranchPath == 2 && _dirtySnapshotSlot >= 0)
         {
             _dirtySnapshots[_dirtySnapshotSlot] = FenceDirtyBits;
+        }
+        else if (FenceBranchPath == 1)
+        {
+            // Branch 1's array is the retained change list: grown, it is kept, or the next tick rents the short one and grows it again.
+            _branch1ChangeListScratch = FenceDirtyBits;
         }
     }
 

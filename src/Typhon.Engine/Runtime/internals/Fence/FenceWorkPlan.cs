@@ -881,7 +881,8 @@ internal sealed class FenceWorkPlan
         // Zeroed: the item counts accumulate into it below, then become starts.
         var chunks = _chunks.Reset(chunkCount);
 
-        Array.Sort(_items, 0, ItemCount, FenceWorkItemCostDescComparer.Instance);
+        // A cached Comparison over a span: Array.Sort with an IComparer wraps it in a new Comparison delegate on every call (#1623 residual).
+        _items.AsSpan(0, ItemCount).Sort(ByCostDesc);
 
         // FFD with O(N log K) heap-based load tracking (review M-2): _chunkLoadAcc holds the running load per chunk. Dequeue lightest, append item, update load,
         // re-enqueue with new priority. Total: O(N log K) vs the prior O(N² ) GetChunkLoad scan.
@@ -960,11 +961,7 @@ internal sealed class FenceWorkPlan
         _items[ItemCount++] = item;
     }
 
-    private sealed class FenceWorkItemCostDescComparer : IComparer<FenceWorkItem>
-    {
-        public static readonly FenceWorkItemCostDescComparer Instance = new();
-        public int Compare(FenceWorkItem x, FenceWorkItem y) => y.Cost.CompareTo(x.Cost);
-    }
+    private static readonly Comparison<FenceWorkItem> ByCostDesc = static (x, y) => y.Cost.CompareTo(x.Cost);
 }
 
 /// <summary>One fence chunk's run of its plan's items: <c>Items[ItemStart, ItemStart + ItemCount)</c>.</summary>

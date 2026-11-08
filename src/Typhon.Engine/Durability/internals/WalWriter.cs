@@ -36,7 +36,7 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// </remarks>
 [PublicAPI]
-internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
+internal sealed unsafe partial class WalWriter : ResourceNode, IMetricSource
 {
     // ═══════════════════════════════════════════════════════════════
     // Constants
@@ -448,16 +448,51 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
     // Writer loop (core — runs on dedicated thread)
     // ═══════════════════════════════════════════════════════════════
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "WAL writer thread started")]
+    private static partial void LogWriterStarted(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "WAL writer: loop iter, nextLsn={NextLsn} drain={DrainPos} tail={TailPos} swap={Swap} inflight={Inflight} active={Active}")]
+    private static partial void LogLoopIteration(ILogger logger, long nextLsn, long drainPos, long tailPos, int swap, int inflight, int active);
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "WAL batch of {Bytes} bytes does not fit the active segment, rotating before the write (sealing at LSN {LastLsn})")]
+    private static partial void LogBatchDoesNotFit(ILogger logger, int bytes, long lastLsn);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "WAL writer: advancing durable LSN to {DurableLsn}, wrote {BytesWritten} bytes ({FrameCount} frames)")]
+    private static partial void LogAdvancingDurable(ILogger logger, long durableLsn, int bytesWritten, int frameCount);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "WAL segment rotation at {Utilization:P0}, rotating after LSN {LastLsn}")]
+    private static partial void LogRotationStart(ILogger logger, double utilization, long lastLsn);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "WAL segment rotation complete, new segment {SegmentId}")]
+    private static partial void LogRotationComplete(ILogger logger, long segmentId);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "WAL segment rotation FAILED")]
+    private static partial void LogRotationFailed(ILogger logger, Exception error);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "WAL writer: shutdown requested, draining remaining")]
+    private static partial void LogShutdownDraining(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "WAL writer FATAL error — thread terminating")]
+    private static partial void LogWriterFatal(ILogger logger, Exception error);
+
     private void WriterLoop()
     {
-        Logger?.LogDebug("WAL writer thread started");
+        if (Logger != null)
+        {
+            LogWriterStarted(Logger);
+        }
         try
         {
             while (!_shutdown)
             {
-                Logger?.LogDebug("WAL writer: loop iter, nextLsn={NextLsn} drain={DrainPos} tail={TailPos} swap={Swap} inflight={Inflight} active={Active}",
-                    _commitBuffer.NextLsn, _commitBuffer.DrainPosition, _commitBuffer.TailPosition,
-                    _commitBuffer.SwapState, _commitBuffer.InflightCount, _commitBuffer.ActiveBufferIndex);
+                // [LoggerMessage]: the params overload boxed six values and allocated their array on every loop pass, filtered or not (#1623 residual).
+                if (Logger != null)
+                {
+                    LogLoopIteration(Logger, _commitBuffer.NextLsn, _commitBuffer.DrainPosition, _commitBuffer.TailPosition, _commitBuffer.SwapState,
+                        _commitBuffer.InflightCount, _commitBuffer.ActiveBufferIndex);
+                }
 
                 // 1. Try to drain published frames from the commit buffer
                 if (!_commitBuffer.TryDrain(out var data, out var frameCount))
@@ -514,8 +549,10 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                     if (!_segmentManager.ActiveSegmentCanHold(bytesToWrite))
                     {
                         var sealAt = SealLsn;
-                        Logger?.LogInformation("WAL batch of {Bytes} bytes does not fit the active segment, rotating before the write (sealing at LSN {LastLsn})",
-                            bytesToWrite, sealAt);
+                        if (Logger != null)
+                        {
+                            LogBatchDoesNotFit(Logger, bytesToWrite, sealAt);
+                        }
                         using var fitRotateScope = TyphonEvent.BeginWalSegmentRotate((int)(_segmentManager.ActiveSegment?.SegmentId ?? -1));
                         _segmentManager.RotateSegment(sealAt + 1, sealAt, bytesToWrite);
                         _lastFooterCrc = 0; // Reset CRC chain for new segment
@@ -596,8 +633,10 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
                         var signalScope = TyphonEvent.BeginDurabilityWalSignal(batchHighLsn);
                         try
                         {
-                            Logger?.LogDebug("WAL writer: advancing durable LSN to {DurableLsn}, wrote {BytesWritten} bytes ({FrameCount} frames)",
-                                batchHighLsn, bytesToWrite, frameCount);
+                            if (Logger != null)
+                            {
+                                LogAdvancingDurable(Logger, batchHighLsn, bytesToWrite, frameCount);
+                            }
                             AdvanceDurable(batchHighLsn);
                         }
                         finally
@@ -621,19 +660,26 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
 
                     if (_segmentManager.ActiveSegmentUtilization >= RotationThreshold)
                     {
-                        Logger?.LogInformation("WAL segment rotation at {Utilization:P0}, rotating after LSN {LastLsn}",
-                            _segmentManager.ActiveSegmentUtilization, SealLsn);
+                        if (Logger != null)
+                        {
+                            LogRotationStart(Logger, _segmentManager.ActiveSegmentUtilization, SealLsn);
+                        }
                         using var rotateScope = TyphonEvent.BeginWalSegmentRotate((int)(_segmentManager.ActiveSegment?.SegmentId ?? -1));
                         try
                         {
                             _segmentManager.RotateSegment(SealLsn + 1, SealLsn);
                             _lastFooterCrc = 0; // Reset CRC chain for new segment
-                            Logger?.LogInformation("WAL segment rotation complete, new segment {SegmentId}",
-                                _segmentManager.ActiveSegment?.SegmentId ?? -1);
+                            if (Logger != null)
+                            {
+                                LogRotationComplete(Logger, _segmentManager.ActiveSegment?.SegmentId ?? -1);
+                            }
                         }
                         catch (Exception rotEx)
                         {
-                            Logger?.LogError(rotEx, "WAL segment rotation FAILED");
+                            if (Logger != null)
+                            {
+                                LogRotationFailed(Logger, rotEx);
+                            }
                             throw; // Let outer catch handle it
                         }
                     }
@@ -653,13 +699,19 @@ internal sealed unsafe class WalWriter : ResourceNode, IMetricSource
             }
 
             // Shutdown: drain any remaining data
-            Logger?.LogDebug("WAL writer: shutdown requested, draining remaining");
+            if (Logger != null)
+            {
+                LogShutdownDraining(Logger);
+            }
             DrainRemaining();
         }
         catch (Exception ex)
         {
             // Fatal I/O error — set error flag and wake all waiters
-            Logger?.LogCritical(ex, "WAL writer FATAL error — thread terminating");
+            if (Logger != null)
+            {
+                LogWriterFatal(Logger, ex);
+            }
             _fatalError = ex;
             // Unconditional: a volatile store followed by a load of the waiter count is not Dekker-safe, and this path runs once.
             PulseDurabilityWaiters();
