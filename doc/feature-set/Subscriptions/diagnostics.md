@@ -26,9 +26,11 @@ tools need the server's own numbers alongside the stream, and developers need a 
   Over one second a p99 of 30 samples is simply the maximum, which is why the two are separate.
 - **Application metrics**: `subs.Metric(name, unit, codec, source)` (server scope, optionally labelled) and `subs.SessionMetric(…)` (per
   session); the server segment is encoded once for every subscriber.
-- **The same numbers without a client**: `TyphonRuntime.ReadStats()` returns tick p50/p99 against the target, the overrun count, the
+- **The same metrics without a client**: `TyphonRuntime.ReadStats()` returns tick p50/p99 against the target, the overrun count, the
   per-tick durability wait, per-system means, entities per archetype and the session figures — reading the telemetry ring and the
-  engine directly, so it answers on an engine with **no replication and no declared metrics**. `MapTyphonStats()`
+  engine directly, so it answers on an engine with **no replication and no declared metrics**. Its p99 is computed over the last
+  second's ticks (the default `windowTicks`), not the ten-second window STATS uses, so the two surfaces can give different p99 values
+  under bursty load; p50 and tick.max are both one-second windows and agree. `MapTyphonStats()`
   (`Typhon.Subscriptions.AspNetCore`) serves it as JSON at `/typhon/stats.json`. It has no authentication and publishes system and
   archetype names: restrict it as you would an admin route.
 - **Why sessions closed.** `ReadStats().SessionsClosed` (per reason: left, link lost, kicked, and the engine's own: silent 4001, lagging 1013,

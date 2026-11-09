@@ -165,7 +165,7 @@ public struct TickContext {   // init-only properties, shown as fields for brevi
     public float         DeltaTime;
     public Transaction   Transaction;
     public EntityAccessor Accessor;        // per-worker, non-Versioned parallel path
-    public IReadOnlyCollection<EntityId> Entities;
+    public TickEntities Entities;        // value type — foreach allocates nothing
     public EventQueueBase[] ConsumedQueues;
     public SideTransactionFactory CreateSideTransaction;
     public int WorkerId, ChunkIndex, ChunkCount;
@@ -256,7 +256,8 @@ if (_parallelFenceEnabled) {
     RunParallelFence(scheduler);
 } else {
     using var window = Engine.EpochManager.FenceWindow.Open();
-    InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(...));
+    using (TyphonEvent.BeginRuntimePhase(TickPhase.WriteTickFence))
+        Engine.WriteTickFenceNoClock(...);
     ...
 }
 ```
