@@ -71,7 +71,7 @@ Constants defined on `PagedMMF`:
 | `PageRawDataSize` | 8000 | What user code actually writes to |
 | `PageSizePow2` | 13 | `2^13 = 8192` (used for shift-instead-of-divide) |
 
-The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see [§7](#7-page-crc--seqlock-writes)). The header struct itself only occupies the first 24 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
+The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see [§7](#7-page-crc--seqlock-writes)). The header struct itself only occupies the first 16 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
 
 ### `PageInfo` and `PageState`
 
