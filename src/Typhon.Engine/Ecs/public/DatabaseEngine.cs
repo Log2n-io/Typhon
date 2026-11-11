@@ -6623,15 +6623,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </remarks>
     private void RebuildPendingClusterIndexes()
     {
-        using var guard = EpochGuard.Enter(EpochManager);
-        var changeSet = MMF.CreateChangeSet();
-
+        // No scope check here: RebuildWorkers.Run refuses a coordinator that holds one, and only when an archetype has work for the workers. An open with
+        // nothing pending must not fail because a transaction a closed engine left alive still holds its scope on this thread (#1268's test does that).
         // A directory of this database's own (inside the bundle, or named after it): the bundle lock makes every file in it this database's, and no rebuild
         // of this open has started, so whatever a previous process left there goes (RB-10).
         var tempDirectory = SortedIndexRebuild.TempDirectoryOf(_options.IndexRebuild, MMF.BundleDirectory);
         RebuildTempFile.Sweep(tempDirectory);
         _indexRebuildNode ??= new ResourceNode("IndexRebuild", ResourceType.Node, this);
-        var succeeded = false;
+
+        // The workers own their scopes and ChangeSets, saved when each phase ends and released when it fails (CK-08, RB-09); this thread holds no scope
+        // while they run, or every page they touch would stay held.
+        var environment = new RebuildEnvironment
+        {
+            Epochs = EpochManager,
+            CreateChangeSet = () => MMF.CreateChangeSet(),
+            BatchPoint = RecoveryBatchPoint,
+            OtherFailure = ex => LogIndexRebuildWorkerFailure(ex),
+            Workers = IndexRebuildWorkers(_options.IndexRebuild, MMF.CacheSlotCount),
+        };
         try
         {
             foreach (var meta in OwnArchetypes())
@@ -6660,31 +6669,32 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     Owner = new BufferOwner(MemoryAllocator, _indexRebuildNode),
                     TempDirectory = tempDirectory,
                     TempFileName = $"{RebuildTempFile.FilePrefix}{meta.ArchetypeId}{RebuildTempFile.Extension}",
-                    ChangeSet = changeSet,
-                    BatchPoint = () => RecoveryBatchPoint(changeSet, RecoveryPass.Indexes),
+                    Environment = environment,
                     Stats = LastOpenIndexRebuild ??= new IndexRebuildStats(),
+                    Logger = _logger,
+                    ArchetypeName = meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString(),
+                    ArchetypeId = (ushort)Math.Min(meta.ArchetypeId, ushort.MaxValue),
+                    DataFilePagesRead = () => MMF.DataFilePagesRead,
+                    DataFilePagesWritten = () => MMF.DataFilePagesWritten,
                 };
                 NoteUniqueIndexRebuildConflicts(meta, SortedIndexRebuild.Run(context));
                 LastOpenClusterIndexRebuildCount++;
             }
-
-            succeeded = true;
         }
         finally
         {
-            // A failed pass gives its marks back rather than saving (CK-08, as the replay does): the open fails and the next one rebuilds, and a save that
-            // throws in turn would hide the failure.
-            if (succeeded)
-            {
-                changeSet.SaveChanges();
-            }
-            else
-            {
-                changeSet.ReleaseDirtyMarks();
-            }
-
             TryRemoveEmptyDirectory(tempDirectory);
         }
+    }
+
+    /// <summary>
+    /// The index rebuild's worker threads (design §D8): <see cref="IndexRebuildOptions.Workers"/>, or <c>min(ProcessorCount, 8)</c> when 0, and never more
+    /// than one per 256 cache pages, so the pages all workers hold in flight stay a small part of the cache; at least one.
+    /// </summary>
+    internal static int IndexRebuildWorkers(IndexRebuildOptions options, int cachePages)
+    {
+        var wanted = options.Workers > 0 ? options.Workers : Math.Min(Environment.ProcessorCount, 8);
+        return Math.Max(1, Math.Min(wanted, cachePages / 256));
     }
 
     /// <summary>The resource node the index rebuild's native buffers are children of, created at the first rebuild pass (#1588).</summary>
@@ -8870,20 +8880,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return;
         }
 
-        // Serialised, so a test's counting probe stays exact when several threads make batch points (the sorted index rebuild's workers, #1588).
+        // Counted first, so the number the probe sees is this batch point's own when several threads make them at once (the sorted index rebuild's
+        // workers, #1588); the probe is serialised, so a test's counting closure stays exact.
+        var made = Interlocked.Increment(ref _recoveryBatchPoints) - 1;
         var probe = RecoveryBatchPointProbe;
         if (probe != null)
         {
             lock (RecoveryBatchPointProbeLock)
             {
-                probe(pass, RecoveryBatchPoints);
+                probe(pass, made);
             }
         }
 
         ThrowIfRecoveryCheckpointerFailed();
 
         // Sampled: the census reads every slot, and a large database with a large cache makes tens of thousands of batch points (review).
-        if ((RecoveryBatchPoints & (RecoveryEpochHeldSampleEvery - 1)) == 0)
+        if ((made & (RecoveryEpochHeldSampleEvery - 1)) == 0)
         {
             var held = MMF.CountEpochProtectedPages();
             var peak = Volatile.Read(ref _peakRecoveryEpochHeldPages);
@@ -8901,13 +8913,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         changeSet?.ReleaseDirtyMarks();
         EpochManager.RefreshScope();
-        Interlocked.Increment(ref _recoveryBatchPoints);
         var threshold = _options.Resources.CheckpointDirtyPageThresholdPercent;
         var limit = RecoveryFlushThresholdPercentForTest >= 0 ? RecoveryFlushThresholdPercentForTest
             : threshold > 0 ? Math.Min(threshold, RecoveryFlushMaxThresholdPercent) : RecoveryFlushMaxThresholdPercent;
         if (CheckpointManager != null && MMF.WritebackDebtPercent() >= limit)
         {
-            CheckpointManager.RunFlushOnlyCycle();
+            // The debt is read again under the cycle lock: index rebuild workers queued behind one flush find it paid and run no empty cycle.
+            CheckpointManager.RunFlushOnlyCycle(() => MMF.WritebackDebtPercent() >= limit);
             ThrowIfRecoveryCheckpointerFailed();
         }
     }
@@ -8965,7 +8977,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         VersionedHeads,
         Replay,
         Scrub,
-        Indexes,
+
+        /// <summary>The index rebuild's stage: the cluster walk that copies the keys out (#1588).</summary>
+        IndexStage,
+
+        /// <summary>The index rebuild's build: the merge of each tree's runs and its bottom-up build.</summary>
+        IndexBuild,
+
+        /// <summary>The index rebuild's write-back of the multi-value element ids to the cluster tails.</summary>
+        IndexWriteBack,
     }
 
     /// <summary>

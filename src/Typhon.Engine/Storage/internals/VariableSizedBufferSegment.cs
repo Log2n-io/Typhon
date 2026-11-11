@@ -52,7 +52,7 @@ internal static class VariableSizedBufferRecovery
     /// Whether an unnamed chunk is a buffer's root — not its first free chunk, nor a data chunk whose predecessor's link a crash lost: referenced, and its
     /// append cursor the root itself or a chunk its chain reaches through allocated chunks.
     /// </summary>
-    private static unsafe bool IsBufferRoot(ref ChunkAccessor<PersistentStore> scan, ChunkBasedSegment<PersistentStore> segment, int chunkId)
+    internal static unsafe bool IsBufferRoot(ref ChunkAccessor<PersistentStore> scan, ChunkBasedSegment<PersistentStore> segment, int chunkId)
     {
         ref var header = ref scan.GetChunk<VariableSizedBufferRootHeader>(chunkId);
         int cursor = header.FirstStoredChunkId, next = header.Header.NextChunkId;
@@ -642,6 +642,68 @@ public class VariableSizedBufferSegment<T, TStore> : VariableSizedBufferSegmentB
     }
 
     unsafe public int AddElement(int bufferId, T value, ref ChunkAccessor<TStore> accessor) => AddElementCore(bufferId, value, ref accessor, false);
+
+    /// <summary>Where a bulk build stands in the one buffer it is filling (#1588, design §5.1): see <see cref="BeginBuild"/>.</summary>
+    internal struct BuildCursor
+    {
+        internal int Root;
+        internal int Current;
+        internal int Count;   // elements in Current
+        internal int Total;
+    }
+
+    /// <summary>
+    /// Starts a buffer a bulk build fills alone, front to back (#1588, design §5.1): the root as
+    /// <see cref="VariableSizedBufferSegmentBase{TStore}.AllocateBuffer"/> leaves it. No lock is taken and none is needed: the buffer is unreachable until
+    /// the build publishes its tree. No address is held between calls, so a batch point may fall between any two appends; each chunk's element count is
+    /// written with each element and the chain always reaches the root's append cursor, which follows each new chunk; the root's total is exact at
+    /// <see cref="EndBuild"/>, when the buffer becomes one <see cref="AddElement"/> continues.
+    /// </summary>
+    internal unsafe int BeginBuild(ref BuildCursor cursor, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+    {
+        var chunkId = accessor.Segment.AllocateChunk(changeSet, ref accessor);   // cleared through the caller's accessor (CP-04)
+        var addr = accessor.GetChunkAddress(chunkId, true);
+        ref var rh = ref Unsafe.AsRef<VariableSizedBufferRootHeader>(addr);
+        rh.Lock.Reset();
+        rh.FirstStoredChunkId = chunkId;
+        rh.RefCounter = 1;
+        cursor = new BuildCursor { Root = chunkId, Current = chunkId };
+        return chunkId;
+    }
+
+    /// <summary>
+    /// Appends <paramref name="value"/> to the buffer <paramref name="cursor"/> fills; returns its element id, the chunk it lands in, as
+    /// <see cref="AddElement"/> would. A chunk is taken only when an element no longer fits the current one, as <see cref="AddElement"/> takes it.
+    /// </summary>
+    internal unsafe int AppendBuild(ref BuildCursor cursor, T value, ChangeSet changeSet, ref ChunkAccessor<TStore> accessor)
+    {
+        var isRoot = cursor.Current == cursor.Root;
+        if (cursor.Count == (isRoot ? ElementCountRootChunk : ElementCountPerChunk))
+        {
+            var next = accessor.Segment.AllocateChunk(changeSet, ref accessor);   // cleared: NextChunkId and ElementCount 0
+            Unsafe.AsRef<VariableSizedBufferChunkHeader>(accessor.GetChunkAddress(cursor.Current, true)).NextChunkId = next;
+            ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(cursor.Root, true);
+            rh.FirstStoredChunkId = next;
+            rh.TotalCount = cursor.Total;
+            cursor.Current = next;
+            cursor.Count = 0;
+            isRoot = false;
+        }
+
+        var addr = accessor.GetChunkAddress(cursor.Current, true);
+        ((T*)(addr + (isRoot ? RootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader))))[cursor.Count] = value;
+        Unsafe.AsRef<VariableSizedBufferChunkHeader>(addr).ElementCount = ++cursor.Count;
+        cursor.Total++;
+        return cursor.Current;
+    }
+
+    /// <summary>Ends the buffer <paramref name="cursor"/> filled: the root's total and append cursor.</summary>
+    internal void EndBuild(ref BuildCursor cursor, ref ChunkAccessor<TStore> accessor)
+    {
+        ref var rh = ref accessor.GetChunk<VariableSizedBufferRootHeader>(cursor.Root, true);
+        rh.FirstStoredChunkId = cursor.Current;
+        rh.TotalCount = cursor.Total;
+    }
 
     /// <summary>
     /// <see cref="AddElement"/> for an index writer under its leaf latch (#1190, IXW-07): when the element needs a new chunk and the calling thread's

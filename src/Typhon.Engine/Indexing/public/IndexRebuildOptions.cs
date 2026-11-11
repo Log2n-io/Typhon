@@ -38,8 +38,23 @@ public sealed class IndexRebuildOptions
     /// </summary>
     public int LeafFillPercent { get; set; } = 90;
 
+    /// <summary>The most worker threads <see cref="Workers"/> may name.</summary>
+    public const int MaximumWorkers = 64;
+
+    /// <summary>
+    /// The threads each phase of the rebuild may use: 0 (the default) for <c>min(ProcessorCount, 8)</c>, else 1..64. Never more than one per 256 cache
+    /// pages, so the pages they all hold in flight stay a small part of the cache. One builds each tree; more than the archetype has trees helps only its
+    /// cluster walk.
+    /// </summary>
+    public int Workers { get; set; }
+
     internal void Validate(List<string> failures)
     {
+        if (Workers is < 0 or > MaximumWorkers)
+        {
+            failures.Add($"IndexRebuild.Workers must be within 0..{MaximumWorkers} (was {Workers}).");
+        }
+
         if (MemoryBudgetBytes < MinimumMemoryBudgetBytes)
         {
             failures.Add($"IndexRebuild.MemoryBudgetBytes must be >= {MinimumMemoryBudgetBytes} (was {MemoryBudgetBytes}).");

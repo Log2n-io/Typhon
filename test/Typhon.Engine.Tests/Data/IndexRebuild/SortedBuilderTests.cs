@@ -48,31 +48,32 @@ internal sealed unsafe class SortedBuilderTests
     [VerifiesRule("IXB-01")]
     public void UniqueLongTree_MatchesOrderedAdd_AtEverySizeAndFill(
         [ValueSource(nameof(Sizes))] int size, [Values(50, 90, 100)] int fill)
-        => Check((segment, load) => new LongSingleBTree<PersistentStore>(segment, load), sizeof(Index64Chunk), (_, _) => [size], fill, multi: false);
+        => Check((segment, load) => new LongSingleBTree<PersistentStore>(segment, load), sizeof(Index64Chunk), (_, _, _) => [size], fill, multi: false);
 
     [Test]
     [VerifiesRule("IXB-01")]
     public void UniqueIntTree_MatchesOrderedAdd_AtEverySizeAndFill(
         [ValueSource(nameof(Sizes))] int size, [Values(50, 90, 100)] int fill)
-        => Check((segment, load) => new IntSingleBTree<PersistentStore>(segment, load), sizeof(Index32Chunk), (_, _) => [size], fill, multi: false);
+        => Check((segment, load) => new IntSingleBTree<PersistentStore>(segment, load), sizeof(Index32Chunk), (_, _, _) => [size], fill, multi: false);
 
     [Test]
     [VerifiesRule("IXB-01")]
     public void MultiValueLongTree_MatchesOrderedAdd(
-        [ValueSource(nameof(Sizes))] int size, [Values(100)] int fill)
-        => Check((segment, load) => new LongMultipleBTree<PersistentStore>(segment, load), sizeof(Index64Chunk), (_, _) => [size], fill, multi: true);
+        [ValueSource(nameof(Sizes))] int size, [Values(50, 90, 100)] int fill)
+        => Check((segment, load) => new LongMultipleBTree<PersistentStore>(segment, load), sizeof(Index64Chunk), (_, _, _) => [size], fill, multi: true);
 
     [Test]
     [VerifiesRule("IXB-01")]
     public void MultiValueIntTree_MatchesOrderedAdd(
-        [ValueSource(nameof(Sizes))] int size, [Values(100)] int fill)
-        => Check((segment, load) => new IntMultipleBTree<PersistentStore>(segment, load), sizeof(Index32Chunk), (_, _) => [size], fill, multi: true);
+        [ValueSource(nameof(Sizes))] int size, [Values(50, 90, 100)] int fill)
+        => Check((segment, load) => new IntMultipleBTree<PersistentStore>(segment, load), sizeof(Index32Chunk), (_, _, _) => [size], fill, multi: true);
 
     [Test]
     [VerifiesRule("IXB-01")]
     public void UniqueString64Tree_MatchesOrderedAdd(
         [ValueSource(nameof(Sizes))] int size, [Values(50, 90, 100)] int fill)
-        => Check((segment, load) => new String64SingleBTree<PersistentStore>(segment, load), sizeof(IndexString64Chunk), (_, _) => [size], fill, multi: false);
+        => Check((segment, load) => new String64SingleBTree<PersistentStore>(segment, load), sizeof(IndexString64Chunk), (_, _, _) => [size], fill,
+            multi: false);
 
     /// <summary>
     /// A built tree takes the live path's concurrency (IXB-01: "a tree the live insert path could have produced"): writers insert between the built keys and
@@ -253,13 +254,12 @@ internal sealed unsafe class SortedBuilderTests
     }
 
     /// <summary>
-    /// The sizes that sit on a tree's own shape edges, from its node capacity and leaf fill: one leaf full and one more, two leaves, the first internal
+    /// The sizes that sit on a tree's own shape edges, from its node capacity and fills: one leaf full and one more, two leaves, the first internal
     /// level full and one more (height 2 → 3), and the second (height 3 → 4) while it stays under <paramref name="limit"/> keys: every size of a case
     /// is built twice in one scope of the test's 32 MiB cache, which no checkpoint drains.
     /// </summary>
-    private static IEnumerable<int> ShapeEdges(int capacity, int leafFill, int limit)
+    private static IEnumerable<int> ShapeEdges(int capacity, int leafFill, int fanout, int limit)
     {
-        var fanout = capacity + 1;
         var edges = new SortedSet<int> { capacity - 1, capacity, capacity + 1, leafFill, leafFill + 1, 2 * leafFill, 2 * leafFill + 1 };
         foreach (var level in new long[] { (long)leafFill * fanout, (long)leafFill * fanout * fanout })
         {
@@ -281,13 +281,9 @@ internal sealed unsafe class SortedBuilderTests
     public void EveryTreeKind_AtTheEdgesOfItsOwnShape([Values(0, 1, 2, 3, 4)] int kind, [Values(50, 90, 100)] int fill)
     {
         var multi = kind is 3 or 4;
-        if (multi && fill != 100)
-        {
-            return;   // a multi-value tree is always built full (D2)
-        }
 
         // A multi-value key holds up to 150 values: fewer keys fit the cache.
-        IEnumerable<int> Edges(int capacity, int leafFill) => ShapeEdges(capacity, leafFill, multi ? 3_000 : 30_000);
+        IEnumerable<int> Edges(int capacity, int leafFill, int fanout) => ShapeEdges(capacity, leafFill, fanout, multi ? 3_000 : 30_000);
 
         switch (kind)
         {
@@ -306,6 +302,47 @@ internal sealed unsafe class SortedBuilderTests
             default:
                 Check((segment, load) => new IntMultipleBTree<PersistentStore>(segment, load), sizeof(Index32Chunk), Edges, fill, multi);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// A built value buffer at its exact chunk edges: the root one short of full, full, and one past; a chunk after it the same; and two. Each holds the
+    /// values ordered Add puts there, names the chunk of each, and is a buffer the live path and crash recovery take for one of theirs.
+    /// </summary>
+    [Test]
+    [VerifiesRule("IXB-01")]
+    public void AValueBuffer_AtItsExactChunkEdges([Values(false, true)] bool wide)
+    {
+        var stride = wide ? sizeof(Index64Chunk) : sizeof(Index32Chunk);
+        var inRoot = (stride - sizeof(VariableSizedBufferRootHeader)) / sizeof(int);
+        var perChunk = (stride - sizeof(VariableSizedBufferChunkHeader)) / sizeof(int);
+        int[] holders = [1, inRoot - 1, inRoot, inRoot + 1, inRoot + perChunk - 1, inRoot + perChunk, inRoot + perChunk + 1, inRoot + 2 * perChunk + 1];
+        var stream = new List<(long Key, int Location)>();
+        var location = 0;
+        for (var k = 0; k < holders.Length; k++)
+        {
+            for (var h = 0; h < holders[k]; h++)
+            {
+                stream.Add((k * 10L, location++));
+            }
+        }
+
+        using var mmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var depth = epochManager.EnterScope();
+        try
+        {
+            Func<ChunkBasedSegment<PersistentStore>, bool, BTreeBase<PersistentStore>> create = wide
+                ? (segment, load) => new LongMultipleBTree<PersistentStore>(segment, load)
+                : (segment, load) => new IntMultipleBTree<PersistentStore>(segment, load);
+            var built = Build(mmf, create, stride, stream, 100, builder: true, out var builtIds);
+            var oracle = Build(mmf, create, stride, stream, 100, builder: false, out _);
+            Assert.That(Contents(built, multi: true), Is.EqualTo(Contents(oracle, multi: true)), "the values ordered Add puts in each buffer");
+            AssertElementIdsNameTheirChunks(built, stream, builtIds);
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
         }
     }
 
@@ -352,14 +389,14 @@ internal sealed unsafe class SortedBuilderTests
     }
 
     private void Check(Func<ChunkBasedSegment<PersistentStore>, bool, BTreeBase<PersistentStore>> create, int stride,
-        Func<int, int, IEnumerable<int>> sizes, int fill, bool multi)
+        Func<int, int, int, IEnumerable<int>> sizes, int fill, bool multi)
     {
         using var mmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
         using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
         var depth = epochManager.EnterScope();
         try
         {
-            // The tree's own node capacity and leaf fill, read from a builder over a scratch tree that is never fed.
+            // The tree's own node capacity and fills, read from a builder over a scratch tree that is never fed.
             var probe = create(mmf.AllocateChunkBasedSegment(PageBlockType.None, 8, stride), false);
             var shape = probe switch
             {
@@ -368,7 +405,7 @@ internal sealed unsafe class SortedBuilderTests
                 BTree<String64, PersistentStore> strings => Shape(strings, fill),
                 _ => throw new NotSupportedException(probe.GetType().Name),
             };
-            foreach (var size in sizes(shape.Capacity, shape.LeafFill))
+            foreach (var size in sizes(shape.Capacity, shape.LeafFill, shape.InternalFill))
             {
                 CheckOne(mmf, create, stride, size, fill, multi);
             }
@@ -379,10 +416,10 @@ internal sealed unsafe class SortedBuilderTests
         }
     }
 
-    private static (int Capacity, int LeafFill) Shape<TKey>(BTree<TKey, PersistentStore> tree, int fill) where TKey : unmanaged
+    private static (int Capacity, int LeafFill, int InternalFill) Shape<TKey>(BTree<TKey, PersistentStore> tree, int fill) where TKey : unmanaged
     {
-        var sorted = tree.BeginSortedBuild(fill, null);
-        return (sorted.NodeCapacity, sorted.LeafFill);
+        var sorted = Begin(tree, fill);
+        return (sorted.NodeCapacity, sorted.LeafFill, sorted.InternalFill);
     }
 
     private static void CheckOne(ManagedPagedMMF mmf, Func<ChunkBasedSegment<PersistentStore>, bool, BTreeBase<PersistentStore>> create, int stride,
@@ -513,7 +550,7 @@ internal sealed unsafe class SortedBuilderTests
             return;
         }
 
-        var sorted = tree.BeginSortedBuild(fill, null);
+        var sorted = Begin(tree, fill);
         foreach (var (key, location) in stream)
         {
             elementIds.Add(sorted.Append(key, location, ref accessor));
@@ -521,6 +558,104 @@ internal sealed unsafe class SortedBuilderTests
 
         sorted.Finish(ref accessor);
         AssertEveryNonRootNodeAtLeastHalfFull(tree, ref accessor);
+        AssertInternalNodesKeepTheFill(tree, sorted.InternalFill - 1, ref accessor);
+        if (tree.AllowMultiple)
+        {
+            AssertBuffersAsTheLivePathLeavesThem(tree, ref accessor);
+        }
+    }
+
+    /// <summary>
+    /// Every value buffer the build wrote directly is one the live path could continue: the root as AllocateBuffer leaves it (referenced once, no free
+    /// chunk, lock free), its append cursor the chain's last chunk, every chunk but the last full, and the counts summing to its total.
+    /// </summary>
+    private static void AssertBuffersAsTheLivePathLeavesThem<TKey>(BTree<TKey, PersistentStore> tree, ref ChunkAccessor<PersistentStore> accessor)
+        where TKey : unmanaged
+    {
+        if (!tree.DiagnosticRoot.IsValid)
+        {
+            return;
+        }
+
+        var stride = tree.Segment.Stride;
+        var rootCapacity = (stride - sizeof(VariableSizedBufferRootHeader)) / sizeof(int);
+        var chunkCapacity = (stride - sizeof(VariableSizedBufferChunkHeader)) / sizeof(int);
+        var leaf = tree.DiagnosticRoot;
+        while (!leaf.GetIsLeaf(ref accessor))
+        {
+            leaf = leaf.GetChild(-1, ref accessor);
+        }
+
+        for (; leaf.IsValid; leaf = leaf.GetNext(ref accessor))
+        {
+            var count = leaf.GetCount(ref accessor);
+            for (var i = 0; i < count; i++)
+            {
+                var bufferId = leaf.GetItem(i, ref accessor).Value;
+                var root = accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId);
+                Assert.That((root.RefCounter, root.FirstFreeChunkId, root.TotalFreeChunk), Is.EqualTo(((short)1, 0, (short)0)), $"buffer {bufferId}: root");
+                Assert.That(new ReadOnlySpan<byte>(&root.Lock, sizeof(AccessControl)).IndexOfAnyExcept((byte)0), Is.EqualTo(-1),
+                    $"buffer {bufferId}: the lock word as AllocateBuffer resets it");
+                Assert.That(VariableSizedBufferRecovery.IsBufferRoot(ref accessor, tree.Segment, bufferId), Is.True,
+                    $"buffer {bufferId}: a root to crash recovery");
+                int chunk = bufferId, last = bufferId, total = 0;
+                while (chunk != 0)
+                {
+                    var header = accessor.GetChunk<VariableSizedBufferChunkHeader>(chunk);
+                    var capacity = chunk == bufferId ? rootCapacity : chunkCapacity;
+                    if (header.NextChunkId != 0)
+                    {
+                        Assert.That(header.ElementCount, Is.EqualTo(capacity), $"buffer {bufferId}: chunk {chunk} full before the next");
+                    }
+
+                    total += header.ElementCount;
+                    last = chunk;
+                    chunk = header.NextChunkId;
+                }
+
+                Assert.That((root.FirstStoredChunkId, root.TotalCount), Is.EqualTo((last, total)), $"buffer {bufferId}: cursor and total");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A multi-value tree's leaves are always full (D2), its internal nodes at the fill under test, as the rebuild builds them; a unique tree's both at it.
+    /// </summary>
+    private static BTree<TKey, PersistentStore>.SortedBuilder Begin<TKey>(BTree<TKey, PersistentStore> tree, int fill) where TKey : unmanaged
+        => tree.BeginSortedBuild(tree.AllowMultiple ? 100 : fill, null, fill);
+
+    /// <summary>
+    /// Internal nodes keep their fill: each holds exactly that many keys, but the last two of its level, which the balance may merge or split.
+    /// </summary>
+    private static void AssertInternalNodesKeepTheFill<TKey>(BTree<TKey, PersistentStore> tree, int fill, ref ChunkAccessor<PersistentStore> accessor)
+        where TKey : unmanaged
+    {
+        if (!tree.DiagnosticRoot.IsValid || tree.DiagnosticRoot.GetIsLeaf(ref accessor))
+        {
+            return;
+        }
+
+        // Level by level from the root; the last node of a level is its tail.
+        var level = new List<BTree<TKey, PersistentStore>.NodeWrapper> { tree.DiagnosticRoot };
+        while (!level[0].GetIsLeaf(ref accessor))
+        {
+            var below = new List<BTree<TKey, PersistentStore>.NodeWrapper>();
+            for (var n = 0; n < level.Count; n++)
+            {
+                var count = level[n].GetCount(ref accessor);
+                if (n < level.Count - 2 && count != fill)
+                {
+                    Assert.Fail($"internal node {level[n].ChunkId} holds {count} keys, not the fill of {fill}");
+                }
+
+                for (var i = -1; i < count; i++)
+                {
+                    below.Add(level[n].GetChild(i, ref accessor));
+                }
+            }
+
+            level = below;
+        }
     }
 
     /// <summary>

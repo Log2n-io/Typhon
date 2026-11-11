@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
@@ -30,6 +31,12 @@ internal sealed unsafe class TreeBuildInput
 
     /// <summary>The leaf fill of the bottom-up build, 50..100 (design §D2).</summary>
     public int LeafFillPercent = 100;
+
+    /// <summary>Its internal-node fill, 50..100 (design §D2).</summary>
+    public int InternalFillPercent = 100;
+
+    /// <summary>Where the build counts the entries it consumed, at each batch point, for the progress line; may be null.</summary>
+    public RebuildProgress Progress;
 }
 
 /// <summary>What one tree's build did.</summary>
@@ -136,13 +143,15 @@ internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey
         var accessor = _tree.Segment.CreateChunkAccessor(input.ChangeSet);
         try
         {
-            var builder = _tree.BeginSortedBuild(input.LeafFillPercent, input.ChangeSet);
+            var builder = _tree.BeginSortedBuild(input.LeafFillPercent, input.ChangeSet, input.InternalFillPercent);
             var previous = default(StagedEntry<TKey>);
             var hasPrevious = false;
             var sinceBatchPoint = 0;
+            var unreported = 0;   // entries consumed since the last progress report, unique conflicts included: Done reaches the staged total
             while (merger.Next(out var entry))
             {
                 result.Entries++;
+                unreported++;
                 if (!multi && hasPrevious && StagedOrder<TKey>.CompareKeys(in previous, in entry) == 0)
                 {
                     // RB-07: two entities hold one unique key; the lower location already won it.
@@ -162,8 +171,19 @@ internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey
                 {
                     accessor.CommitChanges();
                     input.BatchPoint();
+                    if (input.Progress != null)
+                    {
+                        Interlocked.Add(ref input.Progress.Done, unreported);
+                    }
+
                     sinceBatchPoint = 0;
+                    unreported = 0;
                 }
+            }
+
+            if (input.Progress != null)
+            {
+                Interlocked.Add(ref input.Progress.Done, unreported);
             }
 
             builder.Finish(ref accessor);

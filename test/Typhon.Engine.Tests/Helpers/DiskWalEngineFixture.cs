@@ -65,7 +65,8 @@ internal abstract class DiskWalEngineFixture
     /// A provider for the next session, with a <paramref name="cacheSize"/>-byte cache; <paramref name="deleteFile"/> starts a fresh database, its WAL
     /// directory emptied too.
     /// </summary>
-    protected ServiceProvider Provider(ulong cacheSize, bool deleteFile = false, Action<DatabaseEngineOptions> configure = null)
+    protected ServiceProvider Provider(ulong cacheSize, bool deleteFile = false, Action<DatabaseEngineOptions> configure = null,
+        Action<ILoggingBuilder> logging = null)
     {
         _serviceProvider?.Dispose();
         if (deleteFile)
@@ -76,7 +77,11 @@ internal abstract class DiskWalEngineFixture
 
         var services = new ServiceCollection();
         services
-            .AddLogging(b => b.SetMinimumLevel(LogLevel.Warning))
+            .AddLogging(b =>
+            {
+                b.SetMinimumLevel(LogLevel.Warning);
+                logging?.Invoke(b);
+            })
             .AddResourceRegistry()
             .AddMemoryAllocator()
             .AddEpochManager()

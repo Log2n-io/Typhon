@@ -64,8 +64,8 @@ internal readonly unsafe struct RunDescriptor
 /// <para>
 /// <b>Synchronous I/O, never <see cref="FileOptions.Asynchronous"/>:</b> a synchronous read through an overlapped handle costs about twice as much on
 /// Windows (huge-scan assessment). Buffered, no write-through, no flush: the data is recomputable, and a crash makes the next open rebuild from the
-/// clusters. Offsets are reserved with <see cref="Interlocked.Add(ref long, long)"/>, ready for writers on several threads; today one thread writes
-/// (design Phase 4), and the staging buffers its callers pass are their own.
+/// clusters. Offsets are reserved with <see cref="Interlocked.Add(ref long, long)"/>, so the rebuild's workers write side by side (design Phase 5),
+/// each through a staging buffer of its own.
 /// </para>
 /// <para>
 /// A write packs whole blocks — header, payload, zero pad — into the caller's staging buffer and writes it in one call, rather than a gather write of

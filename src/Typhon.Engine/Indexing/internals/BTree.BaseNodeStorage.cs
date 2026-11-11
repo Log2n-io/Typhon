@@ -74,6 +74,9 @@ internal abstract partial class BTree<TKey, TStore>
         public abstract int Append(int bufferId, int value, ref ChunkAccessor<TStore> bufferAccessor);
         public abstract void Insert(NodeWrapper node, int index, KeyValueItem item, ref ChunkAccessor<TStore> accessor);
         public abstract int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor);
+
+        /// <summary>A multi-value tree's value buffers, for a bulk build to fill directly (#1588); null for a unique tree.</summary>
+        internal virtual VariableSizedBufferSegment<int, TStore> ValueStore => null;
         /// <summary>One key's buffer for a point read (TryGetMultiple): a regular reader, which tags the chain it reads under the caller's epoch.</summary>
         public abstract VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId, ref ChunkAccessor<TStore> accessor);
 

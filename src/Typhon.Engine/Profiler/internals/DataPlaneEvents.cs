@@ -66,6 +66,20 @@ internal ref partial struct DataIndexBTreeRangeScanEvent
 
 }
 
+/// <summary>Producer-side ref struct for <see cref="TraceEventKind.DataIndexRebuild"/>.</summary>
+[TraceEvent(TraceEventKind.DataIndexRebuild, EmitEncoder = true)]
+internal ref partial struct DataIndexRebuildEvent
+{
+    [BeginParam]
+    public ushort ArchetypeId;
+    [BeginParam]
+    public byte Phase;
+    [BeginParam]
+    public int Item;
+    public long Entries;
+
+}
+
 /// <summary>Producer-side ref struct for <see cref="TraceEventKind.DataIndexBTreeBulkInsert"/>.</summary>
 [TraceEvent(TraceEventKind.DataIndexBTreeBulkInsert, EmitEncoder = true)]
 internal ref partial struct DataIndexBTreeBulkInsertEvent

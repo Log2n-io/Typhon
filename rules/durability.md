@@ -890,9 +890,12 @@ CK-08 (flush-only cycles) are later increments.
             the dirty-page threshold. Released, not saved (#1588): a save per batch rewrote the pages each batch re-dirtied, and the index
             rebuild's random inserts re-dirty the same B+Tree pages batch after batch (a 7 GB crash open at 512 MiB: >91 GB in >5.5 min saved,
             15.3 GB in 95 s released). The passes: the entity-map rebuild, the
-            Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild — on
-            every open that rebuilds, clean ones included (an added index, a migration; #1588), whose cycles are not limited to
-            flush-only but write the same pages. The batch point's counters are atomic and its probe is serialised. A pass
+            Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild's stage,
+            build and write-back (RecoveryPass.IndexStage, IndexBuild, IndexWriteBack) — on every open that rebuilds, clean ones included (an
+            added index, a migration; #1588), whose cycles are not limited to flush-only but write the same pages. The index passes make their
+            batch points on each worker thread, with its own ChangeSet and epoch scope: the batch point's counters are atomic, its probe is
+            serialised, and its flush-only cycle reads the debt again once it holds the cycle lock, so workers queued behind one cycle run no
+            other. A pass
             calls it only where it holds no page address across it, and records every page it writes through an accessor without a ChangeSet as
             owed (the HEAD rebuild's clusters): refreshed, an unrecorded page could be evicted unwritten (PS-10). The replay's ChangeSet is saved
             when the replay completes, its marks released when it throws. OPEN: the spatial passes still epoch-tag (#1305). A partial entity map on
@@ -3435,14 +3438,25 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
             open writes are at most the clear's I_old plus about 1.5 × I_new, against one write per insert once random-order inserts
             outgrow the cache
   invariant the stage reads the clusters through a scan accessor (EP-02); every write (the trees, the element-id tails, through which the
-            write-back also reads each cluster's occupancy) goes through the pass's ChangeSet accessors, committed before each batch point (CK-08)
-  scope: SortedIndexRebuild.Run, RebuildMemory, TreeRebuild.Build, RunMerger, ElementIdWriteBack.Apply, DatabaseEngine.RebuildPendingClusterIndexes
+            write-back also reads each cluster's occupancy) goes through a worker's own ChangeSet accessors (PS-05a), committed before each batch
+            point (CK-08); the ChangeSets are saved by the coordinator once every worker of the phase has exited, released when any failed — never
+            by a worker: a save writes its pages from live memory, checksum stamped first, and the workers write the same pages (the trees of an
+            archetype share their index segment and directory chunk), so a save beside a running sibling put a page on disk that failed its CRC
+  invariant each phase runs on RebuildWorkers threads, each entering and exiting its epoch scope on its own thread (EP-04); the coordinating
+            thread holds no scope while they run — checked, it throws — or its pin would hold every page the workers touch. The first failure
+            stops the others at their next batch point or work item and is rethrown once every thread has exited; the open fails (RB-01 rebuilds
+            on the next one). The budget is shared: P stage partitions take M/P each, the build runs as many workers as the budget holds
+  scope: SortedIndexRebuild.Run, RebuildWorkers, RebuildMemory, TreeRebuild.Build, RunMerger, ElementIdWriteBack.Apply, PairCollector,
+         DatabaseEngine.RebuildPendingClusterIndexes
   on_violation: the rebuild rewrites index pages per insert (184 GB of data-file writes for a 1.9 GB index segment, unfinished after 30 min, on
                 the 29 GB SWG world at a 512 MiB cache, #1588), or its memory grows with the data and the open runs out of it
   verified: SortedIndexRebuildTests.ACrashOpenBeyondTheCache_WritesEachIndexPageAboutOnce [VerifiesRule] — three unique trees 1.25× an 8 MiB
             cache, rebuilt in a 3 MiB budget the keys outgrow (12 runs): 1.40 index-page writes per page and a peak of exactly the budget (the
             previous rebuild timed out on back-pressure at that scale); ACrashOpen_RebuildsEveryTreeKind [VerifiesRule] — every tree kind, in
-            memory, spilled, merged in several passes, and with spilled element-id pairs
+            memory, spilled, merged in several passes, and with spilled element-id pairs; AnyWorkerCount_RebuildsTheSameTrees [VerifiesRule] —
+            1, 2, 4 and 8 workers (stage partitions, build workers side by side, merged down in parallel) give trees and element ids that agree
+            with the data, and every index batch point is a worker's; AWorkerThrow_FailsTheOpenWithIt_EveryWorkerExits_AndTheNextOpenRebuilds
+            [VerifiesRule]; RebuildWorkersTests.ACoordinatorHoldingAScope_StartsNoWorker [VerifiesRule]
 
 ### RB-10: Rebuild temp data is verified on every read and never outlives its open `[fatal]` `[silent]`
   invariant every temp block is checked (magic, header CRC32C, version, kind, owner, sequence, stride, count, payload CRC32C) before a record

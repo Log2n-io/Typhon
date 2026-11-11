@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace Typhon.Engine.Internals;
 
@@ -9,21 +10,24 @@ internal abstract partial class BTree<TKey, TStore>
     /// Starts a bottom-up build of this tree from entries that will arrive in ascending key order (#1588, design §5.1). The tree must be empty and stay
     /// private to the caller's thread until <see cref="SortedBuilder.Finish"/> publishes it.
     /// </summary>
-    /// <param name="leafFillPercent">The share of a leaf's capacity each leaf is filled to, 50..100; the last two leaves of the tree are balanced.</param>
+    /// <param name="leafFillPercent">The share of a leaf's capacity each leaf is filled to, 50..100; the last two nodes of every level are balanced.</param>
     /// <param name="changeSet">The ChangeSet the node and buffer writes are tracked in.</param>
-    internal SortedBuilder BeginSortedBuild(int leafFillPercent, ChangeSet changeSet)
+    /// <param name="internalFillPercent">The same for internal nodes; negative for the leaf fill.</param>
+    internal SortedBuilder BeginSortedBuild(int leafFillPercent, ChangeSet changeSet, int internalFillPercent = -1)
     {
         if (_rootChunkId != 0 || _count != 0)
         {
             ThrowHelper.ThrowInvalidOp("A sorted build needs an empty tree.");
         }
 
-        return new SortedBuilder(this, leafFillPercent, changeSet);
+        return new SortedBuilder(this, leafFillPercent, internalFillPercent < 0 ? leafFillPercent : internalFillPercent, changeSet);
     }
 
     /// <summary>
-    /// Builds a tree bottom-up from an ascending stream, writing every node once (#1588, design §5.1, IXB-01): leaves are filled left to right to the
-    /// requested fill, each internal level full, and the last two nodes of every level balanced so no node but the root holds fewer than half its capacity.
+    /// Builds a tree bottom-up from an ascending stream, writing every node once (#1588, design §5.1, IXB-01): every level is filled left to right to its
+    /// fill, and the last two nodes of every level balanced so no node but the root holds fewer than half its capacity. Internal nodes have a fill of their
+    /// own: built full, the first leaf split after the build would split every node up to the root in one insert, in the tick path — a multi-value tree's
+    /// leaves are full, yet its internal nodes keep room for the leaf splits its new keys make.
     /// The result is a tree the live insert path could have produced: items from slot 0 (<c>Start = 0</c>), strictly ascending; leaves doubly linked, each
     /// one's HighKey the next one's first key and the tail's the sentinel; an internal node's <c>LeftValue</c> its first child and <c>Keys[i]</c> the first
     /// key of child <c>i + 1</c>; every node initialised by <see cref="BaseNodeStorage.InitializeNode"/>.
@@ -39,8 +43,9 @@ internal abstract partial class BTree<TKey, TStore>
     /// so the caller may commit its accessor and make a batch point between any two <see cref="Append"/>s.
     /// </para>
     /// <para>
-    /// Multi-value trees: the first entry of a key creates its value buffer, every entry of the key appends to it, and <see cref="Append"/> returns the
-    /// element id the live path would have. Sparse key 0 never reaches the builder (the caller skips it, IX-09).
+    /// Multi-value trees: the first entry of a key starts its value buffer, every entry of the key is written straight into it
+    /// (<see cref="VariableSizedBufferSegment{T,TStore}.AppendBuild"/>: no lock, one chunk lookup per value), and <see cref="Append"/> returns the element id
+    /// the live path would have. Sparse key 0 never reaches the builder (the caller skips it, IX-09).
     /// </para>
     /// </remarks>
     internal sealed class SortedBuilder
@@ -50,8 +55,11 @@ internal abstract partial class BTree<TKey, TStore>
         private readonly ChangeSet _changeSet;
         private readonly IComparer<TKey> _comparer;
         private readonly bool _multi;
+        private readonly VariableSizedBufferSegment<int, TStore> _values;
+        private VariableSizedBufferSegment<int, TStore>.BuildCursor _buffer;
         private readonly int _capacity;
         private readonly int _leafFill;
+        private readonly int _internalFill;
         private readonly List<Level> _levels = [];
 
         private bool _hasRun;
@@ -61,23 +69,32 @@ internal abstract partial class BTree<TKey, TStore>
         private int _lastLeaf;
         private int _leafItems;
 
-        internal SortedBuilder(BTree<TKey, TStore> tree, int leafFillPercent, ChangeSet changeSet)
+        internal SortedBuilder(BTree<TKey, TStore> tree, int leafFillPercent, int internalFillPercent, ChangeSet changeSet)
         {
             _tree = tree;
             _storage = tree._storage;
             _changeSet = changeSet;
             _comparer = tree.Comparer;   // the tree's own order, the one its descents use
             _multi = tree.AllowMultiple;
+            _values = _storage.ValueStore;
+            Debug.Assert(_multi == (_values != null), "a multi-value tree's storage names its value buffers (BaseNodeStorage.ValueStore)");
             _capacity = _storage.GetNodeCapacity();
-            var percent = Math.Clamp(leafFillPercent, 50, 100);
-            _leafFill = Math.Min(_capacity, Math.Max((_capacity * percent + 99) / 100, _capacity / 2 + 1));
+            _leafFill = FillOf(_capacity, leafFillPercent);
+            _internalFill = FillOf(_capacity, internalFillPercent) + 1;   // in children: one more than keys
         }
+
+        // Keys per node at a fill of percent: never under ⌊cap/2⌋ + 1, so the balanced tail of a level keeps ⌊cap/2⌋.
+        private static int FillOf(int capacity, int percent)
+            => Math.Min(capacity, Math.Max((capacity * Math.Clamp(percent, 50, 100) + 99) / 100, capacity / 2 + 1));
 
         /// <summary>A node's capacity in keys.</summary>
         internal int NodeCapacity => _capacity;
 
         /// <summary>The leaf fill this build uses, in items.</summary>
         internal int LeafFill => _leafFill;
+
+        /// <summary>The internal fill this build uses, in children.</summary>
+        internal int InternalFill => _internalFill;
 
         /// <summary>Nodes written so far.</summary>
         internal long NodesWritten { get; private set; }
@@ -100,7 +117,7 @@ internal abstract partial class BTree<TKey, TStore>
 
                 if (c == 0)
                 {
-                    return _storage.Append(_runValue, value, ref accessor);
+                    return _values.AppendBuild(ref _buffer, value, _changeSet, ref accessor);
                 }
 
                 CloseRun(ref accessor);
@@ -114,8 +131,8 @@ internal abstract partial class BTree<TKey, TStore>
                 return 0;
             }
 
-            _runValue = _storage.CreateBuffer(ref accessor);
-            return _storage.Append(_runValue, value, ref accessor);
+            _runValue = _values.BeginBuild(ref _buffer, _changeSet, ref accessor);
+            return _values.AppendBuild(ref _buffer, value, _changeSet, ref accessor);
         }
 
         /// <summary>
@@ -164,6 +181,11 @@ internal abstract partial class BTree<TKey, TStore>
 
         private void CloseRun(ref ChunkAccessor<TStore> accessor)
         {
+            if (_multi)
+            {
+                _values.EndBuild(ref _buffer, ref accessor);
+            }
+
             _leafItems++;
             Push(0, new KeyValueItem(_runKey, _runValue), ref accessor);
         }
@@ -174,7 +196,7 @@ internal abstract partial class BTree<TKey, TStore>
             {
                 var leaf = _levels.Count == 0;
                 var entries = leaf ? _capacity : _capacity + 1;
-                _levels.Add(new Level(leaf, entries, leaf ? _leafFill : entries));
+                _levels.Add(new Level(leaf, entries, leaf ? _leafFill : _internalFill));
             }
 
             return _levels[index];

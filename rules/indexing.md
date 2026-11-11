@@ -963,17 +963,22 @@ guarantees holds of it by construction. The live path then writes into it, concu
   invariant a tree BTree.SortedBuilder builds satisfies IXS-04 (strictly ascending items), IXS-05 (descent and chain reach the same leaves; EntryCount
             = leaf items, not values), IXW-03 (each node's HighKey the next node of its level's first key, internal levels too, as the live split sets
             it; the last node of a level keeps the sentinel), every separator its right subtree's first key, and every non-root node, leaf or internal, holds at least ⌊cap/2⌋ keys: each level's last two nodes are balanced
-  invariant every node is initialised as BaseNodeStorage.InitializeNode leaves it, so no latch or version residue; a multi-value key's buffer is the
-            one CreateBuffer made and Append filled, and the element id Append returns names the chunk that holds its value
+  invariant every node is initialised as BaseNodeStorage.InitializeNode leaves it, so no latch or version residue; a multi-value key's buffer, written
+            directly (VariableSizedBufferSegment.AppendBuild), is one AddElement could continue: the root as AllocateBuffer leaves it, its append
+            cursor the chain's last chunk, every chunk but the last full, the counts summing to its total; the element id names the chunk that
+            holds its value
   invariant the input is key-ordered (unique: strictly; multi-value: then by location); a key below the previous one, or a unique duplicate, throws —
             never a fallback. The tree is published only by Finish: height before the root (IXW-10), then the chain ends, the count, and the
             last-key cache cleared (IXW-11), and the root last, so everything a reader reaches from it is in place
   invariant the leaf fill is 100 % for multi-value trees and for unique trees whose keys ascend with location across the whole stream, else
-            IndexRebuildOptions.LeafFillPercent (default 90, 50..100); never under ⌊cap/2⌋+1
+            IndexRebuildOptions.LeafFillPercent (default 90, 50..100); never under ⌊cap/2⌋+1. Internal nodes hold exactly LeafFillPercent's keys
+            (but each level's balanced tail) in every tree but a location-ascending unique one, multi-value trees included: built full, the first
+            leaf split after the build splits every node up to the root in one insert, and a multi-value tree's new keys split its full leaves
   rationale: the builder writes each node once instead of inserting each entry, so a fault in it is a tree that answers wrong for its whole life — a
              separator off by one entry sends lookups to the wrong leaf with no error, and an under-full tail node breaks the merge arithmetic of the
              first remove that reaches it
-  scope: BTree.SortedBuilder, BTree.BeginSortedBuild, TreeRebuild.Build, SortedIndexRebuild.Run
+  scope: BTree.SortedBuilder, BTree.BeginSortedBuild, VariableSizedBufferSegment.BeginBuild, VariableSizedBufferSegment.AppendBuild,
+         VariableSizedBufferSegment.EndBuild, TreeRebuild.Build, SortedIndexRebuild.Run
   on_violation: lookups and range scans that miss or misplace keys after a crash open, and live writes that corrupt the tree further
   verified: SortedBuilderTests.UniqueLongTree_MatchesOrderedAdd_AtEverySizeAndFill, …UniqueIntTree…, …UniqueString64Tree…, …MultiValueLongTree…,
             …MultiValueIntTree… and EveryTreeKind_AtTheEdgesOfItsOwnShape [VerifiesRule] — sizes on each tree's own capacity, leaf-fill and

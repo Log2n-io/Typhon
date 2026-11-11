@@ -1,7 +1,13 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using Typhon.Profiler;
+using Typhon.Profiler.Events;
+using Typhon.Engine.Tests.Profiler;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
@@ -49,6 +55,22 @@ class SrThreeKeysArch : Archetype<SrThreeKeysArch>
     public static readonly Comp<SrThreeKeys> Row = Register<SrThreeKeys>();
 }
 
+[Component("Typhon.Test.SortedRebuild.Halves", 1, StorageMode = StorageMode.SingleVersion)]
+struct SrHalves
+{
+    [Index]
+    public long Rising;
+
+    [Index]
+    public long Halves;
+}
+
+[Archetype]
+class SrHalvesArch : Archetype<SrHalvesArch>
+{
+    public static readonly Comp<SrHalves> Row = Register<SrHalves>();
+}
+
 /// <summary>
 /// The sorted index rebuild (#1588) fills every kind of tree (8-byte unique, String64 unique, 8-byte multi-value, sparse 4-byte multi-value) from the
 /// clusters on a crash open, the same way whether it stays in memory, spills runs, merges them in several passes or writes the element ids back by
@@ -72,6 +94,7 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
         Spilled,
         MultiPass,
         PairsSpilled,
+        KeptNearTheBudget,
     }
 
     protected override void OnTearDown()
@@ -81,12 +104,426 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
         SortedIndexRebuild.MemoryBudgetForTest = 0;
         ElementIdWriteBack.PairBufferEntriesForTest = 0;
         SortedIndexRebuild.AfterSpillForTest = null;
+        SortedIndexRebuild.ClustersPerPartitionForTest = 0;
+        RebuildWorkers.ProgressCadenceForTest = TimeSpan.Zero;
+        DatabaseEngine.RecoveryBatchSize = DatabaseEngine.DefaultRecoveryBatchSize;
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+    }
+
+    /// <summary>
+    /// Design §12: an open that rebuilds logs one start line and one done line per archetype, and a progress line each time the coordinator's wait passes
+    /// the cadence; the stats carry each phase's time and the data-file pages the passes read and wrote.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void AnOpenThatRebuilds_LogsItsStartProgressAndDone()
+    {
+        Seed();
+        SortedIndexRebuild.StageEntriesForTest = 500;
+        DatabaseEngine.RecoveryBatchSize = 64;
+        RebuildWorkers.ProgressCadenceForTest = TimeSpan.FromMilliseconds(1);
+        var log = new LogCapture();
+
+        // The first build batch point waits for a progress line: the coordinator's join then outlasts the cadence however fast the phase runs (a Join of
+        // 1 ms waits a timer tick, ~15 ms, and a small phase can finish inside it).
+        var progressSeen = false;
+        DatabaseEngine.RecoveryBatchPointProbe = (pass, _) =>
+        {
+            if (pass == DatabaseEngine.RecoveryPass.IndexBuild && !progressSeen)
+            {
+                progressSeen = log.WaitFor(LogLevel.Information, "Index rebuild of 'SrArch', ", TimeSpan.FromSeconds(10));
+            }
+        };
+        using var scope = Provider(64UL << 20, logging: b => b.AddProvider(log).SetMinimumLevel(LogLevel.Information)).CreateScope();
+        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SrRow>();
+        dbe.InitializeArchetypes();
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+
+        var stats = dbe.LastOpenIndexRebuild;
+        Assert.Multiple(() =>
+        {
+            Assert.That(progressSeen, Is.True, "a progress line while a build worker waited");
+            Assert.That(log.Count(LogLevel.Information, "Index rebuild of 'SrArch': "), Is.EqualTo(1), "one start line");
+            Assert.That(log.Count(LogLevel.Information, "4 trees (2 multi-value)"), Is.EqualTo(1), "the start line names the trees");
+            Assert.That(log.Count(LogLevel.Information, "Index rebuild of 'SrArch' done in "), Is.EqualTo(1), "one done line");
+            Assert.That(log.Count(LogLevel.Information, $"{stats.Entries} entries"), Is.EqualTo(1), "the done line counts the entries");
+            Assert.That(log.Count(LogLevel.Information, "Index rebuild of 'SrArch', "), Is.GreaterThan(0), "progress lines, at the cadence");
+            Assert.That(stats.StageMs, Is.GreaterThan(0), "the stage's time");
+            Assert.That(stats.BuildMs, Is.GreaterThan(0), "the build's time");
+            Assert.That(stats.WriteBackMs, Is.GreaterThan(0), "the write-back's time");
+            Assert.That(stats.DataFilePagesWritten, Is.GreaterThan(0), "the pages the passes wrote");
+        });
+    }
+
+    /// <summary>
+    /// Design §12: the rebuild's spans reach a trace — one per archetype, per stage partition, per spilled run, per tree and for the write-back, each
+    /// naming the archetype and carrying its entries.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TheRebuild_ShowsInATrace()
+    {
+        Seed();
+        SortedIndexRebuild.StageEntriesForTest = 500;
+        SortedIndexRebuild.ClustersPerPartitionForTest = 8;
+        var provider = Provider(64UL << 20, configure: o => o.IndexRebuild.Workers = 2);
+        var profilerNode = provider.GetRequiredService<IResourceRegistry>().Profiler;
+        using var observer = new TraceRingObserver(profilerNode, captureRawBytes: true);
+        TyphonProfiler.AttachExporter(observer);
+        TyphonProfiler.Start(profilerNode, new ProfilerSessionMetadata(systems: [], archetypes: [], componentTypes: [], workerCount: 0,
+            baseTickRate: 60.0f, startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(), stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
+            startedUtc: DateTime.UtcNow));
+        FreeDeadThreadsSlots();
+        IndexRebuildStats stats;
+        ushort archetypeId;
+
+        // The profiler drains every slot, earlier tests' rebuilds of this archetype included: only spans that began after this point are this open's.
+        var since = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            using var scope = provider.CreateScope();
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SrRow>();
+            dbe.InitializeArchetypes();
+            stats = dbe.LastOpenIndexRebuild;
+            archetypeId = (ushort)ArchetypeRegistry.GetMetadata<SrArch>().ArchetypeId;
+        }
+        finally
+        {
+            TyphonProfiler.Stop();
+        }
+
+        var spans = new List<DataIndexRebuildEventDto>();
+        try
+        {
+            foreach (var (_, bytes) in observer.GetRecords())
+            {
+                // Decoded at one tick per microsecond, the timestamp reads in raw Stopwatch ticks.
+                if (TraceEventDecoder.Decode(bytes, 0, 1) is DataIndexRebuildEventDto span && span.ArchetypeId == archetypeId && span.TimestampUs >= since)
+                {
+                    spans.Add(span);
+                }
+            }
+        }
+        finally
+        {
+            TyphonProfiler.ResetForTests();   // the profiler is process-wide: a decode that throws must not leave it to the next test
+        }
+        Assert.Multiple(() =>
+        {
+            Assert.That(spans.Count(s => s.Phase == (byte)IndexRebuildPhase.Archetype), Is.EqualTo(1), "one span for the archetype");
+            Assert.That(spans.Single(s => s.Phase == (byte)IndexRebuildPhase.Archetype).Entries, Is.EqualTo(stats.Entries), "with its entries");
+            Assert.That(spans.Where(s => s.Phase == (byte)IndexRebuildPhase.Stage).Select(s => s.Item), Is.EquivalentTo(new[] { 0, 1 }),
+                "one per stage partition");
+            Assert.That(spans.Count(s => s.Phase == (byte)IndexRebuildPhase.Spill), Is.EqualTo(stats.Runs), "one per spilled run");
+            Assert.That(spans.Where(s => s.Phase == (byte)IndexRebuildPhase.Build).Select(s => s.Item), Is.EquivalentTo(new[] { 0, 1, 2, 3 }),
+                "one per tree");
+            Assert.That(spans.Count(s => s.Phase == (byte)IndexRebuildPhase.WriteBack), Is.EqualTo(1), "one for the write-back");
+        });
+    }
+
+    // Spans claim a profiler thread slot even with no session running, and a dead thread's slot is freed only once its finalizer has run and a running
+    // consumer has drained it. The worker threads of this fixture's earlier rebuilds can hold all 256, and this open's workers would then trace nothing.
+    private static void FreeDeadThreadsSlots()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        for (var i = 0; i < ThreadSlotRegistry.HighWaterMark; i++)
+        {
+            while (ThreadSlotRegistry.GetSlotState(i) == (int)SlotState.Retiring)
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the profiler's consumer frees a retiring slot");
+                Thread.Yield();
+            }
+        }
+    }
+
+    /// <summary>Keeps every message at Information and above, for tests that assert a line was logged.</summary>
+    private sealed class LogCapture : ILoggerProvider
+    {
+        private readonly List<(LogLevel Level, string Text)> _lines = [];
+
+        /// <summary>Waits until a line at <paramref name="level"/> containing <paramref name="fragment"/> arrives; false after <paramref name="timeout"/>.</summary>
+        public bool WaitFor(LogLevel level, string fragment, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            lock (_lines)
+            {
+                while (Count(level, fragment) == 0)
+                {
+                    var left = deadline - DateTime.UtcNow;
+                    if (left <= TimeSpan.Zero || !System.Threading.Monitor.Wait(_lines, left))
+                    {
+                        return Count(level, fragment) > 0;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        public int Count(LogLevel level, string fragment)
+        {
+            lock (_lines)
+            {
+                return _lines.Count(l => l.Level == level && l.Text.Contains(fragment, StringComparison.Ordinal));
+            }
+        }
+
+        public ILogger CreateLogger(string categoryName) => new Capturing(this);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class Capturing(LogCapture owner) : ILogger
+        {
+            public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter)
+            {
+                lock (owner._lines)
+                {
+                    owner._lines.Add((logLevel, formatter(state, exception)));
+                    System.Threading.Monitor.PulseAll(owner._lines);
+                }
+            }
+        }
+    }
+
+    private static bool IsIndexPass(DatabaseEngine.RecoveryPass pass)
+        => pass is DatabaseEngine.RecoveryPass.IndexStage or DatabaseEngine.RecoveryPass.IndexBuild or DatabaseEngine.RecoveryPass.IndexWriteBack;
+
+    /// <summary>
+    /// Phase 5 (design §D8): the stage's partitions, one build worker per tree and the write-back worker give the same trees and the same element ids
+    /// whatever the worker count, spilled runs and pair runs included; and every batch point the open counted in the index passes is one a worker made.
+    /// </summary>
+    [TestCase(1, false)]
+    [TestCase(2, false)]
+    [TestCase(4, false)]
+    [TestCase(8, false)]
+    [TestCase(4, true)]
+    [CancelAfter(60_000)]
+    [VerifiesRule("RB-09")]
+    public void AnyWorkerCount_RebuildsTheSameTrees(int workers, bool multiPass)
+    {
+        var ids = Seed();
+        SortedIndexRebuild.StageEntriesForTest = multiPass ? 200 : 500;
+        SortedIndexRebuild.MergeReadBytesForTest = multiPass ? 4 * RebuildTempFile.BlockSize : 0;
+        SortedIndexRebuild.ClustersPerPartitionForTest = 8;
+        ElementIdWriteBack.PairBufferEntriesForTest = 300;
+        DatabaseEngine.RecoveryBatchSize = 256;
+        var indexBatchPoints = 0;
+        DatabaseEngine.RecoveryBatchPointProbe = (pass, _) =>
+        {
+            if (IsIndexPass(pass))
+            {
+                indexBatchPoints++;
+            }
+        };
+
+        using var scope = Provider(64UL << 20, configure: o => o.IndexRebuild.Workers = workers).CreateScope();
+        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<SrRow>();
+        dbe.InitializeArchetypes();
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+
+        var stats = dbe.LastOpenIndexRebuild;
+        Assert.That(dbe.CrashRecoveryAtOpen, Is.True, "premise: a crash open");
+        Assert.Multiple(() =>
+        {
+            Assert.That(stats.Partitions, Is.EqualTo(workers), "premise: the stage ran on one partition per worker");
+            Assert.That(stats.BuildWorkers, Is.EqualTo(Math.Min(workers, 4)), "premise: one build worker per tree, up to the workers");
+            Assert.That(stats.Runs, Is.GreaterThan(4 * 3), "premise: the trees spilled runs");
+            Assert.That(stats.ElementIdRuns, Is.GreaterThan(2), "premise: the element-id pairs spilled runs");
+            Assert.That(stats.UniqueConflicts, Is.Zero);
+            Assert.That(stats.FullLeafTrees, Is.EqualTo(2), "the leaf fill decided across partitions as in one");
+            Assert.That(indexBatchPoints, Is.EqualTo(stats.WorkerBatchPoints).And.GreaterThan(3), "every index batch point is a worker's");
+            Assert.That(stats.ExtraMergePasses, multiPass ? Is.GreaterThan(0) : Is.Zero, "premise: merged down, side by side, or not");
+        });
+
+        AssertTreesAgreeWithData(dbe, Count, $"after a crash open with {workers} workers");
+        using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+        {
+            foreach (var id in ids)
+            {
+                t.Destroy(id);
+            }
+
+            Assert.That(t.Commit(), Is.True);
+        }
+
+        AssertTreesAgreeWithData(dbe, 0, "after destroying every entity: each removed through its tail's element id");
+    }
+
+    /// <summary>
+    /// D2 across partitions: a key that ascends within each stage partition but drops where the second begins is not location-ascending, and its tree keeps
+    /// the leaf fill; the key that rises throughout is built full. Each partition checks only its own keys; the barrier checks each one's first key against
+    /// the one before's last.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("IXB-01")]
+    public void AKeyDroppingBetweenPartitions_IsNotAscending()
+    {
+        int n;
+        using (var scope = Provider(64UL << 20, deleteFile: true).CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SrHalves>();
+            dbe.InitializeArchetypes();
+
+            // Whole clusters, an even number of them: the two partitions split the sorted clusters in halves, and the spawns fill them in order.
+            var clusterSize = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<SrHalvesArch>().ArchetypeId].ClusterState.Layout.ClusterSize;
+            n = clusterSize * 2 * (2_000 / (clusterSize * 2) + 1);
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < n; i++)
+                {
+                    t.Spawn<SrHalvesArch>(SrHalvesArch.Row.Set(new SrHalves { Rising = i, Halves = i < n / 2 ? n + i : i - n / 2 }));
+                }
+
+                Assert.That(t.Commit(), Is.True);
+            }
+
+            dbe.SimulateUncleanShutdownForTest = true;
+            dbe.Dispose();
+        }
+
+        SortedIndexRebuild.ClustersPerPartitionForTest = 1;
+        using (var scope = Provider(64UL << 20, configure: o => o.IndexRebuild.Workers = 2).CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SrHalves>();
+            dbe.InitializeArchetypes();
+            var state = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<SrHalvesArch>().ArchetypeId].ClusterState;
+            var stats = dbe.LastOpenIndexRebuild;
+            Assert.That(dbe.CrashRecoveryAtOpen, Is.True, "premise: a crash open");
+            // Premise: in location order the key drops once, at the first slot of the cluster the second partition starts with — so each partition
+            // ascends on its own and only the check across them sees the drop.
+            var clusters = new int[state.ActiveClusterCount];
+            Array.Copy(state.ActiveClusterIds, clusters, clusters.Length);
+            Array.Sort(clusters);
+            var layout = state.Layout;
+            var halvesField = Array.Find(state.IndexSlots[0].Fields, field => field.FieldOffset == sizeof(long));
+            var halvesOffset = layout.ComponentOffset(state.IndexSlots[0].Slot) + halvesField.FieldOffset;
+            var componentSize = layout.ComponentSize(state.IndexSlots[0].Slot);
+            var drops = new List<int>();
+            using (EpochGuard.Enter(dbe.EpochManager))
+            {
+                var scan = state.ClusterSegment.CreateChunkAccessor();
+                try
+                {
+                    var previousKey = long.MinValue;
+                    foreach (var chunkId in clusters)
+                    {
+                        var clusterBase = scan.GetChunkAddress(chunkId);
+                        var occupancy = *(ulong*)clusterBase;
+                        while (occupancy != 0)
+                        {
+                            var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                            occupancy &= occupancy - 1;
+                            var key = *(long*)(clusterBase + halvesOffset + slot * componentSize);
+                            if (key < previousKey)
+                            {
+                                drops.Add(chunkId * 64 + slot);
+                            }
+
+                            previousKey = key;
+                        }
+                    }
+                }
+                finally
+                {
+                    scan.Dispose();
+                }
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(state.ActiveClusterCount, Is.EqualTo(n / state.Layout.ClusterSize), "premise: whole clusters");
+                Assert.That(stats.Partitions, Is.EqualTo(2), "premise: two partitions");
+                Assert.That(drops, Is.EqualTo(new[] { clusters[clusters.Length / 2] * 64 }), "premise: one drop, where the second partition begins");
+                Assert.That(stats.FullLeafTrees, Is.EqualTo(1), "only the key rising throughout fills its leaves");
+            });
+
+            IndexDataOracle.AssertIndexAgreesWithData(dbe, ArchetypeRegistry.GetMetadata<SrHalvesArch>(), "the trees two partitions staged");
+        }
+    }
+
+    /// <summary>
+    /// A throw on one build worker fails the open with that exception (design §D10, §9.9): the other workers stop at their next batch point, every thread
+    /// exits, their epoch slots go back, and the next open rebuilds.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("RB-09")]
+    public void AWorkerThrow_FailsTheOpenWithIt_EveryWorkerExits_AndTheNextOpenRebuilds()
+    {
+        Seed();
+        SortedIndexRebuild.StageEntriesForTest = 500;
+        DatabaseEngine.RecoveryBatchSize = 64;
+        var injected = new InvalidOperationException("a build worker fails");
+        var builds = 0;
+        DatabaseEngine.RecoveryBatchPointProbe = (pass, _) =>
+        {
+            if (pass == DatabaseEngine.RecoveryPass.IndexBuild && ++builds == 3)
+            {
+                throw injected;
+            }
+        };
+
+        EpochManager epochs;
+        int baseline;
+        using (var scope = Provider(64UL << 20, configure: o => o.IndexRebuild.Workers = 4).CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SrRow>();
+            epochs = dbe.EpochManager;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            baseline = epochs.ActiveSlotCount;
+
+            var thrown = Assert.Catch(() => dbe.InitializeArchetypes(), "the open whose worker failed");
+            var chain = new List<Exception>();
+            for (var e = thrown; e != null; e = e.InnerException)
+            {
+                chain.Add(e);
+            }
+
+            Assert.That(chain, Does.Contain(injected), "the open failed with the worker's own exception");
+            Assert.That(dbe.LastOpenIndexRebuild.BuildWorkers, Is.EqualTo(4), "premise: four builders, one per tree");
+
+            // Each other builder stops at its next batch point: at most one each was already past the abort check. Run on, each would make a batch
+            // point every 64 entries of its 6 000.
+            Assert.That(builds, Is.LessThanOrEqualTo(3 + 3), "the other builders stopped at their next batch point");
+            Assert.That(RebuildWorkers.LiveThreadsForTest, Is.Zero, "every worker thread exited");
+        }
+
+        // Once the engine is gone too, its own threads with it: the slots any thread of the failed open claimed all went back.
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.That(epochs.ActiveSlotCount, Is.LessThanOrEqualTo(baseline), "the workers' epoch slots went back");
+
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        using var scope2 = Provider(64UL << 20).CreateScope();
+        using var reopened = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        reopened.RegisterComponentFromAccessor<SrRow>();
+        reopened.InitializeArchetypes();
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the failed open closed as a crash");
+        AssertTreesAgreeWithData(reopened, Count, "after the open that rebuilt again");
     }
 
     [TestCase(Mode.InMemory)]
     [TestCase(Mode.Spilled)]
     [TestCase(Mode.MultiPass)]
     [TestCase(Mode.PairsSpilled)]
+    [TestCase(Mode.KeptNearTheBudget)]
     [CancelAfter(60_000)]
     [VerifiesRule("RB-09")]
     public void ACrashOpen_RebuildsEveryTreeKind(Mode mode)
@@ -106,7 +543,13 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
                 SortedIndexRebuild.StageEntriesForTest = 700;
                 ElementIdWriteBack.PairBufferEntriesForTest = 100;
                 break;
+            case Mode.KeptNearTheBudget:
+                // The stage holds every key without spilling, in buffers that leave the build less than its least reserve.
+                SortedIndexRebuild.MemoryBudgetForTest = 5L << 19;
+                break;
         }
+
+        var budget = mode == Mode.KeptNearTheBudget ? 5L << 19 : new IndexRebuildOptions().MemoryBudgetBytes;
 
         using var scope = Provider(64UL << 20).CreateScope();
         using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -122,7 +565,7 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
             Assert.That(stats.Trees, Is.EqualTo(4));
             Assert.That(stats.UniqueConflicts, Is.Zero);
             Assert.That(stats.FullLeafTrees, Is.EqualTo(2), "the two multi-value trees fill their leaves; the two shuffled unique ones leave room (D2)");
-            Assert.That(stats.PeakNativeBytes, Is.LessThanOrEqualTo(new IndexRebuildOptions().MemoryBudgetBytes), "within the budget");
+            Assert.That(stats.PeakNativeBytes, Is.LessThanOrEqualTo(budget), "within the budget");
             switch (mode)
             {
                 case Mode.InMemory:
@@ -139,6 +582,10 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
                     break;
                 case Mode.PairsSpilled:
                     Assert.That(stats.ElementIdRuns, Is.GreaterThan(4), "premise: the element-id pairs spilled runs");
+                    break;
+                case Mode.KeptNearTheBudget:
+                    Assert.That(stats.Runs, Is.EqualTo(4), "premise: the stage spilled nothing on its own");
+                    Assert.That(stats.InMemoryTrees, Is.LessThan(4), "kept buffers spilled at the barrier to leave the build its reserve");
                     break;
             }
         });
@@ -168,6 +615,29 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
         new IndexRebuildOptions { LeafFillPercent = percent }.Validate(failures);
         Assert.That(failures, valid ? Is.Empty : Has.One.Contains("LeafFillPercent"));
     }
+
+    [TestCase(-1, false)]
+    [TestCase(0, true)]
+    [TestCase(64, true)]
+    [TestCase(65, false)]
+    public void Workers_IsValidatedWithin0To64(int workers, bool valid)
+    {
+        var failures = new List<string>();
+        new IndexRebuildOptions { Workers = workers }.Validate(failures);
+        Assert.That(failures, valid ? Is.Empty : Has.One.Contains("Workers"));
+    }
+
+    /// <summary>Design §D8: the workers asked for, min(ProcessorCount, 8) when 0, and never more than one per 256 cache pages, one at least.</summary>
+    [TestCase(4, 8192, 4)]
+    [TestCase(64, 8192, 32)]
+    [TestCase(8, 1024, 4)]
+    [TestCase(8, 100, 1)]
+    public void TheWorkers_AreCappedByTheCache(int asked, int cachePages, int expected)
+        => Assert.That(DatabaseEngine.IndexRebuildWorkers(new IndexRebuildOptions { Workers = asked }, cachePages), Is.EqualTo(expected));
+
+    [Test]
+    public void ZeroWorkers_MeansTheProcessorsUpTo8()
+        => Assert.That(DatabaseEngine.IndexRebuildWorkers(new IndexRebuildOptions(), 1 << 20), Is.EqualTo(Math.Min(System.Environment.ProcessorCount, 8)));
 
     /// <summary>
     /// D2: a unique tree whose keys ascend with location — the shape of a sequence or a timestamp — gets full leaves, since its inserts land at the right
@@ -336,13 +806,14 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
         var corrupted = 0;
         SortedIndexRebuild.AfterSpillForTest = (file, run) =>
         {
-            if (corrupted++ == 3)
+            if (Interlocked.Increment(ref corrupted) == 4)   // the stage partitions spill on their own threads
             {
                 file.PatchForTest(run.Offset + RebuildTempFile.HeaderSize + 40, [0xA5, 0x5A]);
             }
         };
 
-        using (var scope = Provider(64UL << 20).CreateScope())
+        var log = new LogCapture();
+        using (var scope = Provider(64UL << 20, logging: b => b.AddProvider(log)).CreateScope())
         {
             var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
             bundle = dbe.MMF.BundleDirectory;
@@ -356,6 +827,7 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
 
             Assert.That(cause, Is.InstanceOf<IndexRebuildTempCorruptException>(), $"the temp block's check failed it, not something else: {ex}");
             Assert.That(((IndexRebuildTempCorruptException)cause).Check, Does.Contain("payload CRC"));
+            Assert.That(log.Count(LogLevel.Error, "failed its check (payload CRC"), Is.EqualTo(1), "the corrupt block logged at Error, once");
             AssertNoTempFile(bundle, "after the failed open");
             dbe.Dispose();
         }
