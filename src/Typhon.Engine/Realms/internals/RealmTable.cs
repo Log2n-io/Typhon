@@ -20,6 +20,13 @@ internal sealed class Realm
     /// <summary>Unregistered and waiting to be empty (Realms D5): entries refused, removed at the first fence that finds it holding no cluster.</summary>
     internal volatile bool Closing;
 
+    /// <summary>
+    /// Sessions and application pins observing THIS incarnation (RLM-03), Interlocked from any thread. Per object, not per id: an id is registered again
+    /// within the session once a removal is durable (RLM-06), and a pin or a session still holding the old realm must neither keep the new one active nor
+    /// release a count it never took on it.
+    /// </summary>
+    internal int Observers;
+
     internal Realm(RealmId id, SpatialGrid grid, RealmConfig config)
     {
         ArgumentNullException.ThrowIfNull(grid);
@@ -106,7 +113,6 @@ internal sealed class RealmTable
         _byId = new Realm[maxRealms];
         _state = new RealmRunState[maxRealms];
         _divisor = new ushort[maxRealms];
-        _observers = new int[maxRealms];
         _unobservedTicks = new int[maxRealms];
         _wakeRequested = new byte[maxRealms];
     }
@@ -118,7 +124,6 @@ internal sealed class RealmTable
     // evaluation, so a change lands at the next tick start.
     private readonly RealmRunState[] _state;
     private readonly ushort[] _divisor;
-    private readonly int[] _observers;
     private readonly int[] _unobservedTicks;
     private readonly byte[] _wakeRequested;
 
@@ -190,8 +195,8 @@ internal sealed class RealmTable
             Volatile.Write(ref _byId[id], null);
             Volatile.Write(ref _registered, new Snapshot(compacted, n));
 
-            // The observer count is left as it is: a pin taken before the removal still releases once, and the id is quarantined for the session
-            // (RLM-06), so nothing else reads it (review #4: zeroing it made that release throw).
+            // The observer count lives on the removed Realm object: a pin taken before the removal still releases once, on it, and a later incarnation of
+            // the id (RLM-06) starts from its own (review #4: zeroing a shared per-id count made that release throw).
             _state[id] = RealmRunState.Dormant;
             _unobservedTicks[id] = 0;
             _wakeRequested[id] = 0;
@@ -249,23 +254,29 @@ internal sealed class RealmTable
     /// <summary>The realm's rate divisor this tick: 1 when observed, its <see cref="RealmConfig.UnobservedTickDivisor"/> otherwise.</summary>
     internal int DivisorOf(ushort id) => _divisor[id];
 
-    /// <summary>A session or an application pin starts observing <paramref name="id"/>. Any thread; takes effect at the next tick start.</summary>
-    internal void AddObserver(ushort id)
+    /// <summary>A session or an application pin starts observing <paramref name="id"/>: returns the incarnation observed, which the observer releases on.
+    /// Any thread; takes effect at the next tick start.</summary>
+    internal Realm AddObserver(ushort id)
     {
-        _ = Get(id);
-        Interlocked.Increment(ref _observers[id]);
+        var realm = Get(id);
+        AddObserver(realm);
+        return realm;
     }
 
-    /// <summary>How many sessions and pins observe <paramref name="id"/> now.</summary>
-    internal int ObserverCount(ushort id) => Volatile.Read(ref _observers[id]);
+    /// <summary>A session starts observing <paramref name="realm"/>, an incarnation it read from the table. Any thread.</summary>
+    internal static void AddObserver(Realm realm) => Interlocked.Increment(ref realm.Observers);
 
-    /// <summary>An observer of <paramref name="id"/> leaves. Any thread; takes effect at the next tick start.</summary>
-    internal void RemoveObserver(ushort id)
+    /// <summary>How many sessions and pins observe realm <paramref name="id"/>'s current incarnation; 0 when it is not registered.</summary>
+    internal int ObserverCount(ushort id) => TryGet(id) is { } realm ? Volatile.Read(ref realm.Observers) : 0;
+
+    /// <summary>An observer of <paramref name="realm"/> leaves — the incarnation it observed, registered or not by now. Any thread; takes effect at the next
+    /// tick start.</summary>
+    internal static void RemoveObserver(Realm realm)
     {
-        if (Interlocked.Decrement(ref _observers[id]) < 0)
+        if (Interlocked.Decrement(ref realm.Observers) < 0)
         {
-            Interlocked.Increment(ref _observers[id]);
-            throw new InvalidOperationException($"Realm {id}: an observer was removed that was never added.");
+            Interlocked.Increment(ref realm.Observers);
+            throw new InvalidOperationException($"Realm {realm.Id.Value}: an observer was removed that was never added.");
         }
     }
 
@@ -301,7 +312,7 @@ internal sealed class RealmTable
                 next = RealmRunState.Closing;
                 divisor = 1;
             }
-            else if (Volatile.Read(ref _observers[id]) > 0)
+            else if (Volatile.Read(ref realm.Observers) > 0)
             {
                 next = RealmRunState.Active;
                 divisor = 1;

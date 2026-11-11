@@ -9,7 +9,8 @@ namespace Typhon.Engine.Tests.Realms;
 
 /// <summary>
 /// Realms D5 (RT-7, RLM-06): realms registered and unregistered on a running engine. Register publishes a complete realm and writes its catalog row;
-/// Unregister closes it — entries refused, removal at the first fence that finds it empty; its id is reusable only after an open retires it.
+/// Unregister closes it — entries refused, removal at the first fence that finds it empty; its id is reusable, at the next generation, once a checkpoint
+/// that started after the removal has completed (#1641), or after an open retires it.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -124,9 +125,127 @@ class RealmLifecycleTests : TestBase<RealmLifecycleTests>
         Assert.That(Count(dbe, 3), Is.EqualTo(2), "its entities are still there, and still answer its queries");
     }
 
+    private static readonly TimeSpan CheckpointWait = TimeSpan.FromSeconds(10);
+
+    private static SpatialGridConfig OtherGrid() => SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(100, 100), 25);
+
     [Test]
     [VerifiesRule("RLM-06")]
-    public void Unregister_Empty_RemovedAtTheFence_TheIdQuarantinedUntilAnOpenRetiresIt()
+    public void Unregister_Empty_RemovedAtTheFence_TheIdReusableInTheSessionOnceACheckpointMakesTheRemovalDurable()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = Open(scope);
+        dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(Grid()));
+        SpawnIn(dbe, 4, 3);
+        dbe.WriteTickFence(1);
+        var cs = dbe._archetypeStates[Archetype<RealmUnit>.Metadata.ArchetypeId].ClusterState;
+        Assert.That(cs.RealmSpatial[4], Is.Not.Null);
+
+        dbe.Realms.Unregister(new RealmId(4));
+        Assert.That(dbe.Realms.CanRegister(new RealmId(4)), Is.False, "a closing id is not free");
+        Empty(dbe, 4);
+
+        // A checkpoint that completes BEFORE the removal proves nothing about it: the pages the removal's fence dirties are not in it.
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(CheckpointWait), Is.True);
+        dbe.WriteTickFence(2);
+
+        Assert.That(dbe.RealmTable.IsRegistered(4), Is.False, "emptied, it is removed at the fence");
+        Assert.That(cs.RealmSpatial[4], Is.Null, "with its per-archetype state");
+        Assert.That(dbe.Realms.CanRegister(new RealmId(4)), Is.False, "removed, but not durably: no checkpoint started after the removal");
+        Assert.Throws<InvalidOperationException>(() => dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(OtherGrid())),
+            "reusing it before a checkpoint covers the removal would let a crash replay the old realm's entities into the new one");
+
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(CheckpointWait), Is.True);
+        Assert.That(dbe.Realms.CanRegister(new RealmId(4)), Is.True, "the removal is durable: the id is free in this session");
+        dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(OtherGrid()));
+        Assert.Multiple(() =>
+        {
+            Assert.That(dbe.RealmTable.Get(4).GridConfig.CellSize, Is.EqualTo(25d), "a new identity on the same id");
+            Assert.That(dbe.PersistedRealmCatalog[4].Row.Generation, Is.EqualTo(1), "the old row, next incarnation");
+            Assert.That(dbe.PersistedRealmCatalog[4].Row.State, Is.EqualTo(RealmR1.StateLive));
+            Assert.That(dbe.Realms.GenerationOf(new RealmId(4)), Is.EqualTo(1), "GenerationOf moves within the session");
+            Assert.That(cs.RealmSpatial[4], Is.Null, "the new incarnation starts with no state of the old one");
+        });
+
+        SpawnIn(dbe, 4, 2);
+        dbe.WriteTickFence(3);
+        Assert.That(Count(dbe, 4), Is.EqualTo(2), "only the new incarnation's entities");
+    }
+
+    [Test]
+    [VerifiesRule("RLM-06")]
+    public void AnObserverPinOutlivingItsRealm_NeitherKeepsTheReusedIdActive_NorReleasesOnIt()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = Open(scope);
+        dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(Grid()));
+        var stalePin = dbe.Realms.Observe(new RealmId(4));
+        dbe.Realms.Unregister(new RealmId(4));
+        dbe.WriteTickFence(1);
+        Assert.That(dbe.RealmTable.IsRegistered(4), Is.False, "precondition: removed, with the pin still held");
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(CheckpointWait), Is.True);
+
+        dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(OtherGrid()));
+        Assert.That(dbe.RealmTable.ObserverCount(4), Is.Zero, "the old realm's pin is not the new one's");
+        using (dbe.Realms.Observe(new RealmId(4)))
+        {
+            Assert.DoesNotThrow(stalePin.Dispose, "the stale pin releases on the realm it pinned");
+            Assert.That(dbe.RealmTable.ObserverCount(4), Is.EqualTo(1), "and leaves the new realm's own pin alone");
+        }
+
+        Assert.That(dbe.RealmTable.ObserverCount(4), Is.Zero);
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("RLM-06")]
+    public void CrashAfterAnIdIsReusedInTheSession_ReopensTheNewIncarnationOnly()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            dbe.Realms.Register(new RealmId(6), RealmConfig.SimulatedAlways(Grid()));
+            SpawnIn(dbe, 6, 4);
+            dbe.WriteTickFence(1);
+            dbe.Realms.Unregister(new RealmId(6));
+            Empty(dbe, 6);
+            dbe.WriteTickFence(2);
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(CheckpointWait), Is.True);
+
+            dbe.Realms.Register(new RealmId(6), RealmConfig.SimulatedAlways(OtherGrid()));
+
+            // Commit discipline and a flush: the realm key reaches the WAL with the commit, durable before the crash (as in the test below).
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(5, 50, 6)));
+                    tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(15, 50, 6, 1)));
+                    Assert.That(tx.Commit(), Is.True);
+                }
+
+                uow.Flush();
+            }
+
+            dbe.SimulateHardCrash();
+        }
+
+        // A generic opener: the catalog names the new incarnation; neither the data pages nor the WAL past CheckpointLSN name the old one's entities.
+        using var reopen = ServiceProvider.CreateScope();
+        using var engine = Open(reopen, configure: false);
+        engine.WriteTickFence(1);
+        Assert.Multiple(() =>
+        {
+            Assert.That(engine.RealmTable.Get(6).GridConfig.CellSize, Is.EqualTo(25d), "the new identity");
+            Assert.That(engine.Realms.GenerationOf(new RealmId(6)), Is.EqualTo(1));
+            Assert.That(Count(engine, 6), Is.EqualTo(2), "the new incarnation's entities, and none of the old one's");
+            Assert.That(Count(engine, 0), Is.Zero);
+        });
+    }
+
+    [Test]
+    [VerifiesRule("RLM-06")]
+    public void Unregister_Empty_NotReusedInTheSession_AnOpenRetiresIt()
     {
         using (var scope = ServiceProvider.CreateScope())
         {
@@ -134,23 +253,16 @@ class RealmLifecycleTests : TestBase<RealmLifecycleTests>
             dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(Grid()));
             SpawnIn(dbe, 4, 3);
             dbe.WriteTickFence(1);
-            var cs = dbe._archetypeStates[Archetype<RealmUnit>.Metadata.ArchetypeId].ClusterState;
-            Assert.That(cs.RealmSpatial[4], Is.Not.Null);
-
             dbe.Realms.Unregister(new RealmId(4));
             Empty(dbe, 4);
             dbe.WriteTickFence(2);
-
             Assert.That(dbe.RealmTable.IsRegistered(4), Is.False, "emptied, it is removed at the fence");
-            Assert.That(cs.RealmSpatial[4], Is.Null, "with its per-archetype state");
-            Assert.Throws<InvalidOperationException>(() => dbe.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(Grid())),
-                "its id is not reusable in the session that unregistered it");
         }
 
         using var reopen = ServiceProvider.CreateScope();
         using var engine = Open(reopen);
         Assert.That(engine.RealmTable.IsRegistered(4), Is.False, "an open that found it empty retired its catalog row");
-        engine.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(100, 100), 25)));
+        engine.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(OtherGrid()));
         Assert.That(engine.PersistedRealmCatalog[4].Row.Generation, Is.EqualTo(1), "the retired row is reused, next incarnation");
         Assert.That(engine.RealmTable.Get(4).GridConfig.CellSize, Is.EqualTo(25d), "a new identity: the id is free");
 

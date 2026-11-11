@@ -2526,24 +2526,36 @@
     Full and observed realms every run; per-realm delta time)
   on_violation: a planet's creatures integrated twice in some windows and never in others, or at the wrong delta time — visible as jumps
 
-### RLM-06: A realm leaves only empty, and its id returns only after an open proves it empty `[fatal][silent]`
+### RLM-06: A realm leaves only empty, and its id returns only once its emptiness is durable `[fatal][silent]`
   invariant a run-time Register grows every archetype's per-realm table, writes its catalog row synchronously (RLM-01) and marks the archetypes the
     realm cannot hold, all BEFORE publishing it — no entity can enter a half-built realm, nor one the next open would not know
   invariant Unregister marks the catalog row Closing synchronously, then the realm: from then on no entity may enter it (spawn and teleport throw; a
     raw key write naming it is reverted at the fence, D-2); entities already in it stay and still answer its queries
-  invariant the first fence that finds a Closing realm holding no cluster removes it: every archetype's state for it, then its table slot
-  invariant an id unregistered this session is not registrable again in it. Closing is never carried across an open: after recovery a Closing
+  invariant the first fence that finds a Closing realm holding no cluster removes it: every archetype's state for it, then its table slot, then records
+    the reuse gate — the first checkpoint cycle to start after that point and the last WAL LSN appended by then
+  invariant an id unregistered this session is registrable again in it only once that gate is passed: the cycle (or a later one) has written every page it
+    collected and CheckpointLSN has reached the LSN. The registration rewrites the Closing row to the new identity at generation + 1, one synchronous
+    write; a crash before it reopens the row Closing (below). (id, generation) is a realm's identity: the observer count is per incarnation, and a session
+    placed in an incarnation that is gone is told RealmClosed and moved to none, whatever now holds the id
+  invariant Closing is never carried across an open: after recovery a Closing
     realm that something still names — a cluster in it, ANY entity's [RealmKey] (replay claims slots cell- and realm-agnostically), or the
     application's registration at this open — is live again (row Live); one nothing names is retired (row Retired, id free, reused at the next
     generation). Kept Closing, a replayed entity's key would be refused as an entry and reverted into another realm
   invariant a spawn validated before Unregister and committed after it lands in the primary realm, its key rewritten (D-2); the commit never throws
   never remove a realm that holds a cluster, and never free its id on the strength of in-memory state alone: a crash before the destroys are
-    checkpointed leaves their entities in the data pages, and a realm id reused by then would receive them on replay
+    checkpointed leaves their entities in the data pages (or in the WAL past CheckpointLSN), and a realm id reused by then would receive them on replay.
+    A checkpoint that completed before the removal proves nothing: the pages the removal's fence dirtied are not in it
   scope: DatabaseEngine.RegisterRealmAtRuntime, DatabaseEngine.UnregisterRealm, DatabaseEngine.RemoveEmptyClosingRealms,
-    DatabaseEngine.ResolveClosingRealmsAtOpen, RealmTable.MarkClosing, RealmTable.Remove, ArchetypeClusterState.EnsureRealmSpatialCapacity
+    DatabaseEngine.CanRegisterRealm, DatabaseEngine.ReleaseQuarantinedId, DatabaseEngine.ResolveClosingRealmsAtOpen, CheckpointManager.CoverageTicket,
+    CheckpointManager.HasCovered, RealmTable.MarkClosing, RealmTable.Remove, RealmTable.AddObserver, RealmTable.RemoveObserver,
+    ArchetypeClusterState.EnsureRealmSpatialCapacity, FrameAssembler.PlacedRealm
   verified: RealmLifecycleTests (a run-time realm reopens from the catalog; a closing realm refuses entries and keeps its entities; an emptied one is
-    removed with its state and its id quarantined until an open retires it; a crash after unregistering never resurrects it — skipping the
-    synchronous Closing mark, or the entry refusal, fails them, run by hand 2026-09-26)
+    removed with its state and its id refused until a checkpoint started after the removal completes — one completed before it does not count — then
+    reused at generation 1; a crash after the reuse reopens the new incarnation only; a pin outliving its realm neither keeps nor releases the reused
+    id; a crash after unregistering never resurrects it — skipping the synchronous Closing mark, or the entry refusal, fails them, run by hand
+    2026-09-26; dropping the coverage check, the generation bump or the per-incarnation release fails them, run by hand 2026-11-11) and
+    RealmSessionTests.AnIdReusedBeforeTheFrameStageSeesTheRemoval_TheSessionIsToldItsRealmClosed_NotMovedIntoTheNewOne (red without the incarnation
+    check)
   on_violation: entities of a realm the application destroyed reappear in a new realm on the same id, or a realm vanishes with entities in it
 
 ### RLM-07: A QuerySystem narrowed to realms is dispatched their runnable clusters only, and a narrowed change filter their changes only `[fatal][silent]`

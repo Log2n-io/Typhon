@@ -1080,6 +1080,56 @@ class RealmSessionTests : TestBase<RealmSessionTests>
     }
 
     /// <summary>
+    /// A realm removed under a placed session and its id registered again before the frame stage runs: the session is told its realm closed and is moved to
+    /// none — it never lands in the new incarnation on the strength of the id (RLM-06, #1641).
+    /// </summary>
+    /// <remarks>
+    /// The window is real: the reuse waits only for a checkpoint cycle, which runs on its own thread and can finish between the fence that removed the realm
+    /// and the replication track that would notice. The id alone cannot tell the two realms apart; the placement records which incarnation it was made in.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("RLM-06")]
+    public void AnIdReusedBeforeTheFrameStageSeesTheRemoval_TheSessionIsToldItsRealmClosed_NotMovedIntoTheNewOne()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+        var config = new RealmConfig
+        {
+            Grid = Realm1Grid(),
+            WhenUnobserved = RealmUnobserved.Simulate,
+            UnobservedTickDivisor = 1,
+            Replication = new RealmReplicationConfig { Kind = "interior", CellM = 8, AppTag = 7 },
+        };
+
+        dbe.Realms.Register(new RealmId(3), config);
+        Assert.That(commands.TryEnter(session, new RealmId(3)), Is.True);
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(3)), "precondition: the session is in the realm about to go");
+
+        // Between this tick's fence (which removes the realm) and its frame stage: the removal made durable, the id registered again.
+        dbe.Realms.Unregister(new RealmId(3));
+        harness.AfterFence = _ =>
+        {
+            Assert.That(dbe.Realms.IsRegistered(new RealmId(3)), Is.False, "precondition: the fence removed the realm");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True);
+            dbe.Realms.Register(new RealmId(3), config);
+            harness.AfterFence = null;
+        };
+
+        harness.RunTick(harness.Tick + 1);
+        Assert.That(dbe.Realms.GenerationOf(new RealmId(3)), Is.EqualTo(1), "precondition: the id was reused within the tick");
+        Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.None), "the session landed in the new realm on the strength of its id");
+        Assert.That(dbe.RealmTable.ObserverCount(3), Is.Zero, "and the new realm is not observed on its behalf");
+
+        harness.RunTick(harness.Tick + 1);
+        var events = RealmClosures(harness);
+        Assert.That(events, Has.Count.EqualTo(1), "the application is told its realm closed");
+        Assert.That(events[0].Realm, Is.EqualTo(new RealmId(3)));
+    }
+
+    /// <summary>
     /// The same, for a session anchored to an entity that was destroyed with the realm rather than placed in it by hand.
     /// </summary>
     /// <remarks>

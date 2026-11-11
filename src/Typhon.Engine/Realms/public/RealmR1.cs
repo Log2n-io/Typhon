@@ -30,10 +30,10 @@ public struct RealmR1
     /// Incarnation of the id: 0 the first time an id is registered, and one more than the retired row's each time it is registered again.
     /// </summary>
     /// <remarks>
-    /// <b>It can only advance across an OPEN, and that is RLM-06 rather than an omission.</b> An id unregistered during a session is not registrable again in
-    /// that session at all: it is reusable only after an open has proved the realm empty and retired its row, because a crash before the destroys are
-    /// checkpointed would otherwise replay the old realm's entities into the new one. So within one run every registered realm reads the generation it opened
-    /// with, and a consumer that keys on <c>(id, generation)</c> — the identity 12-realms § 1.1 defines — sees it change only across a restart.
+    /// <b>It advances whenever a retired or durably removed id is registered again — across an open, or within a session (#1641).</b> An id unregistered
+    /// during a session is registrable again once its emptiness is durable: a checkpoint that started after the fence that removed the realm has completed
+    /// (RLM-06). Before that, a crash would replay the old realm's entities into the new one. So a consumer that keys on <c>(id, generation)</c> — the identity
+    /// 12-realms § 1.1 defines — must expect it to change while the server runs.
     /// <para>Read it with <c>Realms.GenerationOf(id)</c>; it is what the <c>REALM</c> block puts on the wire.</para>
     /// </remarks>
     public int Generation;
@@ -62,8 +62,9 @@ public struct RealmR1
     /// <summary>The cell-crossing hysteresis band, as a fraction of the cell (part of CC-02's contract, hence of identity).</summary>
     public float MigrationHysteresisRatio;
 
-    /// <summary>Lifecycle state (Realms D5): <see cref="StateLive"/>, <see cref="StateClosing"/> (unregistered, not yet proven empty) or
-    /// <see cref="StateRetired"/> (empty at an open; the id is free and a later registration reuses this row).</summary>
+    /// <summary>Lifecycle state (Realms D5): <see cref="StateLive"/>, <see cref="StateClosing"/> (unregistered and not yet proven empty at an open; a
+    /// registration in the same session reuses it once the removal is durable) or <see cref="StateRetired"/> (empty at an open; the id is free and a later
+    /// registration reuses this row).</summary>
     public int State;
 
     /// <summary>A registered realm.</summary>

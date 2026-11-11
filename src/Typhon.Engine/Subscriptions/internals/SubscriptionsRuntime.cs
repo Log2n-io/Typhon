@@ -820,9 +820,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         ref readonly var config = ref spatial.Config;
         var cellM = realm != RealmId.Default.Value && replication != null ? replication.CellM
             : options.ReplicationCellM > 0 ? options.ReplicationCellM : config.CellSize;
-        var generation = engine.PersistedRealmCatalog != null && engine.PersistedRealmCatalog.TryGetValue(realm, out var row)
-            ? (ushort)row.Row.Generation
-            : (ushort)0;
+        // The published copy, not the catalog dictionary: a registration on another thread may be inserting into it, and an id reused within the session
+        // (RLM-06) moves its generation while the server runs.
+        var generation = (ushort)engine.RealmGenerationOf(realm);
         return new RealmFrame(realm, generation, kindIdx, replication?.AppTag ?? 0, replication?.PositionBits ?? Codec.DefaultPositionBits, cellM,
             deep: !ReplicationGrid.IsFlat(config, cellM), [config.WorldMin.X, config.WorldMin.Y, config.WorldMin.Z],
             [config.WorldMax.X, config.WorldMax.Y, config.WorldMax.Z]);

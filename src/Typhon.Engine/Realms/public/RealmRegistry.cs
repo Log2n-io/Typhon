@@ -79,6 +79,16 @@ public sealed class RealmRegistry
     public bool IsRegistered(RealmId id) => _engine.RealmTable?.IsRegistered(id.Value) ?? _pending.ContainsKey(id.Value);
 
     /// <summary>
+    /// Whether <see cref="Register"/> would accept <paramref name="id"/> on the running engine now: in range, not realm 0, not registered nor closing, and —
+    /// for an id removed this session — its removal made durable by a checkpoint (RLM-06). Any thread; false before <c>InitializeArchetypes</c>.
+    /// </summary>
+    /// <remarks>
+    /// A pool of instance ids (dungeons, houses) asks this to pick a free one. A removed id becomes free at the end of the first checkpoint that starts
+    /// after its removal: within <see cref="ResourceOptions.CheckpointIntervalMs"/>, or sooner after <see cref="DatabaseEngine.ForceCheckpoint"/>.
+    /// </remarks>
+    public bool CanRegister(RealmId id) => _engine.CanRegisterRealm(id.Value);
+
+    /// <summary>
     /// Pins realm <paramref name="id"/> active — observed, simulated at full rate — from the next tick on, until the returned handle is disposed. For an
     /// application with no session in the realm (a headless server, a benchmark, a test); sessions observe through replication.
     /// </summary>
@@ -98,8 +108,9 @@ public sealed class RealmRegistry
 
     /// <summary>
     /// Unregisters realm <paramref name="id"/> on a running engine (Realms D5): it is <see cref="RealmRunState.Closing"/> from now on — no entity may
-    /// enter it — and is removed at the first fence that finds it empty. Empty it with <see cref="DestroyContents"/>. Its id may be registered again only
-    /// after a later open (RLM-06). The primary realm cannot be unregistered.
+    /// enter it — and is removed at the first fence that finds it empty. Empty it with <see cref="DestroyContents"/>. Its id may be registered again, at the
+    /// next generation, once a checkpoint that started after the removal has completed (<see cref="CanRegister"/>, RLM-06). The primary realm cannot be
+    /// unregistered.
     /// </summary>
     public void Unregister(RealmId id)
     {
@@ -155,8 +166,8 @@ public sealed class RealmRegistry
     /// that caches or compares by id alone can mistake a reused id for the realm it replaced. This is the second half, and it is the same number the
     /// <c>REALM</c> block puts on the wire, so a server and its clients agree about which incarnation they are talking about.
     /// <para>
-    /// It only advances across an open — see <see cref="RealmR1.Generation"/> — so within one run it is a constant per id. Compare it anyway: the code that
-    /// does not is correct today and wrong after the first restart.
+    /// It advances while the server runs: an id unregistered, emptied and removed is registrable again once a checkpoint has made the removal durable, at the
+    /// next generation (RLM-06, see <see cref="RealmR1.Generation"/>). A cached id with an old generation names a realm that no longer exists.
     /// </para>
     /// </remarks>
     /// <remarks>

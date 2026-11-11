@@ -121,8 +121,9 @@ dag.QuerySystem("BarOrders", ctx => { /* … */ }, input: () => patrons, changeF
   unkeyed archetype is wholly in realm 0 (RM-07). Like the archetype-wide walk, the list is live: walk it from a system or outside the fence.
 - **Policy.** Decided once per tick, before any dispatch (RLM-03); a dormant realm's clusters reach no QuerySystem (RLM-04); a divided realm's
   clusters run exactly once every N runs of a system (RLM-05). With every realm runnable, dispatch is exactly the single-realm path.
-- **Lifecycle.** A realm is removed only once empty, and its id may be registered again only after a later open has proven it empty (RLM-06). Realm
-  0 cannot be unregistered.
+- **Lifecycle.** A realm is removed only once empty, and its id may be registered again — at the next generation, in the same session — once a
+  checkpoint that started after the removal has completed (`Realms.CanRegister`, RLM-06); `(id, generation)` is the realm's identity. Realm 0 cannot
+  be unregistered.
 - **Narrowed systems.** Dispatched their realms' runnable clusters only, a dormant or unregistered realm giving nothing; with a tier filter, the
   intersection; with a change filter, their realms' changes only, on every scan path (RLM-07). Refused when the runtime is built on a system that
   selects no clusters, or on a realm id beyond `ConfigureRealms`.

@@ -124,6 +124,7 @@ internal sealed unsafe partial class FrameAssembler
             var source = hasProfile ? Profiles.SourceOf(profile) : ViewpointSource.Placed;
             var follow = EntityId.Null;
             int realm;
+            var stalePlacement = false;
 
             // Session(s).Follow(e) (12-realms § 2.2 Q5) outranks whatever the profile declared, and is legal on every shape: on a Sphere it is the centre and
             // the realm, on a World or a ClientRegion the realm alone (§ 1.5), because those shapes have no centre to move. Both anchors come out of ONE row
@@ -155,19 +156,21 @@ internal sealed unsafe partial class FrameAssembler
                         realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null && _movedEntities.Contains(follow.RawValue));
                         break;
                     default:
-                        realm = PlacedRealm(session);
+                        realm = PlacedRealm(session, out stalePlacement);
                         break;
                 }
             }
 
             // The realm's kind picks the profile's variant (12-realms § 1.4) — in the switch itself, so a realm and variant change is one reset. A realm no
-            // session may be in (no replication declared) puts the session in none; a kind the profile excludes serves it nothing there.
-            var kind = RealmKindOf(realm);
+            // session may be in (no replication declared) puts the session in none; a kind the profile excludes serves it nothing there. A placement in an
+            // incarnation that is gone is gone, whatever now holds its id (RLM-06).
+            var kind = stalePlacement ? RealmGone : RealmKindOf(realm);
             if (kind == RealmGone && realm != RealmId.NoneValue)
             {
                 // The realm was unregistered and a fence found it empty and removed it, with this session still in it (12-realms § 1.6, Q7). Nothing else can
                 // produce this: Enter and Place refuse an unregistered realm, and a followed entity's realm is registered while the entity is alive — so an
-                // unresolvable realm on a session that is in one means the realm went out from under it.
+                // unresolvable realm on a session that is in one means the realm went out from under it. The id may already be registered again — reused once
+                // the removal was durable (RLM-06) — and a placed session then compares incarnations rather than ids: it stays out of the new realm.
                 //
                 // It is noticed HERE rather than at the fence that removes the realm because the realm table is the engine's and the sessions are not: the
                 // fence cannot reach them. The prologue already resolves every session's realm, so this is one comparison on a value it was going to compute.
@@ -495,8 +498,9 @@ internal sealed unsafe partial class FrameAssembler
     private bool _anchorsStale;
     private long _realmTick;
 
-    // Per session slot: the realm the session observes for the realm policy (RLM-03), for which generation, and the last tick it was seen doing so.
-    private int[] _observedRealm = [];
+    // Per session slot: the realm incarnation the session observes for the realm policy (RLM-03), for which session generation, and the last tick it was
+    // seen doing so.
+    private Realm[] _observedIncarnation = [];
     private ushort[] _observedGeneration = [];
     private uint[] _observedSeen = [];
 
@@ -556,16 +560,25 @@ internal sealed unsafe partial class FrameAssembler
         _anchorEntity = new EntityId[n];
         _anchorRealm = new int[n];
         _anchorGeneration = new ushort[n];
-        _observedRealm = new int[n];
+        _observedIncarnation = new Realm[n];
         _observedGeneration = new ushort[n];
         _observedSeen = new uint[n];
-        Array.Fill(_observedRealm, -1);
     }
 
     /// <summary>The realm the application placed a session in; unplaced, realm 0 on an engine with one realm and none on one with several.</summary>
-    private int PlacedRealm(SessionId session)
+    /// <param name="session">The session.</param>
+    /// <param name="stale">Set when the session was placed in an incarnation of that id the realm table no longer holds: removed, and perhaps registered
+    /// again since (RLM-06 reuses an id within the session once its emptiness is durable).</param>
+    private int PlacedRealm(SessionId session, out bool stale)
     {
         var realm = _sessions.RealmOf(session);
+        stale = false;
+        if (realm >= 0 && realm != RealmId.NoneValue)
+        {
+            var placedIn = _sessions.RealmIncarnationOf(session);
+            stale = placedIn != null && !ReferenceEquals(placedIn, Engine?.RealmTable?.TryGet((ushort)realm));
+        }
+
         return realm >= 0 ? realm : MultiRealm ? RealmId.NoneValue : RealmId.Default.Value;
     }
 
@@ -804,32 +817,34 @@ internal sealed unsafe partial class FrameAssembler
         var slot = session.Slot;
         if (_observedGeneration[slot] != session.Generation)
         {
-            Unobserve(table, slot);
+            Unobserve(slot);
             _observedGeneration[slot] = session.Generation;
         }
 
         _observedSeen[slot] = (uint)_tick;
-        var target = realm == RealmId.NoneValue || !table.IsRegistered((ushort)realm) ? -1 : realm;
-        if (target == _observedRealm[slot])
+        var incarnation = realm == RealmId.NoneValue ? null : table.TryGet((ushort)realm);
+        if (ReferenceEquals(incarnation, _observedIncarnation[slot]))
         {
             return;
         }
 
-        Unobserve(table, slot);
-        if (target >= 0)
+        Unobserve(slot);
+        if (incarnation != null)
         {
-            table.AddObserver((ushort)target);
-            _observedRealm[slot] = target;
+            RealmTable.AddObserver(incarnation);
+            _observedIncarnation[slot] = incarnation;
         }
     }
 
-    private void Unobserve(RealmTable table, int slot)
+    // The count is the incarnation's, released on the object it was taken on: a removed realm's is dropped with it, and an id registered again since
+    // (RLM-06) starts from none — never inheriting, nor losing, a count that was another realm's.
+    private void Unobserve(int slot)
     {
-        var observed = _observedRealm[slot];
-        _observedRealm[slot] = -1;
-        if (observed >= 0 && table.IsRegistered((ushort)observed))
+        var observed = _observedIncarnation[slot];
+        _observedIncarnation[slot] = null;
+        if (observed != null)
         {
-            table.RemoveObserver((ushort)observed);
+            RealmTable.RemoveObserver(observed);
         }
     }
 
@@ -842,11 +857,11 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        for (var slot = 0; slot < _observedRealm.Length; slot++)
+        for (var slot = 0; slot < _observedIncarnation.Length; slot++)
         {
-            if (_observedRealm[slot] >= 0 && _observedSeen[slot] != tick)
+            if (_observedIncarnation[slot] != null && _observedSeen[slot] != tick)
             {
-                Unobserve(table, slot);
+                Unobserve(slot);
             }
         }
     }

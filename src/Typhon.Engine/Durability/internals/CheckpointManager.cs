@@ -542,6 +542,30 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     private bool Covers(long ticket, long minCheckpointLsn) => _lastCoveredCycle >= ticket && Interlocked.Read(ref _checkpointLsn) >= minCheckpointLsn;
 
     /// <summary>
+    /// The number of the first cycle to start after this call, without requesting one: <see cref="HasCovered"/> answers once that cycle or a later one has
+    /// written every page it collected (CK-12's ticket, for a caller that waits on the periodic cycle rather than forcing one).
+    /// </summary>
+    /// <remarks>The full fence pairs with the cycle's own numbering, as in <see cref="RequestCycle"/>: the cycle that takes this number collects after every
+    /// write this thread made before the call.</remarks>
+    internal long CoverageTicket()
+    {
+        Interlocked.MemoryBarrier();
+        return Volatile.Read(ref _cyclesStarted) + 1;
+    }
+
+    /// <summary>
+    /// Whether cycle <paramref name="ticket"/> (from <see cref="CoverageTicket"/>) or a later one has finished having written every page it collected, with
+    /// <see cref="CheckpointLsn"/> at <paramref name="minCheckpointLsn"/> or past it. Any thread; never blocks on a cycle.
+    /// </summary>
+    internal bool HasCovered(long ticket, long minCheckpointLsn)
+    {
+        lock (_cycleFinished)
+        {
+            return Covers(ticket, minCheckpointLsn);
+        }
+    }
+
+    /// <summary>
     /// Milliseconds a forced waiter may sleep: until the deadline or until <paramref name="until"/> (a Stopwatch timestamp,
     /// <see cref="long.MaxValue"/> for none), whichever comes first. The end of a cycle wakes it sooner.
     /// </summary>

@@ -107,6 +107,11 @@ internal sealed unsafe partial class SessionTable : IDisposable
     // realm and no realm on one with several (12-realms § 1.2). Tick side, one writer, as the viewpoint.
     private readonly int[] _realms;
 
+    // Per slot: the incarnation of _realms[slot] the session was placed in — the Realm object the table held at Place / Enter, null for none or a
+    // single-world engine. A run-time realm id is reused within a session once its emptiness is durable (RLM-06), so the id alone cannot tell the realm the
+    // application placed the session in from a later one on the same id; the frame prologue compares this against the table's.
+    private readonly Realm[] _realmIncarnations;
+
     // Each slot's run-time Sphere radius (SetRadius), or 0 for its profile's own. Tick side, like the viewpoint; cleared when the slot opens and when its
     // profile changes, because a radius is valid only within the profile it was checked against.
     private readonly double[] _radii;
@@ -223,6 +228,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
         _viewpoints = new SessionViewpoint[_capacity];
         _realms = new int[_capacity];
         Array.Fill(_realms, -1);
+        _realmIncarnations = new Realm[_capacity];
         _radii = new double[_capacity];
         _sessionKinds = new string[_capacity];
         _profileNames = new string[_capacity];
@@ -489,6 +495,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
             row.Followed = EntityId.Null;
             _viewpoints[session.Slot] = default;
             _realms[session.Slot] = -1;
+            _realmIncarnations[session.Slot] = null;
             _radii[session.Slot] = 0d;
 
             _sessionKinds[slot] = sessionKind;
@@ -817,8 +824,13 @@ internal sealed unsafe partial class SessionTable : IDisposable
     /// Places a session in a realm for this tick (R4.3): <paramref name="realm"/> with a viewpoint when <paramref name="placed"/>, nowhere in it otherwise —
     /// or no realm at all (<see cref="RealmId.NoneValue"/>). Tick side, one writer, applied immediately, as <see cref="SetViewpoint"/>.
     /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">The realm, or <see cref="RealmId.NoneValue"/> for none.</param>
+    /// <param name="placed">Whether <paramref name="position"/> is a viewpoint.</param>
+    /// <param name="position">The viewpoint, in the realm's space.</param>
+    /// <param name="incarnation">The realm object the table holds for <paramref name="realm"/> now; null for none or a single-world engine.</param>
     /// <returns><see langword="false"/> when the session is gone.</returns>
-    public bool SetRealm(SessionId session, ushort realm, bool placed, Vector3D position)
+    public bool SetRealm(SessionId session, ushort realm, bool placed, Vector3D position, Realm incarnation = null)
     {
         if (!TryEnter())
         {
@@ -834,6 +846,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
             }
 
             _realms[session.Slot] = realm;
+            _realmIncarnations[session.Slot] = incarnation;
             _viewpoints[session.Slot] = placed ? new SessionViewpoint(position, true) : default;
             return true;
         }
@@ -846,6 +859,9 @@ internal sealed unsafe partial class SessionTable : IDisposable
 
     /// <summary>The realm an application placed a session in, or -1 when it never did. Tick side; the slot is read without a generation check.</summary>
     public int RealmOf(SessionId session) => session.Slot < (uint)_capacity ? _realms[session.Slot] : -1;
+
+    /// <summary>The incarnation of <see cref="RealmOf"/> the session was placed in, or null. Tick side, as <see cref="RealmOf"/>.</summary>
+    public Realm RealmIncarnationOf(SessionId session) => session.Slot < (uint)_capacity ? _realmIncarnations[session.Slot] : null;
 
     /// <summary>
     /// Sets a session's Sphere radius for this tick on. Tick side, from <see cref="SubscriptionsCommands.SetRadius"/>, which checked it against the profile.
@@ -1467,6 +1483,7 @@ internal sealed unsafe partial class SessionTable : IDisposable
             }
 
             _realms[session.Slot] = RealmId.NoneValue;
+            _realmIncarnations[session.Slot] = null;
             _viewpoints[session.Slot] = default;
             _events.Append(new SessionEvent(SessionEventKind.RealmClosed, session, (SessionRole)row.Value.Role, _declaredLimits[session.Slot],
                 _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, default, 0, false, new RealmId(realm)));
