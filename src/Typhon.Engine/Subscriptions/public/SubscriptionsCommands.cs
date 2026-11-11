@@ -426,7 +426,7 @@ public sealed class SubscriptionsCommands : ISessionRequests
                     $"{session} is in no realm, and this engine holds several: place it with Place(session, realm, position) (12-realms § 1.3).");
             }
 
-            return _ingress.Sessions.SetRealm(session, RealmId.Default.Value, placed: true, position);
+            return _ingress.Sessions.SetRealm(session, RealmId.Default.Value, placed: true, position, IncarnationOf(RealmId.Default));
         }
 
         if (_ingress.MultiRealm && _ingress.Sessions.RealmOf(session) < 0)
@@ -453,7 +453,7 @@ public sealed class SubscriptionsCommands : ISessionRequests
     public bool Place(SessionId session, RealmId realm, Vector3D position)
     {
         CheckRealmTarget(session, realm);
-        return _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position);
+        return _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position, IncarnationOf(realm));
     }
 
     /// <summary>
@@ -466,7 +466,7 @@ public sealed class SubscriptionsCommands : ISessionRequests
     public bool Enter(SessionId session, RealmId realm)
     {
         CheckRealmTarget(session, realm);
-        return _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default);
+        return _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default, IncarnationOf(realm));
     }
 
     /// <summary>
@@ -498,7 +498,7 @@ public sealed class SubscriptionsCommands : ISessionRequests
     /// </remarks>
     public bool TryEnter(SessionId session, RealmId realm)
     {
-        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default);
+        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default, IncarnationOf(realm));
     }
 
     /// <summary>
@@ -511,7 +511,7 @@ public sealed class SubscriptionsCommands : ISessionRequests
     /// <returns><see langword="false"/> when the session is closing, gone or anchored, or the realm is gone or closing.</returns>
     public bool TryPlace(SessionId session, RealmId realm, Vector3D position)
     {
-        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position);
+        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position, IncarnationOf(realm));
     }
 
     /// <summary>
@@ -618,6 +618,10 @@ public sealed class SubscriptionsCommands : ISessionRequests
         var realm = state != null && state.Generation == session.Generation ? state.CommittedRealm : -1;
         return realm < 0 ? RealmId.None : new RealmId((ushort)realm);
     }
+
+    /// <summary>The realm object the table holds for <paramref name="realm"/> now — which incarnation a placement is in (RLM-06); null without a
+    /// table.</summary>
+    private Realm IncarnationOf(RealmId realm) => _ingress.Realms?.TryGet(realm.Value);
 
     private void CheckRealmTarget(SessionId session, RealmId realm)
     {

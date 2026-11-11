@@ -14,14 +14,25 @@ namespace Typhon.Engine;
 /// last reverted at the fence, D-2); the entities already in it stay until the application destroys them (<see cref="RealmRegistry.DestroyContents"/>).
 /// The first fence that finds it holding no cluster removes it. The catalog row is marked closing synchronously at the call, so a crash at any point
 /// reopens the realm as Closing: its surviving entities are filed, WAL replay applies the destroys, and an open that finds it empty after recovery
-/// retires the row — only then may the id be registered again (RLM-06).</para>
+/// retires the row (RLM-06).</para>
+/// <para><b>Reuse</b> (#1641): a removed realm's id is registrable again in the same session once its emptiness is durable — once a checkpoint cycle that
+/// started after the removal has written every page it collected, with CheckpointLSN past every WAL record appended by then. From that point no data page
+/// and no replayable record names the old realm's entities, so a crash can no longer hand them to the new one. The registration rewrites the Closing row to
+/// the new identity at the next generation, so <c>(id, generation)</c> tells the incarnations apart.</para>
 /// </remarks>
 public partial class DatabaseEngine
 {
     private readonly Lock _realmLifecycleLock = new();
 
-    // Ids closing or removed this session: not reusable until an open retires their catalog row after proving them empty (RLM-06).
-    private HashSet<ushort> _unavailableRealmIds;
+    // Ids closing or removed this session, with the durability gate their reuse waits for (RLM-06). Absent: the id is free.
+    private Dictionary<ushort, RealmQuarantine> _quarantinedRealmIds;
+
+    /// <summary>
+    /// What an unregistered id waits for before it is registrable again (RLM-06): <see cref="Ticket"/> is the first checkpoint cycle to start after the fence
+    /// that removed the realm, <see cref="Lsn"/> the last WAL record appended by then. <see cref="Ticket"/> 0 = still Closing (not removed);
+    /// <see cref="long.MaxValue"/> = never in this session (no checkpoint manager).
+    /// </summary>
+    private readonly record struct RealmQuarantine(long Ticket, long Lsn);
 
     // Catalog rows of retired realms (State = Retired), by id: a later registration of the id reuses its row with a bumped generation.
     private Dictionary<ushort, (int ChunkId, RealmR1 Row)> _retiredRealmRows;
@@ -45,16 +56,25 @@ public partial class DatabaseEngine
                 throw new InvalidOperationException("Realm 0 is registered at open (ConfigureSpatialGrid or Realms.Register before InitializeArchetypes).");
             }
 
-            if (table.IsRegistered(id.Value))
+            if (table.TryGet(id.Value) is { } existing)
             {
-                throw new InvalidOperationException($"Realm {id.Value} is already registered.");
+                throw new InvalidOperationException(existing.Closing
+                    ? $"Realm {id.Value} is closing: its id is reusable once the realm is empty, removed, and a checkpoint has made that durable (RLM-06)."
+                    : $"Realm {id.Value} is already registered.");
             }
 
-            if (_unavailableRealmIds != null && _unavailableRealmIds.Contains(id.Value))
+            if (_quarantinedRealmIds != null && _quarantinedRealmIds.TryGetValue(id.Value, out var quarantine))
             {
-                throw new InvalidOperationException(
-                    $"Realm {id.Value} was unregistered this session: its id is reusable only after an open retires it (RLM-06) — a crash before the "
-                    + "destroys are checkpointed would otherwise replay the old realm's entities into the new one.");
+                if (!IsQuarantineOver(quarantine))
+                {
+                    throw new InvalidOperationException(
+                        $"Realm {id.Value} was removed this session and its id is not reusable yet: a checkpoint that started after the removal must "
+                        + "complete first (RLM-06) — a crash before then would replay the old realm's entities into the new one. Realms.CanRegister tells "
+                        + "when; ForceCheckpoint brings it forward.");
+                }
+
+                // The removal is durable: the Closing row becomes the retired row this registration reuses at the next generation.
+                ReleaseQuarantinedId(id.Value);
             }
 
             config.Validate(id);
@@ -100,7 +120,7 @@ public partial class DatabaseEngine
                 _persistedRealms[id.Value] = (persisted.ChunkId, row);
             }
 
-            (_unavailableRealmIds ??= []).Add(id.Value);
+            (_quarantinedRealmIds ??= [])[id.Value] = default;
             table.MarkClosing(id.Value);
         }
     }
@@ -205,6 +225,55 @@ public partial class DatabaseEngine
 
                 table.Remove(id);
             }
+
+            // The reuse gate (RLM-06), taken after the realm is gone: this fence has freed its last clusters and dirtied their pages, and every destroy that
+            // emptied it is committed. A cycle that starts after this point collects those pages; CheckpointLSN past this LSN means no replay names them.
+            var checkpoint = CheckpointManager;
+            var gate = checkpoint == null
+                ? new RealmQuarantine(long.MaxValue, long.MaxValue)
+                : new RealmQuarantine(checkpoint.CoverageTicket(), WalManager?.LastAppendedLsn ?? 0);
+            _quarantinedRealmIds ??= [];
+            foreach (var id in empty)
+            {
+                _quarantinedRealmIds[id] = gate;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether realm <paramref name="id"/> may be registered now: in range, not realm 0, not registered (nor closing), and — when it was removed this session —
+    /// its removal durable (RLM-06). Any thread; a point-in-time answer.
+    /// </summary>
+    internal bool CanRegisterRealm(ushort id)
+    {
+        var table = _realms;
+        if (table == null || id == RealmId.Default.Value || id >= table.MaxRealms || table.IsRegistered(id))
+        {
+            return false;
+        }
+
+        lock (_realmLifecycleLock)
+        {
+            return _quarantinedRealmIds == null || !_quarantinedRealmIds.TryGetValue(id, out var quarantine) || IsQuarantineOver(quarantine);
+        }
+    }
+
+    /// <summary>True once a removed realm's emptiness is on the data file and past the WAL replay start (RLM-06). Caller holds the lifecycle lock.</summary>
+    private bool IsQuarantineOver(RealmQuarantine quarantine) =>
+        quarantine.Ticket != 0 && quarantine.Ticket != long.MaxValue && CommitPipelineFailure == null
+        && CheckpointManager is { } checkpoint && checkpoint.HasCovered(quarantine.Ticket, quarantine.Lsn);
+
+    /// <summary>
+    /// Frees a removed realm's id whose removal is durable: its Closing catalog row becomes the retired row the registration under way reuses at the next
+    /// generation. Nothing is written here — the registration's synchronous row write is the single step that moves the id to its new incarnation, so a
+    /// crash before it reopens the old row as Closing, finds it empty and retires it. Caller holds the lifecycle lock.
+    /// </summary>
+    private void ReleaseQuarantinedId(ushort id)
+    {
+        _quarantinedRealmIds.Remove(id);
+        if (_persistedRealms != null && _persistedRealms.Remove(id, out var row))
+        {
+            (_retiredRealmRows ??= [])[id] = row;
         }
     }
 

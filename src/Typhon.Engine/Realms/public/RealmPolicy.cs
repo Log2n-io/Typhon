@@ -92,14 +92,14 @@ public readonly record struct RealmStateCounts(int Active, int Simulated, int Do
 [PublicAPI]
 public sealed class RealmObserver : IDisposable
 {
-    private readonly RealmTable _table;
+    // The incarnation pinned (RLM-06 reuses an id within the session): released on it, so a pin outliving its realm never touches a later one on the id.
+    private readonly Internals.Realm _incarnation;
     private int _released;
 
     internal RealmObserver(RealmTable table, RealmId realm)
     {
-        _table = table;
         Realm = realm;
-        table.AddObserver(realm.Value);
+        _incarnation = table.AddObserver(realm.Value);
     }
 
     /// <summary>The realm this pin holds active.</summary>
@@ -110,7 +110,7 @@ public sealed class RealmObserver : IDisposable
     {
         if (Interlocked.Exchange(ref _released, 1) == 0)
         {
-            _table.RemoveObserver(Realm.Value);
+            RealmTable.RemoveObserver(_incarnation);
         }
     }
 }

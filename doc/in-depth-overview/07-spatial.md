@@ -449,7 +449,8 @@ mask), and the change-filter dirty scans skip clusters outside it (RLM-07).
 
 **Persistence.** Each realm's identity (bounds, cell size, hysteresis) is a row of the realm catalog (`RealmR1`), written synchronously at its first
 registration and checked at every open (RLM-01); the spatial rebuild files each cluster in the realm its entities name and checks every slot (RM-06).
-Run-time `Unregister` marks the realm `Closing`; it is removed once empty, and its id returns only after an open proves it empty (RLM-06).
+Run-time `Unregister` marks the realm `Closing`; it is removed once empty, and its id returns — at the next generation — once a checkpoint that started
+after the removal has completed, so no data page or replayable WAL record still names the old realm's entities (RLM-06).
 
 ---
 
