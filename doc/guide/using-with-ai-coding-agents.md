@@ -64,6 +64,24 @@ Systems add four idioms whose failure **nothing reports** — get them right up 
 
 Every idiom in this section is compiled in the guide's example project (`doc/guide/example/AgentIdioms.cs`), so it tracks the API.
 
+### Build diagnostics: act on them, don't suppress them
+
+The `Typhon` package runs analyzers in your build. An error from one of them is a real defect, not style: fix it the way the message says. The full list
+with fixes is [Build diagnostics](diagnostics.md); the ones agents hit most:
+
+| ID | Means | Fix |
+|---|---|---|
+| TYPHON004 | a `Transaction` / `UnitOfWork` / enumerator is never disposed (pins its epoch) | `using var tx = …` |
+| TYPHON001 / 003 | a no-copy type (`ClusterEnumerator<T>`, …) passed by value or copied | pass it by `ref` |
+| TYPHON011 | a component uses `bool` / `char` (layouts diverge, fields read wrong bytes) | `byte` / `ushort` |
+| TYPHON010 | a component stores avoidable padding | `[StructLayout(LayoutKind.Sequential, Pack = 4)]` |
+| TYPHON012 | `Set`/`Enable` on an `in` / readonly `EntityRefMut` (hidden copy, the write is lost) | take the handle by `ref` |
+| TYPHON009 | a `[SpatialIndex]` component written through `GetSpan` | `cluster.WriteSpatial(…)` |
+| TYPHON013 | a component over 112 bytes passed to `Spawn` | split it, or write it through `OpenMut` |
+| TYPHON015 | a command sent by name while its `[ReplicatedMessage]` struct exists | send it typed |
+
+Analyzers run in the project that references the `Typhon` package directly; they do not flow through project references.
+
 ## 4. A minimal program that compiles
 
 This is the smallest correct end-to-end example — declare a component and archetype, spawn, mutate,

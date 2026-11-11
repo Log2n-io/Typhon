@@ -15,4 +15,9 @@
     <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.3.0" PrivateAssets="all" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Help links for the TPH diagnostics (#1584); single source in Typhon.Analyzers. -->
+    <Compile Include="..\Typhon.Analyzers\DiagnosticHelp.cs" Link="DiagnosticHelp.cs" />
+  </ItemGroup>
+
 </Project>

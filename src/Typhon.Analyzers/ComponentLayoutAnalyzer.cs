@@ -114,7 +114,7 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
           + "is accepted and never reported. Reordering the fields relocates the padding rather than removing it — Pack is what removes it, and is preferred "
           + "over Size because it follows the fields instead of freezing a number that rots when one is added. The trade is alignment: an 8-byte field in a "
           + "12-byte stride is 4-byte-aligned on odd slots, fine for ordinary loads but not for Interlocked. Pack also moves interior field offsets, which are "
-          + "persisted — prefer Size on a component that already has data on disk.");
+          + "persisted — prefer Size on a component that already has data on disk.", helpLinkUri: DiagnosticHelp.For(PaddingDiagnosticId));
 
     private static readonly DiagnosticDescriptor MarshalDivergenceRule = new DiagnosticDescriptor(
         MarshalDivergenceDiagnosticId,
@@ -130,7 +130,7 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
           + "field-addressed path — index key extraction, WAL field decode, crash recovery, schema evolution, the integrity scanner, the Workbench raw read — "
           + "reads the wrong bytes, with no error anywhere; whole-struct copies keep working, which is what makes it so quiet. For char the two layouts can "
           + "even have the same total size, so no runtime size check can detect it. This is an error rather than a warning because there is no correct way to "
-          + "use such a component.");
+          + "use such a component.", helpLinkUri: DiagnosticHelp.For(MarshalDivergenceDiagnosticId));
 
     private static readonly DiagnosticDescriptor InlineSpawnPayloadRule = new DiagnosticDescriptor(
         InlineSpawnPayloadDiagnosticId,
@@ -147,7 +147,7 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
           + "better layout anyway, while at the call site the only remaining option is the two-step spawn. A component over the limit is LEGAL - spawn the "
           + "entity with its smaller components and write this one through OpenMut - so this is a warning, and a component taking that route deliberately should "
           + "suppress it with a reason. The runtime check used to be compiled out by default and corrupted memory instead of throwing (#1140); it is ungated "
-          + "now, but it still fires on the first spawn, whereas the size is a property of the declaration.");
+          + "now, but it still fires on the first spawn, whereas the size is a property of the declaration.", helpLinkUri: DiagnosticHelp.For(InlineSpawnPayloadDiagnosticId));
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         ImmutableArray.Create(PaddingRule, MarshalDivergenceRule, InlineSpawnPayloadRule);

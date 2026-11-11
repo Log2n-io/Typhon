@@ -39,7 +39,7 @@ public class TypedCommandAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description:
             "The name-keyed SendCommandAsync finds fields by string at run time and allocates per send. A [ReplicatedMessage] struct sent with "
-            + "TyphonClient.Enqueue is checked by the compiler and bound to the negotiated catalog once.");
+            + "TyphonClient.Enqueue is checked by the compiler and bound to the negotiated catalog once.", helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 

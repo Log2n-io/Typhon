@@ -49,4 +49,11 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
 - **Never write an `[Index]`ed SingleVersion/Transient component through a span** (`ClusterRef.GetSpan`/`Get`) — it throws;
   write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
 
+**Build diagnostics are real defects — fix, don't suppress.** The `Typhon` package runs analyzers in your build (in the project that
+references the package directly): TYPHON004 = a `Transaction`/enumerator never disposed → `using var`; TYPHON001/003 = a no-copy type passed by value
+or copied → `ref`; TYPHON011 = `bool`/`char` in a component → `byte`/`ushort`; TYPHON010 = avoidable padding → `[StructLayout(LayoutKind.Sequential,
+Pack = 4)]`; TYPHON012 = `Set` on an `in`/readonly `EntityRefMut` → take it by `ref`; TYPHON009 = spatial component written through `GetSpan` →
+`WriteSpatial`; TYPHON013 = component over 112 bytes passed to `Spawn` → split it. All of them, with fixes:
+https://doc.typhondb.io/latest/guides/diagnostics.html.
+
 The whole conceptual core is also available as one file at https://doc.typhondb.io/llms-full.txt.

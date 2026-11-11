@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <RootNamespace>Typhon.Analyzers</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.3.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    The CONSUMER-facing analyzers, shipped inside the `Typhon` package under analyzers/dotnet/cs (#1584).
+
+    Single source of truth: every analyzer lives in Typhon.Analyzers (which the engine's own build runs in full); this project links only the ones that
+    apply to code written AGAINST the engine. Mirrors the Typhon.Generators / Typhon.Generators.Consumer split.
+
+    Left out, on purpose:
+    - InternalApiLeakAnalyzer (TYPHON008): polices the engine's own public/Internals namespace split — meaningless in a consumer.
+    - OwnershipMarkerAnalyzer (TYPHON014): demands [MustDispose]/[NoCopy] on owning types, and those attributes are internal to the engine, so a
+      consumer could never satisfy it. Ownership is still INFERRED for consumer types (OwnershipCatalog), which is what TYPHON001/003/004/005-007 need.
+    - TypedCommandAnalyzer (TYPHON015): binds on Typhon.Client, so it ships in the Typhon.Protocol package (Typhon.Generators.Protocol), which both a
+      client and a server reference — once.
+    - Code fixes: they need Microsoft.CodeAnalysis.Workspaces, which a command-line build does not load; they ship in Typhon.Analyzers.Consumer.CodeFixes.
+
+    Shipped IDs are public contract: AnalyzerReleases.*.md is enforced by RS2008.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Typhon.Analyzers\ComponentLayoutAnalyzer.cs" Link="ComponentLayoutAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\CriticalFieldDisposalAnalyzer.cs" Link="CriticalFieldDisposalAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\DisposableAnalyzerHelpers.cs" Link="DisposableAnalyzerHelpers.cs" />
+    <Compile Include="..\Typhon.Analyzers\DisposableNotDisposedAnalyzer.cs" Link="DisposableNotDisposedAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\EntityHandleDefensiveCopyAnalyzer.cs" Link="EntityHandleDefensiveCopyAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\NoCopyAnalyzer.cs" Link="NoCopyAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\SpatialMutationWithoutBarrierAnalyzer.cs" Link="SpatialMutationWithoutBarrierAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\DiagnosticHelp.cs" Link="DiagnosticHelp.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
+  </ItemGroup>
+
+</Project>

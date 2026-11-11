@@ -36,7 +36,7 @@ public class EntityHandleDefensiveCopyAnalyzer : DiagnosticAnalyzer
         description:
             "EntityRef and EntityRefMut are ~200-byte ref structs. Calling a member that is not readonly on a read-only receiver (in / ref readonly " +
             "parameter or local, foreach or using variable, readonly field, 'this' in a readonly member, ref readonly return) makes a defensive copy first. " +
-            "Hold the handle in a mutable local (var e = tx.OpenMut(id)) or pass it by ref.");
+            "Hold the handle in a mutable local (var e = tx.OpenMut(id)) or pass it by ref.", helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(Rule);
 

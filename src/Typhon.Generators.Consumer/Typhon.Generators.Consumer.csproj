@@ -6,8 +6,6 @@
     <Nullable>disable</Nullable>
     <IsPackable>false</IsPackable>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-    <!-- RS2008 = analyzer release tracking; not applicable to this internal, non-distributed generator. -->
-    <NoWarn>$(NoWarn);RS2008</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,6 +26,13 @@
   -->
   <ItemGroup>
     <Compile Include="..\Typhon.Generators\ArchetypeAccessorGenerator.cs" Link="ArchetypeAccessorGenerator.cs" />
+    <Compile Include="..\Typhon.Analyzers\DiagnosticHelp.cs" Link="DiagnosticHelp.cs" />
+  </ItemGroup>
+
+  <!-- Shipped diagnostic IDs are public contract (#1584): RS2008 release tracking. -->
+  <ItemGroup>
+    <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
   </ItemGroup>
 
 </Project>

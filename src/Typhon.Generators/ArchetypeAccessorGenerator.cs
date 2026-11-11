@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Typhon.Analyzers;
 
 namespace Typhon.Generators;
 
@@ -117,7 +118,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         messageFormat: "Cascade-delete cycle detected involving archetype '{0}'. Cycles in cascade graphs are forbidden.",
         category: "Typhon.Cascade",
         defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+        isEnabledByDefault: true, helpLinkUri: DiagnosticHelp.For("TPH1001"));
 
     private static readonly DiagnosticDescriptor CascadeDiamondDescriptor = new(
         id: "TPH1002",
@@ -125,7 +126,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
         messageFormat: "Cascade-delete diamond detected: archetype '{0}' is reachable via multiple cascade paths. Diamond cascade graphs are forbidden.",
         category: "Typhon.Cascade",
         defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+        isEnabledByDefault: true, helpLinkUri: DiagnosticHelp.For("TPH1002"));
 
     // ═══════════════════════════════════════════════════════════════════════
     // Transform: syntax + semantic model → ArchetypeModel
@@ -1064,7 +1065,7 @@ public partial class ArchetypeAccessorGenerator
                        + "constraints are independent and cost nothing.",
         category: "Typhon.Schema",
         defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+        isEnabledByDefault: true, helpLinkUri: DiagnosticHelp.For("TPH1003"));
 
     private static readonly DiagnosticDescriptor DuplicateComponentDeclarationDescriptor = new(
         id: "TPH1004",
@@ -1074,7 +1075,7 @@ public partial class ArchetypeAccessorGenerator
                        + "Remove the Register call; the inherited slot is already there.",
         category: "Typhon.Schema",
         defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
+        isEnabledByDefault: true, helpLinkUri: DiagnosticHelp.For("TPH1004"));
 
     private static DeclArchModel TransformDeclaration(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
     {

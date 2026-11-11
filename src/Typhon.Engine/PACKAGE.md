@@ -51,6 +51,10 @@ attributes — which a contracts assembly shared with clients can reference alon
 **Source generators** ship alongside: decorate a partial class with `[Archetype]` and Typhon generates the strongly-typed, zero-copy
 component accessors for it at compile time; `[Replicated]` / `[ReplicatedMessage]` declare what Subscriptions send.
 
+**Analyzers** ship too, and run in every project that references this package directly: they catch at build time the mistakes Typhon would
+otherwise report late or never — an undisposed transaction, a component layout the schema cannot describe, a hidden copy of an entity handle.
+Each diagnostic links to its fix: <https://doc.typhondb.io/latest/guides/diagnostics.html>.
+
 ## Serving remote clients
 
 Subscriptions replicate engine state to game clients, browsers and bots. Host the WebSocket endpoint with

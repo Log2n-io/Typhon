@@ -35,7 +35,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
             "Types marked with [NoCopy] are large structs with mutating methods. " +
             "They must be passed by 'ref' only. The 'in' modifier causes defensive copies when calling " +
             "non-readonly methods, defeating the performance design. " +
-            "Passing by value creates expensive stack copies.");
+            "Passing by value creates expensive stack copies.", helpLinkUri: DiagnosticHelp.For(RefDiagnosticId));
 
     // ═══════════════════════════════════════════════════════════════════════
     // TYPHON003 — no-copy enforcement
@@ -53,7 +53,7 @@ public class NoCopyAnalyzer : DiagnosticAnalyzer
         description:
             "Types marked with [NoCopy] are large structs designed for zero-allocation performance. " +
             "Copying them creates expensive stack copies and duplicates internal state. " +
-            "All usage should pass by 'ref' to avoid copies.");
+            "All usage should pass by 'ref' to avoid copies.", helpLinkUri: DiagnosticHelp.For(CopyDiagnosticId));
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         ImmutableArray.Create(RefRule, CopyRule);
