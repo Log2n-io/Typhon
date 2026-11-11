@@ -121,6 +121,7 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
             Assert.That(dbe.LastOpenClusterIndexRebuildCount, Is.EqualTo(1));
             Assert.That(stats.Trees, Is.EqualTo(4));
             Assert.That(stats.UniqueConflicts, Is.Zero);
+            Assert.That(stats.FullLeafTrees, Is.EqualTo(2), "the two multi-value trees fill their leaves; the two shuffled unique ones leave room (D2)");
             Assert.That(stats.PeakNativeBytes, Is.LessThanOrEqualTo(new IndexRebuildOptions().MemoryBudgetBytes), "within the budget");
             switch (mode)
             {
@@ -155,6 +156,73 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
         }
 
         AssertTreesAgreeWithData(dbe, 0, "after destroying every entity: each removed through its tail's element id");
+    }
+
+    [TestCase(49, false)]
+    [TestCase(50, true)]
+    [TestCase(100, true)]
+    [TestCase(101, false)]
+    public void LeafFillPercent_IsValidatedWithin50To100(int percent, bool valid)
+    {
+        var failures = new List<string>();
+        new IndexRebuildOptions { LeafFillPercent = percent }.Validate(failures);
+        Assert.That(failures, valid ? Is.Empty : Has.One.Contains("LeafFillPercent"));
+    }
+
+    /// <summary>
+    /// D2: a unique tree whose keys ascend with location — the shape of a sequence or a timestamp — gets full leaves, since its inserts land at the right
+    /// edge; one whose keys come in any other order gets <see cref="IndexRebuildOptions.LeafFillPercent"/>, room for inserts between them. The ascent is
+    /// judged across every staged buffer, so a spilled build decides as an in-memory one does.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [CancelAfter(60_000)]
+    [VerifiesRule("IXB-01")]
+    public void UniqueKeysAscendingWithLocation_GetFullLeaves(bool spilled)
+    {
+        const int n = 5_000;
+        using (var scope = Provider(64UL << 20, deleteFile: true).CreateScope())
+        {
+            var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SrThreeKeys>();
+            dbe.InitializeArchetypes();
+            using (var t = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < n; i++)
+                {
+                    // A ascends with the spawn order, B descends, C is a sawtooth whose teeth are the spilled build's staged buffers (400 entries):
+                    // each buffer ascends on its own, and only the check across buffers sees C drop.
+                    t.Spawn<SrThreeKeysArch>(SrThreeKeysArch.Row.Set(new SrThreeKeys { A = i, B = -i, C = i % 400 * 100_000L + i / 400 }));
+                }
+
+                Assert.That(t.Commit(), Is.True);
+            }
+
+            dbe.SimulateUncleanShutdownForTest = true;
+            dbe.Dispose();
+        }
+
+        if (spilled)
+        {
+            SortedIndexRebuild.StageEntriesForTest = 400;
+        }
+
+        using (var scope = Provider(64UL << 20).CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<SrThreeKeys>();
+            dbe.InitializeArchetypes();
+            var stats = dbe.LastOpenIndexRebuild;
+            Assert.That(dbe.CrashRecoveryAtOpen, Is.True, "premise: a crash open");
+            Assert.Multiple(() =>
+            {
+                Assert.That(stats.Trees, Is.EqualTo(3));
+                Assert.That(stats.Runs, spilled ? Is.GreaterThan(3 * 5) : Is.EqualTo(3), "premise: spilled or not as the case says");
+                Assert.That(stats.FullLeafTrees, Is.EqualTo(1), "only the ascending tree fills its leaves");
+            });
+
+            IndexDataOracle.AssertIndexAgreesWithData(dbe, ArchetypeRegistry.GetMetadata<SrThreeKeysArch>(), "the trees the crash open rebuilt");
+        }
     }
 
     /// <summary>
@@ -229,7 +297,7 @@ internal sealed unsafe class SortedIndexRebuildTests : DiskWalEngineFixture
             Assert.That(indexPages.Count, Is.GreaterThan(cachePages), "premise: the trees are larger than the cache");
             var stats = dbe.LastOpenIndexRebuild;
             TestContext.Out.WriteLine($"index-segment pages {indexPages.Count}, written during the open {indexWrites}, all data-file writes {written.Count}, "
-                + $"runs {stats.Runs}, extra merge passes {stats.ExtraMergePasses}, peak native {stats.PeakNativeBytes}");
+                + $"runs {stats.Runs}, extra merge passes {stats.ExtraMergePasses}, peak native {stats.PeakNativeBytes}, nodes written {stats.NodesWritten}");
             Assert.Multiple(() =>
             {
                 Assert.That(stats.Runs, Is.GreaterThan(3 * 2), "premise: the data outgrew the budget, so every tree spilled runs");

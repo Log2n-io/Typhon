@@ -22,6 +22,8 @@ internal sealed class IndexRebuildStats
     public long ElementIdTails;
     public int ElementIdRuns;
     public long PeakNativeBytes;
+    public long NodesWritten;
+    public int FullLeafTrees;
 }
 
 /// <summary>
@@ -98,6 +100,10 @@ internal static unsafe class SortedIndexRebuild
         public byte* Base;
         public int Count;
         public List<RunDescriptor> Runs = [];
+
+        // Whether the keys have ascended with location so far (§D2): every buffer already ordered, and each one's first key not below the last one's last.
+        public bool Ascending = true;
+        public NativeBuffer Last;
     }
 
     /// <summary>The temp directory of a bundle: <c>{bundle}/rebuild-tmp</c>, or <c>{TempDirectory}/{bundle name}.rebuild-tmp</c> when the options name
@@ -169,7 +175,8 @@ internal static unsafe class SortedIndexRebuild
                 maxStride = Math.Max(maxStride, p.Stride);
             }
 
-            var capacity = Math.Max(MinimumStageEntries, (budget - IoBufferBytes) / (strideSum + maxStride));
+            // Σstride once more for each field's last staged key (the ascent check, D2), so that buffer stays inside the budget too.
+            var capacity = Math.Max(MinimumStageEntries, (budget - IoBufferBytes - strideSum) / (strideSum + maxStride));
             capacity = Math.Min(capacity, (long)clusterCount * layout.ClusterSize);
             capacity = Math.Min(capacity, int.MaxValue / maxStride);
             if (StageEntriesForTest > 0)
@@ -186,12 +193,38 @@ internal static unsafe class SortedIndexRebuild
             scratch = memory.Allocate(capacity * maxStride, "IndexRebuild.SortScratch");
             var counts = new int[RadixSort.Buckets];
 
-            void Spill(FieldPlan p)
+            // Sorts a field's buffer, tracking whether its keys still ascend with location.
+            void SortBuffer(FieldPlan p)
             {
-                if (!p.Rebuild.Sort(p.Base, p.Count, scratch.Pointer, counts))
+                if (p.Count == 0)
+                {
+                    return;
+                }
+
+                if (p.Ascending && p.Last != null && p.Rebuild.CompareKeys(p.Last.Pointer, p.Base) > 0)
+                {
+                    p.Ascending = false;
+                }
+
+                if (p.Rebuild.Sort(p.Base, p.Count, scratch.Pointer, counts))
+                {
+                    p.Ascending = false;
+                }
+                else
                 {
                     stats.SortsSkipped++;
                 }
+
+                if (p.Ascending)
+                {
+                    p.Last ??= memory.Allocate(p.Stride, "IndexRebuild.LastKey");
+                    new ReadOnlySpan<byte>(p.Base + (long)(p.Count - 1) * p.Stride, p.Stride).CopyTo(p.Last.Span);
+                }
+            }
+
+            void Spill(FieldPlan p)
+            {
+                SortBuffer(p);
 
                 p.Runs.Add(OpenFile().Write(new ReadOnlySpan<byte>(p.Base, p.Count * p.Stride), p.Stride, p.Count, RebuildBlockKind.Run, nextRunId++,
                     new Span<byte>((void*)Staging(), IoBufferBytes)));
@@ -254,11 +287,7 @@ internal static unsafe class SortedIndexRebuild
             {
                 if (p.Runs.Count == 0)
                 {
-                    if (!p.Rebuild.Sort(p.Base, p.Count, scratch.Pointer, counts))
-                    {
-                        stats.SortsSkipped++;
-                    }
-
+                    SortBuffer(p);
                     if (p.Count > 0)
                     {
                         p.Runs.Add(new RunDescriptor(p.Base, p.Count, nextRunId++));
@@ -277,6 +306,10 @@ internal static unsafe class SortedIndexRebuild
             }
 
             memory.Free(ref scratch);
+            foreach (var p in plans)
+            {
+                memory.Free(ref p.Last);
+            }
 
             // ── Build: the kept runs stay, the pair buffers and the merge's buffers take what is left ───────────────────────────────────────────────
             var sections = new List<int>();
@@ -339,13 +372,19 @@ internal static unsafe class SortedIndexRebuild
                     Sink = p.Column >= 0 ? writeBack : null,
                     MultiFieldIndex = p.Column,
                     NextRunId = nextRunId,
+                    LeafFillPercent = p.Tree.AllowMultiple || p.Ascending ? 100 : options.LeafFillPercent,
                 };
+                if (p.Tree.AllowMultiple || p.Ascending)
+                {
+                    stats.FullLeafTrees++;   // full by the D2 policy, not because the option says 100
+                }
 
                 var result = p.Rebuild.Build(input);
                 nextRunId = input.NextRunId;
                 conflicts += result.UniqueConflicts;
                 stats.Entries += result.Entries;
                 stats.ExtraMergePasses += result.ExtraMergePasses;
+                stats.NodesWritten += result.NodesWritten;
                 if (p.Column >= 0)
                 {
                     writeBack.EndColumn(p.Column);
@@ -383,6 +422,7 @@ internal static unsafe class SortedIndexRebuild
             foreach (var p in plans)
             {
                 memory.Free(ref p.Buffer);
+                memory.Free(ref p.Last);
             }
 
             memory.Free(ref scratch);

@@ -331,8 +331,11 @@ lock ordering and deadlock prevention are still to come.
             range enumeration and Path A's cluster walk, and the spatial query's visibility probes — read through a scan accessor
             (ChunkBasedSegment.CreateScanAccessor): its 32-slot window pins each page by SlotRefCount, taken with AcquirePageForRead, and releases
             it the moment it leaves the window. It marks the page recently used, as the epoch path does — for a page on probation, a request
-            from another operation promotes it (PS-25) — so the change is only in what holds the page. Every exit disposes it, a fault included — the entity-map scans in a finally, the range enumerator's constructor if
-            positioning faults: a window's pins are slot references, and nothing else releases them
+            from another operation promotes it (PS-25) — so the change is only in what holds the page. Every exit disposes it, a fault included —
+            the entity-map scans in a finally: a window's pins are slot references, and nothing else releases them
+  invariant a range enumerator is never copied once it has taken a step: it takes nothing until its first MoveNext (BTree.RangeEnumerator.Start), so
+            the copy `using` + `foreach` makes (GetEnumerator hands the loop one, the original is disposed too) owns nothing. A window is a fixed
+            buffer: a pin taken before the copy was owned by both and released twice, the page's SlotRefCount under the readers it had
   invariant so do the reads no query plan chooses to bound: a cluster walk (ClusterEnumerator: a transaction's, and any of LongWalkClusters or more; a
             shorter walk on a lease is bounded by the lease; a ClusterRef is valid for its step, EP-03, and MoveNext records a page handed out before it
             moves), an ordered query's merge streams (ArchetypeSortedStream, tree and clusters, their windows narrowed to share a quarter of the cache, down to
@@ -500,7 +503,10 @@ lock ordering and deadlock prevention are still to come.
             PublishLargerThanTheCacheRecoveryTests.APublishThatGaveBackItsMarks_IsRecoveredWhole_AfterAHardCrash [VerifiesRule] — the crash open of
             an index segment larger than its 8 MiB cache completes, every key and value the committed one (timed out on back-pressure before).
             ChunkBasedSegmentBitmapL3Tests.FreeAllChunksFrom_IgnoresTheBitsPastAPagesLastChunk [VerifiesRule] — padding bits set on two pages:
-            the reset leaves the count at chunk 0's alone, equal to the bitmap's, and the padding bits as they were
+            the reset leaves the count at chunk 0's alone, equal to the bitmap's, and the padding bits as they were.
+            BTreeRangeScanRestartTests.UsingAndForeach_DisposeTwoCopies_ReleaseEachPinOnce [VerifiesRule] — forward, reverse and unbounded scans
+            under `using` + `foreach`: every page's SlotRefCount is back where it was (red before the lazy start: 2 pins lost per bounded scan);
+            …_OverAMultiValueScan_OrLeftEarly_… [VerifiesRule] — the multi-value wrapper, and a loop left by `break` (both red before)
   verified: QueryScanCacheBoundTests.PagesAWriterTagsDuringALongWalk_AreNotHeldByTheWalksEpoch [VerifiesRule] — a writer commits 8 000 updates at
             a walk's second yield; by its fourth, fewer than 16 pages are epoch-protected, the entity-map count and the SoA scan alike (604 with the
             yield's refresh removed). AWalkWaitingOnBackpressure_DoesNotHoldTheCacheWithItsEpoch [VerifiesRule] — the yield refresh off, a writer

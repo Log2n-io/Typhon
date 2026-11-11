@@ -25,14 +25,29 @@ public sealed class IndexRebuildOptions
     /// </summary>
     public int MergeReadBufferBytes { get; set; } = 1 << 20;
 
-    /// <summary>The temp file's directory; null puts it in the database bundle, <c>{bundle}/rebuild-tmp</c>, on the data file's volume.</summary>
+    /// <summary>
+    /// The temp file's directory; null puts it in the database bundle, <c>{bundle}/rebuild-tmp</c>, on the data file's volume. When set, the rebuild works
+    /// in a subdirectory of it named after the database, <c>{TempDirectory}/{bundle name}.rebuild-tmp</c>.
+    /// </summary>
     public string TempDirectory { get; set; }
+
+    /// <summary>
+    /// How full the rebuild fills the leaves of a unique tree whose keys do not grow with the entities' cluster locations: 90 % by default, 50..100. Each
+    /// leaf keeps the rest free, so the first inserts after the open do not split it. A multi-value tree, and a unique tree whose keys do grow with
+    /// location (a sequence number, a timestamp), are built full: their inserts land in a value buffer or at the rightmost leaf.
+    /// </summary>
+    public int LeafFillPercent { get; set; } = 90;
 
     internal void Validate(List<string> failures)
     {
         if (MemoryBudgetBytes < MinimumMemoryBudgetBytes)
         {
             failures.Add($"IndexRebuild.MemoryBudgetBytes must be >= {MinimumMemoryBudgetBytes} (was {MemoryBudgetBytes}).");
+        }
+
+        if (LeafFillPercent is < 50 or > 100)
+        {
+            failures.Add($"IndexRebuild.LeafFillPercent must be within 50..100 (was {LeafFillPercent}).");
         }
 
         if (MergeReadBufferBytes < 64 * 1024 || MergeReadBufferBytes % (64 * 1024) != 0)

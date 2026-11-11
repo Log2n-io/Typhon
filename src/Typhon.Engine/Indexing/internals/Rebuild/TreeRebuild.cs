@@ -27,6 +27,9 @@ internal sealed unsafe class TreeBuildInput
     public IElementIdSink Sink;
     public int MultiFieldIndex;
     public int NextRunId;
+
+    /// <summary>The leaf fill of the bottom-up build, 50..100 (design §D2).</summary>
+    public int LeafFillPercent = 100;
 }
 
 /// <summary>What one tree's build did.</summary>
@@ -35,6 +38,7 @@ internal struct TreeBuildResult
     public long Entries;
     public int UniqueConflicts;
     public int ExtraMergePasses;
+    public long NodesWritten;
 }
 
 /// <summary>
@@ -58,16 +62,20 @@ internal unsafe interface ITreeRebuild
     /// <summary>Sorts <paramref name="count"/> staged entries in place; false when they already were in order.</summary>
     bool Sort(byte* entries, int count, byte* scratch, Span<int> counts);
 
+    /// <summary>Compares two staged entries' keys in the tree's order.</summary>
+    int CompareKeys(byte* a, byte* b);
+
     /// <summary>Merges the tree's runs and fills the (empty) tree from them, in key then location order.</summary>
     TreeBuildResult Build(TreeBuildInput input);
 }
 
 /// <summary>
-/// The ordered-insert build of one tree (#1588, design §D1, Phase 4): the merged stream goes through the tree's own <c>Add</c>, which, fed in key order,
-/// fills each leaf before moving right, so every index page is written about once. It stays as the bottom-up builder's differential oracle.
+/// The build of one tree from its merged runs (#1588, design §D1): the bottom-up <see cref="BTree{TKey,TStore}.SortedBuilder"/>, which writes every node
+/// once. The ordered insert through the tree's own <c>Add</c> — fed in key order it fills each leaf before moving right — is the builder's differential
+/// oracle in <c>SortedBuilderTests</c>; it is never a runtime path.
 /// </summary>
 /// <remarks>
-/// A unique tree keeps the first entry of each key, the lowest location (RB-07): the rest are counted as conflicts and never reach <c>Add</c>. The batch
+/// A unique tree keeps the first entry of each key, the lowest location (RB-07): the rest are counted as conflicts and never reach the tree. The batch
 /// point runs every <see cref="DatabaseEngine.RecoveryBatchSize"/> entries, after the accessor's changes are committed (CK-08).
 /// </remarks>
 internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey : unmanaged where TStore : struct, IPageStore
@@ -93,6 +101,8 @@ internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey
 
     public bool Sort(byte* entries, int count, byte* scratch, Span<int> counts)
         => StagedOrder<TKey>.Sort(new Span<StagedEntry<TKey>>(entries, count), new Span<StagedEntry<TKey>>(scratch, count), counts);
+
+    public int CompareKeys(byte* a, byte* b) => StagedOrder<TKey>.CompareKeys(in *(StagedEntry<TKey>*)a, in *(StagedEntry<TKey>*)b);
 
     public TreeBuildResult Build(TreeBuildInput input)
     {
@@ -126,6 +136,7 @@ internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey
         var accessor = _tree.Segment.CreateChunkAccessor(input.ChangeSet);
         try
         {
+            var builder = _tree.BeginSortedBuild(input.LeafFillPercent, input.ChangeSet);
             var previous = default(StagedEntry<TKey>);
             var hasPrevious = false;
             var sinceBatchPoint = 0;
@@ -139,7 +150,7 @@ internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey
                     continue;
                 }
 
-                var elementId = _tree.Add(entry.Key, entry.Location, ref accessor, out _);
+                var elementId = builder.Append(entry.Key, entry.Location, ref accessor);
                 if (multi)
                 {
                     input.Sink?.Add(input.MultiFieldIndex, entry.Location, elementId);
@@ -154,6 +165,9 @@ internal sealed unsafe class TreeRebuild<TKey, TStore> : ITreeRebuild where TKey
                     sinceBatchPoint = 0;
                 }
             }
+
+            builder.Finish(ref accessor);
+            result.NodesWritten = builder.NodesWritten;
         }
         finally
         {

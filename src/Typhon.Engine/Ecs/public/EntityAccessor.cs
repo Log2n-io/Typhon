@@ -698,7 +698,10 @@ public partial class EntityAccessor : IDisposable
     /// (an FK reverse lookup's per-entity action) therefore waits for the scan to end; the count stays at the threshold, so the refresh happens at the first
     /// operation after. The one refresh made under a live cursor is the index enumerator's own, whose walk has no other point to make it at.
     /// </summary>
-    /// <remarks>A cursor disposed twice (a <c>foreach</c> over a <c>using</c> copy) would decrement twice, so the decrement clamps at zero.</remarks>
+    /// <remarks>
+    /// A cursor counts itself on its first step, so the copy a <c>foreach</c> over a <c>using</c> variable makes before it is never counted and never
+    /// decrements. The decrement still clamps at zero, for a cursor copied after its first step (a misuse EP-02 forbids).
+    /// </remarks>
     [ThreadStatic]
     internal static int LiveIndexCursors;
 
