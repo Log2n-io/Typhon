@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
@@ -41,6 +42,7 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         DatabaseEngine.RecoveryBatchSize = DatabaseEngine.DefaultRecoveryBatchSize;
         DatabaseEngine.RecoveryBatchPointProbe = null;
         DatabaseEngine.RecoveryFlushThresholdPercentForTest = -1;
+        DatabaseEngine.EntityMapBuildEntriesForTest = 0;
     }
 
     private static DatabaseEngine RegisterMarket(DatabaseEngine dbe)
@@ -87,6 +89,325 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the second open recovered");
         AssertItems(reopened, expected);
         Assert.That(reopened.RunStorageIntegrityCheck().Issues, Is.Empty, "the storage integrity check, after the second recovery");
+    }
+
+    /// <summary>
+    /// #1665: the EntityMap built in bucket ranges, a walk of the clusters each, when the archetype is larger than a range — the first build stopped inside
+    /// its second range, the second completing. Every committed item and value comes back, the HEADs copied by the rebuild's own walk, and the reservation
+    /// took the rebuild's chain-root scan instead of scanning again.
+    /// </summary>
+    [Test]
+    [VerifiesRule("AP-12")]
+    [CancelAfter(60_000)]
+    public void AnEntityMapBuiltInBucketRanges_RestoresEveryItem()
+    {
+        var expected = BuildAndCrash();
+        DatabaseEngine.EntityMapBuildEntriesForTest = 48;
+
+        var stopped = 0;
+        DatabaseEngine.RecoveryBatchPointProbe = (p, _) =>
+        {
+            if (p == DatabaseEngine.RecoveryPass.EntityMap && ++stopped == 8)
+            {
+                throw new InvalidOperationException("crash inside the entity-map build");
+            }
+        };
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            Assert.Catch(() => RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>()), "premise: the build stopped half way");
+        }
+
+        DatabaseEngine.RecoveryBatchPointProbe = null;
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the second open recovered");
+        Assert.That(reopened.LastOpenEntityMapBuildPartitions, Is.GreaterThanOrEqualTo(5), "premise: the items' map was built in several bucket ranges");
+        Assert.That(reopened.LastOpenVersionedHeadRebuildCount, Is.GreaterThanOrEqualTo(1), "the HEAD rebuild ran, in the map rebuild's walk");
+        Assert.That(reopened.ChainHeadScansReusedAtOpen, Is.GreaterThanOrEqualTo(1), "the reservation took the map rebuild's chain-root scan");
+
+        // The open's time line: each phase once, in order of first entry, the passes this open ran among them.
+        var phases = reopened.LastOpenPhases.Select(p => p.Name).ToList();
+        Assert.That(phases, Is.Unique, "a phase entered several times sums into one");
+        Assert.That(phases, Is.SupersetOf(new[] { "Archetypes", "EntityMap.Walk", "EntityMap.Stage", "EntityMap.Insert", "Replay", "Scrub", "IndexRebuild" }));
+        Assert.That(phases.IndexOf("EntityMap.Walk"), Is.LessThan(phases.IndexOf("Replay")), "the map rebuilt before the replay");
+        Assert.That(reopened.LastOpenPhases.All(p => p.Ms >= 0 && p.PagesRead >= 0 && p.PagesWritten >= 0 && p.Entries >= 1), Is.True);
+        AssertItems(reopened, expected);
+        Assert.That(reopened.RunStorageIntegrityCheck().Issues, Is.Empty, "the storage integrity check");
+    }
+
+    /// <summary>
+    /// #1665: a staging range too small for one bucket's entries cannot be halved further and fails the open, rather than walking the clusters forever;
+    /// the next open, with room, recovers. Then a clean close and reopen: the bulk-built map's persisted counts load and serve every item.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ABucketLargerThanAStagingRange_FailsTheOpen_AndABuiltMapReopensClean()
+    {
+        // More checkpointed items than the map's 256 initial buckets, so some bucket holds two: a range of one entry cannot take it.
+        const int Count = 600;
+        var expected = new Dictionary<EntityId, MkItem?>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < Count; i++)
+                {
+                    var item = new MkItem { ItemNo = i, OwnerNo = 1, LastTradeSeq = 10_000 + i };
+                    expected[tx.Spawn<MkItemArch>(MkItemArch.Item.Set(in item))] = item;
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the build");
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.SimulateHardCrash();
+        }
+
+        DatabaseEngine.EntityMapBuildEntriesForTest = 1;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var failure = Assert.Catch(() => RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>()), "the open refused");
+            Assert.That(failure.ToString(), Does.Contain("entries a staging range holds"), "refused for the bucket, not for something else");
+        }
+
+        DatabaseEngine.EntityMapBuildEntriesForTest = 0;
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var recovered = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            Assert.That(recovered.CrashRecoveryAtOpen, Is.True, "premise: the second open recovered");
+            AssertItemValues(recovered, expected);
+        }
+
+        using var scope3 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope3.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.False, "premise: a clean reopen, the map loaded as the build persisted it");
+        AssertItemValues(reopened, expected);
+        Assert.That(reopened.RunStorageIntegrityCheck().Issues, Is.Empty, "the storage integrity check, over the loaded map");
+    }
+
+    /// <summary>
+    /// #1665: the bucket ranges are cut evenly over the buckets, so entities crowded into a few buckets overflow a range; the range is halved until its
+    /// entities fit, and the map still holds every item. Staged by destroying every item outside the map's lowest quarter of buckets.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ARangeWhoseEntitiesOverflowTheBuffer_IsHalved_AndTheMapHoldsEveryItem()
+    {
+        const int Count = 400;
+        var expected = new Dictionary<EntityId, MkItem?>();
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            var map = dbe._archetypeStates[ArchetypeRegistry.GetMetadata<MkItemArch>().ArchetypeId].EntityMap;
+            var ids = new List<EntityId>(Count);
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < Count; i++)
+                {
+                    var item = new MkItem { ItemNo = i, OwnerNo = 1, LastTradeSeq = 30_000 + i };
+                    var id = tx.Spawn<MkItemArch>(MkItemArch.Item.Set(in item));
+                    ids.Add(id);
+                    expected[id] = item;
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the build");
+            }
+
+            // The rebuilt map has N0 buckets, as this one does: the bucket each item lands in now is the one the rebuild sorts it by.
+            Assert.That(map.BucketCount, Is.EqualTo(map.N0), "premise: the map never split");
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                foreach (var id in ids.Where(id => map.BucketIndexOf(id.EntityKey) >= map.N0 / 4))
+                {
+                    tx.Destroy(id);
+                    expected.Remove(id);
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the destroys");
+            }
+
+            Assert.That(expected.Count, Is.InRange(60, 160), "premise: about a quarter of the items left, in a quarter of the buckets");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+            dbe.SimulateHardCrash();
+        }
+
+        // Ranges cut for 38 entries each over the whole bucket span: the first holds every survivor.
+        DatabaseEngine.EntityMapBuildEntriesForTest = 48;
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: a crash open");
+        Assert.That(reopened._archetypeStates[ArchetypeRegistry.GetMetadata<MkItemArch>().ArchetypeId].EntityMap.BucketCount,
+            Is.EqualTo(reopened._archetypeStates[ArchetypeRegistry.GetMetadata<MkItemArch>().ArchetypeId].EntityMap.N0), "premise: rebuilt at N0 buckets");
+        Assert.That(reopened.LastOpenEntityMapRangesHalved, Is.GreaterThanOrEqualTo(1), "a range overflowed, and was halved");
+        AssertItemValues(reopened, expected);
+        Assert.That(reopened.RunStorageIntegrityCheck().Issues, Is.Empty, "the storage integrity check");
+    }
+
+    /// <summary>
+    /// #1665: the reservation takes the EntityMap rebuild's chain-root scan only when it still describes the segment, and only as much of it as the budget
+    /// holds. A chunk allocated since the scan, a chain collapsed, or roots past the budget, and the reservation scans again.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    public void TheReservation_ReusesTheRebuildsChainRoots_OnlyWhenTheyStillHold()
+    {
+        BuildAndCrash();
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        var meta = ArchetypeRegistry.GetMetadata<MkItemArch>();
+        var table = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[meta.GetSlot(MkItemArch.Item._componentTypeId)];
+
+        // The recovery's frees wait for a checkpoint (CK-17): taken now, so no chunk of the segment is freed between the scans below.
+        Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint");
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var fresh = ComponentRevisionManager.EnumerateVersionedChainHeads(table, null, acceptNamedRoots: true).Values.ToHashSet();
+        Assert.That(fresh, Is.Not.Empty, "premise: the items have chains");
+
+        int[] Reserve(Action between, bool collapsed = false)
+        {
+            dbe.CrashChainHeadsOf(table);
+            dbe.CompactCrashChainHeadsForReservation();
+            between?.Invoke();
+            return dbe.ChainHeadsForReservation(table, collapsed).ToArray();
+        }
+
+        try
+        {
+            var reused = dbe.ChainHeadScansReusedAtOpen;
+            Assert.That(Reserve(null), Is.EquivalentTo(fresh), "the cached roots");
+            Assert.That(dbe.ChainHeadScansReusedAtOpen, Is.EqualTo(reused + 1), "taken from the cache");
+
+            var segment = table.CompRevTableSegment;
+            // A cleared chunk reads as a root of EntityPK 0, which only a new scan can find.
+            var chunk = 0;
+            Assert.That(Reserve(() => chunk = segment.AllocateChunk(true)), Does.Contain(chunk), "the roots, scanned again");
+            segment.FreeChunk(chunk);
+            Assert.That(dbe.ChainHeadScansReusedAtOpen, Is.EqualTo(reused + 1), "a chunk allocated since the scan: scanned again");
+
+            Assert.That(Reserve(null, collapsed: true), Is.EquivalentTo(fresh));
+            Assert.That(dbe.ChainHeadScansReusedAtOpen, Is.EqualTo(reused + 1), "a chain collapsed since the scan: scanned again");
+
+            DatabaseEngine.ChainHeadCacheBudgetForTest = (long)fresh.Count * sizeof(int) - 1;
+            Assert.That(Reserve(null), Is.EquivalentTo(fresh));
+            Assert.That(dbe.ChainHeadScansReusedAtOpen, Is.EqualTo(reused + 1), "roots past the budget: dropped, and scanned again");
+        }
+        finally
+        {
+            DatabaseEngine.ChainHeadCacheBudgetForTest = 0;
+        }
+    }
+
+    private static void AssertItemValues(DatabaseEngine dbe, Dictionary<EntityId, MkItem?> expected)
+    {
+        using var read = dbe.CreateReadOnlyTransaction();
+        var wrong = 0;
+        foreach (var (id, item) in expected)
+        {
+            if (!read.IsAlive(id) || read.Open(id).Read(MkItemArch.Item).LastTradeSeq != item.Value.LastTradeSeq)
+            {
+                wrong++;
+            }
+        }
+
+        Assert.That(wrong, Is.Zero, "items missing or with the wrong value");
+        Assert.That(read.Query<MkItemArch>().Count(), Is.EqualTo(expected.Count), "the items alive, and no other");
+    }
+
+    /// <summary>
+    /// A crash open restores each Versioned HEAD from its chain when the persisted cluster slot is stale — what a crash between a commit and the tick fence
+    /// leaves — here staged by zeroing every item's slot and checkpointing it. The rebuild runs in the EntityMap rebuild's walk since #1665, which no
+    /// test covered: a crash open whose HEAD copy was dropped passed every recovery test.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("CS-03")]
+    public unsafe void ACrashOpen_RestoresStaleHeadsFromTheirChains()
+    {
+        const int Count = 100;
+        var ids = new List<EntityId>(Count);
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < Count; i++)
+                {
+                    ids.Add(tx.Spawn<MkItemArch>(MkItemArch.Item.Set(new MkItem { ItemNo = i, OwnerNo = 1, LastTradeSeq = -1 - i })));
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the build");
+            }
+
+            using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Immediate))
+            {
+                for (var i = 0; i < Count; i++)
+                {
+                    tx.OpenMut(ids[i]).Set(MkItemArch.Item, new MkItem { ItemNo = i, OwnerNo = 3, LastTradeSeq = 20_000 + i });
+                }
+
+                Assert.That(tx.Commit(), Is.True, "the update");
+            }
+
+            // Every item's slot zeroed in its cluster page and checkpointed: the data file holds stale HEADs that no logged transaction restores.
+            Assert.That(ItemSlots(dbe, ids, zero: true).Count(s => s.OwnerNo == 3), Is.EqualTo(Count), "premise: each slot held its HEAD");
+            Assert.That(ItemSlots(dbe, ids, zero: false).Count(s => s.OwnerNo == 0), Is.EqualTo(Count), "premise: each slot zeroed");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint of the stale slots");
+            dbe.SimulateHardCrash();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: a crash open");
+        var slots = ItemSlots(reopened, ids, zero: false);
+        var stale = 0;
+        for (var i = 0; i < Count; i++)
+        {
+            if (slots[i].ItemNo != i || slots[i].OwnerNo != 3 || slots[i].LastTradeSeq != 20_000 + i)
+            {
+                stale++;
+            }
+        }
+
+        Assert.That(stale, Is.Zero, "items whose cluster slot holds a stale HEAD");
+    }
+
+    /// <summary>The <see cref="MkItem"/> each of <paramref name="ids"/> holds in its cluster slot, zeroed after it is read when <paramref name="zero"/>.</summary>
+    private static unsafe MkItem[] ItemSlots(DatabaseEngine dbe, List<EntityId> ids, bool zero)
+    {
+        var meta = ArchetypeRegistry.GetMetadata<MkItemArch>();
+        var state = dbe._archetypeStates[meta.ArchetypeId];
+        var layout = state.ClusterState.Layout;
+        var slot = meta.GetSlot(MkItemArch.Item._componentTypeId);
+        var size = layout.ComponentSize(slot);
+        var items = new MkItem[ids.Count];
+        using var guard = EpochGuard.Enter(dbe.EpochManager);
+        var changeSet = dbe.MMF.CreateChangeSet();
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        var map = state.EntityMap.Segment.CreateChunkAccessor();
+        var clusters = state.ClusterState.ClusterSegment.CreateChunkAccessor(changeSet);
+        try
+        {
+            for (var i = 0; i < ids.Count; i++)
+            {
+                Assert.That(state.EntityMap.TryGet(ids[i].EntityKey, record, ref map), Is.True, $"{ids[i]}'s record");
+                var clusterBase = clusters.GetChunkAddress(ClusterEntityRecordAccessor.GetClusterChunkId(record), zero);
+                var value = new Span<byte>(clusterBase + layout.ComponentOffset(slot) + ClusterEntityRecordAccessor.GetSlotIndex(record) * size, size);
+                items[i] = System.Runtime.InteropServices.MemoryMarshal.Read<MkItem>(value);
+                if (zero)
+                {
+                    value.Clear();
+                }
+            }
+        }
+        finally
+        {
+            clusters.Dispose();
+            map.Dispose();
+            changeSet.SaveChanges();
+        }
+
+        return items;
     }
 
     /// <summary>

@@ -1444,6 +1444,8 @@ internal sealed class TornCaptureRecoveryTests : TestBase<TornCaptureRecoveryTes
         using var reopened = RegisterMarket(scope2.ServiceProvider.GetRequiredService<DatabaseEngine>());
         Assert.That(reopened.CrashRecoveryAtOpen, Is.True, "premise: the reopen recovered from a crash");
         Assert.That(reopened.ChainsCollapsedAtOpen, Is.EqualTo(1), "the torn chain, collapsed before the replay");
+        Assert.That(reopened.ChainHeadScansReusedAtOpen, Is.Zero,
+            "the reservation scanned the collapsed table's roots again: the collapse unlinked chunks the map rebuild's scan had as overflow (#1665)");
         Assert.That((reopened.MMF.QuarantinePeakBytes > 0, reopened.MMF.QuarantinedBytes), Is.EqualTo((true, 0L)),
             "recovery's frees — the collapsed chain's chunks the sweep gave back — held until the recovery's seal covered them (CK-17)");
         using (var read = reopened.CreateReadOnlyTransaction())

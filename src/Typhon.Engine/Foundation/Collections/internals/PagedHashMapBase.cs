@@ -1126,6 +1126,71 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     }
 
     /// <summary>
+    /// The bucket count a bulk build of <paramref name="entries"/> entries takes: the fewest that hold them under the split threshold, as
+    /// <see cref="EnsureCapacity"/> sizes it, so the build never splits and the first inserts after it split one bucket at a time as usual.
+    /// </summary>
+    protected int BulkBuildBucketCount(long entries)
+        => (int)Math.Clamp((long)(entries / (BucketCapacity * MaxLoadFactor)) + 1, _n0, BucketCap);
+
+    /// <summary>
+    /// Empties the map for a crash-recovery bulk build (#1665) at its final size: every chunk but the meta freed by bitmap, as
+    /// <see cref="ClearForRebuild"/> does, and <paramref name="bucketCount"/> published at once, with the allocation floor past them. No bucket chunk is
+    /// reserved yet: the build takes each in order as it fills it, so every bucket page is written once. Quiescent maps only.
+    /// </summary>
+    protected void ResetForBulkBuild(int bucketCount, ChangeSet changeSet)
+    {
+        _segment.FreeAllChunksFrom(1);
+        var floor = AllocationFloorFor(bucketCount);
+        _segment.ResetAllocationFloor(floor);
+
+        // The buckets, the runway above them, and an eighth for overflow chunks, as EnsureCapacity sizes a map of this many buckets.
+        _segment.EnsureCapacity((int)Math.Min(ChunkBasedSegment<TStore>.MaxChunkCount, floor + (bucketCount >> 3) + 1), changeSet);
+
+        Volatile.Write(ref _packedMeta, bucketCount);
+        _entryCount = 0;
+        _persistedEntryCount = 0;
+        _persistedBucketCount = bucketCount;
+        _splitRetryAtEntries = 0;
+
+        var accessor = _segment.CreateChunkAccessor(changeSet);
+        try
+        {
+            ref var meta = ref accessor.GetChunk<PagedHashMapMeta>(0, true);
+            meta = default;
+            meta.N0 = _n0;
+            meta.Format = PagedHashMapMeta.FormatMagic;
+            meta.BucketCount = bucketCount;
+            meta.EntryCount = 0;
+            meta.Flags = (byte)(_allowMultiple ? 1 : 0);
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        OnClearedForRebuild();
+    }
+
+    /// <summary>Reserves and initializes the primary chunk of <paramref name="bucket"/> for a bulk build. Quiescent maps only.</summary>
+    protected void ReserveBucketForBulkBuild(int bucket, ref ChunkAccessor<TStore> accessor, ChangeSet changeSet)
+    {
+        var chunkId = BucketChunkId(bucket);
+        if (!_segment.TryReserveChunk(chunkId, changeSet, ref accessor))
+        {
+            throw new InvalidOperationException($"PagedHashMap bulk build: bucket chunk {chunkId} is already allocated — the build runs over chunk 0 alone.");
+        }
+
+        InitializeBucket(chunkId, ref accessor);
+    }
+
+    /// <summary>Persists the bucket and entry counts a bulk build ends with. Quiescent maps only.</summary>
+    protected void PersistBulkBuildMeta(ref ChunkAccessor<TStore> accessor)
+    {
+        PersistBucketCount(ref accessor);
+        PersistEntryCount(ref accessor);
+    }
+
+    /// <summary>
     /// Drops what a subclass caches about chunk positions. After a clear, a chunk that was a bucket's primary can come back as an overflow chunk, whose
     /// owner tag (<see cref="TagOverflowOwner"/>) a stale cache entry would read as a primary's unlocked OLC version.
     /// </summary>

@@ -321,6 +321,9 @@ lock ordering and deadlock prevention are still to come.
             One such walk writes: ChunkBasedSegment.FreeAllChunksFrom clears bitmap words through the read pin, with nothing allocating or freeing
             concurrently, and records the page modified (CP-04) before it releases it. It clears and counts only the bits that name a chunk: a
             torn page's padding bits past its last chunk, which the load's count masks, would drive the allocated count below the bitmap's
+  invariant a second writes: the crash open's EntityMap rebuild copies each Versioned HEAD into the cluster through its cluster walk's scan
+            accessor (DatabaseEngine.RebuildClusterEntityMapEntries, #1665), single-threaded at open, and records each cluster's page modified
+            (ArchetypeClusterState.NoteClusterPageModifiedAt) while the window still holds it, before the walk moves to the next cluster
   invariant an open's clear of a shared index segment (BTreeBase.ClearSharedSegment) — a crash open's, and a clean open's when a component gained
             an index — frees its node chunks through ChunkBasedSegment.FreeAllChunksFrom(DirectoryChunkCount), keeping the directory chunks, and
             checks chunk 0 with IsChunkAllocatedUnpinned. The pages it frees are owed a write, not held by dirty marks: the checkpoint cycle that

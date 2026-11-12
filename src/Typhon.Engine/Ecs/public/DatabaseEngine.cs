@@ -5187,11 +5187,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         try
         {
             InitializeArchetypesCore();
+            EndOpenPhases();
         }
         finally
         {
             // The summary describes the file only as the last close left it: nothing after this open may use it, whether the open completed or not.
             MMF.ReleaseChunkSummary();
+            _crashChainHeads = null;    // the reservation drops it; an open that never reached it must not keep every root
         }
 
         _archetypeInitIncomplete = false;
@@ -5285,6 +5287,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // per-archetype loop and log one summary at the end, so a slow open shows exactly where the time went. The
         // Stopwatch.GetTimestamp() reads are ~nanoseconds — negligible against the work they bracket.
         var initStart = Stopwatch.GetTimestamp();
+        BeginOpenPhases("Archetypes");
         long cellStateTicks = 0;
         long clusterAabbTicks = 0;
         long versionedHeadTicks = 0;
@@ -6016,9 +6019,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             // Both timers still exist and are still reported separately, but they now split one walk rather than two passes: cellStateTicks is
                             // zero and the whole cost lands in clusterAabbTicks. Kept as two fields rather than collapsed to one so the open-time log line and
                             // the step-1 telemetry accessors keep their shape.
+                            MarkOpenPhase("Archetypes.Spatial");
                             var rebuildStart = Stopwatch.GetTimestamp();
                             clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
                             clusterAabbTicks += Stopwatch.GetTimestamp() - rebuildStart;
+                            MarkOpenPhase("Archetypes");
                         }
                     }
                     finally
@@ -6075,11 +6080,15 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Rebuild entity maps from persisted ComponentTable data (entities from prior database sessions). On a clean
         // reopen this is the O(1) persisted-EntityMap fast path; it only walks entities for legacy / migrated DBs.
         var entityMapStart = Stopwatch.GetTimestamp();
+        MarkOpenPhase("EntityMap");
         RebuildEntityMapsFromPersistedData();
+        CompactCrashChainHeadsForReservation();
         var entityMapTicks = Stopwatch.GetTimestamp() - entityMapStart;
 
         // Drain the cluster head rebuilds deferred above — the EntityMap they read is now freshly derived, not the untrusted loaded one.
+        MarkOpenPhase("VersionedHeads");
         versionedHeadTicks += DrainDeferredVersionedHeadRebuilds();
+        MarkOpenPhase("Archetypes.Finish");
 
         // A clean open's index rebuild (RB-02): the trees the init block created empty, filled now that the migration's placement and every HEAD rebuild are
         // done. A crash open's waits for Phase 5, after the replay. Nothing between the init block and here reads a cluster tree.
@@ -6166,6 +6175,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // WAL v2 crash recovery (P1.2): replay committed records that postdate the last checkpoint, now that archetypes,
         // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
         // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
+        MarkOpenPhase("Archetypes.Finish");
         RunWalV2Recovery();
 
         // The clusters the replay's destroys emptied, and the empty ones the open's scan found allocated — a drain pending when the engine stopped — are only
@@ -6240,7 +6250,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         // Before the replay allocates anything: every chunk the on-disk chains name is taken, so the replay never hands one out again (#1251).
+        MarkOpenPhase("Reserve.LiveRoots");
         ReserveChainChunksAfterCrash();
+        MarkOpenPhase("Reserve.Text");
 
         // Likewise every text chunk a handle in the file names, the content chunks the line above took included (#1094, TXT-03).
         ReserveTextChunksAfterCrash();
@@ -6254,6 +6266,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Read with a throwaway IO when no backend is injected; the WAL writer's handles coexist (segments open with sharing).
         var walIO = _injectedWalIo ?? new WalFileIO();
         RecoveryDriver.Result result;
+        MarkOpenPhase("Replay");
         try
         {
             result = new RecoveryDriver().Run(walIO, walDir, this, checkpointLsn);
@@ -6307,23 +6320,28 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Phase 4 — SCRUB (03-recovery.md §6, D1): now that the WAL window is applied, collapse every Versioned revision chain
         // to its HEAD so the consolidated base carries no pre-crash MVCC history. Runs before the seal so its mutations are
         // consolidated into the data file by the same checkpoint.
+        MarkOpenPhase("Scrub");
         ScrubVersionedChains();
 
         // Phase 4b — the component-collection segments' orphans (#1307, REAP-02): a buffer named by nothing once the chains are their heads — one whose free a
         // checkpoint had not written, one a swept orphan named — is freed. After the scrub, which releases what dropped revisions named.
+        MarkOpenPhase("Sweep.Collections");
         SweepCollectionOrphans();
 
         // Phase 4b' — the text segment's orphans (#1094, TXT-03): the chunk a replayed row held before the replay gave it a fresh one, a dropped revision's.
+        MarkOpenPhase("Sweep.Text");
         SweepTextOrphans();
 
         // Phase 4c — the slots hidden when the process died (VIS-09, RB-08): free on disk with their entity ids in place, their claims and cleanups lost.
         // Before
         // the seal, so the same checkpoint writes them.
+        MarkOpenPhase("ClearFreeSlots");
         ClearFreeSlotsAfterCrash();
 
         // Phase 5 — REBUILD (03-recovery.md §7, RB-01): repopulate every archetype's secondary indexes from the now-final chain HEADs. The indexes were emptied
         // at open on the crash path; this rebuild replaces FPI repair of torn checkpointed index pages. Before the seal so the same checkpoint consolidates the
         // rebuilt index pages.
+        MarkOpenPhase("IndexRebuild");
         //
         // The per-ComponentTable half of this walk is gone (#629). Every archetype is cluster-backed, so that home receives no entries and nothing reads it —
         // rebuilding it meant enumerating every Versioned chain head in the database on every crash reopen to populate a tree no query consults. RB-01 is still
@@ -6337,7 +6355,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // rebuild never saw at all (a crash before the first checkpoint leaves the cluster segment empty at open), so the reopened database answered every
         // spatial query with nothing. Rebuilt from scratch now that cluster data is final; its per-slot check files any mixed-cell cluster's strays for
         // the first fence (Realms P0.2).
+        MarkOpenPhase("Spatial.Recovery");
         RebuildSpatialLayerAfterRecovery();
+        MarkOpenPhase("Suspects");
 
         // Phase 6 — SUSPECT RESOLUTION (03-recovery.md §9, RB-04): now that derived structures are rebuilt and chains scrubbed, classify every page that failed
         // CRC during recovery (RecoverySuspect mode). Derived/orphaned suspects are already healed (rebuilt / freed by scrub); a suspect page still holding a live
@@ -6351,6 +6371,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             PrepareSchemaCommit();
         }
 
+        MarkOpenPhase("Seal");
         SealRecovery(result.MaxLsn, checkpointLsn);
 
         if (_pendingSchemaCommit != null)
@@ -6382,7 +6403,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // AFTER the seal because the seal checkpoint can still grow segments (e.g. EntityMap bucket pages allocated as it flushes deferred work), so page ownership is
         // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
         // if this session crashes again first, recovery simply re-derives (idempotent).
+        MarkOpenPhase("Occupancy");
         RederiveOccupancyOnCrash();
+        MarkOpenPhase("Finish");
     }
 
     /// <summary>
@@ -8638,15 +8661,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // cluster holds them. They used to be snapshotted from the map first, as the one value the rebuild could not derive: a walk of the whole map
             // and a dictionary of every entity, which could only agree with the cluster or be wrong — a tear handed it garbage bits, and a crash during this
             // pass left a partial map for the next open to snapshot (#398, #1306).
-            state.EntityMap.ClearForRebuild(cs);
-
-            if (meta.IsClusterEligible)
+            if (meta.IsClusterEligible && state.ClusterState?.ClusterSegment != null)
             {
+                // Emptied at its final size and filled in bucket order (#1665).
                 RebuildClusterEntityMapEntries(meta, state, cs);
+                MarkOpenPhase("EntityMap");
             }
             else
             {
-                BuildFlatEntityMapEntries(meta, state, cs, true);
+                MarkOpenPhase("EntityMap.Clear");
+                state.EntityMap.ClearForRebuild(cs);
+
+                // A pure-Transient cluster archetype has no persistent data to rebuild from: its map stays empty.
+                if (!meta.IsClusterEligible)
+                {
+                    BuildFlatEntityMapEntries(meta, state, cs, true);
+                }
             }
 
             _crashRebuiltEntityMapSegments.Add(state.EntityMap.Segment.RootPageIndex);
@@ -8690,148 +8720,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
     }
 
-    /// <summary>
-    /// Re-derive a cluster archetype's EntityMap from the cluster segment alone. Walks every live slot of every active cluster (the same occupancy-bit walk
-    /// as <see cref="SortedIndexRebuild.Run"/>) and rebuilds the <c>ClusterEntityRecord</c> from self-describing cluster state: the
-    /// EntityKey from <c>EntityKeys[slot]</c>, the per-entity enabled mask reconstructed from the per-component <c>EnabledBits[C]</c> bitmaps, and each
-    /// Versioned slot's compRevFirstChunkId from the chain-head scan. BornTSN/DiedTSN = 0 (live, committed before checkpoint — same convention as the flat
-    /// rebuild). Inserted via the split-aware <c>InsertDuringRebuild</c> into the just-cleared map.
-    /// </summary>
-    private unsafe void RebuildClusterEntityMapEntries(ArchetypeMetadata meta, ArchetypeEngineState state, ChangeSet cs)
-    {
-        var clusterState = state.ClusterState;
-        if (clusterState?.ClusterSegment == null)
-        {
-            return; // pure-Transient cluster — no persistent data to rebuild from
-        }
-
-        var layout = clusterState.Layout;
-        var slotToVi = layout.SlotToVersionedIndex;
-
-        // Versioned chain heads per slot (compRevFirstChunkId keyed by EntityPK) — the same source the flat rebuild uses for the per-slot location.
-        var chainHeads = new Dictionary<long, int>[meta.ComponentCount];
-        var namedHeads = new HashSet<int>[meta.ComponentCount];
-        if (meta.VersionedSlotMask != 0 && slotToVi != null)
-        {
-            for (var slot = 0; slot < meta.ComponentCount; slot++)
-            {
-                if (slotToVi[slot] < 0)
-                {
-                    continue;
-                }
-
-                var table = state.SlotToComponentTable[slot];
-                if (table?.CompRevTableSegment != null && table.StorageMode == StorageMode.Versioned
-                    && table.CompRevTableSegment.ChunkCapacity > 0 && table.CompRevTableSegment.AllocatedChunkCount > 0)
-                {
-                    namedHeads[slot] = [];
-                    chainHeads[slot] = ComponentRevisionManager.EnumerateVersionedChainHeads(table, RoutingIdOf(meta), acceptNamedRoots: true,
-                        namedHeads[slot]);
-                }
-            }
-        }
-
-        var recordBuf = stackalloc byte[ClusterEntityRecordAccessor.RecordSize(meta.VersionedSlotCount)];
-
-        // The clusters read and released page by page (EP-02): the segment can be larger than the cache, and an epoch-tagged walk of it pinned all of it
-        // (#1183). A cluster's address holds until this accessor's next miss — the next cluster's.
-        var clusterAccessor = clusterState.ClusterSegment.CreateScanAccessor();
-        long maxEntityKey = 0;
-        var sinceBatchPoint = 0;
-        try
-        {
-            for (var c = 0; c < clusterState.ActiveClusterCount; c++)
-            {
-                // Between clusters, every RecoveryBatchSize entities: the map's pages written so far saved, the batch's pages unpinned (#1183, CK-08). The
-                // map accessor lives for one insert, the cluster accessor is a scan one: nothing here holds an epoch-protected address across it.
-                if (sinceBatchPoint >= RecoveryBatchSize)
-                {
-                    RecoveryBatchPoint(cs, RecoveryPass.EntityMap);
-                    sinceBatchPoint = 0;
-                }
-
-                var chunkId = clusterState.ActiveClusterIds[c];
-                byte* clusterBase = clusterAccessor.GetChunkAddress(chunkId);
-                sinceBatchPoint += BitOperations.PopCount(*(ulong*)clusterBase);
-                ulong occupancy = *(ulong*)clusterBase;
-
-                while (occupancy != 0)
-                {
-                    var slotIndex = BitOperations.TrailingZeroCount(occupancy);
-                    occupancy &= occupancy - 1;
-
-                    var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
-                    var entityKey = EntityId.FromRaw(entityPK).EntityKey;
-
-                    ClusterEntityRecordAccessor.InitializeRecord(recordBuf, meta.VersionedSlotCount);
-                    ref var header = ref ClusterEntityRecordAccessor.GetHeader(recordBuf);
-                    header.BornTSN = 0; // committed before checkpoint → always visible
-                    header.DiedTSN = 0; // live (occupancy bit set)
-                    clusterState.NoteClusterBorn(chunkId, 0);   // H1: reopened clusters are all-genesis, so seed the summary rather than leaving it unknown
-
-                    // The per-entity 16-bit mask from the cluster's per-component EnabledBits[c] (bit slotIndex set ⇒ component c enabled), which every
-                    // commit keeps equal to the committed record and dirties with the cluster page (ENABLE-01).
-                    ushort enabledMask = 0;
-                    for (var comp = 0; comp < meta.ComponentCount; comp++)
-                    {
-                        var compEnabled = *(ulong*)(clusterBase + layout.EnabledBitsOffset(comp));
-                        if ((compEnabled & (1UL << slotIndex)) != 0)
-                        {
-                            enabledMask |= (ushort)(1 << comp);
-                        }
-                    }
-
-                    header.EnabledBits = enabledMask;
-
-                    ClusterEntityRecordAccessor.SetClusterChunkId(recordBuf, chunkId);
-                    ClusterEntityRecordAccessor.SetSlotIndex(recordBuf, (byte)slotIndex);
-
-                    if (slotToVi != null)
-                    {
-                        for (var slot = 0; slot < meta.ComponentCount; slot++)
-                        {
-                            var vi = slotToVi[slot];
-                            if (vi < 0)
-                            {
-                                continue;
-                            }
-
-                            var head = 0;
-                            chainHeads[slot]?.TryGetValue(entityPK, out head);
-                            ClusterEntityRecordAccessor.SetCompRevFirstChunkId(recordBuf, vi, head);
-
-                            // A root adopted from the named chunks: the lock reset at the table's load leaves named chunks as they are (#1251).
-                            if (head != 0 && namedHeads[slot] != null && namedHeads[slot].Contains(head))
-                            {
-                                ComponentRevisionManager.ResetChainLocks(state.SlotToComponentTable[slot].CompRevTableSegment, this, [head]);
-                            }
-                        }
-                    }
-
-                    var mapAccessor = state.EntityMap.Segment.CreateChunkAccessor(cs);
-                    state.EntityMap.InsertDuringRebuild(entityKey, recordBuf, ref mapAccessor, cs);
-                    mapAccessor.Dispose();
-
-                    if (entityKey > maxEntityKey)
-                    {
-                        maxEntityKey = entityKey;
-                    }
-                }
-            }
-        }
-        finally
-        {
-            clusterAccessor.Dispose();
-        }
-
-        // A max, never an assignment: the persisted counter may be above every occupied key — the top-key entity destroyed — and keys are never
-        // recycled (RB-06). Assigned, the next spawn was handed the dead entity's key (#1164).
-        if (maxEntityKey > state.NextEntityKey)
-        {
-            state.NextEntityKey = maxEntityKey;
-        }
-    }
-
     /// <summary>Recovery, before the log replay: marks allocated every chunk a Versioned chain names (#1251; see the per-table method).</summary>
     private void ReserveChainChunksAfterCrash()
     {
@@ -8851,15 +8739,21 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 // Before the union: only the chains the records name (a flat archetype's, as its scan finds them) — a named chunk the scan accepts can be a
                 // live overflow chunk.
-                ChainsCollapsedAtOpen += ComponentRevisionManager.CollapseTornChainsBeforeReplay(table, roots, changeSet);
+                MarkOpenPhase("Reserve.Collapse");
+                var collapsed = ComponentRevisionManager.CollapseTornChainsBeforeReplay(table, roots, changeSet);
+                ChainsCollapsedAtOpen += collapsed;
                 var reserved = _reservedContentChunks[table] = [];
-                roots.UnionWith(ComponentRevisionManager.EnumerateVersionedChainHeads(table, null, acceptNamedRoots: true).Values);
+                MarkOpenPhase("Reserve.ChainHeads");
+                roots.UnionWith(ChainHeadsForReservation(table, collapsed > 0));
+                MarkOpenPhase("Reserve.Walk");
                 ChainChunksReservedAtOpen += ComponentRevisionManager.ReserveChainChunksAfterCrash(table, roots, reserved);
+                MarkOpenPhase("Reserve.LiveRoots");
             }
         }
         finally
         {
             changeSet.SaveChanges();
+            _crashChainHeads = null;
         }
     }
 
