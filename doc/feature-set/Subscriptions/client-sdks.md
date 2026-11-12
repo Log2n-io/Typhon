@@ -22,8 +22,8 @@ and send commands in the server's encoding — without being regenerated every t
   backoff per close code.
 - `FrameApplier` — applies each `TICK` into a `WorldStore`: per-archetype `ArchetypeStore`s of typed columns (`field(name)`), live slots,
   and per-frame entered/updated/left lists; `SelfState`, acks, events and `AggregateGrid`s beside them.
-- `Clock` + `evaluateLive(store, renderTick, frac, out)` — render time and motion-segment extrapolation, including tick-period changes under
-  overload.
+- `Clock` + `evaluateLive(store, renderTick, frac, out, heightAt?)` — render time and motion-segment extrapolation, including tick-period changes under
+  overload; pass a `heightAt` callback for a ground-clamped archetype to fill grounded entities' vertical axis (without it, NaN).
 - `CommandQueue` (one batch per rendered frame) and `RegionSender` (`ClientRegion` footprints, ≤ 5 Hz). `enqueueTyped(commands.MoveCmd, record)`
   sends a command through its generated encoder: a misspelled field is a compile error, and a steady frame allocates nothing.
 - `GroupSubscriptions` — `subscribe(set, key)` / `unsubscribe(set, key)` for an explicit group set, each a promise of its answer: `pump(queue)`
@@ -53,7 +53,7 @@ and send commands in the server's encoding — without being regenerated every t
 **C** (`src/Typhon.Client.Native`, C++20 inside, a C ABI outside, no third-party dependency):
 
 - `typhon_client_create` / `_start` / `_poll` / `_stop` over TCP — a columnar store read through `typhon_archetype_view_get` and
-  `typhon_field_column`, motion through `typhon_motion_evaluate_live`, commands through `typhon_command_enqueue` / `typhon_commands_flush`,
+  `typhon_field_column`, motion through `typhon_motion_evaluate_live` (non-ground) or `typhon_motion_evaluate_slot_ground` / `typhon_motion_evaluate_live_ground` (ground-clamped, fill vertical axis via a `typhon_height_at` callback), commands through `typhon_command_enqueue` / `typhon_commands_flush`,
   groups through `typhon_group_subscribe` and `typhon_groups_get`, events through `typhon_event_*`. Caller-owned buffers and opaque handles, so
   any language with an FFI binds the one header (`typhon/client.h`). TLS and WebSocket are not built (#1045).
 
