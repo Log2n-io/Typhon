@@ -18,10 +18,12 @@ tick. A projection names only what travels, quantizes it to what the client can 
 
 - **Position.** `Motion(comp, …)` for movers: sent as **motion segments** — a start point, a velocity, a start tick — that the client
   extrapolates. A new segment is sent when the extrapolation would drift past `Tolerance` (5 cm by default), on a teleport (a jump faster
-  than `Teleport(maxSpeedMps)`, which is required and also sizes the velocity codec), or as a `MaxAge` heartbeat (5 s).
+  than `Teleport(maxSpeedMps)`, which is required and also sizes the velocity codec), as a `MaxAge` heartbeat (5 s), or when a run settles
+  at a constant velocity whose gap to the fitted segment's velocity would breach the tolerance before the next heartbeat.
   `.Grounded(comp, x => x.OnGround, up)` ground-clamps a 3D mover: while the flag is set, segments omit the vertical axis, the client
-  derives the height from its own terrain (`heightAt` in every SDK's evaluator), and bumps and slopes trigger no segment; leaving the
-  ground sends a full 3D one. `Position(comp)` for things that never move. The component must hold the archetype's `[SpatialIndex]` field; positions are quantized to 24 bits per axis
+  derives the height from its own terrain (`heightAt` is an optional parameter of TypeScript's and .NET's evaluator; in C the caller uses
+  `typhon_motion_evaluate_slot_ground` / `typhon_motion_evaluate_live_ground`, which accept a `typhon_height_at` callback), and bumps
+  and slopes trigger no segment; leaving the ground sends a full 3D one. `Position(comp)` for things that never move. The component must hold the archetype's `[SpatialIndex]` field; positions are quantized to 24 bits per axis
   over the spatial world's bounds.
 - **Fields** travel under a `Codec` and in a **change group** (the default one when unnamed): an update record carries only the groups
   that changed.

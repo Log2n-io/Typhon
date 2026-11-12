@@ -112,7 +112,7 @@ A single archetype freely mixes modes — `Character` has all three — because 
 
 ### Fields
 
-Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
+Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), `String1024` (a 4-byte handle to up to 1 023 bytes of out-of-line UTF-8 text — write it with `EntityRefMut.SetText` / `EntityRefMut.ClearText`, not via `Set`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
 
 > **Two component rules that catch newcomers:**
 >

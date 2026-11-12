@@ -61,6 +61,7 @@ Systems add four idioms whose failure **nothing reports** — get them right up 
 | 13 | Write `SingleVersion`, `Transient` and spatial-archetype components **inside a system** | Write them from another thread (a request handler, a timer) — only Versioned components of a non-spatial archetype are safe off-tick; the rest races the tick fence with no error |
 | 14 | Call `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`) after changing a replicated entity | Expect clients to see a plain write — under the default `PushDetection.Explicit` an unmarked change is never sent |
 | 15 | Write an `[Index]`ed `SingleVersion`/`Transient` component with `cluster.Set(…)` / `entity.Set(…)` | Write it through `GetSpan`/`Get` — that throws; and don't store `0` in a `[Index(Sparse = true)]` field expecting to find it — `0` means "no data" and is never indexed |
+| 16 | Write a `String1024` text field with `EntityRefMut.SetText` / `EntityRefMut.ClearText`; write the rest of a `String1024`-containing component with `ClusterRef.Set` (preserves the out-of-line handle) | Write it through `GetSpan`/`Get` — that throws in every build; a store through the span could drop or corrupt the out-of-line text handle |
 
 Every idiom in this section is compiled in the guide's example project (`doc/guide/example/AgentIdioms.cs`), so it tracks the API.
 

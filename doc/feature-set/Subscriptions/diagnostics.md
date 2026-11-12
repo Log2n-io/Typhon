@@ -28,7 +28,8 @@ tools need the server's own numbers alongside the stream, and developers need a 
   session); the server segment is encoded once for every subscriber.
 - **The same numbers without a client**: `TyphonRuntime.ReadStats()` returns tick p50/p99 against the target, the overrun count, the
   per-tick durability wait, per-system means, entities per archetype and the session figures — reading the telemetry ring and the
-  engine directly, so it answers on an engine with **no replication and no declared metrics**. `MapTyphonStats()`
+  engine directly, so it answers on an engine with **no replication and no declared metrics**. Note: `ReadStats()` uses a one-second
+  window for p99 while STATS `typhon.tick.p99` uses ten seconds, so the two agree on p50 and tick.max but can differ on p99 when load is bursty. `MapTyphonStats()`
   (`Typhon.Subscriptions.AspNetCore`) serves it as JSON at `/typhon/stats.json`. It has no authentication and publishes system and
   archetype names: restrict it as you would an admin route.
 - **Why sessions closed.** `ReadStats().SessionsClosed` (per reason: left, link lost, kicked, and the engine's own: silent 4001, lagging 1013,

@@ -48,5 +48,7 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
   `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`); otherwise no client is ever sent the change.
 - **Never write an `[Index]`ed SingleVersion/Transient component through a span** (`ClusterRef.GetSpan`/`Get`) — it throws;
   write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
+- **Never write a component with a `String1024` field through a span** (`ClusterRef.GetSpan`/`Get`) — it throws in every build;
+  use `ClusterRef.Set` for the component and `EntityRefMut.SetText` / `EntityRefMut.ClearText` for the text field itself.
 
 The whole conceptual core is also available as one file at https://doc.typhondb.io/llms-full.txt.
