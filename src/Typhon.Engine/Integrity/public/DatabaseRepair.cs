@@ -433,6 +433,11 @@ public static class DatabaseRepair
         foreach (var file in Directory.GetFiles(bundlePath, "*", SearchOption.AllDirectories))
         {
             var relative = Path.GetRelativePath(bundlePath, file);
+            if (relative.StartsWith(SortedIndexRebuild.TempDirectoryName + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                continue;   // an index rebuild's scratch (RB-10): never data, and a live one is held open exclusively
+            }
+
             var destination = Path.Combine(target, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(destination));
             File.Copy(file, destination, true);

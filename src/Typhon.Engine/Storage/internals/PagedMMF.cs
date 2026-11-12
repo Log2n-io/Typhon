@@ -1748,7 +1748,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         try
         {
             using var diskReadScope = TyphonEvent.BeginPageCacheDiskRead(filePageIndex);
-            pendingRead.SetResult(RandomAccess.Read(_readHandle ?? _fileHandle, PageCacheWindow.PageMemory(_windows, memPageIndex).Span, pageOffset));
+            var read = RandomAccess.Read(_readHandle ?? _fileHandle, PageCacheWindow.PageMemory(_windows, memPageIndex).Span, pageOffset);
+            Interlocked.Increment(ref _dataFilePagesRead);
+            pendingRead.SetResult(read);
             if (diskReadScope.Header.SpanId != 0 && !TyphonEvent.IsKindSuppressed(TraceEventKind.PageCacheDiskReadCompleted))
             {
                 TyphonEvent.EmitPageCacheDiskReadCompleted(diskReadScope.Header.SpanId, diskReadScope.Header.StartTimestamp, filePageIndex, Stopwatch.GetTimestamp());
@@ -3248,7 +3250,17 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         Volatile.Read(ref _writeHook)?.BeforeWrite(filePageIndex, pageCount, ref deadline);
         DataFileWriteProbe?.Invoke(filePageIndex, pageCount);
+        Interlocked.Add(ref _dataFilePagesWritten, pageCount);
     }
+
+    /// <summary>Pages written to the data file since the open (every write funnels through <see cref="BeforeDataFileWrite"/>). Diagnostic.</summary>
+    internal long DataFilePagesWritten => Interlocked.Read(ref _dataFilePagesWritten);
+
+    /// <summary>Pages the page cache read from the data file since the open. Diagnostic.</summary>
+    internal long DataFilePagesRead => Interlocked.Read(ref _dataFilePagesRead);
+
+    private long _dataFilePagesWritten;
+    private long _dataFilePagesRead;
 
     /// <summary>
     /// The asynchronous half of the data-file write chokepoint (BKP-01), used by <see cref="SavePageInternal"/>. It does not advance the

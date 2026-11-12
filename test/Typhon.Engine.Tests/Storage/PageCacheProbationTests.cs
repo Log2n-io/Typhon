@@ -501,6 +501,142 @@ class PageCacheProbationTests
     }
 
     /// <summary>
+    /// Pass 2, which takes any evictable slot once the clock and the probation queue found none, passes over a probation page's counter: that counter is
+    /// its own operation's reference state, not an age. Staged with every slot held by a slot reference, so all three come back empty-handed and the
+    /// request times out after pass 2 swept the whole cache.
+    /// </summary>
+    [Test]
+    [CancelAfter(10_000)]
+    public void PassTwo_NeverAgesAProbationPage()
+    {
+        var (scope, cache, epochs) = Open();
+        using (scope)
+        {
+            var held = new List<int>(Slots);
+            void Hold(long op, int page)
+            {
+                if (op != 0)
+                {
+                    PagedMMF.EnterOperation(op);
+                }
+
+                try
+                {
+                    using var guard = EpochGuard.Enter(epochs);
+                    Assert.That(cache.RequestPageEpoch(page, epochs.GlobalEpoch, out var slot), Is.True);
+                    cache.IncrementSlotRefCount(slot);
+                    held.Add(slot);
+                }
+                finally
+                {
+                    if (op != 0)
+                    {
+                        PagedMMF.ExitOperation(op);
+                    }
+                }
+            }
+
+            // Loaded on probation, at 1, and held without a request: a request of its own operation would set its bit, which the take then spends.
+            Request(cache, epochs, 5, 0);
+            var probationSlot = Enumerable.Range(0, Slots).Single(s => cache.ProbationTagForTests(s) != 0);
+            cache.IncrementSlotRefCount(probationSlot);
+            held.Add(probationSlot);
+            for (var p = 1; p < Slots; p++)
+            {
+                Hold(0, p);   // the clock's, every other slot
+            }
+
+            Assert.That((cache.ProbationCount, cache.GetClockSweepCounterForDiagnostic(0)), Is.EqualTo((1, 1)), "premise: one probation page, at its load's 1");
+
+            var saved = TimeoutOptions.Current;
+            var timeouts = saved.Clone();
+            timeouts.PageCacheBackpressureTimeout = TimeSpan.FromMilliseconds(100);
+            TimeoutOptions.Current = timeouts;
+            var visits = Interlocked.Read(ref cache.FailedSweepVisitsForTests);
+            try
+            {
+                Assert.That(() => Request(cache, epochs, 0, 10_000), Throws.InstanceOf<PageCacheBackpressureTimeoutException>(), "no slot to take");
+            }
+            finally
+            {
+                TimeoutOptions.Current = saved;
+            }
+
+            Assert.That(Interlocked.Read(ref cache.FailedSweepVisitsForTests) - visits, Is.GreaterThanOrEqualTo(3L * Slots),
+                "premise: a round's two passes ran, pass 2 over every slot");
+            Assert.That(cache.GetClockSweepCounterForDiagnostic(0), Is.EqualTo(1), "pass 2 left the probation page's reference state alone");
+            Assert.That(cache.ProbationCount, Is.EqualTo(1), "and on probation");
+
+            foreach (var slot in held)
+            {
+                cache.DecrementSlotRefCount(slot);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Several threads of one operation asking for one probation page at once — workers of one lease — advance its reference state one step, not one per
+    /// thread: from loaded (1) to its reference bit (2), never past it into the second lap it has not had. Each round loads a fresh page and releases
+    /// the threads on it together.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ConcurrentRequestsOfOneOperation_AdvanceAPageOnce()
+    {
+        const int slots = 1_024;
+        const int workers = 8;
+        const int rounds = 400;
+        const long op = 3;
+        var (scope, cache, epochs) = Open(slots: slots);
+        using (scope)
+        {
+            using var barrier = new Barrier(workers + 1);
+            var page = -1;
+            var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+            var threads = Enumerable.Range(0, workers).Select(_ => new Thread(() =>
+            {
+                for (var r = 0; r < rounds; r++)
+                {
+                    barrier.SignalAndWait();
+                    try
+                    {
+                        Request(cache, epochs, op, Volatile.Read(ref page));
+                    }
+                    catch (Exception e)
+                    {
+                        failures.Enqueue(e);
+                    }
+
+                    barrier.SignalAndWait();
+                }
+            }) { IsBackground = true }).ToArray();
+            foreach (var t in threads)
+            {
+                t.Start();
+            }
+
+            var states = new int[6];
+            for (var r = 0; r < rounds; r++)
+            {
+                Volatile.Write(ref page, 100 + r);
+                Request(cache, epochs, op, 100 + r);   // loaded on probation: 1
+                barrier.SignalAndWait();               // the workers ask for it together
+                barrier.SignalAndWait();
+                states[cache.GetClockSweepCounterForDiagnostic(100 + r)]++;
+            }
+
+            foreach (var t in threads)
+            {
+                t.Join();
+            }
+
+            Assert.That(failures, Is.Empty);
+            Assert.That(states[2], Is.EqualTo(rounds), $"every page at its reference bit; by state: {string.Join(", ", states)}");
+            Assert.That((cache.ProbationCount, cache.ProbationPromotions), Is.EqualTo((rounds, 0L)), "none promoted: one operation");
+        }
+    }
+
+    /// <summary>
     /// Operations ending out of order — the first transaction disposed before the second — never leave the thread in one that has ended; nested ones
     /// put back the outer one.
     /// </summary>

@@ -890,7 +890,12 @@ CK-08 (flush-only cycles) are later increments.
             the dirty-page threshold. Released, not saved (#1588): a save per batch rewrote the pages each batch re-dirtied, and the index
             rebuild's random inserts re-dirty the same B+Tree pages batch after batch (a 7 GB crash open at 512 MiB: >91 GB in >5.5 min saved,
             15.3 GB in 95 s released). The passes: the entity-map rebuild, the
-            Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild. A pass
+            Versioned HEAD rebuild, the replay, the scrub (and its dropped-content free and orphan sweep), the cluster index rebuild's stage,
+            build and write-back (RecoveryPass.IndexStage, IndexBuild, IndexWriteBack) — on every open that rebuilds, clean ones included (an
+            added index, a migration; #1588), whose cycles are not limited to flush-only but write the same pages. The index passes make their
+            batch points on each worker thread, with its own ChangeSet and epoch scope: the batch point's counters are atomic, its probe is
+            serialised, and its flush-only cycle reads the debt again once it holds the cycle lock, so workers queued behind one cycle run no
+            other. A pass
             calls it only where it holds no page address across it, and records every page it writes through an accessor without a ChangeSet as
             owed (the HEAD rebuild's clusters): refreshed, an unrecorded page could be evicted unwritten (PS-10). The replay's ChangeSet is saved
             when the replay completes, its marks released when it throws. OPEN: the spatial passes still epoch-tag (#1305). A partial entity map on
@@ -902,7 +907,8 @@ CK-08 (flush-only cycles) are later increments.
             moved, or — a fatal failure after the seal's own advance, in its WAL recycling — moved only over data the cycle had fsynced
   requires: CK-04, AP-12
   scope: CheckpointManager.RunFlushOnlyCycle, CheckpointManager.RunCheckpointCycle, CheckpointManager.RecoveryInProgress,
-         DatabaseEngine.RecoveryBatchPoint, DatabaseEngine.SealRecovery, DatabaseEngine.ThrowIfRecoveryCheckpointerFailed, RecoveryApplier.BatchPoint,
+         DatabaseEngine.RecoveryBatchPoint, DatabaseEngine.RebuildPendingClusterIndexes, DatabaseEngine.SealRecovery,
+         DatabaseEngine.ThrowIfRecoveryCheckpointerFailed, RecoveryApplier.BatchPoint,
          RecoveryDriver.Run
   on_violation: recovery either deadlocks on cache back-pressure (no valve) — the crash open of a 0.4 GiB market over a 64 MiB cache timed out
                 with every slot epoch-held (#1183) — or destroys its own re-runnability: a full cycle mid-recovery advances CheckpointLSN over a
@@ -912,7 +918,9 @@ CK-08 (flush-only cycles) are later increments.
             row, converges on the next open; a fatal cycle failure latched inside the replay fails the open at the next batch point, before the
             index pass, a seal cycle failing fatally fails it too, and a batch point's own flush-only cycle failing fatally fails it at that batch
             point (classified, not thrown raw), each followed by an open that recovers whole; MarketHardeningTests at 64 MiB
-            (TYPHON_MKT_STOP_RECOVERY): five recoveries stopped in a row, then coherent, every durable transfer present
+            (TYPHON_MKT_STOP_RECOVERY): five recoveries stopped in a row, then coherent, every durable transfer present;
+            IndexRebuildOncePerOpenTests [VerifiesRule] — a clean open adding an index over twice the cache's clusters completes (it timed out
+            on back-pressure with no batch point), and a clean migrating open makes batch points in its index pass
 
 ### CK-09: Occupancy bitmap is derived — re-derived on crash `[fatal]` `[silent]`
   invariant the occupancy bitmap is a DERIVED structure: on the crash path it is never trusted, but rebuilt WHOLESALE from the
@@ -2125,7 +2133,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          ClusterRef.GetSpan, ClusterRef.Get, ClusterEnumerator.MoveNext, ClusterEnumerator.Dispose, ClusterEnumerator.MarkCurrentDirty,
          ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange,
          DatabaseEngine.DrainClusterShadowSlots, EntityRefMut.WriteRef, EntityAccessor.NoteSvInPlacePageWrite, PagedMMF.MemPageIndexOf,
-         DatabaseEngine.MarkClusterSlotDirty, ArchetypeClusterState.RebuildIndexesFromData
+         DatabaseEngine.MarkClusterSlotDirty, ElementIdWriteBack.Apply
   verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
             page clean, must still read back after allocations have cycled the page cache — both fail with the page record removed);
             PageSlotRecordTests.ACaptureLandingAfterTheSlotWasReused_LeavesItsNextPageClean [VerifiesRule] (fails with the reset to 0 restored);
@@ -2154,11 +2162,13 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
        page nothing marks, and the element id went with it — Migrate read the old id, its location update was dropped, and the index kept the entity at
        the slot it had left
   note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty, or by DatabaseEngine.MarkClusterSlotDirty),
-       WriteSpatial, and the index rebuild's element-id writes (RebuildIndexesFromData, once per cluster). They record the page at the
+       and WriteSpatial. They record the page at the
        write (MarkPageModified), and the fence's WAL emit records every cluster page it serialises besides — as writeback debt, not as a dirty mark in a
        ChangeSet, because the serial fence SAVES its own ChangeSet and would then write data pages outside the checkpoint's WAL barrier (CK-02). Before 2026-09-23 neither did: committed values reverted to the
        on-disk image whenever an unrelated allocation evicted the page (found by the push-replication oracle; seed 9160 reverted four creatures inside a
        rock spawn), and the checkpoint never collected those pages.
+  note the index rebuild's element-id write-back (ElementIdWriteBack.Apply, #1588) writes each cluster through a ChangeSet accessor, dirty, once per
+       cluster page, in ascending order
   on_violation: an unrecorded modification is never written and is lost at eviction (#385, #301, #30);
     a debt never discharged pins the page for ever (#824). Until #1127, TryAcquire reset a reused slot's pair to 0, so a checkpoint's
     capture landing after a SavePages had settled the page and the slot was reused set CapturedGen above the new page's WritebackGen:
@@ -2694,7 +2704,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
          PagedMMF.AllocateMemoryPageCore, PagedMMF.EnterOperation, PagedMMF.ExitOperation, PagedMMF.OperationTag, ProbationPolicy,
          PagedMMFOptions.ScanResistantEviction
   on_violation: a walk larger than the cache evicts the working set: on a full 64 MiB cache, the replay of three long walks beside live traffic
-                counted 20-24k foreground misses under the plain clock against about 650 with this rule (claude/scratch/huge-scan-assessment.md, I8).
+                counted 20-24k foreground misses under the plain clock against about 650 with this rule (claude/research/Storage/huge-scan-assessment.md, I8).
                 A reserved area instead of an adaptive one cost a working set near the cache size 75 % more misses with no walk at all
   rationale: ARC's adaptation (Megiddo and Modha, FAST 2003) on the clock, as CAR (Bansal and Modha, FAST 2004), with one change: promotion needs a
              different operation, not merely a second hit — 63-65 % of a walk's requests re-read its own pages. Deviates from EP-02's "marks the page
@@ -2706,7 +2716,9 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
             AProtectedProbationPage_IsNeverTaken, UnderConcurrency_TheProbationCountMatchesTheSlots, APagePromotedDuringTheTake_IsLeftToTheClock,
             TheTarget_NeverExceedsHalfTheCache, WithTheOptionOff_NoPageIsOnProbation, APageItsOperationAskedForAgain_GetsOneMoreLap,
             OperationsEndingOutOfOrder_LeaveNoEndedOperation, AfterTheQueueChurns_EveryProbationPageCanStillBeTaken, TheGhostList_MatchesItsModel,
-            APageItsOperationKeepsComingBackTo_JoinsTheClock
+            APageItsOperationKeepsComingBackTo_JoinsTheClock, PassTwo_NeverAgesAProbationPage (every slot held, so pass 2 sweeps the cache: a
+            probation page's counter is unchanged; mutation-checked), ConcurrentRequestsOfOneOperation_AdvanceAPageOnce (8 threads of one
+            operation on a fresh probation page, 400 rounds: one step each time; a plain increment instead of the CAS overshoots)
 
 ## Module: WAL Recovery
 
@@ -3216,7 +3228,8 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
             durability mode and index kind, and passes. There is no flat shape left.
   scope: crash path clears + recreates indexes empty at open (ComponentTable.BuildIndexedFieldInfo /
     BTreeBase.ClearSharedSegment) and repopulates from final HEADs after apply+scrub via
-    ArchetypeClusterState.RebuildIndexesFromData, driven by DatabaseEngine.RebuildClusterIndexes on the crash path.
+    SortedIndexRebuild.Run (a staged external sort of the keys, then an ordered build of each tree, #1588), driven by
+    DatabaseEngine.RebuildPendingClusterIndexes in Phase 5 of a crash open.
     The spatial cell layer is rebuilt the same way, after apply (DatabaseEngine.RebuildSpatialLayerAfterRecovery, #1054):
     the only rebuild before it runs in InitializeArchetypes, BEFORE the WAL window is applied, and a crash before the
     first checkpoint leaves the cluster segment empty there — every replayed spawn was then invisible to spatial queries.
@@ -3236,8 +3249,8 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     🔴 BOTH index homes, since #656. A cluster-backed archetype keeps its field indexes on the ARCHETYPE, and that home did
     NOT implement this rule: the cluster-index init block read the persisted SPI, loaded the segment and skipped its rebuild,
     so the crash flag — consulted in six places, `CrashRecoveryAtOpen` since #1143 (CS-06) — reached none of it. Now the same shape as the flat home: the init
-    block clears (ClearSharedSegment over both stride segments) and DatabaseEngine.RebuildClusterIndexes repopulates from the
-    cluster SoA in Phase 5, via ArchetypeClusterState.RebuildIndexesFromData. Rebuilding from the SoA rather than from chain
+    block clears (ClearSharedSegment over both stride segments) and DatabaseEngine.RebuildPendingClusterIndexes repopulates from the
+    cluster SoA in Phase 5, via SortedIndexRebuild.Run. Rebuilding from the SoA rather than from chain
     heads is what makes it storage-mode-agnostic: the cluster slot IS the head for SingleVersion and carries the published
     head for Versioned (D1). The EntityMap is
     discarded (RawValuePagedHashMap.ClearForRebuild) and re-derived from authoritative data on the crash path
@@ -3264,10 +3277,12 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     per-archetype home's rebuild could not simply be re-enabled where its CLEAR lives: the cluster-index init block runs
     inside InitializeArchetypes, BEFORE RunWalV2Recovery, so a rebuild there indexes pre-apply state — RB-01's letter met and
     this rule broken, yielding an index that is confidently wrong rather than merely stale (#656).
-  scope: DatabaseEngine.RunWalV2Recovery (ScrubVersionedChains → RebuildSecondaryIndexes → RebuildClusterIndexes →
-    ResolveSuspectPrimaryPages → SealRecovery). Exactly one of the two cluster-index rebuild sites runs per open: the init
-    block's, on a clean reopen, or RebuildClusterIndexes, on the crash path — RunWalV2Recovery returns immediately when no
-    WAL window exists.
+  scope: DatabaseEngine.RunWalV2Recovery (ScrubVersionedChains → RebuildSecondaryIndexes → RebuildPendingClusterIndexes →
+    ResolveSuspectPrimaryPages → SealRecovery). Each archetype's cluster indexes are rebuilt at most once per open, by
+    DatabaseEngine.RebuildPendingClusterIndexes: in Phase 5 on a crash open, after DrainDeferredVersionedHeadRebuilds on a
+    clean one. The init block only marks the archetypes whose trees it created empty (ArchetypeClusterState.IndexRebuildPending);
+    RebuildClusterFromChains rebuilds no index. Phase 5 runs on every crash open, with or without a WAL window
+    (RunWalV2Recovery returns only when !CrashRecoveryAtOpen).
     A THIRD ordering applies on a migrating open: RebuildClusterFromChains must place the entities BEFORE anything reads
     the cluster, and the cluster head rebuild (ArchetypeClusterState.RebuildVersionedHeadFromChain) must run AFTER the
     EntityMap it reads has been re-derived — DatabaseEngine.DrainDeferredVersionedHeadRebuilds exists precisely to defer
@@ -3275,9 +3290,12 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     which is RB-01's own rationale applied one level down.
   on_violation: an index built over pre-scrub MVCC history carries stale/duplicate keys; a suspect resolved before
     rebuild misclassifies a to-be-discarded derived page; a cluster index built at open covers only the checkpointed half of
-    the data and silently omits every entity recovered from the WAL window.
+    the data and silently omits every entity recovered from the WAL window. A crash open that also migrated rebuilt the
+    migrating archetype twice, in the placement and in Phase 5, over trees nothing had cleared: every unique key a conflict,
+    every multi-value location indexed twice with the cluster tail naming the second copy, so a destroy left the first (#1588).
   verified_by: DifferentialRecoveryOracleTests.ClusterIndexed_MidCheckpoint_IndexAxisHolds (rebuilding at open instead of in
-    Phase 5 reports exactly the checkpointed subset) — `[VerifiesRule("RB-02")]`.
+    Phase 5 reports exactly the checkpointed subset); IndexRebuildOncePerOpenTests.ACrashOpenThatMigrates_RebuildsTheIndexesOnce
+    (one rebuild, no conflict, each location once, destroys leave nothing) — `[VerifiesRule("RB-02")]`.
 
 ### RB-03: Chain scrub postcondition `[fatal]`
   post ∀ Versioned (entity, component) chain: exactly one committed HEAD element (highest TSN, IsolationFlag==0),
@@ -3367,11 +3385,14 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
         state is on disk, so the next open repeats it and no caller can catch its way out
   never dropping the ENTITIES to satisfy the derived structure. They are valueless, not absent, and deleting user data to
         make an index representable inverts which of the two is primary.
+  invariant the entry kept for a duplicate unique key is the one at the LOWEST cluster location; the others are dropped and
+            counted. The rebuild orders its input by (key, location), so the winner does not depend on the order of
+            ActiveClusterIds, which a crash open's replay leaves unsorted (#1588)
   enforce the rebuild counts the drops and the caller logs them at Warning naming the archetype
-        (`ArchetypeClusterState.RebuildIndexesFromData` returns the count, `DatabaseEngine.NoteUniqueIndexRebuildConflicts`
+        (`SortedIndexRebuild.Run` returns the count, `DatabaseEngine.NoteUniqueIndexRebuildConflicts`
         reports it and accumulates `LastOpenUniqueIndexRebuildConflicts`)
-  scope: ArchetypeClusterState.RebuildIndexesFromData (the UniqueConstraintViolationException catch), the three
-         DatabaseEngine rebuild call sites, DatabaseEngine.LastOpenUniqueIndexRebuildConflicts
+  scope: TreeRebuild.Build (the duplicate drop), SortedIndexRebuild.Run, DatabaseEngine.RebuildPendingClusterIndexes,
+         DatabaseEngine.LastOpenUniqueIndexRebuildConflicts
   on_violation: the database is PERMANENTLY unopenable — measured: a hard crash on a SingleVersion archetype carrying a
                 unique `[Index]` under TickFence returned all 64 entities with all 64 keys zeroed, and the second `Add`
                 threw `UniqueConstraintViolationException` out of `InitializeArchetypes` on every subsequent open.
@@ -3391,7 +3412,10 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
   verified: AxisArchetypesTests.SvWithUniqueIndex_AfterHardCrash_StillOpens [VerifiesRule] — asserts the open succeeds, the
             drop count is NON-ZERO, and every entity is still reachable by scan. The drop-count assertion is load-bearing:
             "it opens" is equally true of a rebuild that never ran and of an archetype with nothing to index, and both would
-            satisfy every other assertion in the test.
+            satisfy every other assertion in the test. It also asserts the entity keeping key 0 is the one at the lowest occupied
+            location (a rebuild keeping the last duplicate fails it). TreeRebuildTests.DuplicatesAcrossRuns_KeepTheLowestLocation
+            [VerifiesRule] — duplicates spread across runs in no location order, merged in one pass and in several: every key keeps its lowest
+            location, every other duplicate is counted.
 
 ### RB-08: A crash open leaves no entity id in a free slot `[correctness]`
   invariant after a crash open, every free slot of a populated cluster holds entity id 0 and no enabled bit. The open clears them after the
@@ -3405,6 +3429,49 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
        scan treat a disagreement as a finding. A free slot's collection buffers are REAP-02's: it names nothing
   verified: BackupCaptureRoundTripTests.ADestroyHiddenAtTheLastCheckpoint_LeavesNoKeyInItsFreeSlot [VerifiesRule] stages it;
             AHardCrashUnderTheSameWorkload_IsSoundAfterRecovery reaches it from 40 seeded crashes, nightly
+
+### RB-09: An index rebuild's memory and page writes are bounded, whatever the archetype's size `[fatal]`
+  invariant the rebuild's native memory, every buffer of it allocated through one RebuildMemory, stays within
+            IndexRebuildOptions.MemoryBudgetBytes, its I/O buffers included; nothing it holds grows with the archetype: more data is more sorted
+            runs in the temp file, of keys and of element-id pairs alike, never a larger buffer
+  invariant the keys reach each tree in (key, location) order, so a tree's pages are written about once: the index-segment pages a crash
+            open writes are at most the clear's I_old plus about 1.5 × I_new, against one write per insert once random-order inserts
+            outgrow the cache
+  invariant the stage reads the clusters through a scan accessor (EP-02); every write (the trees, the element-id tails, through which the
+            write-back also reads each cluster's occupancy) goes through a worker's own ChangeSet accessors (PS-05a), committed before each batch
+            point (CK-08); the ChangeSets are saved by the coordinator once every worker of the phase has exited, released when any failed — never
+            by a worker: a save writes its pages from live memory, checksum stamped first, and the workers write the same pages (the trees of an
+            archetype share their index segment and directory chunk), so a save beside a running sibling put a page on disk that failed its CRC
+  invariant each phase runs on RebuildWorkers threads, each entering and exiting its epoch scope on its own thread (EP-04); the coordinating
+            thread holds no scope while they run — checked, it throws — or its pin would hold every page the workers touch. The first failure
+            stops the others at their next batch point or work item and is rethrown once every thread has exited; the open fails (RB-01 rebuilds
+            on the next one). The budget is shared: P stage partitions take M/P each, the build runs as many workers as the budget holds
+  scope: SortedIndexRebuild.Run, RebuildWorkers, RebuildMemory, TreeRebuild.Build, RunMerger, ElementIdWriteBack.Apply, PairCollector,
+         DatabaseEngine.RebuildPendingClusterIndexes
+  on_violation: the rebuild rewrites index pages per insert (184 GB of data-file writes for a 1.9 GB index segment, unfinished after 30 min, on
+                the 29 GB SWG world at a 512 MiB cache, #1588), or its memory grows with the data and the open runs out of it
+  verified: SortedIndexRebuildTests.ACrashOpenBeyondTheCache_WritesEachIndexPageAboutOnce [VerifiesRule] — three unique trees 1.25× an 8 MiB
+            cache, rebuilt in a 3 MiB budget the keys outgrow (12 runs): 1.40 index-page writes per page and a peak of exactly the budget (the
+            previous rebuild timed out on back-pressure at that scale); ACrashOpen_RebuildsEveryTreeKind [VerifiesRule] — every tree kind, in
+            memory, spilled, merged in several passes, and with spilled element-id pairs; AnyWorkerCount_RebuildsTheSameTrees [VerifiesRule] —
+            1, 2, 4 and 8 workers (stage partitions, build workers side by side, merged down in parallel) give trees and element ids that agree
+            with the data, and every index batch point is a worker's; AWorkerThrow_FailsTheOpenWithIt_EveryWorkerExits_AndTheNextOpenRebuilds
+            [VerifiesRule]; RebuildWorkersTests.ACoordinatorHoldingAScope_StartsNoWorker [VerifiesRule]
+
+### RB-10: Rebuild temp data is verified on every read and never outlives its open `[fatal]` `[silent]`
+  invariant every temp block is checked (magic, header CRC32C, version, kind, owner, sequence, stride, count, payload CRC32C) before a record
+            of it is used, and a run's entry count at its end, for key runs and element-id pair runs alike, each run with an id of its own; a
+            failed check fails the open (IndexRebuildTempCorruptException), never skipped or repaired. The next open rebuilds from the clusters
+  invariant a temp file is deleted when its handle closes, the process's death included (FileOptions.DeleteOnClose on Windows; unlinked
+            right after it is opened elsewhere); the temp directory is the database's own ({bundle}/rebuild-tmp, or {TempDirectory}/{bundle
+            name}.rebuild-tmp), its rebuild files (ix-*.tmp) are swept at the start of every open's rebuild pass, it is removed once empty, and
+            a repair's bundle copy skips it
+  scope: RebuildTempFile, RunCursor, ElementIdWriteBack, DatabaseEngine.RebuildPendingClusterIndexes, DatabaseRepair.CopyBundle
+  on_violation: a tree built from bytes nobody checked serves wrong keys or locations as derived truth, or a stale file is read as this open's
+  verified: RebuildTempFileTests [VerifiesRule] — each corruption kind detected with its own reason before the corrupt block's first record;
+            SortedIndexRebuildTests.ACorruptedRunBlock_FailsTheOpen_AndTheNextOpenRebuilds [VerifiesRule] (no temp file left after the failed
+            open nor the next), TheSweep_DeletesOnlyThisDatabasesLeftovers [VerifiesRule];
+            DatabaseRepairTests.BackupFirst_SkipsTheIndexRebuildTempDirectory [VerifiesRule]
 
 ---
 

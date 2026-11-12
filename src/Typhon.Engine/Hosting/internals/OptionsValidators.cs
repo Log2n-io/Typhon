@@ -111,6 +111,15 @@ internal sealed class DatabaseEngineOptionsValidator : IValidateOptions<Database
             failures.Add(backupError);
         }
 
+        if (options.IndexRebuild == null)
+        {
+            failures.Add("IndexRebuild must not be null.");
+        }
+        else
+        {
+            options.IndexRebuild.Validate(failures);
+        }
+
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }
 }

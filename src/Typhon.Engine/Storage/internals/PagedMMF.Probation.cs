@@ -6,7 +6,7 @@ using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
-// I8 of the huge-scan assessment (claude/scratch/huge-scan-assessment.md), rule PS-25: scan-resistant eviction. A page loaded for the first time waits on
+// I8 of claude/research/Storage/huge-scan-assessment.md, rule PS-25: scan-resistant eviction. A page loaded for the first time waits on
 // probation until a DIFFERENT operation — a transaction or a lease — asks for it again; only then does it join the clock. The probation area's size p adapts
 // as ARC's does (Megiddo and Modha, FAST 2003), on the clock as CAR does (Bansal and Modha, FAST 2004): a miss on a page the area let go says the area is
 // too small, a miss on a page the clock let go says the clock is. Nothing is reserved: with no walk running, p drifts to its floor and the clock has the cache.

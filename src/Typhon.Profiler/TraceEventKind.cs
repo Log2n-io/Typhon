@@ -536,6 +536,15 @@ public enum TraceEventKind : byte
     /// </summary>
     SchedulerSuccessorDispatch = 78,
 
+    // ── Index rebuild (span) ──
+
+    /// <summary>
+    /// An open's sorted index rebuild (#1588): one kind for every phase, told apart by <c>phase</c> — 0 the archetype, 1 a stage partition, 2 a spilled
+    /// run, 3 a tree's build, 4 the element-id write-back — so a rarely-seen startup pass takes one value of this byte enum, not five. Payload:
+    /// <c>archetypeId: u16</c>, <c>phase: u8</c>, <c>item: i32</c> (the partition, run or tree; the archetype's tree count), <c>entries: i64</c>.
+    /// </summary>
+    DataIndexRebuild = 79,
+
     // ── WAL (span) ──
 
     /// <summary>WAL writer drain-write-signal cycle. Required: <c>batchByteCount: i32</c>, <c>frameCount: i32</c>, <c>highLsn: i64</c>.</summary>

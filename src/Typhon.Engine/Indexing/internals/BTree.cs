@@ -1648,6 +1648,8 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public override unsafe bool SkipsKey(void* key) => Sparse && EqualityComparer<TKey>.Default.Equals(*(TKey*)key, default);
 
+    internal override ITreeRebuild CreateRebuild() => new TreeRebuild<TKey, TStore>(this);
+
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
     {
         if (SkipsKey(key))

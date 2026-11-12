@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using System;
+
 namespace Typhon.Engine;
 
 /// <summary>
@@ -7,4 +10,7 @@ namespace Typhon.Engine;
 /// </summary>
 public partial class DatabaseEngine
 {
+    [LoggerMessage(LogLevel.Warning,
+        "An index rebuild worker failed after another had already failed the open; the first failure is the one rethrown.")]
+    private partial void LogIndexRebuildWorkerFailure(Exception exception);
 }

@@ -23,6 +23,10 @@ internal abstract partial class BTree<TKey, TStore>
     /// key — answered a single-key read empty, or with another key's entries (#1235).</para>
     /// <para>The caller must be inside an epoch scope (e.g., via a Transaction).</para>
     /// <para>Supports <c>foreach</c> via duck-typing (GetEnumerator/MoveNext/Current/Dispose).</para>
+    /// <para>Nothing is read until the first <see cref="MoveNext"/>: the constructor takes no pin and counts no live cursor. <c>using var e = ...;
+    /// foreach (var x in e)</c> disposes two copies — the one <see cref="GetEnumerator"/> hands to <c>foreach</c> and the original — and an accessor's
+    /// slots are a fixed buffer, so a pin taken by the constructor was owned by both and released twice: the page's reference count went below the
+    /// readers it had, and a page still read could be evicted. A cursor is never copied after its first step: the copy would own its pins too.</para>
     /// </remarks>
     [MustDispose(Reason = "owns a ChunkAccessor ('_accessor'): until disposed its pages stay pinned and registered as written, and the checkpoint cannot cover them (CP-13)")]
     [NoCopy(Reason = "holds a ChunkAccessor by value ('_accessor'): a copy duplicates its slots and pins")]
@@ -43,7 +47,10 @@ internal abstract partial class BTree<TKey, TStore>
         private int _leafVersion;
         private KeyValueItem _current;   // the row last emitted, read under a validated version — Current never re-reads the leaf
         private bool _disposed;
-        private readonly bool _countedLive;   // counted in EntityAccessor.LiveIndexCursors: holds a node across calls, so no per-operation epoch refresh (#1199)
+        private bool _countedLive;   // counted in EntityAccessor.LiveIndexCursors: holds a node across calls, so no per-operation epoch refresh (#1199)
+
+        /// <summary>No step taken yet: the first <see cref="MoveNext"/> seeks. Until then the cursor holds nothing, so a copy of it owns nothing.</summary>
+        private bool _unpositioned;
         private readonly IComparer<TKey> _comparer;
         private readonly TKey _boundKey;
         private readonly bool _bounded;
@@ -93,29 +100,11 @@ internal abstract partial class BTree<TKey, TStore>
             _lastKey = default;
             _hasLastKey = false;
             _finished = false;
-            _currentNode = tree._linkList;
+            _currentNode = default;
             _currentIndex = -1;
             _disposed = false;
             _countedLive = false;
-            _refreshesSeen = EpochManager.ThreadRefreshCount;
-            _retirementsSeen = Volatile.Read(ref tree._leafRetirements);
-
-            try
-            {
-                if (!PositionAtHead())
-                {
-                    _finished = true;
-                }
-            }
-            catch
-            {
-                _accessor.Dispose();   // never reaches the caller's Dispose (EP-02)
-                throw;
-            }
-
-            _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
-            _countedLive = true;
-            EntityAccessor.LiveIndexCursors++;
+            _unpositioned = true;
         }
 
         /// <summary>
@@ -137,38 +126,39 @@ internal abstract partial class BTree<TKey, TStore>
             _finished = false;
             _disposed = false;
             _countedLive = false;
-            _refreshesSeen = EpochManager.ThreadRefreshCount;
-            _retirementsSeen = Volatile.Read(ref tree._leafRetirements);
             _currentIndex = -1;
             _nodeItemCount = 0;
             _leafVersion = 0;
+            _currentNode = default;
 
-            // Inverted range or empty tree — yield nothing
-            if (_comparer.Compare(minKey, maxKey) > 0 || tree.IsEmpty())
-            {
-                _currentNode = default;
-                _finished = true;
-                return;
-            }
+            // An inverted range yields nothing; an empty tree is found empty by the first step's seek, against the tree as it is then.
+            _finished = _comparer.Compare(minKey, maxKey) > 0;
+            _unpositioned = !_finished;
+        }
 
-            // A fault while positioning never reaches the caller's Dispose: the window's pins are slot references, released here or never (EP-02).
-            try
+        /// <summary>
+        /// The first step's seek — the start of the range, or the head of the leaf chain — then, once the cursor stands on a leaf, its live count and span,
+        /// as the constructor used to: the seek itself is not a live cursor, so a back-pressure wait inside it may still move the epoch, and the refresh
+        /// check that follows in <see cref="MoveNext"/> finds the leaf again if it did. A throw leaves the cursor unpositioned, so a retried step seeks
+        /// again; whatever it pinned is the accessor's, released by the caller's Dispose.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private bool Start()
+        {
+            _refreshesSeen = EpochManager.ThreadRefreshCount;
+            _retirementsSeen = Volatile.Read(ref _tree._leafRetirements);
+            var positioned = _bounded ? Position(_seekKey, false) : PositionAtHead();
+            _unpositioned = false;
+            if (!positioned)
             {
-                if (!Position(_seekKey, false))
-                {
-                    _finished = true;   // the tree is empty
-                    return;
-                }
-            }
-            catch
-            {
-                _accessor.Dispose();
-                throw;
+                _finished = true;   // the tree is empty
+                return false;
             }
 
             _span = TyphonEvent.BeginDataIndexBTreeRangeScan();
             _countedLive = true;
             EntityAccessor.LiveIndexCursors++;
+            return true;
         }
 
         /// <summary>
@@ -334,6 +324,11 @@ internal abstract partial class BTree<TKey, TStore>
         /// </remarks>
         public bool MoveNext()
         {
+            if (_unpositioned && !Start())
+            {
+                return false;
+            }
+
             if ((_refreshesSeen != EpochManager.ThreadRefreshCount || _repositioning) && !ResumeAfterRefresh())
             {
                 return false;

@@ -1098,6 +1098,7 @@ internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TSt
         public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId) => _valueStore.GetScanAccessor(bufferId);
 
         public override int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.AllocateBuffer(ref bufferAccessor);
+        internal override VariableSizedBufferSegment<int, TStore> ValueStore => _valueStore;
         public override int BufferChunksNeededToAppend(int bufferId, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.ChunksNeededToAppend(bufferId, ref bufferAccessor);
         public override void PrefetchBuffer(int bufferId, int elementChunkId, ref ChunkAccessor<TStore> bufferAccessor)

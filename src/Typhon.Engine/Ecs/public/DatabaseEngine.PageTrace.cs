@@ -5,7 +5,7 @@ using Typhon.Engine.Internals;
 
 namespace Typhon.Engine;
 
-// The page trace (I7 of the huge-scan assessment, claude/scratch/huge-scan-assessment.md): every page request of a stretch of the engine's life, hit or
+// The page trace (I7 of claude/research/Storage/huge-scan-assessment.md): every page request of a stretch of the engine's life, hit or
 // miss, for scripts/page-trace-replay.py to replay against eviction policies. Recorded only while TelemetryConfig.ProfilerPageTraceEnabled; off, the
 // request paths carry no trace code at all.
 public partial class DatabaseEngine

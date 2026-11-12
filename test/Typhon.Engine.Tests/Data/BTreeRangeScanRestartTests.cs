@@ -514,6 +514,9 @@ class BTreeRangeScanRestartTests
             var e = tree.EnumerateRange(0, int.MaxValue);
             try
             {
+                // The first step is the scan's own seek; only a second one would be a re-descent.
+                Assert.That(e.MoveNext(), Is.True);
+                emitted.Add(e.Current.Key);
                 BTree<int, PersistentStore>.RangeEnumerator.SeekProbe = () => seeks++;
                 while (e.MoveNext())
                 {
@@ -627,5 +630,127 @@ class BTreeRangeScanRestartTests
                     + $"({keys.Count} keys emitted, first={keys[0]}, last={keys[^1]})");
             }
         }
+    }
+
+    /// <summary>
+    /// <c>using var e = ...; foreach (var x in e)</c> — the documented pattern — disposes two copies of the cursor: the one <c>GetEnumerator</c> hands to
+    /// <c>foreach</c> and the original. A cursor that pinned its first leaf in its constructor had that pin owned by both, and released it twice: every
+    /// page's reference count must be what it was before the scan.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    unsafe public void UsingAndForeach_DisposeTwoCopies_ReleaseEachPinOnce([Values(0, 1, 2)] int kind)
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var tree = new IntSingleBTree<PersistentStore>(segment);
+            var accessor = segment.CreateChunkAccessor();
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor);
+            }
+
+            accessor.Dispose();
+            var before = PinSum(pmmf);
+            var seen = 0;
+            {
+                using var e = kind switch
+                {
+                    0 => tree.EnumerateRange(0, int.MaxValue),
+                    1 => tree.EnumerateRangeDescending(0, int.MaxValue),
+                    _ => tree.EnumerateLeaves(),
+                };
+                foreach (var _ in e)
+                {
+                    seen++;
+                }
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(seen, Is.EqualTo(SeedCount), "premise: the scan walked the tree");
+                Assert.That(PinSum(pmmf), Is.EqualTo(before), "every pin the scan took released exactly once");
+            });
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    /// <summary>
+    /// The same over the multi-value wrapper, which holds a <c>RangeEnumerator</c> by value and is copied by <c>foreach</c> the same way, and over a
+    /// loop left early: the copy the loop walked owns the pins, the original none.
+    /// </summary>
+    [Test]
+    [VerifiesRule("EP-02")]
+    unsafe public void UsingAndForeach_OverAMultiValueScan_OrLeftEarly_ReleaseEachPinOnce(
+        [Values(false, true)] bool multi, [Values(false, true)] bool leaveEarly)
+    {
+        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 8, sizeof(Index32Chunk));
+        var depth = epochManager.EnterScope();
+        try
+        {
+            BTree<int, PersistentStore> tree = multi ? new IntMultipleBTree<PersistentStore>(segment) : new IntSingleBTree<PersistentStore>(segment);
+            var accessor = segment.CreateChunkAccessor();
+            for (var i = 0; i < SeedCount; i++)
+            {
+                tree.Add(i * 2, i, ref accessor, out _);
+            }
+
+            accessor.Dispose();
+            var before = PinSum(pmmf);
+            var seen = 0;
+            var stopAt = leaveEarly ? SeedCount / 3 : int.MaxValue;
+            if (multi)
+            {
+                using var e = tree.EnumerateRangeMultiple(0, int.MaxValue);
+                foreach (var key in e)
+                {
+                    if (++seen >= stopAt)
+                    {
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                using var e = tree.EnumerateRange(0, int.MaxValue);
+                foreach (var _ in e)
+                {
+                    if (++seen >= stopAt)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(seen, Is.EqualTo(leaveEarly ? SeedCount / 3 : SeedCount), "premise: the scan walked as far as the case says");
+                Assert.That(PinSum(pmmf), Is.EqualTo(before), "every pin the scan took released exactly once");
+            });
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    private static long PinSum(ManagedPagedMMF mmf)
+    {
+        long sum = 0;
+        for (var i = 0; i < mmf.CacheSlotCount; i++)
+        {
+            sum += mmf.SlotRefCountOf(i);
+        }
+
+        return sum;
     }
 }

@@ -610,6 +610,7 @@ export const SpanKindNames: Record<number, string> = {
   184: 'Data.Index.BTree.BulkInsert',
   185: 'Data.Index.BTree.Root',
   186: 'Data.Index.BTree.NodeCow',
+  79: 'Data.Index.Rebuild',   // sorted-index rebuild at open (#1588): u16 archetypeId, u8 phase, i32 item; end i64 entries
 
   // Query subtree (187-198).
   187: 'Query.Parse',

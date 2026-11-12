@@ -951,3 +951,41 @@ written for the read path; these are the write-path obligations that went unwrit
             AKeyMovedOffTheEndOfAMultiValueTree_CanBeAppendedAgain guards the multi-value restart, which passes on main too. Both tests
             are killed by the move's clear alone: the leaf re-check, the defence against a cache a concurrent removal re-sets stale, has
             no test that isolates it
+
+---
+
+## Module: IXB — Bulk build
+
+A tree built bottom-up from a sorted stream (#1588, the open's index rebuild) never passes through the live insert path, so nothing the live path
+guarantees holds of it by construction. The live path then writes into it, concurrently, as into any tree.
+
+### IXB-01: A bulk-built tree is a tree the live insert path could have produced `[silent]`
+  invariant a tree BTree.SortedBuilder builds satisfies IXS-04 (strictly ascending items), IXS-05 (descent and chain reach the same leaves; EntryCount
+            = leaf items, not values), IXW-03 (each node's HighKey the next node of its level's first key, internal levels too, as the live split sets
+            it; the last node of a level keeps the sentinel), every separator its right subtree's first key, and every non-root node, leaf or internal, holds at least ⌊cap/2⌋ keys: each level's last two nodes are balanced
+  invariant every node is initialised as BaseNodeStorage.InitializeNode leaves it, so no latch or version residue; a multi-value key's buffer, written
+            directly (VariableSizedBufferSegment.AppendBuild), is one AddElement could continue: the root as AllocateBuffer leaves it, its append
+            cursor the chain's last chunk, every chunk but the last full, the counts summing to its total; the element id names the chunk that
+            holds its value
+  invariant the input is key-ordered (unique: strictly; multi-value: then by location); a key below the previous one, or a unique duplicate, throws —
+            never a fallback. The tree is published only by Finish: height before the root (IXW-10), then the chain ends, the count, and the
+            last-key cache cleared (IXW-11), and the root last, so everything a reader reaches from it is in place
+  invariant the leaf fill is 100 % for multi-value trees and for unique trees whose keys ascend with location across the whole stream, else
+            IndexRebuildOptions.LeafFillPercent (default 90, 50..100); never under ⌊cap/2⌋+1. Internal nodes hold exactly LeafFillPercent's keys
+            (but each level's balanced tail) in every tree but a location-ascending unique one, multi-value trees included: built full, the first
+            leaf split after the build splits every node up to the root in one insert, and a multi-value tree's new keys split its full leaves
+  rationale: the builder writes each node once instead of inserting each entry, so a fault in it is a tree that answers wrong for its whole life — a
+             separator off by one entry sends lookups to the wrong leaf with no error, and an under-full tail node breaks the merge arithmetic of the
+             first remove that reaches it
+  scope: BTree.SortedBuilder, BTree.BeginSortedBuild, VariableSizedBufferSegment.BeginBuild, VariableSizedBufferSegment.AppendBuild,
+         VariableSizedBufferSegment.EndBuild, TreeRebuild.Build, SortedIndexRebuild.Run
+  on_violation: lookups and range scans that miss or misplace keys after a crash open, and live writes that corrupt the tree further
+  verified: SortedBuilderTests.UniqueLongTree_MatchesOrderedAdd_AtEverySizeAndFill, …UniqueIntTree…, …UniqueString64Tree…, …MultiValueLongTree…,
+            …MultiValueIntTree… and EveryTreeKind_AtTheEdgesOfItsOwnShape [VerifiesRule] — sizes on each tree's own capacity, leaf-fill and
+            height edges and 10 000, fills 50/90/100, multi-value keys of up to 150 values: CheckConsistency, the same (key, values) and EntryCount
+            as ordered Add, the same tree reloaded from its directory entry, every non-root node at least half full, every element id removing its
+            own value, then live inserts and removes; AKeyBelowThePreviousOne_Throws, AUniqueTree_RefusesADuplicateKey; SortedBuilderTests.ABuiltTreeSurvivesConcurrentWriters [VerifiesRule] — unique and multi-value built trees take
+            concurrent inserts, removes and reads and hold exactly what the writers left;
+            SortedIndexRebuildTests.UniqueKeysAscendingWithLocation_GetFullLeaves [VerifiesRule] — in memory and spilled, with a sawtooth key whose
+            teeth are the staged buffers, so only the ascent check across buffers rejects it. Mutants killed: no leaf HighKey, tail not balanced,
+            separator = the child's last key (hangs the descent), EntryCount counting values, no ascent check across buffers

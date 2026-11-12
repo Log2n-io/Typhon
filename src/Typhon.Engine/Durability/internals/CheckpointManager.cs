@@ -873,7 +873,7 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// </summary>
     internal static long WorldTickToPersist(long sampled, long frontier, long barrierLsn) => barrierLsn >= frontier ? sampled : 0;
 
-    /// <summary>Flush-only cycles run (<see cref="RunFlushOnlyCycle"/>, and every cycle during recovery). Diagnostic.</summary>
+    /// <summary>Flush-only cycles run (<see cref="RunFlushOnlyCycle()"/>, and every cycle during recovery). Diagnostic.</summary>
     public long TotalFlushOnlyCycles => Interlocked.Read(ref _totalFlushOnlyCycles);
 
     /// <summary>
@@ -883,10 +883,22 @@ internal sealed partial class CheckpointManager : ResourceNode, IMetricSource
     /// torn bytes were checksummed again and the next open served them, whatever the suspect resolution then decided (#1304). Serialized with the cycles.
     /// Returns the pages written.
     /// </summary>
-    internal int RunFlushOnlyCycle()
+    internal int RunFlushOnlyCycle() => RunFlushOnlyCycle(null);
+
+    /// <summary>
+    /// <see cref="RunFlushOnlyCycle()"/>, unless <paramref name="stillNeeded"/>, asked once the cycle lock is held, says the debt that called for it was
+    /// paid by a cycle this one waited behind: several threads making batch points at once (the index rebuild's workers, #1588) then run one cycle, not one
+    /// each.
+    /// </summary>
+    internal int RunFlushOnlyCycle(Func<bool> stillNeeded)
     {
         lock (_cycleLock)
         {
+            if (stillNeeded != null && !stillNeeded())
+            {
+                return 0;
+            }
+
             // Classified as a cycle's failure is (CK-06): a transient one is retried by the next call, a fatal one latches and the crash open fails at its
             // next check (DatabaseEngine.RecoveryBatchPoint).
             try

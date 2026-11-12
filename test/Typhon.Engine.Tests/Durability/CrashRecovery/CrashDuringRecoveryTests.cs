@@ -56,7 +56,9 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
     [TestCase(DatabaseEngine.RecoveryPass.VersionedHeads)]
     [TestCase(DatabaseEngine.RecoveryPass.Replay)]
     [TestCase(DatabaseEngine.RecoveryPass.Scrub)]
-    [TestCase(DatabaseEngine.RecoveryPass.Indexes)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexStage)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexBuild)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexWriteBack)]
     [VerifiesRule("AP-12")]
     [CancelAfter(60_000)]
     public void ACrashDuringAPass_ConvergesOnTheNextOpen(DatabaseEngine.RecoveryPass pass)
@@ -164,8 +166,9 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
     /// value, nothing else. The market failed this with any two stops (59 to 87 problems, items held by two live entities) and passed it with one.
     /// </summary>
     [TestCase(DatabaseEngine.RecoveryPass.Replay, DatabaseEngine.RecoveryPass.Scrub)]
-    [TestCase(DatabaseEngine.RecoveryPass.Scrub, DatabaseEngine.RecoveryPass.Indexes)]
-    [TestCase(DatabaseEngine.RecoveryPass.Indexes, DatabaseEngine.RecoveryPass.Replay)]
+    [TestCase(DatabaseEngine.RecoveryPass.Scrub, DatabaseEngine.RecoveryPass.IndexBuild)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexStage, DatabaseEngine.RecoveryPass.Replay)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexBuild, DatabaseEngine.RecoveryPass.IndexWriteBack)]
     [TestCase(DatabaseEngine.RecoveryPass.Replay, DatabaseEngine.RecoveryPass.Replay)]
     [TestCase(DatabaseEngine.RecoveryPass.EntityMap, DatabaseEngine.RecoveryPass.Scrub)]
     [VerifiesRule("AP-12")]
@@ -203,8 +206,9 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
     /// lore enabled. The market recovered such items held by two live entities.
     /// </summary>
     [TestCase(DatabaseEngine.RecoveryPass.Replay, DatabaseEngine.RecoveryPass.Scrub)]
-    [TestCase(DatabaseEngine.RecoveryPass.Scrub, DatabaseEngine.RecoveryPass.Indexes)]
-    [TestCase(DatabaseEngine.RecoveryPass.Indexes, DatabaseEngine.RecoveryPass.Replay)]
+    [TestCase(DatabaseEngine.RecoveryPass.Scrub, DatabaseEngine.RecoveryPass.IndexBuild)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexStage, DatabaseEngine.RecoveryPass.Replay)]
+    [TestCase(DatabaseEngine.RecoveryPass.IndexBuild, DatabaseEngine.RecoveryPass.IndexWriteBack)]
     [TestCase(DatabaseEngine.RecoveryPass.Replay, DatabaseEngine.RecoveryPass.Replay)]
     [VerifiesRule("AP-12")]
     [CancelAfter(60_000)]
@@ -444,7 +448,7 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
             var latched = false;
             DatabaseEngine.RecoveryBatchPointProbe = (p, _) =>
             {
-                if (p == DatabaseEngine.RecoveryPass.Indexes)
+                if (p is DatabaseEngine.RecoveryPass.IndexStage or DatabaseEngine.RecoveryPass.IndexBuild or DatabaseEngine.RecoveryPass.IndexWriteBack)
                 {
                     indexBatchPoints++;
                 }

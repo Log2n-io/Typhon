@@ -51,6 +51,8 @@ const SPAN_KINDS: readonly number[] = [
   60, 61, 62, 63, 64,
   // 74 (BackupArchiveSegment, #1418) sits directly above the 65-73 run and 75 is GcSuspension.
   74, 75,
+  // 79 (DataIndexRebuild, #1588) sits directly above the 76/77 instants.
+  79,
   117, 126, 136, 138, 139, 143,
   149, 150, 152, 155, 159, 160, 163, 164, 165,
   173, 174, 175, 177, 179, 181, 184,
