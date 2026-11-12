@@ -615,7 +615,7 @@ static class ArchetypeAccessorBenchmark
             for (int w = 0; w < 10; w++)
             {
                 WriteAllEntities(dbe, ids);
-                dbe.WriteTickFence(w + 1);
+                dbe.WriteTickFence();
                 Thread.Sleep(5); // Let WAL writer drain the commit buffer
             }
 
@@ -628,7 +628,7 @@ static class ArchetypeAccessorBenchmark
                 WriteAllEntities(dbe, ids);
 
                 var sw = Stopwatch.StartNew();
-                dbe.WriteTickFence(100 + i);
+                dbe.WriteTickFence();
                 sw.Stop();
                 tickFenceTimes[i] = sw.Elapsed.TotalMicroseconds;
                 Thread.Sleep(5); // Let WAL writer drain before next iteration
@@ -690,7 +690,7 @@ static class ArchetypeAccessorBenchmark
         for (int w = 0; w < 5; w++)
         {
             WriteAllIndexedEntities(dbe, ids, w);
-            dbe.WriteTickFence(w + 1);
+            dbe.WriteTickFence();
         }
 
         GC.Collect(2, GCCollectionMode.Aggressive, true, true);
@@ -712,7 +712,7 @@ static class ArchetypeAccessorBenchmark
         {
             WriteAllIndexedEntities(dbe, ids, 200 + i);
             sw.Restart();
-            dbe.WriteTickFence(200 + i);
+            dbe.WriteTickFence();
             sw.Stop();
             tickTimes[i] = sw.Elapsed.TotalMicroseconds;
         }
@@ -795,7 +795,7 @@ static class ArchetypeAccessorBenchmark
         for (int w = 0; w < 5; w++)
         {
             WriteSpatialEntities(dbe, ids, w, 10.0f);
-            dbe.WriteTickFence(w + 1);
+            dbe.WriteTickFence();
         }
 
         GC.Collect(2, GCCollectionMode.Aggressive, true, true);
@@ -817,7 +817,7 @@ static class ArchetypeAccessorBenchmark
         {
             WriteSpatialEntities(dbe, ids, 200 + i, 0.5f);
             sw.Restart();
-            dbe.WriteTickFence(200 + i);
+            dbe.WriteTickFence();
             sw.Stop();
             tickTimes[i] = sw.Elapsed.TotalMicroseconds;
         }
@@ -836,7 +836,7 @@ static class ArchetypeAccessorBenchmark
         {
             WriteSpatialEntities(dbe, ids, 300 + i, 50.0f); // Large move escapes fat AABB
             sw.Restart();
-            dbe.WriteTickFence(300 + i);
+            dbe.WriteTickFence();
             sw.Stop();
             tickTimes[i] = sw.Elapsed.TotalMicroseconds;
         }
@@ -930,7 +930,7 @@ static class ArchetypeAccessorBenchmark
             offset += batch;
         }
 
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();
 
         return new BenchEnv(sp, dbe, ids);
     }
@@ -980,7 +980,7 @@ static class ArchetypeAccessorBenchmark
         }
 
         // Initial tick fence to establish baseline index state
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();
 
         return new BenchEnv(sp, dbe, ids);
     }
@@ -1152,7 +1152,7 @@ static class ArchetypeAccessorBenchmark
             offset += batch;
         }
 
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();
         return new BenchEnv(sp, dbe, ids);
     }
 
@@ -1253,7 +1253,7 @@ static class ArchetypeAccessorBenchmark
             offset += batch;
         }
 
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();
         return new BenchEnv(sp, dbe, ids);
     }
 
@@ -1405,7 +1405,7 @@ static class ArchetypeAccessorBenchmark
             offset += batch;
         }
 
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();
         return new BenchEnv(sp, dbe, ids);
     }
 
@@ -1509,7 +1509,7 @@ static class ArchetypeAccessorBenchmark
         }
 
         // Tick fence to compute zone maps from cluster data
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();
         return new BenchEnv(sp, dbe, ids);
     }
 }

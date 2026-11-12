@@ -191,7 +191,15 @@ public struct TickContext
     /// <typeparam name="T">The event type.</typeparam>
     /// <param name="queue">The queue to produce into, or null for a no-op writer — the <c>queue?.Push(...)</c> idiom, kept working.
     /// The system should declare the queue via <c>WritesEvents</c> / <c>produces:</c>.</param>
-    public readonly EventWriter<T> Writer<T>(EventQueue<T> queue) => queue == null ? default : queue.GetWriter(WorkerId);
+    public readonly EventWriter<T> Writer<T>(EventQueue<T> queue)
+    {
+        if (queue == null)
+        {
+            return default;
+        }
+        SystemAccessValidator.AssertEventWrite(queue);   // DV-01 (#1650): an undeclared producer derives no producer→consumer edge
+        return queue.GetWriter(WorkerId);
+    }
 
     /// <summary>
     /// The tick's deferred entity commands, or null outside a database engine. Internal because <c>ctx.Commands</c> is the supported surface — a system

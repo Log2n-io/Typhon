@@ -3,6 +3,8 @@
 using JetBrains.Annotations;
 using Microsoft.Extensions.Configuration;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
 
@@ -19,9 +21,10 @@ namespace Typhon.Engine;
 /// </para>
 ///
 /// <para>
-/// <b>Off by default, everywhere.</b> Enable deliberately when diagnosing, via <c>Typhon:Checks:Enabled</c> in
-/// <c>typhon.telemetry.json</c> or the <c>TYPHON__CHECKS__ENABLED</c> environment variable. There is no build-config
-/// auto-detection and no runtime setter (a mutable field would defeat the JIT fold — restart to reconfigure).
+/// <b><see cref="Enabled"/> is off by default, everywhere.</b> Enable it deliberately when diagnosing, via <c>Typhon:Checks:Enabled</c> in
+/// <c>typhon.telemetry.json</c> or the <c>TYPHON__CHECKS__ENABLED</c> environment variable. <see cref="DeclaredAccessActive"/> is the one exception:
+/// it defaults on in a Debug build of the application. There is no runtime setter (a mutable field would defeat the JIT fold — restart to
+/// reconfigure).
 /// </para>
 ///
 /// <para>
@@ -40,10 +43,12 @@ public static class CheckConfig
     public static readonly bool Enabled;
 
     /// <summary>
-    /// Separate opt-in (default <c>false</c>) for the one costly check — <c>SystemAccessValidator.AssertWrite&lt;T&gt;</c> and its
-    /// <c>Enter/LeaveSystem</c> descriptor-stack infrastructure — so enabling strict mode does not force a <c>HashSet</c> lookup
-    /// on every <c>Write&lt;T&gt;()</c>. Effective value is <c>Enabled AND Typhon:Checks:DeclaredAccess</c>.
+    /// Declared-access validation, rule DV-01 (#1650): every component read and write, spawn, destroy, event write and event drain made inside a system
+    /// throws <see cref="InvalidAccessException"/> unless the system declared it. Independent of <see cref="Enabled"/>. Reads
+    /// <c>Typhon:Checks:DeclaredAccess</c> / <c>TYPHON__CHECKS__DECLAREDACCESS</c>; when neither is set it defaults to <c>true</c> if the process's entry
+    /// assembly is a Debug build (<see cref="DebuggableAttribute.IsJITOptimizerDisabled"/>) and <c>false</c> otherwise.
     /// </summary>
+    /// <remarks>Under <c>dotnet test</c> the entry assembly is the test host, which is optimized: test runs get <c>false</c> unless the key is set.</remarks>
     public static readonly bool DeclaredAccessActive;
 
     /// <summary>
@@ -60,7 +65,21 @@ public static class CheckConfig
         var config = TelemetryConfig.Configuration;
 
         Enabled = ReadBool(config, "Typhon:Checks:Enabled", false);
-        DeclaredAccessActive = Enabled && ReadBool(config, "Typhon:Checks:DeclaredAccess", false);
+        DeclaredAccessActive = ReadBool(config, "Typhon:Checks:DeclaredAccess", IsDebugEntryAssembly());
+    }
+
+    /// <summary>True when the process's entry assembly was compiled without JIT optimization, i.e. a Debug build of the user's application.</summary>
+    private static bool IsDebugEntryAssembly()
+    {
+        try
+        {
+            var entry = Assembly.GetEntryAssembly();
+            return entry?.GetCustomAttribute<DebuggableAttribute>()?.IsJITOptimizerDisabled == true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool ReadBool(IConfiguration config, string key, bool defaultValue)

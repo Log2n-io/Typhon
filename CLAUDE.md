@@ -223,13 +223,13 @@ Console.WriteLine("hello");
 |-----------|--------|---------|
 | `#:package` | Pull a NuGet package | `#:package BenchmarkDotNet@0.14.0` |
 | `#:sdk` | Switch SDK (default: `Microsoft.NET.Sdk`) | `#:sdk Microsoft.NET.Sdk.Web` |
-| `#:property` | Set an MSBuild property | `#:property AllowUnsafeBlocks true` |
+| `#:property` | Set an MSBuild property | `#:property AllowUnsafeBlocks=true` |
 | `#:project` | Reference an existing `.csproj` | `#:project src/Typhon.Engine/Typhon.Engine.csproj` |
 
 **Typical Typhon POC skeleton** — references the engine directly:
 
 ```csharp
-#:property AllowUnsafeBlocks true
+#:property AllowUnsafeBlocks=true
 #:project src/Typhon.Engine/Typhon.Engine.csproj
 
 using Typhon.Engine;

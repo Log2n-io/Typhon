@@ -224,6 +224,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
     }
 
+    /// <summary>The off-tick write guard for a write through this cluster (#1651): out of line, reached only when the walking transaction is stamped.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private readonly void GuardWrite(int componentTypeId) =>
+        TickWriteGuard.CheckSlotWrite(_owner, _meta, _owner.Engine?._archetypeStates[_meta.ArchetypeId], _meta.GetSlot(componentTypeId));
+
     /// <summary>
     /// Get a mutable span of the component's data across all N slots (its SoA array). For Versioned components use <see cref="GetReadOnlySpan{T}"/> instead —
     /// writing directly to the cluster slot bypasses the revision chain and breaks MVCC snapshot isolation.
@@ -250,6 +255,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
     {
         CheckStep();
+        SystemAccessValidator.AssertWrite<T>(_owner);
+        if (_owner is { GuardActive: true })
+        {
+            GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
+        }
         var slot = _meta.GetSlot(comp._componentTypeId);
         if (_state != null && (_state.FenceIndexedSlotMask & (1 << slot)) != 0)
         {
@@ -372,6 +382,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
     {
         CheckStep();
+        SystemAccessValidator.AssertRead<T>(_owner);
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
         return new ReadOnlySpan<T>(ResolveBase(slot) + _layout.ComponentOffset(slot), _layout.ClusterSize);
@@ -386,6 +397,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         CheckStep();
+        SystemAccessValidator.AssertWrite<T>(_owner);
+        if (_owner is { GuardActive: true })
+        {
+            GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
+        }
         var slot = _meta.GetSlot(comp._componentTypeId);
         if (_state != null && (_state.FenceIndexedSlotMask & (1 << slot)) != 0)
         {
@@ -422,7 +438,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly void Set<T>(Comp<T> comp, int slotIndex, in T value) where T : unmanaged
     {
         CheckStep();
-        SystemAccessValidator.AssertWrite<T>();
+        SystemAccessValidator.AssertWrite<T>(_owner);
+        if (_owner is { GuardActive: true })
+        {
+            GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
+        }
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
         if ((_state.SetRefusedSlotMask & (1 << slot)) != 0)
@@ -468,7 +488,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly void Set<T>(Comp<T> comp, ulong slots, scoped ReadOnlySpan<T> values) where T : unmanaged
     {
         CheckStep();
-        SystemAccessValidator.AssertWrite<T>();
+        SystemAccessValidator.AssertWrite<T>(_owner);
+        if (_owner is { GuardActive: true })
+        {
+            GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
+        }
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
         if ((_state.SetRefusedSlotMask & (1 << slot)) != 0)
@@ -667,6 +691,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public ref readonly T GetReadOnly<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         CheckStep();
+        SystemAccessValidator.AssertRead<T>(_owner);
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
         return ref Unsafe.Add(ref Unsafe.AsRef<T>(ResolveBase(slot) + _layout.ComponentOffset(slot)), slotIndex);
@@ -809,6 +834,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public void WriteSpatial<T>(Comp<T> comp, int slotIndex, in T newValue) where T : unmanaged
     {
         CheckStep();
+        SystemAccessValidator.AssertWrite<T>(_owner);
+        if (_owner is { GuardActive: true })
+        {
+            GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
+        }
         var slot = _meta.GetSlot(comp._componentTypeId);
         // Hottest path (AntHill per-entity-per-tick spatial write): inline-guard form so the gate JIT-folds to nothing when strict mode is off (#422 AC#6).
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
@@ -906,6 +936,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public void WriteSpatial<T>(Comp<T> comp, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
     {
         CheckStep();
+        SystemAccessValidator.AssertWrite<T>(_owner);
+        if (_owner is { GuardActive: true })
+        {
+            GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
+        }
         if (slots == 0)
         {
             return;

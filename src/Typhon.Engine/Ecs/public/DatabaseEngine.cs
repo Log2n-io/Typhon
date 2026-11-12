@@ -914,7 +914,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public long NextWorldTick => WorldClock.Next;
 
     /// <summary>
-    /// Records that world tick <paramref name="worldTick"/> completed (#1495): the runtime calls it at every tick end, and <see cref="WriteTickFence"/> for a
+    /// Records that world tick <paramref name="worldTick"/> completed (#1495): the runtime calls it at every tick end, and <see cref="WriteTickFence(long, ChangeSet)"/> for a
     /// host that drives the fence itself. Never lowers the clock.
     /// </summary>
     internal void NoteTickCompleted(long worldTick) => WorldClock.Raise(worldTick + 1);
@@ -8419,7 +8419,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// AP-03: whether a fence must log nothing — the engine stopped committing over a partial publish. Logged once. Both fence paths call it before they
-    /// append: the serial <see cref="WriteTickFence"/>, and the runtime's parallel fence, whose table and archetype appends never pass through it. A tick
+    /// append: the serial <see cref="WriteTickFence(long, ChangeSet)"/>, and the runtime's parallel fence, whose table and archetype appends never pass through it. A tick
     /// path must not throw, so the fence returns instead of meeting <see cref="DurabilityLog"/>'s refusal.
     /// </summary>
     private bool FenceMustNotAppend(long tickNumber)

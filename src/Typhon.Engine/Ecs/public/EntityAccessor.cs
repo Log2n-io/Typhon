@@ -52,6 +52,25 @@ public partial class EntityAccessor : IDisposable
     private protected bool _isDisposed;
     private protected DatabaseEngine _dbe;
 
+    /// <summary>The engine this accessor reads and writes.</summary>
+    internal DatabaseEngine Engine => _dbe;
+
+    /// <summary>The off-tick write guard stamped at creation (<see cref="TickWriteGuard"/>, #1651): None, Unbound or Bound.</summary>
+    internal byte WriteGuard;
+
+    /// <summary>For a bound accessor, the run that created it (<see cref="DagThread.CurrentRun"/>).</summary>
+    internal long SideRun;
+
+    /// <summary>
+    /// The off-tick guard must look at this write: the accessor is stamped and a runtime ticks the engine. Inline: one byte and one volatile int on the
+    /// write path; everything else is out of line in <see cref="TickWriteGuard"/>.
+    /// </summary>
+    internal bool GuardActive
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => WriteGuard != TickWriteGuard.None && _dbe.RuntimeTicking;
+    }
+
     /// <summary>The engine's commit cards, through which a revision walk resolves flagged entries (VIS-01).</summary>
     internal CommitCardTable CommitCards => _dbe.CommitCards;
     internal DatabaseEngine DBE => _dbe;

@@ -208,6 +208,9 @@ public enum TyphonErrorCode
 
     // 8xxx — Runtime / Scheduler
 
-    /// <summary>DEBUG-only: a system mutated a component it did not declare in its access set (see <see cref="InvalidAccessException"/>).</summary>
+    /// <summary>A system accessed a component or event queue it did not declare in its access set (rule DV-01, see <see cref="InvalidAccessException"/>).</summary>
     InvalidSystemAccess             = 8001,
+
+    /// <summary>The runtime's in-tick queue is full (see <see cref="TickQueueFullException"/>).</summary>
+    TickQueueFull                   = 8002,
 }

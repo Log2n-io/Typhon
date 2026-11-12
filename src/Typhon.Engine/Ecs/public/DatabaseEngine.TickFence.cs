@@ -27,10 +27,13 @@ public partial class DatabaseEngine
     /// <para><b>Under <see cref="TyphonRuntime"/> this is automatic</b> — the runtime calls it from its tick-end callback and
     /// application code does not. <b>A host that does NOT use the runtime must call it itself, once per tick</b>, after that tick's writes have been
     /// committed and before the next tick begins. See the embedding guide (<c>doc/guide/embedding-without-the-runtime.md</c>).</para>
-    /// <para><b>What happens if it is never called.</b> Nothing throws and nothing is corrupted — the database silently stops maintaining itself:
-    /// <c>SingleVersion</c> components degrade to <c>Transient</c>-like durability (no crash recovery), queued cluster migrations never execute, and
+    /// <para><b>What happens if it is never called</b> (rule TP-01a). Nothing throws, and the database silently stops maintaining itself:
+    /// <c>SingleVersion</c> writes reach no WAL record, yet a checkpoint still writes their pages, so after a crash the data file holds in-place mutations
+    /// no log record covers — phantom data after a crash (AP-01) — queued cluster migrations never execute, and
     /// spatial AABBs and zone maps go stale, so spatial queries return results computed against old positions, and a cluster a destroy empties is never
     /// reclaimed — its chunk stays allocated until the database is closed or reopened (#582, CLUSTERWALK-03).</para>
+    /// <para><b>Not while a runtime ticks.</b> A <see cref="TyphonRuntime"/> runs this fence itself at the end of every tick; calling it while one ticks
+    /// the engine throws (rule <c>EW-02</c>, #1651).</para>
     /// <para><b>Threading — a caller obligation, not an enforced one</b> (rule <c>EW-01</c>). No other thread may mutate the database while this runs: the
     /// fence rewrites cluster B+Trees, the EntityMap, the per-cell spatial index and the cluster-to-cell map, and a concurrent writer corrupts them silently.
     /// Under <see cref="TyphonRuntime"/> it holds by construction — the fence runs from the scheduler's tick-end callback, after every system has completed,
@@ -44,24 +47,70 @@ public partial class DatabaseEngine
     /// <see cref="ForceCheckpoint"/> is not part of the tick loop.</para>
     /// </remarks>
     /// <param name="tickNumber">
-    /// This session's tick: 0 for the first fence after open, increasing by one per tick. For a host driving the fence itself it also drives the world
-    /// clock (#1495, TICK-01): tick N completes world tick <see cref="WorldTickBase"/> + N, and the clock is never lowered — a host that numbers from
-    /// anything but 0, or carries its own count across sessions, moves the persisted world clock forward by that much for good. The runtime raises the
-    /// clock itself (its scheduler's world tick) and calls the fence without this.
+    /// This session's tick, conventionally 0 for the first fence after open and one more per tick: it must strictly increase within the session (gaps
+    /// are accepted), and a negative, repeated or decreasing number throws (TICK-01). It labels the tick's WAL records and paces cluster repair; it does
+    /// NOT drive the world clock: each fence completes the world tick the clock stands at (#1658), so a host numbering from a persisted value cannot
+    /// inflate the clock. <see cref="WriteTickFence(ChangeSet)"/> numbers the tick for you.
     /// </param>
     /// <param name="changeSet">ChangeSet for dirty-page tracking across the whole fence. Under the runtime this is the per-tick UoW's shared ChangeSet
     /// (see <see cref="UnitOfWork.ChangeSet"/>), which consolidates the fence's dirty pages with the rest of the tick. <b>Pass <c>null</c> when driving
     /// the fence from a host without a per-tick UoW</b> — this method then creates and commits a one-shot ChangeSet itself, which is correct but yields
     /// per-fence rather than per-tick consolidation.</param>
     /// <returns>Highest LSN written, or 0 if nothing was serialized.</returns>
-    public long WriteTickFence(long tickNumber, ChangeSet changeSet = null)
+    public long WriteTickFence(long tickNumber, ChangeSet changeSet = null) => WriteHostTickFence(tickNumber, changeSet);
+
+    /// <summary>
+    /// <see cref="WriteTickFence(long, ChangeSet)"/> with the tick numbered by the engine: one past the last tick this session fenced, 0 for the first
+    /// (#1658). The form to use unless the host already numbers its ticks.
+    /// </summary>
+    /// <param name="changeSet">As in <see cref="WriteTickFence(long, ChangeSet)"/>.</param>
+    /// <returns>Highest LSN written, or 0 if nothing was serialized.</returns>
+    public long WriteTickFence(ChangeSet changeSet = null) => WriteHostTickFence(_lastHostFenceTick + 1, changeSet);
+
+    private long WriteHostTickFence(long tickNumber, ChangeSet changeSet)
     {
-        NoteTickCompleted(WorldTickBase + tickNumber);
+        if (RuntimeTicking)
+        {
+            // EW-02 (#1651): the runtime runs its own fence at the end of every tick; a second one from any other caller rewrites the same structures
+            // concurrently with it or with the tick's systems.
+            ThrowHelper.ThrowInvalidOp("WriteTickFence was called while a TyphonRuntime ticks this engine (rule EW-02): the runtime runs the fence itself " +
+                                       "at the end of every tick. Call it only from a host that drives the engine without a runtime.");
+        }
+        if (tickNumber < 0)
+        {
+            ThrowHelper.ThrowInvalidOp($"WriteTickFence({tickNumber}): a tick number is never negative (rule TICK-01).");
+        }
+        if (tickNumber <= _lastHostFenceTick)
+        {
+            // TICK-01 (#1658): a repeated or decreasing number is a host counting wrong.
+            ThrowHelper.ThrowInvalidOp($"WriteTickFence({tickNumber}) follows WriteTickFence({_lastHostFenceTick}): the tick number must strictly increase " +
+                                       "within a session (rule TICK-01). WriteTickFence() numbers it for you.");
+        }
+        _lastHostFenceTick = tickNumber;
+        // The engine counts the world clock itself (#1658): each fence completes the world tick the clock stands at, whatever the host numbers its ticks —
+        // so a host counting from a persisted value cannot move the persisted clock forward for good, and a host fence after a runtime ran continues
+        // from where the runtime left the clock.
+        NoteTickCompleted(NextWorldTick);
         return WriteTickFenceNoClock(tickNumber, changeSet);
     }
 
+    /// <summary>The last tick number a host passed to <see cref="WriteTickFence(long, ChangeSet)"/> this session (-1: none yet).</summary>
+    private long _lastHostFenceTick = -1;
+
+
+    private int _tickingRuntimes;
+
     /// <summary>
-    /// <see cref="WriteTickFence"/> without its world-clock raise: the runtime's serial arm, which has raised the clock from its own scheduler — whose base
+    /// True while a <see cref="TyphonRuntime"/> ticks this engine: from just before its scheduler starts until no tick can run any more (#1651). A
+    /// transaction created on a thread running no system while this holds is stamped off-tick (<see cref="TickWriteGuard"/>).
+    /// </summary>
+    internal bool RuntimeTicking => Volatile.Read(ref _tickingRuntimes) > 0;
+
+    /// <summary>A runtime starts (<paramref name="ticking"/>) or has stopped ticking this engine.</summary>
+    internal void NoteRuntimeTicking(bool ticking) => Interlocked.Add(ref _tickingRuntimes, ticking ? 1 : -1);
+
+    /// <summary>
+    /// <see cref="WriteTickFence(long, ChangeSet)"/> without its world-clock raise: the runtime's serial arm, which has raised the clock from its own scheduler — whose base
     /// a second runtime on the session moves past <see cref="WorldTickBase"/>.
     /// </summary>
     internal long WriteTickFenceNoClock(long tickNumber, ChangeSet changeSet = null)
@@ -536,7 +585,7 @@ public partial class DatabaseEngine
 
     /// <summary>
     /// Serializes dirty cluster entity data to WAL for all cluster-eligible archetypes.
-    /// Called from <see cref="WriteTickFence"/> after per-ComponentTable processing.
+    /// Called from <see cref="WriteTickFence(long, ChangeSet)"/> after per-ComponentTable processing.
     /// </summary>
     private void WriteClusterTickFence(long tickNumber, ref long highestLSN, ChangeSet changeSet)
     {
@@ -1898,7 +1947,7 @@ public partial class DatabaseEngine
     /// Phase 4 of the parallel cluster tick fence for one archetype, end to end: the head (<see cref="FinalizeArchetypeFenceHead"/> — bookkeeping clear,
     /// dormancy sweep, dirty-ring archive, ComponentTable flag propagation, column narrowing) and then the WAL emit over every dirty word
     /// (<see cref="EmitArchetypeFenceRange"/>). Safe to call concurrently across DISTINCT archetypes. Returns the highest LSN published by this archetype's
-    /// WAL chunks (0 if none). The <see cref="FenceWorkKind.ArchetypeFinalize"/> item and the serial <see cref="WriteTickFence"/> path run this; when the
+    /// WAL chunks (0 if none). The <see cref="FenceWorkKind.ArchetypeFinalize"/> item and the serial <see cref="WriteTickFence(long, ChangeSet)"/> path run this; when the
     /// archetype's Finalize was sliced (#889) the head ran on the driver and the emit runs as <see cref="FenceWorkKind.FinalizeEmitSlice"/> items instead.
     /// </summary>
     internal long FinalizeArchetypeFence(ArchetypeMetadata meta, long tickNumber, ChangeSet changeSet)

@@ -4,12 +4,13 @@ using System;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Thrown when a system attempts to mutate a component or resource that it did not declare in its access set (RFC 07 — Unit 4). DEBUG builds only;
-/// <see cref="SystemAccessValidator"/> compiles out in RELEASE.
+/// Thrown when a system reads, writes, spawns, destroys or exchanges events through something it did not declare in its access set (rule DV-01). Runs
+/// when declared-access checking is on: <c>Typhon:Checks:DeclaredAccess</c>, on by default when the entry assembly is a Debug build.
 /// </summary>
 /// <remarks>
-/// Indicates declaration drift: the system body's actual writes diverged from what was registered
-/// via <see cref="SystemBuilder.Writes{T}"/> / <see cref="SystemBuilder.SideWrites{T}"/>. Fix by adding the missing declaration.
+/// Indicates declaration drift: the system body's actual access diverged from what was registered via <see cref="SystemBuilder.Reads{T}"/>,
+/// <see cref="SystemBuilder.Writes{T}"/>, <see cref="SystemBuilder.SideWrites{T}"/>, <see cref="SystemBuilder.WritesEvents"/> and their siblings. An
+/// undeclared access derives no scheduling edge, so it races with the systems that do declare it. Fix by adding the missing declaration.
 /// </remarks>
 [PublicAPI]
 public sealed class InvalidAccessException : TyphonException
@@ -28,9 +29,15 @@ public sealed class InvalidAccessException : TyphonException
         UndeclaredType = undeclaredType;
     }
 
-    /// <summary>Name of the system that performed the undeclared write.</summary>
+    internal InvalidAccessException(string systemName, Type undeclaredType, string message, bool _) : base(TyphonErrorCode.InvalidSystemAccess, message)
+    {
+        SystemName = systemName;
+        UndeclaredType = undeclaredType;
+    }
+
+    /// <summary>Name of the system that performed the undeclared access.</summary>
     public string SystemName { get; }
 
-    /// <summary>The component type the system wrote without declaring it in its access set.</summary>
+    /// <summary>The component type the system accessed without declaring it; null for an undeclared event queue.</summary>
     public Type UndeclaredType { get; }
 }

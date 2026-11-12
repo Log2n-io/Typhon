@@ -249,7 +249,11 @@ public unsafe ref struct EntityRefMut
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ref T WriteSlot<T>(byte slot, int componentTypeId, byte* newValue) where T : unmanaged
     {
-        SystemAccessValidator.AssertWrite<T>();
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckSlotWrite(guarded, _ref._archetype, _ref._engineState, slot);   // EW-01/EW-02 (#1651)
+        }
         // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
         // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
@@ -387,13 +391,17 @@ public unsafe ref struct EntityRefMut
     /// </summary>
     internal ref T WriteRef<T>() where T : unmanaged
     {
-        SystemAccessValidator.AssertWrite<T>();
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (CheckConfig.Enabled && typeId < 0)
         {
             ThrowHelper.ThrowInvalidOp($"Component type {typeof(T).Name} not registered");
         }
         byte slot = _ref._archetype.GetSlot(typeId);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckSlotWrite(guarded, _ref._archetype, _ref._engineState, slot);   // EW-01/EW-02 (#1651)
+        }
         if (CheckConfig.Enabled && (_ref._enabledBits & (1 << slot)) == 0)
         {
             ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
@@ -537,6 +545,12 @@ public unsafe ref struct EntityRefMut
     public void Disable<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        // An enable or disable writes the component's slot and, at commit, the cluster's enabled bits: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckStructural(guarded, _ref._archetype, "enabled or disabled a component of");
+        }
         _ref._enabledBits &= (ushort)~(1 << slot);
 
         // Staged only. The cluster's EnabledBits copy is written at commit by FlushPendingEnableDisable, never from here: a write at staging reached every
@@ -556,6 +570,12 @@ public unsafe ref struct EntityRefMut
     public void Enable<T>(Comp<T> comp, in T value) where T : unmanaged
     {
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        // An enable or disable writes the component's slot and, at commit, the cluster's enabled bits: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckStructural(guarded, _ref._archetype, "enabled or disabled a component of");
+        }
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
         {
             ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_ref._archetype.ArchetypeId}");
@@ -586,6 +606,12 @@ public unsafe ref struct EntityRefMut
     public void Enable<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        // An enable or disable writes the component's slot and, at commit, the cluster's enabled bits: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckStructural(guarded, _ref._archetype, "enabled or disabled a component of");
+        }
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
         {
             ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_ref._archetype.ArchetypeId}");

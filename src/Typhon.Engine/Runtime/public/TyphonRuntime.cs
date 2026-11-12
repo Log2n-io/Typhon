@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Engine.internals;
 using Typhon.Profiler;
 using Typhon.Schema.Definition;
@@ -505,6 +506,22 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <summary>Starts the scheduler (worker threads + tick driver).</summary>
     public void Start()
     {
+        lock (_lifecycleLock)
+        {
+            StartCore();
+        }
+    }
+
+    private void StartCore()
+    {
+        if (_started || _inTickClosed)
+        {
+            throw new InvalidOperationException("This runtime was already started: a TyphonRuntime starts once.");
+        }
+        if (_inlineInTick)
+        {
+            throw new InvalidOperationException("Start was called from in-tick work running before Start: let that work return first.");
+        }
         // Before the scheduler, deliberately: compiling the declarations can refuse the configuration, and refusing it on a runtime whose workers have not yet
         // started leaves nothing to unwind. Building here rather than in the constructor is equally deliberate — resolving a projection reads the engine's
         // archetype layouts and its spatial grid, and an application configures both between Create and Start.
@@ -525,7 +542,144 @@ public sealed partial class TyphonRuntime : IDisposable
             _subscriptionsContext.AttachSubscriptions(built);
         }
 
-        Scheduler.Start();
+        // From here a transaction created on a thread running no system is off-tick (#1651) — before the first tick can start, so none is missed.
+        Engine?.NoteRuntimeTicking(true);
+        _tickingNoted = 1;
+        try
+        {
+            Scheduler.Start();
+        }
+        catch
+        {
+            UnnoteTicking();
+            throw;
+        }
+        _started = true;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // In-tick work (#1651)
+    // ═══════════════════════════════════════════════════════════════
+
+    private readonly object _lifecycleLock = new();
+    private bool _started;
+    private int _tickingNoted;
+    private InTickQueue _inTickQueue;
+
+    // Created under _lifecycleLock, read by the tick thread: published with a release store, read with an acquire load.
+    private InTickQueue InTickWork
+    {
+        get
+        {
+            var q = Volatile.Read(ref _inTickQueue);
+            if (q == null)
+            {
+                q = new InTickQueue(Options.InTickQueueCapacity, Options.InTickMaxItemsPerTick);
+                Volatile.Write(ref _inTickQueue, q);
+            }
+            return q;
+        }
+    }
+
+    private bool _inTickClosed;
+    private bool _inlineInTick;
+
+    /// <summary>No more in-tick work: pending items fault, and so does every later call, even one that would create the queue (#1651).</summary>
+    private void CloseInTick(Exception reason)
+    {
+        lock (_lifecycleLock)
+        {
+            _inTickClosed = true;
+            Volatile.Read(ref _inTickQueue)?.Close(reason);
+        }
+    }
+
+    /// <summary>The engine no longer counts this runtime as ticking. Once: from whichever of Shutdown (after its drain) and Dispose comes first.</summary>
+    private void UnnoteTicking()
+    {
+        if (Interlocked.Exchange(ref _tickingNoted, 0) == 1)
+        {
+            Engine?.NoteRuntimeTicking(false);
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="write"/> inside the tick: the supported way to write, from a thread that is not a system (an HTTP handler, a test, a tool),
+    /// what the off-tick guard refuses there — SingleVersion and Transient components, spatial archetypes (rule EW-02).
+    /// </summary>
+    /// <param name="write">The write. Receives its own transaction and the tick number; the transaction is committed after it returns — do not commit
+    /// it.</param>
+    /// <param name="durability">How the item's commit is made durable. Required: <see cref="DurabilityMode.Deferred"/> waits for a later flush and can be
+    /// lost to a crash before it; <see cref="DurabilityMode.Immediate"/> is refused (it would block the tick on a WAL flush per item) — use
+    /// <see cref="DurabilityMode.GroupCommit"/>.</param>
+    /// <returns>The tick the write ran on (-1 before <see cref="Start"/>).</returns>
+    /// <remarks>When and how it runs: see <see cref="InTick{T}"/>.</remarks>
+    public Task<long> WriteInTick(Action<Transaction, long> write, DurabilityMode durability)
+    {
+        ArgumentNullException.ThrowIfNull(write);
+        return InTick((tx, tick) =>
+        {
+            write(tx, tick);
+            return tick;
+        }, durability);
+    }
+
+    /// <summary>Runs <paramref name="work"/> inside the tick and returns its result: a write, or a read consistent as of the tick start.</summary>
+    /// <param name="work">The work. Receives its own transaction and the tick number; the transaction is committed after it returns — do not commit
+    /// it.</param>
+    /// <param name="durability">How the item's commit is made durable. Required, as in <see cref="WriteInTick"/>.</param>
+    /// <typeparam name="T">The result type.</typeparam>
+    /// <returns>A task that completes once the work has committed, on a thread-pool thread — never inline on the tick.</returns>
+    /// <remarks>
+    /// <para><b>Before <see cref="Start"/></b> the work runs at once, on the caller's thread, in a quick transaction, with tick number -1.</para>
+    /// <para><b>While the runtime runs</b> it is queued and runs at the start of a later tick, on the scheduler thread, before any system of that tick
+    /// dispatches: nothing runs concurrently with it, so it needs no access declaration. Each item gets its own transaction, committed after the work
+    /// returns. <b>It is applied before this tick's systems run, and they may overwrite it.</b> A read sees the state as of the tick start, before this
+    /// tick's writes. At most <see cref="RuntimeOptions.InTickMaxItemsPerTick"/> items run per tick, and their time is the tick's: keep each short.</para>
+    /// <para><b>Faults</b> go to the task, never to the tick: an exception from <paramref name="work"/> or a failed commit rolls the item back. A full queue
+    /// (<see cref="RuntimeOptions.InTickQueueCapacity"/>) faults the task at once with <see cref="TickQueueFullException"/>; a stopped runtime faults every
+    /// pending and later item with <see cref="InvalidOperationException"/> (inner: the aborted tick's fault, after <see cref="FatalStop"/>).</para>
+    /// <para>The caller's causal scope (<see cref="CausalScope"/>) is carried onto the tick. Never wait on the returned task from inside a system or from
+    /// other in-tick work: the item runs on a later tick, so that wait blocks the tick that would run it.</para>
+    /// </remarks>
+    public Task<T> InTick<T>(Func<Transaction, long, T> work, DurabilityMode durability)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        if (durability == DurabilityMode.Immediate)
+        {
+            // Each item commits on the scheduler thread at tick start: an Immediate commit would wait for its own WAL flush there, up to
+            // InTickMaxItemsPerTick serial waits in one tick.
+            throw new ArgumentException("In-tick work cannot use DurabilityMode.Immediate: it would block the tick on a WAL flush per item. Use GroupCommit.",
+                nameof(durability));
+        }
+        lock (_lifecycleLock)
+        {
+            if (_inTickClosed)
+            {
+                return Task.FromException<T>(new InvalidOperationException("The runtime stopped: it runs no more in-tick work."));
+            }
+            if (_started)
+            {
+                return InTickWork.Enqueue(work, durability);
+            }
+
+            // Not started: run now, under the lock, so a racing Start either waits for this or came first (and the work queued).
+            _inlineInTick = true;
+            try
+            {
+                using var tx = Engine.CreateQuickTransaction(durability);
+                var value = work(tx, -1);
+                return tx.Commit() ? Task.FromResult(value) : Task.FromException<T>(new InvalidOperationException("In-tick work did not commit."));
+            }
+            catch (Exception e)
+            {
+                return Task.FromException<T>(e);
+            }
+            finally
+            {
+                _inlineInTick = false;
+            }
+        }
     }
 
     /// <summary>
@@ -886,10 +1040,16 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </remarks>
     public void Shutdown()
     {
-        if (Scheduler.StopTicksAndDrain(ShutdownDrainTimeout) == DagScheduler.DrainOutcome.TimedOut)
+        var outcome = Scheduler.StopTicksAndDrain(ShutdownDrainTimeout);
+        if (outcome == DagScheduler.DrainOutcome.TimedOut)
         {
             LogShutdownDrainTimedOut(ShutdownDrainTimeout.TotalSeconds);
         }
+        else if (outcome == DagScheduler.DrainOutcome.Drained)
+        {
+            UnnoteTicking();   // no tick runs any more: a write from any thread is legal again (#1651)
+        }
+        CloseInTick(null);
 
         StopInternal(true);
     }
@@ -912,7 +1072,11 @@ public sealed partial class TyphonRuntime : IDisposable
     /// the tick thread.
     /// </para>
     /// </remarks>
-    public void FatalStop() => StopInternal(false);
+    public void FatalStop()
+    {
+        CloseInTick(LastTickOutcome.FailedSystemException);
+        StopInternal(false);
+    }
 
     private void StopInternal(bool runOnShutdown)
     {
@@ -926,6 +1090,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Execute OnShutdown callback with a dedicated transaction
         if (runOnShutdown && OnShutdown != null)
         {
+            using var serial = DagThread.Serial();   // OnShutdown is a runtime serial point (#1651)
             using var tx = Engine.CreateQuickTransaction(DurabilityMode.Immediate);
             var ctx = new TickContext
             {
@@ -955,6 +1120,8 @@ public sealed partial class TyphonRuntime : IDisposable
     {
         // Nothing ticks past this line — the workers are joined and the timer thread is stopped — but the scheduler's resource node is still alive.
         Scheduler.Quiesce();
+        UnnoteTicking();
+        CloseInTick(null);
 
         // AFTER the tick has stopped, and for the same reason as the identity allocator below, only harder: the replication state hands the ECS a reference
         // the cluster-drain hook calls, and its directory holds raw pointers into the block pool's native slabs. Tearing it down while a tick could still reach
@@ -1013,10 +1180,14 @@ public sealed partial class TyphonRuntime : IDisposable
     /// carry no such risk: the runtime commits and disposes those itself.
     /// </remarks>
     public Transaction CreateSideTransaction(DurabilityMode durability = DurabilityMode.Immediate,
-        CommitDiscipline discipline = CommitDiscipline.TickFence) => Engine.CreateQuickTransaction(durability, discipline);
+        CommitDiscipline discipline = CommitDiscipline.TickFence) => CreateSideTransactionInternal(durability, discipline);
 
     private Transaction CreateSideTransactionInternal(DurabilityMode durability, CommitDiscipline discipline)
-        => Engine.CreateQuickTransaction(durability, discipline);
+    {
+        var tx = Engine.CreateQuickTransaction(durability, discipline);
+        tx.IsSideTransaction = true;   // Init bound it to the system run opening it (EW-01, #1651); outside any system it is unbound
+        return tx;
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // #197: Change filter resolution
@@ -2544,7 +2715,7 @@ public sealed partial class TyphonRuntime : IDisposable
     {
         if (_parallelAccessors[sysIdx] == null)
         {
-            _parallelAccessors[sysIdx] = new PointInTimeAccessor();
+            _parallelAccessors[sysIdx] = new PointInTimeAccessor { RuntimeOwned = true };
             _partitionViews[sysIdx] = new PartitionEntityView[Scheduler.WorkerCount];
             for (var w = 0; w < Scheduler.WorkerCount; w++)
             {
@@ -3236,24 +3407,13 @@ public sealed partial class TyphonRuntime : IDisposable
         _currentUow = Engine.CreateUnitOfWork();
         TyphonEvent.EmitRuntimePhaseUoWCreate(scheduler.CurrentTickNumber);
 
-        // A pull-mode system input is a snapshot until someone re-queries it (#718). Must run BEFORE the tier-index rebuild and before any dispatch: both
-        // read the view's entity set, and a set refreshed after them is a set the tier index does not know about.
-        RefreshSystemInputViewsAtTickStart();
-
-        // Realms D1 (RLM-03): every realm's state and divisor for this tick, decided once, here, before anything is dispatched — then the per-archetype
-        // runnable sets the tier indexes and the dispatch below read.
-        UpdateRealmPolicyAtTickStart();
-
-        // Rebuild per-archetype tier indexes ONCE per tick on the scheduler thread, before any parallel system dispatch. This eliminates the race where
-        // multiple worker threads concurrently invoking OnParallelQueryPrepare for different systems on the same archetype would corrupt shared
-        // TierClusterIndex buffers. After this point, every reader (parallel prepare callbacks, change-filter scans, view materialization) only READS the tier
-        // index — no concurrent rebuilds possible.
-        BuildTierIndexesAtTickStart();
-
+        // OnFirstTick, then the in-tick queue (#1651): BEFORE the view refresh and the tier-index rebuild below, so the entities they spawn, destroy or move
+        // are in this tick's sets — refreshed after them, a set would be one the tier index does not know about, and this tick's systems would miss them.
         // OnFirstTick: runs once, on the timer thread before workers wake
         if (!_firstTickExecuted && OnFirstTick != null)
         {
             var tx = _currentUow.CreateTransaction();
+            tx.MarkRuntimeOwned();
             var ctx = new TickContext
             {
                 TickNumber = scheduler.CurrentTickNumber,
@@ -3276,6 +3436,7 @@ public sealed partial class TyphonRuntime : IDisposable
 
             try
             {
+                using var serial = DagThread.Serial();   // a runtime serial point: a transaction the handler opens is not off-tick (#1651)
                 OnFirstTick.Invoke(ctx);
                 tx.Commit();
             }
@@ -3285,6 +3446,26 @@ public sealed partial class TyphonRuntime : IDisposable
                 _firstTickExecuted = true; // Set in finally — prevents infinite retry if handler throws
             }
         }
+
+        // The work handed to the tick (#1651): serial, before any system of this tick dispatches. Never throws — a fault goes to the caller's task.
+        if (Engine != null)
+        {
+            Volatile.Read(ref _inTickQueue)?.Drain(Engine, scheduler.CurrentTickNumber);
+        }
+
+        // A pull-mode system input is a snapshot until someone re-queries it (#718). Must run BEFORE the tier-index rebuild and before any dispatch: both
+        // read the view's entity set, and a set refreshed after them is a set the tier index does not know about.
+        RefreshSystemInputViewsAtTickStart();
+
+        // Realms D1 (RLM-03): every realm's state and divisor for this tick, decided once, here, before anything is dispatched — then the per-archetype
+        // runnable sets the tier indexes and the dispatch below read.
+        UpdateRealmPolicyAtTickStart();
+
+        // Rebuild per-archetype tier indexes ONCE per tick on the scheduler thread, before any parallel system dispatch. This eliminates the race where
+        // multiple worker threads concurrently invoking OnParallelQueryPrepare for different systems on the same archetype would corrupt shared
+        // TierClusterIndex buffers. After this point, every reader (parallel prepare callbacks, change-filter scans, view materialization) only READS the tier
+        // index — no concurrent rebuilds possible.
+        BuildTierIndexesAtTickStart();
     }
 
     /// <summary>
@@ -3326,7 +3507,11 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
 
                 // Created lazily: a schedule with no pull system input must not pay for a transaction it never uses.
-                tx ??= _currentUow.CreateTransaction();
+                if (tx == null)
+                {
+                    tx = _currentUow.CreateTransaction();
+                    tx.MarkRuntimeOwned();
+                }
                 view.RefreshFromScheduler(tx);
                 // #841: a change filter's Added set is this refresh's Added delta, which the line below would otherwise discard.
                 var added = view.AddedThisTick;
@@ -4049,6 +4234,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Create a Transaction on the CALLING THREAD (worker thread).
         // This respects Transaction's single-thread affinity constraint.
         var tx = _currentUow.CreateTransaction();
+        tx.MarkRuntimeOwned();   // the system's own transaction: inside the DAG by construction (#1651)
         if (Interlocked.CompareExchange(ref _systemTransactions[sysIdx], tx, null) != null)
         {
             tx.Dispose();

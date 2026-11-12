@@ -183,6 +183,17 @@ public unsafe partial class Transaction : EntityAccessor
     /// <summary>When true, all write operations (Create/Update/Delete/Commit) are forbidden. No ChangeSet or UoW is allocated.</summary>
     public bool IsReadOnly { get; internal set; }
 
+    /// <summary>
+    /// True for a transaction from <see cref="TyphonRuntime.CreateSideTransaction"/> / <see cref="TickContext.CreateSideTransaction"/>: DV-01 lets a
+    /// system declaring <see cref="SystemBuilder.SideWrites{T}"/> touch <c>T</c> through it, and through nothing else (#1650).
+    /// </summary>
+    public bool IsSideTransaction { get; internal set; }
+
+    /// <summary>
+    /// The runtime created this transaction for its own use (a system's transaction, a serial-point transaction): it is never off-tick (#1651).
+    /// </summary>
+    internal void MarkRuntimeOwned() => WriteGuard = TickWriteGuard.None;
+
     /// <summary>UoW ID for revision stamping. 0 until UoW Registry (#51) assigns real IDs.</summary>
     internal ushort UowId => OwningUnitOfWork?.UowId ?? 0;
 
@@ -257,6 +268,7 @@ public unsafe partial class Transaction : EntityAccessor
         _isDisposed = false;
         _ending = false;
         IsReadOnly = readOnly;
+        TickWriteGuard.Stamp(this);   // #1651: unbound outside the DAG, bound to the run that opens it inside
         OwningUnitOfWork = uow;
         ChainLockWaitContextProbe = null;
         _owningThreadId = Environment.CurrentManagedThreadId;   // #422: affinity field promoted out of #if DEBUG (see EntityAccessor)
@@ -322,6 +334,9 @@ public unsafe partial class Transaction : EntityAccessor
         OwningUnitOfWork = null;
         OwnsUnitOfWork = false;
         IsReadOnly = false;
+        IsSideTransaction = false;
+        WriteGuard = TickWriteGuard.None;
+        SideRun = 0;
         Next = null;
         _committedOperationCount = null;
         _deletedComponentCount = 0;
@@ -1941,6 +1956,12 @@ public unsafe partial class Transaction : EntityAccessor
         if (meta == null)
         {
             throw new InvalidOperationException($"Archetype ID {archetypeId} not registered");
+        }
+        // The checks Spawn<TArch> makes in RequireSpawnable: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertStructural(meta, false, this);
+        if (GuardActive)
+        {
+            TickWriteGuard.CheckStructural(this, meta, "spawned");
         }
         // Delegate to the core Spawn logic (shared with Spawn<TArch>)
         return SpawnInternal(meta, values);
@@ -4413,6 +4434,37 @@ public unsafe partial class Transaction : EntityAccessor
     /// on-media durability unconfirmed. Only reachable on the FUA/Immediate durability path.
     /// </exception>
     public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler = null)
+    {
+        if (WriteGuard == TickWriteGuard.Bound)
+        {
+            TickWriteGuard.CheckBoundCommit(this);   // EW-01 (#1651): not once the run that opened it has returned
+        }
+        else if (WriteGuard == TickWriteGuard.Unbound && HasStructuralChanges)
+        {
+            // EW-02 (#1651): an off-tick spawn, destroy or enable/disable claims and releases cluster slots, appends to the active list and writes the
+            // enabled words, all of which the fence writes plainly. The gate keeps this commit and the fence apart. Gated whether or not a runtime ticks,
+            // so a runtime starting mid-commit, or a host fencing from another thread, is covered too.
+            var window = _dbe.EpochManager.FenceWindow;
+            if (window.EnterStructuralWriter())
+            {
+                try
+                {
+                    return CommitCore(ref ctx, handler);
+                }
+                finally
+                {
+                    window.ExitStructuralWriter();
+                }
+            }
+        }
+        return CommitCore(ref ctx, handler);
+    }
+
+    /// <summary>True when the commit will claim, release or re-enable cluster slots: a pending spawn, destroy or enable/disable.</summary>
+    private bool HasStructuralChanges =>
+        _spawnedEntities is { Count: > 0 } || _pendingDestroys is { Count: > 0 } || _pendingEnableDisable is { Count: > 0 };
+
+    private bool CommitCore(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler)
     {
         BeginOperation();
         _ending = true;

@@ -27,6 +27,9 @@ public sealed class PointInTimeAccessor : IDisposable
     private int _workerCount;
     private bool _disposed;
 
+    /// <summary>The runtime's own accessor (a parallel system's workers): its workers are never off-tick (#1651).</summary>
+    internal bool RuntimeOwned;
+
     /// <summary>Creates an empty PointInTimeAccessor. Call <see cref="Attach"/> before use.</summary>
     public PointInTimeAccessor()
     {
@@ -123,6 +126,10 @@ public sealed class PointInTimeAccessor : IDisposable
             {
                 acc = new EntityAccessor();
                 acc.InitLightweight(_dbe, TSN);
+                if (!RuntimeOwned)
+                {
+                    TickWriteGuard.Stamp(acc);   // #1651: an application's point-in-time worker writes like any transaction it would open here
+                }
                 _workerAccessors[workerId] = acc;
             }
 

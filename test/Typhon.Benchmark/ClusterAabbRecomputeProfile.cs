@@ -102,7 +102,7 @@ public static class ClusterAabbRecomputeProfile
             tx.Commit();
         }
 
-        dbe.WriteTickFence(1);
+        dbe.WriteTickFence();
 
         var state = dbe._archetypeStates[Archetype<TArch>.Metadata.ArchetypeId].ClusterState;
         var grid = dbe.Realm0Grid;

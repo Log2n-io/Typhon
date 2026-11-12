@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
+using System.Threading;
 using Typhon.Engine.internals;
 using Typhon.Schema.Definition;
 
@@ -146,6 +147,74 @@ internal class ArchetypeMetadata
     /// <c>OnParentDelete = Delete</c>. Null when it has none. A commit pointing one at a parent passes the referential check (CASC-02).
     /// </summary>
     internal (byte Slot, int FieldOffset)[] _cascadeFks;
+
+    private ulong[] _spawnAccessFootprint;
+    private ulong[] _destroyAccessFootprint;
+
+    /// <summary>
+    /// DV-01 (#1650): the components a spawn of this archetype writes, as a bitset over <see cref="AccessTypeIds"/> — every slot,
+    /// since a spawn creates them all. Built on first use, after <see cref="ArchetypeRegistry.Freeze"/>.
+    /// </summary>
+    internal ulong[] SpawnAccessFootprint => Volatile.Read(ref _spawnAccessFootprint) ?? Publish(ref _spawnAccessFootprint, BuildFootprint(false));
+
+    /// <summary>
+    /// DV-01 (#1650): the components a destroy of this archetype writes: its own slots and those of every archetype the delete cascades to (and their
+    /// sub-archetypes), transitively.
+    /// </summary>
+    internal ulong[] DestroyAccessFootprint => Volatile.Read(ref _destroyAccessFootprint) ?? Publish(ref _destroyAccessFootprint, BuildFootprint(true));
+
+    /// <summary>Drops both footprints: <see cref="ArchetypeRegistry.Freeze"/> rebuilt the cascade graph they derive from.</summary>
+    internal void ResetAccessFootprints()
+    {
+        Volatile.Write(ref _spawnAccessFootprint, null);
+        Volatile.Write(ref _destroyAccessFootprint, null);
+    }
+
+    /// <summary>Release-publishes a footprint filled before the store (arm64: a reader on another thread must not see its words unwritten).</summary>
+    private static ulong[] Publish(ref ulong[] field, ulong[] built)
+    {
+        Volatile.Write(ref field, built);
+        return built;
+    }
+
+    private ulong[] BuildFootprint(bool cascade)
+    {
+        ulong[] bits = [];
+        var visited = new HashSet<ushort>();
+        AddFootprint(this, cascade, ref bits, visited);
+        return bits;
+    }
+
+    private static void AddFootprint(ArchetypeMetadata meta, bool cascade, ref ulong[] bits, HashSet<ushort> visited)
+    {
+        if (meta == null || !visited.Add(meta.ArchetypeId))
+        {
+            return;
+        }
+        if (meta._slotToComponentType != null)
+        {
+            foreach (var t in meta._slotToComponentType)
+            {
+                AccessTypeIds.Set(ref bits, AccessTypeIds.Of(t));
+            }
+        }
+        if (!cascade || meta._cascadeTargets == null)
+        {
+            return;
+        }
+        foreach (var target in meta._cascadeTargets)
+        {
+            var child = ArchetypeRegistry.GetMetadata(target.ChildArchetypeId);
+            AddFootprint(child, true, ref bits, visited);
+            if (child?.SubtreeArchetypeIds != null)
+            {
+                foreach (var sub in child.SubtreeArchetypeIds)
+                {
+                    AddFootprint(ArchetypeRegistry.GetMetadata(sub), true, ref bits, visited);
+                }
+            }
+        }
+    }
 
     /// <summary>Get the slot index for a component type ID. Throws if the component is not part of this archetype.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

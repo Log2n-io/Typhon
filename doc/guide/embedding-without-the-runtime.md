@@ -31,18 +31,23 @@ while (running)
         tx.Commit();
     }
 
-    // 2. Close the tick. Monotonic number, once per tick, after the tick's writes.
-    dbe.WriteTickFence(++tick);
+    // 2. Close the tick. This session's tick number (0, 1, 2…), once per tick, after the tick's writes.
+    dbe.WriteTickFence(tick++);
 }
 ```
 
-That's the whole contract. Three rules:
+That's the whole contract. Four rules:
 
 1. **Once per tick**, not once per transaction and not once before a query.
-2. **`tickNumber` must increase** between calls.
+2. **`tickNumber` must increase** between calls — the session's tick, from 0. A repeated or decreasing number throws.
+   `dbe.WriteTickFence()` with no number lets the engine number it for you. It labels the
+   tick's WAL records; the persisted world clock is counted by the engine itself (one world tick per fence), so do not carry your own
+   counter across sessions to "continue" it — the engine already does (rule TICK-01).
 3. **Nothing else may mutate the database while the fence runs.** On a single-threaded host that's automatic. If
    your host has its own worker threads, joining them before the fence is your responsibility — the engine does not
    check it.
+4. **Not alongside a `TyphonRuntime`.** A runtime runs this fence itself at the end of every tick; calling `WriteTickFence`
+   while one ticks the engine throws.
 
 ## What the fence actually does
 
@@ -57,10 +62,12 @@ Four jobs, not one. This is why it isn't optional:
 
 ## What breaks if you skip it
 
-Nothing throws. Nothing is corrupted. The failure is **silent**, which is what makes it worth a page:
+Nothing throws, and the failure is **silent**, which is what makes it worth a page. It is not harmless:
 
-- **`SingleVersion` components degrade to `Transient`-like durability** — no crash recovery. See
-  [storage modes](../feature-set/Ecs/storage-modes/storage-mode-singleversion.md).
+- **`SingleVersion` writes become durable without a log record.** They are made in place in cluster pages and get their
+  WAL record at the fence. Skip it and the page stays dirty and un-logged — and the checkpoint still writes it to the data
+  file on its own schedule. After a crash that file holds mutations no log record accounts for: phantom data, not merely
+  lost data (rule TP-01a). See [storage modes](../feature-set/Ecs/storage-modes/storage-mode-singleversion.md).
 - **Cluster migrations never execute.** Entities keep their old cluster, so spatial locality decays and queries open
   progressively more clusters for the same answer.
 - **Spatial AABBs and zone maps go stale.** Spatial queries answer against *old positions* — not an error, just

@@ -40,10 +40,14 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
   tick's writers), `ReadsSnapshot<T>()` (before them; Versioned only), `SideWrites<T>()` (side transactions). The scheduler
   orders and parallelizes from these declarations alone — it never inspects the body, so an **undeclared read is a silent race**.
   `Build()` throws on two same-phase writers of a component (add `.After("Other")`) and on a plain `Reads<T>()` beside a
-  same-phase writer. In development, set `Typhon:Checks:Enabled` and `Typhon:Checks:DeclaredAccess` to `true` (`typhon.telemetry.json` or
-  environment) to assert undeclared *writes* at runtime.
-- **SingleVersion, Transient and spatial-archetype writes belong inside a system.** From any other thread only Versioned
-  components of a non-spatial archetype may be written; anything else races the tick fence and corrupts silently.
+  same-phase writer. In a **Debug build** every read, write, spawn, destroy, `ctx.Writer(q)` and `q.Drain` inside a class-form system throws
+  `InvalidAccessException` unless declared (`Typhon:Checks:DeclaredAccess`; set it `true` in a test project's `typhon.telemetry.json`, since
+  under `dotnet test` the entry assembly is the optimized test host). Fix the declaration, never catch the exception. A spawn or destroy
+  needs `Writes<T>()` for every component of the archetype; events need `WritesEvents(q)` / `ReadsEvents(q)`.
+- **SingleVersion, Transient and spatial-archetype writes belong inside a system.** From any other thread (an HTTP handler, a
+  test) while the runtime ticks, only Versioned components of an archetype that is neither spatial nor realm-keyed may be written, and
+  only such an archetype's entities spawned, destroyed, enabled or disabled; anything else throws `InvalidOperationException` (EW-02). Hand such a write to the tick: `await runtime.WriteInTick((tx, tick) => …,
+  DurabilityMode.GroupCommit)` (or `InTick` to return a value) — it runs at the next tick start, before that tick's systems.
 - **Replication is explicit**: with the default `PushDetection.Explicit`, a system that changes a replicated entity must call
   `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`); otherwise no client is ever sent the change.
 - **Never write an `[Index]`ed SingleVersion/Transient component through a span** (`ClusterRef.GetSpan`/`Get`) — it throws;

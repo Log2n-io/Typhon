@@ -335,7 +335,8 @@ public sealed class SystemBuilder
         return this;
     }
 
-    /// <summary>Declare a read of T beyond the system's primary View input (cross-entity read).</summary>
+    /// <summary>Declare a read of T beyond the system's primary View input (cross-entity read). Scheduled as a plain <see cref="Reads{T}"/>: an error at
+    /// <c>Build()</c> beside a same-phase writer of T.</summary>
     public SystemBuilder AdditionalReads<T>() where T : unmanaged
     {
         _access.AdditionalReads.Add(typeof(T));
@@ -349,7 +350,9 @@ public sealed class SystemBuilder
         return this;
     }
 
-    /// <summary>Declare that this system writes T via a side-transaction (<see cref="DurabilityMode.Immediate"/>). Surfaced in tooling but does NOT affect scheduler ordering.</summary>
+    /// <summary>Declare that this system writes T through a side transaction (<see cref="TickContext.CreateSideTransaction"/>). Surfaced in tooling but
+    /// does NOT affect scheduler ordering. DV-01 accepts reads and writes of T through a side transaction only: through the system's own transaction
+    /// the write would escape AC-01, so declare <see cref="Writes{T}"/> for that.</summary>
     public SystemBuilder SideWrites<T>() where T : unmanaged
     {
         _access.SideWrites.Add(typeof(T));

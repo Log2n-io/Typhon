@@ -213,7 +213,7 @@ unsafe class MotionSegmentRateTests : TestBase<MotionSegmentRateTests>
         }
 
         tx.Commit();
-        harness.Engine.WriteTickFence(1);
+        harness.Engine.WriteTickFence(0);   // the harness's ticks start at 1 (TICK-01: a tick number must increase)
     }
 
     /// <summary>

@@ -517,9 +517,15 @@ public sealed class RuntimeSchedule
             systems[sysIdx].MinChunkSize = reg.MinChunkSize;
             systems[sysIdx].ExplicitChunkCount = reg.ExplicitChunkCount;
 
+            // DV-01 (#1650): a class-form system always carries a descriptor, empty or not, and is checked against it — one that declared nothing has every
+            // access refused. A lambda-form registration (Dag.CallbackSystem/QuerySystem/PipelineSystem) has no declaration surface and no descriptor: it is
+            // ordered by its explicit edges alone and the validator does not see it. Compiled here, after the last declaration, so the dispatch path's
+            // bitsets are final.
             if (reg.Access != null)
             {
                 systems[sysIdx].Access = reg.Access;
+                systems[sysIdx].CheckedAccess = reg.Access;
+                reg.Access.Compile();
             }
         }
 

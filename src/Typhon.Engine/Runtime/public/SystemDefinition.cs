@@ -51,6 +51,12 @@ public sealed class SystemDefinition
     /// </summary>
     public SystemAccessDescriptor Access { get; internal set; } = new();
 
+    /// <summary>
+    /// The descriptor DV-01 checks this system against (#1650): <see cref="Access"/> for a class-form system, null for a lambda-form registration
+    /// (<see cref="Dag.CallbackSystem"/> and siblings), which has no declaration surface and is not checked.
+    /// </summary>
+    internal SystemAccessDescriptor CheckedAccess { get; set; }
+
     // ═══════════════════════════════════════════════════════════════
     // Execution delegates
     // ═══════════════════════════════════════════════════════════════

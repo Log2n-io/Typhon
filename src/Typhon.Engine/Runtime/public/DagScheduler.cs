@@ -834,6 +834,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     members.Add(sysIdx);
                     _systemTrackIndex[sysIdx] = t;
                     _systemIsEngine[sysIdx] = track.IsEngine;
+                    if (track.IsEngine)
+                    {
+                        // DV-01 (#1650) checks application systems: an engine track's systems reach storage through internals, and a throw there latches
+                        // the terminal fence verdict in every Debug host.
+                        systems[sysIdx].CheckedAccess = null;
+                    }
                     if (systems[sysIdx].PredecessorCount == 0)
                     {
                         roots.Add(sysIdx);
@@ -1513,7 +1519,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     for (var chunk = 0; chunk < totalChunks; chunk++)
                     {
                         var chunkStartTs = Stopwatch.GetTimestamp();
-                        SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                        SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
                         CorrelationContext.EnterSystem(sysIdx);
                         try
                         {
@@ -1551,7 +1557,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 for (var chunk = 0; chunk < sys.TotalChunks; chunk++)
                 {
-                    SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                    SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
                     CorrelationContext.EnterSystem(sysIdx);
                     try
                     {
@@ -1585,7 +1591,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 else
                 {
                 ctx.DebugValidateWorkerId(WorkerSlotCount, sys.Name);
-                SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
                 CorrelationContext.EnterSystem(sysIdx);
                 try
                 {
@@ -2010,7 +2016,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         var success = true;
         ctx.DebugValidateWorkerId(WorkerSlotCount, Systems[sysIdx].Name);
-        SystemAccessValidator.EnterSystem(Systems[sysIdx].Access, Systems[sysIdx].Name);
+        SystemAccessValidator.EnterSystem(Systems[sysIdx].CheckedAccess, Systems[sysIdx].Name, DagThread.SystemRun(CurrentTickNumber, sysIdx));
         CorrelationContext.EnterSystem(sysIdx);
         try
         {
@@ -2093,7 +2099,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             var workStart = Stopwatch.GetTimestamp();
             InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
-            SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+            SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
             CorrelationContext.EnterSystem(sysIdx);
             try
             {
@@ -2247,7 +2253,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             var workStart = Stopwatch.GetTimestamp();
             InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
-            SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+            SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
             CorrelationContext.EnterSystem(sysIdx);
             try
             {
@@ -2675,7 +2681,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         var success = true;
         ctx.DebugValidateWorkerId(WorkerSlotCount, Systems[sysIdx].Name);
-        SystemAccessValidator.EnterSystem(Systems[sysIdx].Access, Systems[sysIdx].Name);
+        SystemAccessValidator.EnterSystem(Systems[sysIdx].CheckedAccess, Systems[sysIdx].Name, DagThread.SystemRun(CurrentTickNumber, sysIdx));
         CorrelationContext.EnterSystem(sysIdx);
         try
         {

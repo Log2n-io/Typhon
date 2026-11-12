@@ -500,6 +500,11 @@ public unsafe partial class Transaction
             ThrowNotSpawnable<TArch>(meta == null ? null : _dbe.SkippedArchetypeReason(meta.ArchetypeId),
                 meta == null ? null : _dbe.SupersededArchetypeMessage(meta.ArchetypeId));
         }
+        SystemAccessValidator.AssertStructural(meta, false, this);   // DV-01 (#1650): a spawn writes every component of the archetype
+        if (GuardActive)
+        {
+            TickWriteGuard.CheckStructural(this, meta, "spawned");   // EW-01/EW-02 (#1651)
+        }
     }
 
     /// <summary>Out of line, so the message is not built into every inlined spawn.</summary>
@@ -991,6 +996,13 @@ public unsafe partial class Transaction
     /// </summary>
     public void DestroyBatch(ReadOnlySpan<EntityId> ids)
     {
+        if (CheckConfig.DeclaredAccessActive || GuardActive)
+        {
+            foreach (var id in ids)
+            {
+                AssertDestroyDeclared(id);
+            }
+        }
         EnsureMutable();
         State = TransactionState.InProgress;
         BeginOperation();
@@ -1198,6 +1210,10 @@ public unsafe partial class Transaction
         BeginOperation();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
+        if (CheckConfig.DeclaredAccessActive || GuardActive)
+        {
+            AssertDestroyDeclared(id);
+        }
         CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
@@ -1215,6 +1231,24 @@ public unsafe partial class Transaction
         }
         // PROFILING-SPAN-NO-THROW-END
         scope.Dispose();
+    }
+
+    /// <summary>
+    /// The checks a destroy owes before it touches anything: DV-01 (#1650) — it writes every component of the entity's archetype and of what the delete
+    /// cascades to — and the off-tick guard (#1651).
+    /// </summary>
+    private void AssertDestroyDeclared(EntityId id)
+    {
+        if (id.IsNull)
+        {
+            return;
+        }
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);   // an id carries a routing id
+        SystemAccessValidator.AssertStructural(meta, true, this);
+        if (GuardActive)
+        {
+            TickWriteGuard.CheckStructural(this, meta, "destroyed");
+        }
     }
 
     /// <summary>Mark an entity link target for destruction.</summary>
@@ -1245,6 +1279,10 @@ public unsafe partial class Transaction
         BeginOperation();
 
         CheckConfig.Require(CheckConfig.Enabled, !id.IsNull, $"Cannot destroy null entity");
+        if (CheckConfig.DeclaredAccessActive || GuardActive)
+        {
+            AssertDestroyDeclared(id);
+        }
         CheckEpochRefresh();   // EP-03: a loop of destroys reads a cluster and a record each, kept by this transaction's pin until something moves it
 
         var scope = TyphonEvent.BeginEcsDestroy(id.RawValue);
