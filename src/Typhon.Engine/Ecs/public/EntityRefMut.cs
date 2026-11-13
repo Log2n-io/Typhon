@@ -190,20 +190,26 @@ public unsafe ref struct EntityRefMut
     /// would fail terminally (CA-01, #1652): refused at the call, nothing stored. A store that changes the realm key moves the entity to another realm at
     /// the next fence: it gets <see cref="EntityAccessor.Teleport{T}"/>'s checks before anything is stored — the fence must never throw, so before D-2's
     /// revert this is the only place the application hears of a bad key — and, once stored, the flag a barrier-only archetype's fence needs to see the
-    /// move.
+    /// move. A position stored on a barrier-only archetype (<see cref="DatabaseEngine.SetSpatialBarrierOnly{TArch}"/>) gets the same flag: its fence runs
+    /// no dirty scan, and an unflagged move would leave the entity where no query finds it, neither at its old place nor at its new one.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void SetChecked<T>(int componentTypeId, in T value) where T : unmanaged
     {
         var comp = new Comp<T>(componentTypeId);
         byte slot = _ref._archetype.GetSlot(componentTypeId);
-        if ((_ref._archetype.SpatialSlotMask & (1 << slot)) != 0)
+        var isSpatial = (_ref._archetype.SpatialSlotMask & (1 << slot)) != 0;
+        if (isSpatial)
         {
             RefuseNonFinitePosition(in value);
         }
         if ((_ref._archetype.RealmKeySlotMask & (1 << slot)) == 0)
         {
             Store(comp, in value);
+            if (isSpatial)
+            {
+                FlagBarrierOnlyMove();
+            }
             return;
         }
 
@@ -215,6 +221,10 @@ public unsafe ref struct EntityRefMut
         if (newRealm == oldRealm)
         {
             Store(comp, in value);
+            if (isSpatial)
+            {
+                FlagBarrierOnlyMove();
+            }
             return;
         }
 
@@ -224,6 +234,20 @@ public unsafe ref struct EntityRefMut
         // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit. Otherwise the slot is flagged as
         // Teleport flags it — a barrier-only archetype's fence runs no dirty scan and would never see the move.
         if (!_ref._isOwnSpawn)
+        {
+            state.FlagOutOfBarrierSpatialWrite(_ref._clusterChunkId, _ref._clusterSlotIndex);
+        }
+    }
+
+    /// <summary>
+    /// A position stored outside <c>ClusterRef.WriteSpatial</c> on a barrier-only archetype: flagged for the fence as the barrier would flag it, as
+    /// <see cref="EntityAccessor.Teleport{T}"/> does. The dirty scan finds the move on any other archetype, and an entity spawned in this transaction has
+    /// no cluster yet. A Static archetype's fence moves nothing; a Commit-discipline write is flagged again by the publish that lands it (CC-02).
+    /// </summary>
+    private void FlagBarrierOnlyMove()
+    {
+        var state = _ref._engineState.ClusterState;
+        if (state.SpatialBarrierOnly && !_ref._isOwnSpawn && state.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {
             state.FlagOutOfBarrierSpatialWrite(_ref._clusterChunkId, _ref._clusterSlotIndex);
         }

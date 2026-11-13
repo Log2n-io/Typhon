@@ -1674,9 +1674,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// legacy scan for this archetype — both <c>DetectClusterMigrations</c>'s dirtyBits sweep and <c>RecomputeDirtyClusterAabbs</c>'s <c>ActiveClusterIds</c>
     /// iteration are replaced with sparse iteration over <see cref="ArchetypeClusterState.ClusterProcessBitmap"/>.
     /// <para>
-    /// Only set when EVERY spatial-field write on this archetype goes through <c>WriteSpatial</c>. Mutations via raw <c>GetSpan</c> or <c>OpenMut + Write</c>
-    /// will be invisible to the engine's spatial maintenance after this is enabled. The <c>TYPHON009</c> analyzer flags non-WriteSpatial mutation sites — once
-    /// those are zero, it's safe to opt in.
+    /// Only set when every spatial-field write on this archetype goes through <c>WriteSpatial</c>, an <c>EntityRefMut.Set</c> of the spatial component or
+    /// <c>Teleport</c>: the last two flag their slot for the fence as the barrier does, at a few interlocked operations per write. A mutation via a raw
+    /// <c>GetSpan</c> is invisible to the engine's spatial maintenance after this is enabled. The <c>TYPHON009</c> analyzer flags non-WriteSpatial mutation
+    /// sites.
     /// </para>
     /// </summary>
     [PublicAPI]

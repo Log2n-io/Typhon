@@ -408,6 +408,40 @@ class OffTickWriteGuardTests : TestBase<OffTickWriteGuardTests>
     }
 
     [Test]
+    public void InTick_ASpatialMove_IsIndexedAtItsNewPlace([Values] bool barrierOnly)
+    {
+        if (barrierOnly)
+        {
+            _dbe.SetSpatialBarrierOnly<OtSpatial>();
+        }
+        using var runtime = StartRuntime();
+        runtime.WriteInTick((tx, _) => tx.OpenMut(_spatial).Set(OtSpatial.Pos, At(510, 510)), DurabilityMode.Deferred).GetAwaiter().GetResult();
+        // A few ticks, so the move's fence has run; then counted in the tick, where nothing else writes.
+        for (var i = 0; i < 3; i++)
+        {
+            runtime.WriteInTick((_, _) => { }, DurabilityMode.Deferred).GetAwaiter().GetResult();
+        }
+        var (atNew, atOld) = runtime.InTick((_, _) => (CountAround(510, 510), CountAround(10, 10)), DurabilityMode.Deferred).GetAwaiter().GetResult();
+        Assert.That(atNew, Is.EqualTo(1), "found at its new place");
+        Assert.That(atOld, Is.EqualTo(0), "gone from its old place");
+    }
+
+    private int CountAround(float x, float y)
+    {
+        var box = new AABB2F { MinX = x - 3, MinY = y - 3, MaxX = x + 3, MaxY = y + 3 };
+        using var epoch = EpochGuard.Enter(_dbe.EpochManager);
+        var e = _dbe.ClusterSpatialQuery<OtSpatial>().AABB(in box);
+        try
+        {
+            return e.Count();
+        }
+        finally
+        {
+            e.Dispose();
+        }
+    }
+
+    [Test]
     public void InTick_RefusesImmediateDurability()
     {
         using var runtime = StartRuntime();

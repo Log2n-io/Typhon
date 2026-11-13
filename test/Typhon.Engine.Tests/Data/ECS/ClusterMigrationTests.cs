@@ -179,6 +179,38 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That(cs.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
     }
 
+    /// <summary>
+    /// On a barrier-only archetype the fence runs no dirty scan: a <c>Set</c> of the spatial component flags its slot as <c>WriteSpatial</c> would, or the
+    /// entity stays in its old cluster, found by no query at either place.
+    /// </summary>
+    [Test]
+    public void BarrierOnly_ASetOfThePosition_MigratesAtTheFence()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(ClMigUnit.Pos, PointAt(550f, 650f));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        var dstCell = dbe.Realm0Grid.WorldToCellKey(550f, 650f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f)).EntityCount, Is.EqualTo(0), "gone from the source cell");
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).EntityCount, Is.EqualTo(1), "in the destination cell");
+        var (postChunk, _) = ReadLocation(dbe, id);
+        Assert.That(dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Scan-cursor behaviour under migration (issue #364 — cursor-thrash fix)
     // ═══════════════════════════════════════════════════════════════════════
