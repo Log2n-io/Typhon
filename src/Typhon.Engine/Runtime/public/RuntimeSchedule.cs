@@ -523,6 +523,18 @@ public sealed class RuntimeSchedule
             // bitsets are final.
             if (reg.Access != null)
             {
+                // The schedule-level Produces/Consumes declare the same thing as the builder's WritesEvents/ReadsEvents and are checked as such. Merged
+                // here, after Phase 2b's derivation, so they add no derived edge: they never did, and a producer→consumer edge appearing on an existing
+                // schedule could cycle against its explicit ones.
+                if (_produces.TryGetValue(reg.Name, out var produced))
+                {
+                    reg.Access.WritesEvents.UnionWith(produced);
+                }
+                if (_consumes.TryGetValue(reg.Name, out var consumed))
+                {
+                    reg.Access.ReadsEvents.UnionWith(consumed);
+                }
+
                 systems[sysIdx].Access = reg.Access;
                 systems[sysIdx].CheckedAccess = reg.Access;
                 reg.Access.Compile();

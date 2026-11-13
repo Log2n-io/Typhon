@@ -371,6 +371,28 @@ class DeclaredAccessTests : TestBase<DeclaredAccessTests>
 
     [Test]
     [VerifiesRule("DV-01")]
+    public void Events_DeclaredThroughScheduleProducesAndConsumes_Pass()
+    {
+        // Dag/RuntimeSchedule.Produces and Consumes are the schedule-level form of WritesEvents/ReadsEvents and count as the declaration. A consumer runs only
+        // on a tick its queue holds events, so a lambda-form feeder (unchecked) fills the consumed queue first.
+        EventQueue<int> fed = null;
+        EventQueue<int> produced = null;
+        var e = Run(b => b.After("Feeder"), ctx =>
+        {
+            ctx.Writer(produced).Push(1);
+            fed.Drain(stackalloc int[4]);
+        }, dag =>
+        {
+            fed = dag.CreateEventQueue<int>("Dv01Fed");
+            produced = dag.CreateEventQueue<int>("Dv01Produced");
+            dag.CallbackSystem("Feeder", ctx => ctx.Writer(fed).Push(1));
+            dag.Produces("Probe", produced).Consumes("Probe", fed);
+        });
+        Assert.That(e, Is.Null, e?.ToString());
+    }
+
+    [Test]
+    [VerifiesRule("DV-01")]
     public void Events_Declared_Pass()
     {
         EventQueue<int> queue = null;
