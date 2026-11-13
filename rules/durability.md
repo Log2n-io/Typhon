@@ -518,6 +518,10 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             revision before the replay, so the replay appends onto a chain it can walk (#1251, #1297). A compaction writes the root alone and
             allocates nothing (REAP-02, #1298): it used to move the newest revisions of a chain it compacted after the barrier into fresh chunks,
             unlogged, and a crash that wrote the root and not them had the collapse keep an older value
+  invariant before the replay, the live roots of an archetype whose EntityMap the crash open re-derived are those its rebuild wrote into the records
+            (DatabaseEngine.WalkClustersForEntityMapRebuild collects each root BuildEntityMapRange writes, both from the same chain-head scan;
+            DatabaseEngine.CompactCrashChainHeadsForReservation keeps them within the budget, else the archetype is walked): nothing rewrites a record
+            between the two. After the replay, which does, the scrub derives them from the records again (#1665)
   scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting / ApplyCollectionFolds
          VariableSizedBufferSegmentBase.SetElementsRaw (the "Set" the collections clause names)
          RecoveryApplier.ReapplySpawnedEntityToCluster, ComponentRevisionManager.ScrubChainToHead / FreeDroppedContent /

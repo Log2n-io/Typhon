@@ -51,6 +51,14 @@ public partial class DatabaseEngine
     private Dictionary<ChunkBasedSegment<PersistentStore>, CrashChainHeads> _crashChainHeads;
 
     /// <summary>
+    /// The chain roots each cluster archetype's re-derived records name, per component slot, as the crash open's EntityMap rebuild wrote them: the live
+    /// roots the reservation collapses and walks before the replay, which otherwise re-derived them by a cluster walk and a map lookup per entity (#1665).
+    /// Keyed by archetype id; 4 bytes a root, within <see cref="IndexRebuildOptions.MemoryBudgetBytes"/> with the chain-head scans. Taken by the
+    /// reservation, and only by it: the replay rewrites records, so the scrub derives its roots again.
+    /// </summary>
+    private Dictionary<ushort, List<int>[]> _crashRecordRoots;
+
+    /// <summary>
     /// The entries a partition of the EntityMap's bulk build holds when positive, instead of what <see cref="IndexRebuildOptions.MemoryBudgetBytes"/> holds:
     /// few enough that a test archetype takes several partitions. Test seam.
     /// </summary>
@@ -67,6 +75,9 @@ public partial class DatabaseEngine
 
     /// <summary>The revision segments whose chain-root scan the last crash open's reservation took from the EntityMap rebuild's. Test seam.</summary>
     internal int ChainHeadScansReusedAtOpen { get; private set; }
+
+    /// <summary>The archetypes whose live chain roots the last crash open's reservation took from the EntityMap rebuild's records. Test seam.</summary>
+    internal int RecordRootsReusedAtOpen { get; private set; }
 
     /// <summary>The bytes the compacted chain roots may hold when positive, instead of <see cref="IndexRebuildOptions.MemoryBudgetBytes"/>. Test seam.</summary>
     internal static long ChainHeadCacheBudgetForTest { get; set; }
@@ -99,13 +110,44 @@ public partial class DatabaseEngine
     /// </summary>
     internal void CompactCrashChainHeadsForReservation()
     {
+        var budget = ChainHeadCacheBudgetForTest > 0 ? ChainHeadCacheBudgetForTest : _options.IndexRebuild.MemoryBudgetBytes;
+        long held = 0;
+
+        // The records' roots first: each spares the reservation a cluster walk with a map lookup per entity, a scan's roots only a segment scan.
+        if (_crashRecordRoots != null)
+        {
+            List<ushort> droppedArchetypes = null;
+            foreach (var (archetypeId, bySlot) in _crashRecordRoots)
+            {
+                long bytes = 0;
+                foreach (var roots in bySlot)
+                {
+                    bytes += (long)(roots?.Capacity ?? 0) * sizeof(int);
+                }
+
+                if (held + bytes > budget)
+                {
+                    (droppedArchetypes ??= []).Add(archetypeId);
+                    continue;
+                }
+
+                held += bytes;
+            }
+
+            if (droppedArchetypes != null)
+            {
+                foreach (var archetypeId in droppedArchetypes)
+                {
+                    _crashRecordRoots.Remove(archetypeId);
+                }
+            }
+        }
+
         if (_crashChainHeads == null)
         {
             return;
         }
 
-        var budget = ChainHeadCacheBudgetForTest > 0 ? ChainHeadCacheBudgetForTest : _options.IndexRebuild.MemoryBudgetBytes;
-        long held = 0;
         List<ChunkBasedSegment<PersistentStore>> dropped = null;
         foreach (var (segment, scan) in _crashChainHeads)
         {
@@ -227,8 +269,25 @@ public partial class DatabaseEngine
             var entries = (EntityMapBuildEntry*)entriesBuffer.Pointer;
             var sorted = (EntityMapBuildEntry*)sortedBuffer.Pointer;
 
+            // Every Versioned slot with roots, their roots as the records name them, for the reservation. A record names a root only when the scan
+            // holds its EntityPK, so the scan's heads, capped at the cluster slots, bound each list: sized once, never doubled.
+            List<int>[] recordRoots = null;
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                if (chainHeads[slot] != null)
+                {
+                    var bound = (int)Math.Min(chainHeads[slot].Heads.Count, (long)clusterCount * 64);
+                    (recordRoots ??= new List<int>[meta.ComponentCount])[slot] = new List<int>(bound);
+                }
+            }
+
             MarkOpenPhase("EntityMap.Walk");
-            var entities = WalkClustersForEntityMapRebuild(meta, state, chainHeads, heads, cs, stageAll ? entries : null, out var maxEntityKey);
+            var entities = WalkClustersForEntityMapRebuild(meta, state, chainHeads, heads, cs, stageAll ? entries : null, recordRoots, out var maxEntityKey);
+            if (recordRoots != null)
+            {
+                (_crashRecordRoots ??= [])[meta.ArchetypeId] = recordRoots;
+            }
+
             if (heads != null)
             {
                 NoteVersionedHeadRebuildSkips(meta, in heads.Skips);
@@ -310,11 +369,11 @@ public partial class DatabaseEngine
 
     /// <summary>
     /// The bulk build's first walk: every live entity counted, and staged into <paramref name="staged"/> when given (its bucket left for later). The walk
-    /// also seeds each cluster's visibility summary, resets the lock of each named chunk adopted as a root, and copies the Versioned HEADs when
-    /// <paramref name="heads"/> is given. Returns the entities.
+    /// also seeds each cluster's visibility summary, resets the lock of each named chunk adopted as a root, copies the Versioned HEADs when
+    /// <paramref name="heads"/> is given, and adds each root its records will name to <paramref name="recordRoots"/>. Returns the entities.
     /// </summary>
     private unsafe long WalkClustersForEntityMapRebuild(ArchetypeMetadata meta, ArchetypeEngineState state, CrashChainHeads[] chainHeads,
-        VersionedHeadCopier heads, ChangeSet cs, EntityMapBuildEntry* staged, out long maxEntityKey)
+        VersionedHeadCopier heads, ChangeSet cs, EntityMapBuildEntry* staged, List<int>[] recordRoots, out long maxEntityKey)
     {
         var clusterState = state.ClusterState;
         var tables = state.SlotToComponentTable;
@@ -385,6 +444,11 @@ public partial class DatabaseEngine
                             if (root != 0 && chainHeads[slot].Named.Contains(root))
                             {
                                 ComponentRevisionManager.ResetChainLocks(tables[slot].CompRevTableSegment, this, [root]);
+                            }
+
+                            if (root != 0)
+                            {
+                                recordRoots[slot].Add(root);
                             }
 
                             heads?.CopySlot(slot, root, clusterBase, slotIndex, enabledBits);

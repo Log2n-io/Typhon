@@ -43,6 +43,8 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         DatabaseEngine.RecoveryBatchPointProbe = null;
         DatabaseEngine.RecoveryFlushThresholdPercentForTest = -1;
         DatabaseEngine.EntityMapBuildEntriesForTest = 0;
+        DatabaseEngine.VerifyRecordRootsForTest = false;
+        DatabaseEngine.ChainHeadCacheBudgetForTest = 0;
     }
 
     private static DatabaseEngine RegisterMarket(DatabaseEngine dbe)
@@ -296,6 +298,32 @@ internal sealed class CrashDuringRecoveryTests : TestBase<CrashDuringRecoveryTes
         {
             DatabaseEngine.ChainHeadCacheBudgetForTest = 0;
         }
+    }
+
+    /// <summary>
+    /// #1665: before the replay, the reservation takes each re-derived archetype's live chain roots from the records its EntityMap rebuild wrote, instead of
+    /// walking the clusters and looking every entity up in the map — the same roots, checked here against that walk. Past the memory budget they are
+    /// dropped and the archetype is walked.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [VerifiesRule("AP-12")]
+    [CancelAfter(60_000)]
+    public void TheReservation_TakesTheLiveRootsTheRebuildWrote_WithinTheBudget(bool pastTheBudget)
+    {
+        var expected = BuildAndCrash();
+        DatabaseEngine.VerifyRecordRootsForTest = true;
+        if (pastTheBudget)
+        {
+            DatabaseEngine.ChainHeadCacheBudgetForTest = 1;
+        }
+
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = RegisterMarket(scope.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(dbe.CrashRecoveryAtOpen, Is.True, "premise: the open recovered");
+        Assert.That(dbe.RecordRootsReusedAtOpen, pastTheBudget ? Is.Zero : Is.GreaterThanOrEqualTo(1), "the archetypes whose roots the rebuild gave");
+        AssertItems(dbe, expected);
+        Assert.That(dbe.RunStorageIntegrityCheck().Issues, Is.Empty, "the storage integrity check");
     }
 
     private static void AssertItemValues(DatabaseEngine dbe, Dictionary<EntityId, MkItem?> expected)
