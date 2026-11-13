@@ -5984,10 +5984,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
                         clusterState.InitializeSpatial(slotToTable, _realms, meta.ArchetypeId);
                         meta.RealmKeySlotMask = clusterState.SpatialSlot.HasRealmKey ? (ushort)(1 << clusterState.SpatialSlot.RealmKeySlot) : (ushort)0;
+                        meta.SpatialSlotMask = 0;   // the metadata is process-wide: another engine's spatial slot must not leak in
                         // ClusterRef.Set stores neither: a position goes through WriteSpatial, a realm key through OpenMut (#1187).
                         if (clusterState.SpatialSlot.HasSpatialIndex)
                         {
                             clusterState.SetRefusedSlotMask |= (ushort)((1 << clusterState.SpatialSlot.Slot) | meta.RealmKeySlotMask);
+                            clusterState.HandOutRefusedSlotMask |= meta.RealmKeySlotMask;
+                            meta.SpatialSlotMask = (ushort)(1 << clusterState.SpatialSlot.Slot);
+                            if ((meta.VersionedSlotMask & meta.SpatialSlotMask) == 0)
+                            {
+                                clusterState.WriteSpatialSlot = clusterState.SpatialSlot.Slot;
+                            }
                         }
 
                         // Register with the per-table spatial state, which the trigger system reads

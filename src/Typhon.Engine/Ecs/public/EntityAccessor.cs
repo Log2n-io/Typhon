@@ -275,6 +275,13 @@ public partial class EntityAccessor : IDisposable
     /// <summary>Whether a lease is open on this accessor — a reset or a dispose then would race the thread reading through it.</summary>
     internal bool IsLeased => _leaseDepth > 0;
 
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowAccessorDisposed() =>
+        throw new ObjectDisposedException(GetType().Name,
+            $"A {GetType().Name} was used after its Dispose (TX-01): a disposed transaction goes back to the engine's pool and may already be another "
+          + "caller's. Keep its use inside its 'using' scope.");
+
     /// <summary>Whether a lease is open on this accessor on another thread than the caller's: a flush then would race the thread reading through it.</summary>
     internal bool IsLeasedByAnotherThread => _leaseDepth > 0 && _owningThreadId != Environment.CurrentManagedThreadId;
 
@@ -293,6 +300,12 @@ public partial class EntityAccessor : IDisposable
             ThrowHelper.ThrowInvalidOp(
                 "EntityAccessor thread affinity violation: current thread differs from the creating thread. " +
                 "Each EntityAccessor instance must be used only from its creating thread.");
+        }
+
+        // TX-01 (#1653), every build: an accessor used after its Dispose — a transaction is pooled then, and may be another caller's next.
+        if (_isDisposed)
+        {
+            ThrowAccessorDisposed();
         }
 
         ResumeIfSuspended();

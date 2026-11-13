@@ -584,6 +584,9 @@
   invariant ∀ active cluster C with ClusterAabbs[C.chunkId] = A:
     toCellRelative(union(∀ occupied entity E in C: E.spatialAABB), origin(C)) ⊆ A
     (degenerate entities with NaN/Inf bounds are excluded from the union)
+  invariant a non-finite position reaches a cluster through no validated write: Spawn, WriteSpatial, Teleport and EntityRefMut.Set refuse
+    it at the call and store nothing (Set since #1652, EntityRefMut.RefuseNonFinitePosition: it used to fail the next fence for good). A raw
+    write (a span over an unindexed spatial column) is caught at the fence, which names the entity and the cluster
     conversion rounds AWAY from the entity — min down, max up (ClusterSpatialAabb.ToCellRelativeMin/Max). The
     narrowing to f32 is where the error is: round-to-nearest can place a bound INSIDE the entity it must contain,
     which is this rule's own silent failure mode.
@@ -613,7 +616,11 @@
          ClusterRef.WriteSpatial / MaybeGrowAndFlagShrink / WriteSpatialSet (the concurrent writer class),
          ClusterRef.TryGetCellOrigin, ClusterSpatialAabb.ToCellRelativeMin, ClusterSpatialAabb.ToCellRelativeMax,
          SpatialGrid.CellOrigin (the frame the containment is expressed in — C15),
-         AabbClusterEnumerator.SetCellQueryFrame (the query half; without it the invariant is unobservable)
+         AabbClusterEnumerator.SetCellQueryFrame (the query half; without it the invariant is unobservable),
+         EntityRefMut.SetChecked, EntityRefMut.RefuseNonFinitePosition, ArchetypeMetadata.SpatialSlotMask
+  verified: FastPathChecksTests.Set_OfANonFinitePosition_IsRefusedAtTheCall [VerifiesRule] (strict mode off; NaN by handle, infinity by type,
+            the fence then runs), ClusterMigrationTests.NonFinitePosition_ThroughSet_IsRefusedAtTheCall_AndTheFenceRuns and
+            NonFinitePosition_ThroughARawWrite_ThrowsDescriptiveAtTheFence
   note the store is a blind `stored = fresh`, not a grow-merge (issue #573). Safe only under the barrier above; any
        overlap scheme must make it a union first. Neither ArchetypeClusterState nor TyphonRuntime contains a single
        Volatile, so the cluster-side read path is not a valid lock-free protocol on a weak memory model regardless of
@@ -701,6 +708,9 @@
             specialization, and must widen it the same way
   invariant a slot beyond the cluster or beyond values is refused before anything is written, in every build: a slot past the cluster would
             write into the next column
+  invariant both forms write only the [SpatialIndex] component, and only when it is not Versioned, in every build (#1652, one compare against
+            ArchetypeClusterState.WriteSpatialSlot): another component's bytes read as a position give garbage bounds, a Versioned one skips its
+            revision. Both refusals were strict-only
   invariant a slot whose position is not finite stops the call where the single write throws (WorldToCellKey refuses a non-finite centre):
             the slots before it and that slot's own grow are published, the slots after it are not written, and the same exception is thrown.
             The one difference: the process bit is set when that slot's grow changed the bound, which the single write leaves clear
@@ -711,8 +721,9 @@
         the migration flags cannot. A widening the call leaves unflagged is flagged or indexed by the writer that made it: a write sets the
         process bit itself, a spawn widens the index (CA-02), so neither the bound nor the index can end up too tight
   scope: ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, AabbClusterEnumerator.IBoundsReader, ClusterSpatialAabb.ToCellRelativeMin,
-         ClusterSpatialAabb.ToCellRelativeMax
-  verified: SpatialSetWriteTests.ASetWrite_LeavesTheClusterAsItsSingleWrites (all eight field types: two engines from one seed, one written
+         ClusterSpatialAabb.ToCellRelativeMax, ClusterRef.ThrowWriteSpatialRefused, ArchetypeClusterState.WriteSpatialSlot
+  verified: FastPathChecksTests.WriteSpatial_WithANonSpatialOrVersionedComponent_IsRefused [VerifiesRule] (both forms, strict mode off);
+            SpatialSetWriteTests.ASetWrite_LeavesTheClusterAsItsSingleWrites (all eight field types: two engines from one seed, one written
             slot by slot, the other by slot set, with a cluster full to its last slot; every cluster's slot values, bound, flags and counters
             compared for equality before the fence, entity cells and CA-01 after it);
             SpatialSetWriteTests.ASetWriteThatChangesNothing_SetsNoProcessBit (every other slot rewritten unchanged: a partial mask, and a process
@@ -2442,14 +2453,16 @@
 ### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
   invariant validated paths (Spawn, WriteSpatial, Teleport, and EntityRefMut.Set when the value changes the key) throw at the call for an
     unregistered, closing or incompatible realm, a Static archetype or a non-finite position, and store nothing; Set then flags the slot as
-    Teleport does, so a barrier-only archetype's fence sees the move. An unvalidated write (ClusterRef.GetSpan / Get, or a key valid when
-    written whose realm is gone since) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
+    Teleport does, so a barrier-only archetype's fence sees the move. ClusterRef.GetSpan / Get refuse the key's component in every build
+    (#1652): until then they were the unvalidated write path. A key that still escapes validation (valid when written, its realm gone since; bytes
+    a corrupted file holds) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
     modified (the checkpoint writes it) and the slot dirty (the WAL carries it), counts
     LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
   scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry, EntityRefMut.Set,
-    ArchetypeMetadata.RealmKeySlotMask
+    ArchetypeMetadata.RealmKeySlotMask, ClusterRef.GetSpan, ClusterRef.Get, ArchetypeClusterState.HandOutRefusedSlotMask
   note: until #1199 Set handed out a `ref T`, so D-2 listed it among the unvalidated paths; since it takes the value it validates like Teleport
-  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown (a raw span write),
+  verified: FastPathChecksTests.GetSpanAndGet_OnTheRealmKey_AreRefused [VerifiesRule] (strict mode off),
+    CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown (a key planted in the bytes),
     CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing,
     CrossRealmMigrationTests.Set_IntoAnUnregisteredRealm_Throws_AtTheCall_AndStoresNothing (by handle and by type),
     CrossRealmMigrationTests.ASetIntoAPendingSpawn_WithAnInvalidKey_Throws_AndTheSpawnKeepsItsRealm,

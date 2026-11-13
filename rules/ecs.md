@@ -1146,6 +1146,9 @@ caller holds decides what it may do, and the write paths rely on preconditions o
   invariant no defensive copy of a handle: every member of `EntityRef` / `EntityRefMut` other than `Write`, `Enable`,
             `Disable` is `readonly` (the read path's Versioned memo writes through `Unsafe.AsRef(in this)`), and a
             non-`readonly` member called on a read-only receiver is a compile error (analyzer TYPHON012)
+  invariant a cluster walk hands out no writable memory over a Versioned component: `ClusterRef.GetSpan` / `Get` refuse it in every build
+            (#1652), through `ArchetypeClusterState.HandOutRefusedSlotMask` — one load and one bit test per call, the mask they already tested
+            for fence-indexed slots. A store there rewrote the committed head copy in place, under every snapshot, with no revision
   never a runtime access flag. Read-only-ness is the handle's TYPE; the check costs nothing and cannot be switched off.
         The conversion goes one way only: `EntityRefMut` → `EntityRef` (implicit, a copy).
   never a once-per-accessor prep: an `ArchetypeAccessor` taken before its transaction commits and used after would
@@ -1153,7 +1156,8 @@ caller holds decides what it may do, and the write paths rely on preconditions o
   scope: EntityRef, EntityRefMut, EntityHandleDefensiveCopyAnalyzer, EntityAccessor.OpenMut, EntityAccessor.TryOpenMut, EntityAccessor.PrepareOpenMut,
          EntityAccessor.PrepareForMutation, Transaction.PrepareOpenMut, Transaction.PrepareForMutation,
          ArchetypeAccessor.OpenMut, ArchetypeAccessor.TryOpenMut, ArchetypeAccessor.PrepareMutation,
-         BulkLoadSession.OpenMut, BulkLoadSession.TryOpenMut
+         BulkLoadSession.OpenMut, BulkLoadSession.TryOpenMut, ClusterRef.GetSpan, ClusterRef.Get, ClusterRef.ThrowHandOutRefused,
+         ArchetypeClusterState.HandOutRefusedSlotMask, ArchetypeClusterState.InitializeWriteMasks
   on_violation: before #997 one `EntityRef` served both kinds of open, told apart by a `_writable` flag checked only
                 when `CheckConfig.Enabled` (off by default). With checks off, `Open(id).Write(...)` wrote in place into
                 HEAD from a transaction that never ran `EnsureMutable` — a read-only or already finalized one included —
@@ -1172,6 +1176,8 @@ caller holds decides what it may do, and the write paths rely on preconditions o
             open moves the transaction to InProgress).
             TickFenceE2ETests.TickFence_SV_TryOpenMutWrite_SurvivesCheckpointAndReopen covers the end-to-end write but
             does not isolate the dirty resolve: since #1009 the fence records the page too, so it would pass without it.
+            FastPathChecksTests.GetSpanAndGet_OnAVersionedComponent_AreRefused [VerifiesRule] (strict mode off: before #1652 the refusal was
+            strict-only).
 
 ## Module: REAP — Reclaiming what a destroy leaves behind
 
@@ -1801,15 +1807,20 @@ that the engine, not the value, owns the text. These rules are what "owns" means
 ### TXT-02: A whole-value store never changes a text `[fatal]` `[silent]`
   invariant a `Set` / `ClusterRef.Set` keeps the handles the stored component holds: an empty one in the value takes the stored
             one, an equal one is kept, any other is refused; a spawn's value carries no handle at all
-  invariant a cluster span (ClusterRef.GetSpan) is refused on a component with a text: a store through it bypasses the rule
+  invariant writable cluster memory (ClusterRef.GetSpan, and the ref ClusterRef.Get returns) is refused on a component with a text, in every
+            build: a store through it bypasses the rule (Get was unchecked until #1652)
+  invariant a first supply of a never-supplied Versioned component (EntityRefMut.Enable with a value) is a spawn's value: it carries no handle
+            (#1652; it was written raw)
   scope: CollectionHandles.Keep, CollectionHandles.RefuseSpawnedText, Transaction.SpawnInternal, Transaction.SpawnBatch,
-         Transaction.WriteSpawnValueKeepingTexts, Transaction.RefuseSpawnedTexts, ClusterRef.GetSpan, EntityRefMut.SetText,
-         EntityRefMut.ClearText
+         Transaction.WriteSpawnValueKeepingTexts, Transaction.RefuseSpawnedTexts, ClusterRef.GetSpan, ClusterRef.Get, EntityRefMut.Enable,
+         EntityRefMut.SetText, EntityRefMut.ClearText
   on_violation: copying a handle from another entity makes two owners of one chunk (TXT-01), each freeing it; an empty
                 handle stored over a text orphans it
   verified: TextFieldTests.Set_CarryingAnotherEntitysText_IsRefused [VerifiesRule], TextFieldTests.Spawn_WithATextHandle_IsRefused
             [VerifiesRule], TextFieldTests.SpawnBatch_WithASharedTextHandle_IsRefused [VerifiesRule],
-            TextFieldTests.SetText_StaleCopy_IsRefused, TextFieldTests.GetSpan_OnAComponentWithAText_IsRefused
+            TextFieldTests.SetText_StaleCopy_IsRefused, TextFieldTests.GetSpan_OnAComponentWithAText_IsRefused,
+            FastPathChecksTests.Get_OnAComponentWithAText_IsRefused [VerifiesRule],
+            FastPathChecksTests.EnableWithAValue_OfANeverSuppliedVersionedComponent_CarryingAnotherEntitysText_IsRefused [VerifiesRule]
 
 ### TXT-03: A crash open takes every named text chunk before the replay and frees every unnamed one after the scrub `[fatal]` `[silent]`
   invariant before the replay allocates: ∀ handle in an allocated content chunk or a cluster slot on disk, its chunk is allocated

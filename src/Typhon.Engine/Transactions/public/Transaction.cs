@@ -238,6 +238,10 @@ public unsafe partial class Transaction : EntityAccessor
         }
     }
 
+    /// <summary>This transaction writes through its unit of work's shared ChangeSet and holds a place in its PS-05a guard until
+    /// <see cref="Dispose"/>.</summary>
+    private bool _sharesUowChangeSet;
+
     /// <summary>
     /// (Re)initializes this pooled transaction instance for a new lease: enters an epoch scope, binds the engine and owning unit of work, selects the commit
     /// discipline, then registers in the transaction chain, which draws the TSN that fixes the MVCC snapshot (TXC-01: in the chain first, then the TSN).
@@ -254,6 +258,15 @@ public unsafe partial class Transaction : EntityAccessor
     public void Init(DatabaseEngine dbe, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
         bool ownChangeSet = false)
     {
+        // PS-05a (#1653, interim until #400): a transaction sharing its unit of work's ChangeSet is refused while another live one of that unit of work
+        // belongs to another thread. First, before the epoch, the chain or the ChangeSet is taken: a refusal leaves nothing to undo.
+        _sharesUowChangeSet = false;
+        if (!readOnly && !ownChangeSet && uow?.ChangeSet != null)
+        {
+            uow.EnterSharedChangeSet();   // the rest of Init does not throw: nothing can strand the place taken here
+            _sharesUowChangeSet = true;
+        }
+
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
         // The TSN is drawn at the end, by the chain (TXC-01); the span carries it, set before the span is emitted.
@@ -379,10 +392,54 @@ public unsafe partial class Transaction : EntityAccessor
         scope.Dispose();
     }
 
+    /// <summary>
+    /// The lifetime checks of <see cref="Commit(ref UnitOfWorkContext, ConcurrencyConflictHandler)"/> and <see cref="Rollback(ref UnitOfWorkContext)"/>, in
+    /// every build (#1653): not after <see cref="Dispose"/> (TX-01), and only on the thread that created it (EP-04). A field load and a thread-id read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void CheckLifetime(string verb)
+    {
+        if (_isDisposed)
+        {
+            ThrowUsedAfterDispose(verb);
+        }
+        CheckOwnerThread(verb);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void CheckOwnerThread(string verb)
+    {
+        if (_owningThreadId != Environment.CurrentManagedThreadId)
+        {
+            ThrowWrongThread(verb);
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowWrongThread(string verb) =>
+        throw new InvalidOperationException(
+            $"A Transaction created on thread {_owningThreadId} was {verb} on thread {Environment.CurrentManagedThreadId} (EP-04). A transaction "
+          + "belongs to the thread that created it: its epoch scope is that thread's, and ending it elsewhere would unpin the wrong thread. It is "
+          + "left as it was, still holding its creator's scope. The usual cause is an 'await' inside the transaction's 'using' scope, whose "
+          + "continuation resumes on another thread: end the transaction before awaiting, or create it after (build diagnostic TYPHON016).");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowUsedAfterDispose(string verb) =>
+        throw new ObjectDisposedException(nameof(Transaction),
+            $"A Transaction was {verb} after its Dispose (TX-01): a disposed transaction goes back to the engine's pool and may already be another "
+          + "caller's. Keep a transaction's use inside its 'using' scope.");
+
     /// <summary>Throws if the transaction cannot accept new operations (read-only or already finalized).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureMutable()
     {
+        if (_isDisposed)
+        {
+            ThrowUsedAfterDispose("written");   // TX-01 (#1653): before the state below is touched on a pooled object
+        }
+
         if (IsReadOnly)
         {
             ThrowHelper.ThrowInvalidOp("Cannot perform write operations on a read-only transaction");
@@ -426,6 +483,12 @@ public unsafe partial class Transaction : EntityAccessor
     /// </summary>
     public override void Dispose()
     {
+        // EP-04 (#1653): on its own thread, before anything is touched — the epoch scope this exits is that thread's. A second Dispose is a no-op wherever.
+        if (!_isDisposed)
+        {
+            CheckOwnerThread("disposed");
+        }
+
         // Dispose transient batch accessors first — safe even on double-dispose or if never created
         // (ChunkAccessor<PersistentStore>.Dispose() is idempotent: no-op when _segment==null).
         _clusterCommitMapAccessor.Dispose();
@@ -521,6 +584,12 @@ public unsafe partial class Transaction : EntityAccessor
                 // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd
                 // overwrite the new owner's flag, causing their Dispose to skip Remove — leaking the chain node.
                 _isDisposed = true;
+                // PS-05a: the shared ChangeSet is handed back LAST — the chain's Reset may still write through it (a staged prepare's EntityMap
+                // removes) — and from locals: once Remove has pooled this object, another caller may own its fields.
+#pragma warning disable TYPHON004 // borrowed: the unit of work is its creator's to dispose
+                var sharedUow = _sharesUowChangeSet ? OwningUnitOfWork : null;
+#pragma warning restore TYPHON004
+                _sharesUowChangeSet = false;
                 dbe.LogTxDispose(tsn, "ExitEpochAndRemove");
                 try
                 {
@@ -529,6 +598,7 @@ public unsafe partial class Transaction : EntityAccessor
                 finally
                 {
                     PagedMMF.ExitOperation(tsn);   // last: the rollback, cleanups and flush above are still this transaction's requests (PS-25)
+                    sharedUow?.ExitSharedChangeSet();
                 }
             }
         }
@@ -3894,6 +3964,7 @@ public unsafe partial class Transaction : EntityAccessor
     {
         // The hot fast path here is read-only-tx auto-rollback on Dispose: state is already Created/Committed/Rollbacked, returns immediately. By keeping
         // the holdoff `using` and span try/finally inside RollbackCore (slow), this fast-path shim stays EH-free and inlinable into Dispose.
+        CheckLifetime("rolled back");   // TX-01, EP-04 (#1653)
         BeginOperation();
         _ending = true;
 
@@ -4435,6 +4506,7 @@ public unsafe partial class Transaction : EntityAccessor
     /// </exception>
     public bool Commit(ref UnitOfWorkContext ctx, ConcurrencyConflictHandler handler = null)
     {
+        CheckLifetime("committed");   // TX-01, EP-04 (#1653)
         if (WriteGuard == TickWriteGuard.Bound)
         {
             TickWriteGuard.CheckBoundCommit(this);   // EW-01 (#1651): not once the run that opened it has returned

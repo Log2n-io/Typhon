@@ -29,6 +29,7 @@ Each ID below is the target of the help link your IDE shows next to the diagnost
 | [TYPHON011](#typhon011) | Error | Typhon | a component whose managed and marshalled layouts differ (`bool`, `char`) |
 | [TYPHON012](#typhon012) | Error | Typhon | a non-readonly `EntityRef`/`EntityRefMut` member called on a read-only receiver |
 | [TYPHON013](#typhon013) | Warning | Typhon | a component too large to pass to `Spawn` |
+| [TYPHON016](#typhon016) | Warning | Typhon | an `await` inside a transaction's scope |
 | [TYPHON015](#typhon015) | Warning | Typhon.Protocol | a command sent by name while its typed struct is in reach |
 | [TPH1001](#tph1001)–[TPH1004](#tph1004) | Error | Typhon | invalid cascade graphs and archetype declarations |
 | [TPH1101](#tph1101)–[TPH1109](#tph1109) | Error | Typhon.Protocol | invalid replication declarations |
@@ -108,6 +109,13 @@ non-readonly local.
 `Spawn` carries component values inline in 112 bytes. A larger component cannot be passed to it. **Fix:** split the component (a large key and its
 payload are usually two components), or spawn without it and write it through `OpenMut` in the same transaction — then suppress the warning with a
 reason.
+
+<a id="typhon016"></a>
+### TYPHON016 — `await` inside a transaction's scope
+
+An `await` between a `Transaction`'s creation and its disposal, in the same method. A transaction belongs to the thread that created it — it holds
+that thread's epoch scope — and the continuation of an `await` resumes on another thread in an ASP.NET host, where its `Commit`, `Rollback` and
+`Dispose` throw (rule EP-04). **Fix:** finish the transaction before awaiting, or create it after; do the slow I/O outside its scope.
 
 ## Subscriptions clients
 

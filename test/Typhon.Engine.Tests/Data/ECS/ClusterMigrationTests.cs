@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
@@ -556,8 +557,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     // ═══════════════════════════════════════════════════════════════════════
 
     [Test]
-    public void NonFinitePosition_ThrowsDescriptive()
+    public void NonFinitePosition_ThroughSet_IsRefusedAtTheCall_AndTheFenceRuns()
     {
+        // CA-01 (#1652): found at the fence, a NaN position fails it for good; Set refuses it before storing anything.
         using var dbe = SetupEngineWithGrid();
 
         EntityId id;
@@ -569,13 +571,48 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        // Write a NaN position
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var eref = tx.OpenMut(id);
-            var pos = eref.Read(ClMigUnit.Pos);
+            var pos = tx.Open(id).Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = float.NaN, MinY = 50f, MaxX = float.NaN, MaxY = 50f };
-            eref.Set(ClMigUnit.Pos, pos);
+            var ex = Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(ClMigUnit.Pos, pos));
+            Assert.That(ex.Message, Does.Contain("CA-01"));
+            pos.Bounds = new AABB2F { MinX = float.PositiveInfinity, MinY = 50f, MaxX = float.PositiveInfinity, MaxY = 50f };
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(pos));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        Assert.DoesNotThrow(() => dbe.WriteTickFence(1));
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(id).Read(ClMigUnit.Pos).Bounds.MinX, Is.EqualTo(50f), "nothing was stored");
+        }
+    }
+
+    [Test]
+    public void NonFinitePosition_ThroughARawWrite_ThrowsDescriptiveAtTheFence()
+    {
+        // A raw write validates nothing (a span over an unindexed spatial column is one): the fence's descriptive throw is that path's backstop.
+        using var dbe = SetupEngineWithGrid();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<ClMigUnit>().GetClusterEnumerator())
+            {
+                var slot = BitOperations.TrailingZeroCount(cluster.OccupancyBits);
+                // Planted in the bytes (the component is indexed, so GetSpan refuses it): what a raw write leaves, and the fence's throw backs up.
+                Unsafe.AsRef(in cluster.GetReadOnlySpan(ClMigUnit.Pos)[slot]).Bounds =
+                    new AABB2F { MinX = float.NaN, MinY = 50f, MaxX = float.NaN, MaxY = 50f };
+                cluster.MarkDirty(ClMigUnit.Pos);
+            }
             tx.Commit();
         }
 

@@ -562,8 +562,9 @@ lock ordering and deadlock prevention are still to come.
             it kept (EntityRef.ClusterBase) once the generation has moved. Transient pages never move: their accessors report nothing
   invariant a fast-path reference — a ClusterRef and every span or ref it hands out, an index enumerator's CurrentComponent, a WalkBatch and every
             span it hands out — is valid until its enumerator's next MoveNext or Dispose; the enumerator's own accessor holds the current page for
-            that long, or the walk's own buffer the values. Under strict mode (CheckConfig.Enabled) a ClusterRef used after its step throws, from
-            every data member; a WalkBatch throws in every build
+            that long, or the walk's own buffer the values. A ClusterRef used after its step throws, from every data member, in every build since #1652:
+            it holds a reference to its enumerator's step counter (a field of the enumerator, no allocation) and compares it with its own step; a
+            WalkBatch throws in every build
   invariant so the epoch may be refreshed at any call boundary: a transaction refreshes it every 128 entity opens
             (EntityAccessor.NoteEntityOpen, read-only transactions included), every 128 spawns, every 128 destroys, every 128 cluster walks, every 128
             archetypes a spatial query reads, every 128 entries of a view's refresh, every 128 index lookups and every 128 index entries examined, whether the snapshot sees them or not: a walk of rows newer than its snapshot reads the same pages and emits
@@ -630,7 +631,8 @@ lock ordering and deadlock prevention are still to come.
             PTA worker's; a Transient Set captures the entity's own index key and a Commit-discipline partial write seeds from it. With
             ClusterBase trusting the cached pointer, all nine fail [VerifiesRule]; one read-only transaction opens 45 000 entities over a
             512-page cache and peaks at 45 epoch-protected pages (sampled every 1 024 opens), and without the open refresh times out with
-            510 [VerifiesRule]; a ClusterRef used after its enumerator's next MoveNext or Dispose throws under strict mode [VerifiesRule];
+            510 [VerifiesRule]; a ClusterRef used after its enumerator's next MoveNext or Dispose throws under strict mode [VerifiesRule],
+            and with it off (FastPathChecksTests.AClusterRef_UsedAfterItsEnumeratorMovedOn_Throws [VerifiesRule]);
             handles of two archetypes used in turn leave the generation unmoved, which a one-entry cluster cache fails
   verified: EpochRefreshCadenceTests — a transaction refreshes every 8 opens while the cache is under pressure and every 128 once the hold has
             passed and an allocation found a slot; red with the cadence fixed at 128 [VerifiesRule]; the timeout message names the pinned
@@ -667,6 +669,11 @@ lock ordering and deadlock prevention are still to come.
             and every entry point that hands out a walker over pages, For and GetClusterEnumerator (RequireLeaseIfPointInTime): a per-call guard
             would cover the entity-map lookup but not the reads after it. The runtime takes one lease per parallel chunk (RT-01), so a worker
             that is parked, between ticks or in a stalled tick holds no pin
+  invariant a Transaction is committed, rolled back and disposed only on the thread that created it, in every build (#1653): Commit, Rollback and
+            Dispose compare the creating thread's id first, and a mismatch throws before any epoch state is touched (Transaction.CheckLifetime,
+            CheckOwnerThread) — one thread-id read per call. Ended elsewhere, typically after an `await` inside its `using` scope, ExitScopeUnordered
+            ran on the wrong thread: an underflow, or the silent unpinning of that thread's own scope, and the creator pinned for good. Analyzer
+            TYPHON016 (TransactionAcrossAwaitAnalyzer) reports the `await` at build time
   note a lease exits in order (ExitScope with its depth), a Transaction unordered: a transaction opened before a lease and disposed inside it makes
        the lease's exit throw its depth mismatch, loudly, as RT-01 accepts for a body that leaks a scope
   invariant a walk step leaves its transaction's scope only when that scope is the thread's only depth (EpochManager.CurrentThreadDepth == 1): an
@@ -686,8 +693,11 @@ lock ordering and deadlock prevention are still to come.
          NeedsEpochGuard, RequireLeaseIfPointInTime, BeginLease, EndLease, FlushAtSystemEnd), EntityAccessor.ECS.cs (For, GetClusterEnumerator),
          ComponentInfo.cs (ReleaseWindows), PagedMMF.cs (CountPagesWithSlotReferences),
          TyphonRuntime.cs (ExecuteChunkWithAccessor, OnParallelQueryCleanup), EntityAccessor.TrySuspendEpochAtWalkStep, EntityAccessor.ResumeEpoch,
-         Transaction.ExitEpochAndRemove, EpochManager.CurrentThreadDepth
-  verified: WorkerEpochPinTests.ParkedWorkers_HoldNoEpochPin_BetweenTicks [VerifiesRule] (4 workers, two parallel systems, measured inside the idle gap:
+         Transaction.ExitEpochAndRemove, EpochManager.CurrentThreadDepth, Transaction.CheckLifetime, Transaction.CheckOwnerThread, Transaction.Dispose,
+         TransactionAcrossAwaitAnalyzer
+  verified: TransactionLifetimeTests.ACrossThreadDispose_Throws_BeforeTouchingAnyEpochState and ADisposeAfterAnAwait_OnAThreadPoolContinuation_Throws
+            [VerifiesRule] (strict mode off; the other thread's depth unchanged, the creator still pinned until it ends the transaction itself);
+            TransactionAcrossAwaitAnalyzerTests (TYPHON016); WorkerEpochPinTests.ParkedWorkers_HoldNoEpochPin_BetweenTicks [VerifiesRule] (4 workers, two parallel systems, measured inside the idle gap:
             no worker pinned; before the fix every worker pinned at depth 2, the floor frozen 200 epochs behind, 16 pages held); WorkerEpochPinTests.ParkedWorkers_KeepingTheirFirstChunksPin_AreRejected [RuleMutant];
             APointInTimeWorker_UsedOutsideItsLease_Throws and ALease_PinsItsThreadForItsLengthOnly_AndAWorkerIndexMayMoveBetweenThreads [VerifiesRule]
             (each fails with its guard removed: no throw outside a lease, a lease that never unpins);

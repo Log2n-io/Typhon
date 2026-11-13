@@ -1,5 +1,8 @@
 using JetBrains.Annotations;
 using System;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Schema.Definition;
@@ -245,6 +248,48 @@ public sealed class UnitOfWork : IDisposable
 
     /// <summary>The thread that created this unit of work, when admitted: its own later units pass the gate while it holds this one.</summary>
     private readonly int _admittedBy;
+
+    // ── PS-05a interim guard (#1653, until #400 gives every transaction its own ChangeSet) ─────────────────────────────────────────────────────────
+    //
+    // The shared ChangeSet is a plain HashSet and List: two transactions writing through it from two threads corrupt it. Packed: the owning thread's id
+    // in the high 32 bits, the live sharing transactions in the low 32. One CAS per creation, one decrement per dispose; a hand-off between threads (the
+    // previous transaction disposed first) is legal.
+    private long _sharedChangeSetUsers;
+
+    /// <summary>A transaction about to share <see cref="ChangeSet"/> on this thread: refused while a live one belongs to another thread.</summary>
+    internal void EnterSharedChangeSet()
+    {
+        var me = (long)Environment.CurrentManagedThreadId << 32;
+        while (true)
+        {
+            var current = Volatile.Read(ref _sharedChangeSetUsers);
+            var count = (uint)current;
+            if (count != 0 && (current & unchecked((long)0xFFFF_FFFF_0000_0000)) != me)
+            {
+                ThrowSharedChangeSetOwned((int)(current >> 32));
+            }
+
+            if (Interlocked.CompareExchange(ref _sharedChangeSetUsers, me | (count + 1), current) == current)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>A sharing transaction disposed, on its own thread (EP-04 refuses any other).</summary>
+    internal void ExitSharedChangeSet()
+    {
+        var after = Interlocked.Decrement(ref _sharedChangeSetUsers);
+        Debug.Assert((uint)(after + 1) != 0, "PS-05a guard: an exit with no sharing transaction would borrow into the owner's thread id");
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowSharedChangeSetOwned(int owner) =>
+        throw new InvalidOperationException(
+            $"UnitOfWork.CreateTransaction on thread {Environment.CurrentManagedThreadId} while a live transaction of the same unit of work belongs to thread "
+          + $"{owner} (PS-05a): the transactions of one Deferred or GroupCommit unit of work share its ChangeSet, which one thread at a time may write. "
+          + "Dispose the other transaction first, or give each thread its own unit of work.");
 
     /// <inheritdoc />
     public void Dispose()

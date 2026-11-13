@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
 
@@ -117,12 +118,13 @@ public unsafe ref struct EntityRefMut
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Set<T>(Comp<T> comp, in T value) where T : unmanaged
     {
-        if (_ref._archetype.RealmKeySlotMask == 0)
+        // Only the realm key and the spatial component take the checked path: a spatial archetype's other components stay inline.
+        if ((_ref._archetype.CheckedSetSlotMask & (1 << _ref._archetype.GetSlot(comp._componentTypeId))) == 0)
         {
             Store(comp, in value);
             return;
         }
-        SetOnRealmKeyedArchetype(comp._componentTypeId, in value);
+        SetChecked(comp._componentTypeId, in value);
     }
 
     /// <summary>
@@ -169,7 +171,7 @@ public unsafe ref struct EntityRefMut
     /// <exception cref="InvalidOperationException">A realm change the entity cannot make.</exception>
     public void Set<T>(in T value) where T : unmanaged
     {
-        if (_ref._archetype.RealmKeySlotMask == 0)
+        if (_ref._archetype.CheckedSetSlotMask == 0)
         {
             var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
             if (CheckConfig.Enabled && typeId < 0)
@@ -180,20 +182,25 @@ public unsafe ref struct EntityRefMut
             Store(new Comp<T>(typeId), in value);
             return;
         }
-        SetOnRealmKeyedArchetype(ArchetypeRegistry.GetComponentTypeId<T>(), in value);
+        SetChecked(ArchetypeRegistry.GetComponentTypeId<T>(), in value);
     }
 
     /// <summary>
-    /// <see cref="Set{T}(Comp{T}, in T)"/> on an archetype with a <c>[RealmKey]</c>. A store that changes the key moves the entity to another realm at the
-    /// next fence: it gets <see cref="EntityAccessor.Teleport{T}"/>'s checks before anything is stored — the fence must never throw, so before D-2's
+    /// <see cref="Set{T}(Comp{T}, in T)"/> on a spatial or realm-keyed archetype. A position must be finite, or the fence could not place it in a cell and
+    /// would fail terminally (CA-01, #1652): refused at the call, nothing stored. A store that changes the realm key moves the entity to another realm at
+    /// the next fence: it gets <see cref="EntityAccessor.Teleport{T}"/>'s checks before anything is stored — the fence must never throw, so before D-2's
     /// revert this is the only place the application hears of a bad key — and, once stored, the flag a barrier-only archetype's fence needs to see the
     /// move.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void SetOnRealmKeyedArchetype<T>(int componentTypeId, in T value) where T : unmanaged
+    private void SetChecked<T>(int componentTypeId, in T value) where T : unmanaged
     {
         var comp = new Comp<T>(componentTypeId);
         byte slot = _ref._archetype.GetSlot(componentTypeId);
+        if ((_ref._archetype.SpatialSlotMask & (1 << slot)) != 0)
+        {
+            RefuseNonFinitePosition(in value);
+        }
         if ((_ref._archetype.RealmKeySlotMask & (1 << slot)) == 0)
         {
             Store(comp, in value);
@@ -211,18 +218,7 @@ public unsafe ref struct EntityRefMut
             return;
         }
 
-        state.ValidateRealmEntry(newRealm);
-        if (slot == spatial.Slot)
-        {
-            // The key rides in the spatial component: the value carries the position too, and the fence must be able to place it in a cell.
-            var copy = value;   // on the stack: the centre is read through a pointer, which may never address managed memory
-            SpatialGrid.ReadSpatialCenter3D((byte*)&copy + spatial.FieldOffset, spatial.FieldInfo.FieldType, out var x, out var y, out var z);
-            if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
-            {
-                throw new InvalidOperationException($"A realm change to a non-finite position ({x}, {y}, {z}) cannot be placed in any grid.");
-            }
-        }
-
+        state.ValidateRealmEntry(newRealm);   // a key riding in the spatial component: its position was checked above
         Store(comp, in value);
 
         // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit. Otherwise the slot is flagged as
@@ -230,6 +226,21 @@ public unsafe ref struct EntityRefMut
         if (!_ref._isOwnSpawn)
         {
             state.FlagOutOfBarrierSpatialWrite(_ref._clusterChunkId, _ref._clusterSlotIndex);
+        }
+    }
+
+    /// <summary>
+    /// Refuses a value of the spatial component whose position is not finite (CA-01): the fence places a moved entity in a cell, and a NaN or infinite
+    /// centre has none — found there, it fails the fence for good. The same check as <see cref="EntityAccessor.Teleport{T}"/>'s.
+    /// </summary>
+    private void RefuseNonFinitePosition<T>(in T value) where T : unmanaged
+    {
+        ref readonly var spatial = ref _ref._engineState.ClusterState.SpatialSlot;
+        var copy = value;   // on the stack: the centre is read through a pointer, which may never address managed memory
+        SpatialGrid.ReadSpatialCenter3D((byte*)&copy + spatial.FieldOffset, spatial.FieldInfo.FieldType, out var x, out var y, out var z);
+        if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+        {
+            throw new InvalidOperationException($"A position ({x}, {y}, {z}) that is not finite cannot be placed in any cell (CA-01): nothing was stored.");
         }
     }
 
@@ -587,6 +598,12 @@ public unsafe ref struct EntityRefMut
         // (a re-enable, or any non-Versioned slot) already has storage, so the ordinary enable-then-write path applies.
         if (needsContent)
         {
+            // A first supply, as a spawn's value: it may carry no text handle, which could only be another entity's (TXT-02, #1652).
+            var table = _ref._engineState.SlotToComponentTable[slot];
+            if (table.HasText)
+            {
+                CollectionHandles.RefuseSpawnedText(table, MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in value)));
+            }
             _ref.SetLocation(slot, _ref._accessor.CreateVersionedContentAndWrite(_ref._id, slot, in value));
         }
 

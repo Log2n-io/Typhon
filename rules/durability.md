@@ -2102,8 +2102,12 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
 ### PS-05a: A ChangeSet has one writer at a time; a transaction running beside its unit of work's others owns its own `[fatal]` `[silent]`
   invariant a ChangeSet's tracking (a HashSet and a List) is mutated by one thread at a time; hand-off between threads is legal, overlap is not
             (ChangeSet.EnterMutation detects overlap and throws, #400)
-  invariant a Deferred or GroupCommit unit of work's shared ChangeSet serves only transactions that do not run concurrently: one transaction per
-            system per tick, on that system's thread
+  invariant a Deferred or GroupCommit unit of work's shared ChangeSet serves only transactions that do not run concurrently: UnitOfWork.CreateTransaction
+            refuses one while a live transaction sharing it belongs to another thread (#1653, UnitOfWork.EnterSharedChangeSet: one CAS per creation,
+            interim until #400 gives every transaction its own). A hand-off — the first disposed before the second is created — is legal
+  invariant the runtime's system transactions own their ChangeSet (TyphonRuntime.StartSystemRun → CreateConcurrentTransaction): the DAG runs
+            independent systems side by side, each with a live transaction of the tick's unit of work on its own worker. They shared it until
+            #1653, and the guard refused 1 171 system runs of BotSwarmSmokeTests: the overlap was real
   invariant a transaction that runs concurrently with others of its unit of work — the per-chunk transactions of a parallel QuerySystem that
             WritesVersioned (ExecuteChunkWithTransaction) — is created by UnitOfWork.CreateConcurrentTransaction and owns its ChangeSet: rented at Init,
             its marks released and the set returned to the pool at its Dispose (PS-05)
@@ -2112,10 +2116,13 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   on_violation: silent under the default Isolate policy — concurrent chunks corrupt the shared set and fail ("ChangeSet concurrent mutation", and
     downstream "not found in PK index" in Versioned copy-on-write); the failed chunks are drained, so the system processes a fraction of its entities
     with nothing reported (#1116: 12 to 192 of 600 per tick)
-  scope: UnitOfWork.CreateConcurrentTransaction, Transaction.Init (ownChangeSet), Transaction.Dispose, TransactionChain.CreateTransaction,
+  scope: UnitOfWork.CreateConcurrentTransaction, UnitOfWork.CreateTransaction, UnitOfWork.EnterSharedChangeSet, UnitOfWork.ExitSharedChangeSet,
+         TyphonRuntime.StartSystemRun, Transaction.Init (ownChangeSet), Transaction.Dispose, TransactionChain.CreateTransaction,
          TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation, ChunkBasedSegment.ReturnWarmAccessor / ReturnWarmSiblingAccessor /
          ExitBatchMode (a [ThreadStatic] warm accessor must not keep the set past its rent: the set's owner hands it on — #946)
-  verified: ParallelVersionedWriteTests (1, 4 and 8 workers, and a change-filtered dispatch: 600 entities, 16 chunks, every entity paid once per
+  verified: TransactionLifetimeTests.ASiblingTransaction_OnAnotherThread_IsRefused_WhileTheFirstLives [VerifiesRule] (refused across threads, legal
+            on the owning thread and after a hand-off); BotSwarmSmokeTests (system transactions sharing the set: systems refused, frames lost);
+            ParallelVersionedWriteTests (1, 4 and 8 workers, and a change-filtered dispatch: 600 entities, 16 chunks, every entity paid once per
             dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail.
             ChunkAccessorTests.AReturnedWarmAccessor_NeverFlushesTheChangeSetItsRenterHandedOn covers the warm caches (see CP-12)
 

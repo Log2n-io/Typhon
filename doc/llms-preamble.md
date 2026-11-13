@@ -50,8 +50,11 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
   DurabilityMode.GroupCommit)` (or `InTick` to return a value) — it runs at the next tick start, before that tick's systems.
 - **Replication is explicit**: with the default `PushDetection.Explicit`, a system that changes a replicated entity must call
   `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`); otherwise no client is ever sent the change.
-- **Never write an `[Index]`ed SingleVersion/Transient component through a span** (`ClusterRef.GetSpan`/`Get`) — it throws;
-  write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
+- **Never write through a span** (`ClusterRef.GetSpan`/`Get`) an `[Index]`ed SingleVersion/Transient component, a Versioned one, one with a
+  `String1024` field or the realm key's — it throws; write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`, a text with
+  `entity.SetText(...)`.
+- **A transaction lives on one thread**: never `await` inside its `using` scope — Commit, Rollback and Dispose throw on another thread
+  (EP-04, analyzer TYPHON016), and any use after `Dispose` throws. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
 
 **Build diagnostics are real defects — fix, don't suppress.** The `Typhon` package runs analyzers in your build (in the project that
 references the package directly): TYPHON004 = a `Transaction`/enumerator never disposed → `using var`; TYPHON001/003 = a no-copy type passed by value

@@ -4233,7 +4233,9 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // Create a Transaction on the CALLING THREAD (worker thread).
         // This respects Transaction's single-thread affinity constraint.
-        var tx = _currentUow.CreateTransaction();
+        // With a ChangeSet of its own (PS-05a, #1653): systems the DAG runs side by side each have a live transaction of the tick's unit of work, on their
+        // own workers, and the shared ChangeSet takes one writer at a time. Shared, two systems dirtying pages at once corrupted it; the guard now refuses it.
+        var tx = _currentUow.CreateConcurrentTransaction();
         tx.MarkRuntimeOwned();   // the system's own transaction: inside the DAG by construction (#1651)
         if (Interlocked.CompareExchange(ref _systemTransactions[sysIdx], tx, null) != null)
         {

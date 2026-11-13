@@ -52,6 +52,15 @@ public static class CheckConfig
     public static readonly bool DeclaredAccessActive;
 
     /// <summary>
+    /// A disposed transaction is dropped rather than returned to the engine's pool, so a use after its <c>Dispose</c> throws
+    /// <see cref="System.ObjectDisposedException"/> for good instead of reaching the next caller's transaction (TX-01, #1653). Pooled (off), the same use
+    /// throws only until the pool hands the object out again. Reads <c>Typhon:Checks:PoisonDisposedTransactions</c> /
+    /// <c>TYPHON__CHECKS__POISONDISPOSEDTRANSACTIONS</c>; unset, it follows <see cref="DeclaredAccessActive"/>'s default: on for a Debug build of the
+    /// application. Costs a transaction allocation per transaction.
+    /// </summary>
+    public static readonly bool PoisonDisposedTransactions;
+
+    /// <summary>
     /// Number of <see cref="Record(bool, bool, ref CheckMessageHandler)"/> violations flagged this process (latch-safe checks
     /// that record instead of throwing). Diagnostic counter; read via <see cref="Interlocked.Read(ref readonly long)"/>. Internal — not a public
     /// API surface (mirrors <c>SpatialRTreeDiagnostics.DfsStackOverflowCount</c>).
@@ -66,6 +75,7 @@ public static class CheckConfig
 
         Enabled = ReadBool(config, "Typhon:Checks:Enabled", false);
         DeclaredAccessActive = ReadBool(config, "Typhon:Checks:DeclaredAccess", IsDebugEntryAssembly());
+        PoisonDisposedTransactions = ReadBool(config, "Typhon:Checks:PoisonDisposedTransactions", IsDebugEntryAssembly());
     }
 
     /// <summary>True when the process's entry assembly was compiled without JIT optimization, i.e. a Debug build of the user's application.</summary>

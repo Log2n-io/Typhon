@@ -38,6 +38,7 @@
     <Compile Include="..\Typhon.Analyzers\EntityHandleDefensiveCopyAnalyzer.cs" Link="EntityHandleDefensiveCopyAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\NoCopyAnalyzer.cs" Link="NoCopyAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\SpatialMutationWithoutBarrierAnalyzer.cs" Link="SpatialMutationWithoutBarrierAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\TransactionAcrossAwaitAnalyzer.cs" Link="TransactionAcrossAwaitAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\DiagnosticHelp.cs" Link="DiagnosticHelp.cs" />
   </ItemGroup>
 

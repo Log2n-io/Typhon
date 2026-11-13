@@ -131,6 +131,15 @@ internal class ArchetypeMetadata
     /// </summary>
     internal ushort RealmKeySlotMask;
 
+    /// <summary>
+    /// The bit of the cluster <c>[SpatialIndex]</c> component's slot, 0 for a non-spatial archetype. <c>EntityRefMut.Set</c> refuses a non-finite position
+    /// there at the call (CA-01, #1652): the fence would have to place it in a cell, and cannot.
+    /// </summary>
+    internal ushort SpatialSlotMask;
+
+    /// <summary><see cref="RealmKeySlotMask"/> | <see cref="SpatialSlotMask"/>: nonzero sends <c>EntityRefMut.Set</c> to its checked path.</summary>
+    internal ushort CheckedSetSlotMask => (ushort)(RealmKeySlotMask | SpatialSlotMask);
+
 
     // ═══════════════════════════════════════════════════════════════════════
     // Cascade delete graph (populated during Freeze)

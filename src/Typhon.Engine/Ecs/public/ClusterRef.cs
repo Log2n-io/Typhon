@@ -43,9 +43,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     // ── Lifetime check (#1199): valid until its enumerator's next MoveNext ──────────────────────────────────────────
     //
     // A ClusterRef and every span or ref it hands out point into the cluster's page, which the enumerator holds only while the cluster is current.
-    // Under strict mode (CheckConfig.Enabled) the enumerator carries a step counter it bumps on every MoveNext and on Dispose; the ref records the
-    // step it was made at, and its data members throw once the two differ. Off, the source is null and the check folds away.
-    private readonly ClusterStep _stepSource;
+    // The enumerator carries a step counter it bumps on every MoveNext and on Dispose; the ref holds a reference to that counter and the step it was made
+    // at, and its data members throw once the two differ. In every build (EP-03, #1652): one load and one compare, against the enumerator's own field.
+    private readonly ref int _stepSource;
     private readonly int _step;
 
     // ── Page record for handed-out memory (#1531, PS-10) ────────────────────────────────────────────────────────────
@@ -75,13 +75,14 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     private double _cachedOriginZ;
 
     internal ClusterRef(byte* basePtr, byte* transientBasePtr, ArchetypeClusterInfo layout, ArchetypeMetadata meta, int chunkId, ArchetypeClusterState state,
-        ulong occupancy, ref nint handedOutPage, ClusterStep stepSource = null, int step = 0, EntityAccessor owner = null)
+        ulong occupancy, ref nint handedOutPage, ref int stepSource, EntityAccessor owner = null)
     {
         Debug.Assert(!Unsafe.IsNullRef(ref handedOutPage), "a ClusterRef reports its handed-out page to its enumerator (#1531)");
         _handedOutPage = ref handedOutPage;
         _owner = owner;
         _occupancy = occupancy;
-        _stepSource = stepSource;
+        _stepSource = ref stepSource;
+        var step = stepSource;
         _step = step;
         _base = basePtr;
         _transientBase = transientBasePtr;
@@ -97,16 +98,23 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>
-    /// Strict mode (#1199): throw when this ref is used after its enumerator moved on — the page it points into is no longer held for it.
+    /// Throws when this ref is used after its enumerator moved on — the page it points into is no longer held for it (#1199, EP-03). In every build since
+    /// #1652: a load of the enumerator's counter, which the walk keeps in cache, and a compare.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private readonly void CheckStep()
     {
-        if (CheckConfig.Enabled && _stepSource != null && _stepSource.Value != _step)
+        if (_stepSource != _step)
         {
-            ThrowHelper.ThrowInvalidOp("A ClusterRef is valid until its enumerator's next MoveNext (or Dispose): the cluster's page is no longer held for it.");
+            ThrowStale();
         }
     }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowStale() =>
+        throw new InvalidOperationException(
+            "A ClusterRef is valid until its enumerator's next MoveNext (or Dispose): the cluster's page is no longer held for it.");
 
     /// <summary>
     /// Bitmask of occupied slots. Bit i = 1 means slot i contains a live entity. Taken once per cluster by the enumerator's <c>MoveNext</c>: the committed
@@ -261,20 +269,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
         }
         var slot = _meta.GetSlot(comp._componentTypeId);
-        if (_state != null && (_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        if ((_state.HandOutRefusedSlotMask & (1 << slot)) != 0)
         {
-            ThrowWritableIndexedMemory(slot, nameof(GetSpan));
-        }
-        if (_state?.OutOfLineTableBySlot?[slot]?.HasText == true)
-        {
-            // A whole-value store through the span would drop or duplicate a text handle, which the engine owns (TXT-02, #1094).
-            ThrowHelper.ThrowInvalidOp("GetSpan on a component with a String1024 field: a store through the span could drop or copy a text handle. Use "
-                + "ClusterRef.Set, which keeps the stored handles, and EntityRefMut.SetText for the text.");
-        }
-        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
-        {
-            ThrowHelper.ThrowInvalidOp(
-                $"GetSpan on Versioned component bypasses revision chain. Use GetReadOnlySpan for reads, OpenMut+Write for writes.");
+            ThrowHandOutRefused(slot, nameof(GetSpan));
         }
         CheckStride<T>(slot);
 
@@ -403,13 +400,9 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
         }
         var slot = _meta.GetSlot(comp._componentTypeId);
-        if (_state != null && (_state.FenceIndexedSlotMask & (1 << slot)) != 0)
+        if ((_state.HandOutRefusedSlotMask & (1 << slot)) != 0)
         {
-            ThrowWritableIndexedMemory(slot, nameof(Get));
-        }
-        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
-        {
-            ThrowHelper.ThrowInvalidOp($"Get on Versioned component bypasses revision chain. Use OpenMut+Write for writes.");
+            ThrowHandOutRefused(slot, nameof(Get));
         }
         CheckStride<T>(slot);
         NotePageHandedOut(slot);
@@ -668,12 +661,52 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         return _state.IndexedKeysDiffer(slot, current, (byte*)&copy);
     }
 
+    /// <summary>
+    /// <see cref="GetSpan{T}"/> or <see cref="Get{T}"/> on a slot of <see cref="ArchetypeClusterState.HandOutRefusedSlotMask"/>: writable memory there
+    /// would let a store skip what the slot needs. The reasons are tested in the order the checks were made before they shared one mask.
+    /// </summary>
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowWritableIndexedMemory(byte slot, string api) =>
+    private readonly void ThrowHandOutRefused(byte slot, string api)
+    {
+        var bit = 1 << slot;
+        if ((_state.FenceIndexedSlotMask & bit) != 0)
+        {
+            throw new InvalidOperationException(
+                $"{api} hands out writable memory over component slot {slot}, which has an [Index] field the tick fence maintains: a write through it "
+              + "never reaches the index (#1187). Read with GetReadOnlySpan / GetReadOnly; write with ClusterRef.Set, WriteSpatial or OpenMut(...).Set.");
+        }
+        if (_state.OutOfLineTableBySlot?[slot]?.HasText == true)
+        {
+            // A whole-value store through the span would drop or duplicate a text handle, which the engine owns (TXT-02, #1094).
+            throw new InvalidOperationException(
+                $"{api} on a component with a String1024 field: a store through the memory it hands out could drop or copy a text handle. Use "
+              + "ClusterRef.Set, which keeps the stored handles, and EntityRefMut.SetText for the text.");
+        }
+        if ((_meta.VersionedSlotMask & bit) != 0)
+        {
+            throw new InvalidOperationException(
+                $"{api} on a Versioned component bypasses its revision chain: a store through it rewrites the committed value in place, under every "
+              + "snapshot (ACCESS-01). Use GetReadOnlySpan / GetReadOnly for reads, OpenMut(...).Set for writes.");
+        }
         throw new InvalidOperationException(
-            $"{api} hands out writable memory over component slot {slot}, which has an [Index] field the tick fence maintains: a write through it never "
-          + "reaches the index (#1187). Read with GetReadOnlySpan / GetReadOnly; write with ClusterRef.Set, WriteSpatial or OpenMut(...).Set.");
+            $"{api} on the component holding the realm key: a key stored through it is never validated, and the fence would revert it (RM-05). Change "
+          + "a realm through OpenMut(...).Set, Teleport or WriteSpatial.");
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private readonly void ThrowWriteSpatialRefused(byte slot)
+    {
+        if ((_meta.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            throw new InvalidOperationException(
+                $"WriteSpatial on Versioned component slot {slot} bypasses its revision chain: write it with OpenMut(...).Set (CA-03).");
+        }
+        throw new InvalidOperationException(
+            $"WriteSpatial on component slot {slot}, which is not the archetype's [SpatialIndex] component: the spatial field would be read inside the wrong "
+          + "component (CA-03). Write other components with ClusterRef.Set.");
+    }
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -840,15 +873,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             GuardWrite(comp._componentTypeId);   // EW-01/EW-02 (#1651)
         }
         var slot = _meta.GetSlot(comp._componentTypeId);
-        // Hottest path (AntHill per-entity-per-tick spatial write): inline-guard form so the gate JIT-folds to nothing when strict mode is off (#422 AC#6).
-        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
+        // Hottest path (per entity per tick): one compare in every build (CA-03, #1652). WriteSpatialSlot is the spatial slot when it is not Versioned.
+        if (_state.WriteSpatialSlot != slot)
         {
-            ThrowHelper.ThrowInvalidOp($"WriteSpatial on Versioned component bypasses revision chain.");
-        }
-        if (CheckConfig.Enabled && (_state == null || !_state.SpatialSlot.HasSpatialIndex || _state.SpatialSlot.Slot != slot))
-        {
-            ThrowHelper.ThrowInvalidOp(
-                $"WriteSpatial requires the archetype's spatial-indexed component (marked [SpatialIndex]). For non-spatial fields, use GetSpan or Get.");
+            ThrowWriteSpatialRefused(slot);
         }
 
         CheckStride<T>(slot);
@@ -947,14 +975,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         }
 
         var slot = _meta.GetSlot(comp._componentTypeId);
-        if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
+        // Hottest path (per entity per tick): one compare in every build (CA-03, #1652). WriteSpatialSlot is the spatial slot when it is not Versioned.
+        if (_state.WriteSpatialSlot != slot)
         {
-            ThrowHelper.ThrowInvalidOp($"WriteSpatial on Versioned component bypasses revision chain.");
-        }
-        if (CheckConfig.Enabled && (_state == null || !_state.SpatialSlot.HasSpatialIndex || _state.SpatialSlot.Slot != slot))
-        {
-            ThrowHelper.ThrowInvalidOp(
-                $"WriteSpatial requires the archetype's spatial-indexed component (marked [SpatialIndex]). For non-spatial fields, use GetSpan or Get.");
+            ThrowWriteSpatialRefused(slot);
         }
 
         _state.NoteSpatialWrite(_chunkId);
@@ -1767,7 +1791,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     private int[] _clusterIds;
     private int _index;
     private int _endIndex;
-    private ClusterStep _stepCounter;   // strict mode only (#1199): bumped by MoveNext and Dispose; null otherwise
+    private int _stepCounter;           // bumped by MoveNext and Dispose; every ClusterRef handed out holds a reference to it (#1199, EP-03)
     private EntityAccessor _owner;      // handed to each ClusterRef: its writes need the discipline (#1187)
     // CLUSTERWALK-04: the walking accessor's own pending destroys and the destroys other transactions have in flight (both a no-op for an engine walk),
     // and the occupancy MoveNext took for the current cluster.
@@ -1786,7 +1810,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     {
         var result = new ClusterEnumerator<TArch>
         {
-            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
+            _state = state, _meta = meta, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
         if (transientSegment != null)
@@ -1814,7 +1838,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     {
         var result = new ClusterEnumerator<TArch>
         {
-            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
+            _state = state, _meta = meta, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
         if (transientSegment != null)
@@ -1843,7 +1867,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         ArgumentNullException.ThrowIfNull(clusterIds);
         var result = new ClusterEnumerator<TArch>
         {
-            _state = state, _meta = meta, _stepCounter = CheckConfig.Enabled ? new ClusterStep() : null, _owner = owner,
+            _state = state, _meta = meta, _owner = owner,
             _ownDestroys = new OwnDestroyFilter(owner, meta)
         };
         if (transientSegment != null)
@@ -1940,10 +1964,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
     {
-        if (CheckConfig.Enabled && _stepCounter != null)
-        {
-            _stepCounter.Value++;
-        }
+        _stepCounter++;
 
         if (_handedOutPage != 0)
         {
@@ -2027,8 +2048,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             var basePtr = _hasPersistentAccessor ? _accessor.GetChunkAddress(chunkId) : _transientAccessor.GetChunkAddress(chunkId);
             // TransientStore base for mixed archetypes (null for pure-SV/V and pure-Transient)
             var transientPtr = (_hasTransientAccessor && _hasPersistentAccessor) ? _transientAccessor.GetChunkAddress(chunkId) : null;
-            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _occupancy, ref _handedOutPage, _stepCounter,
-                _stepCounter?.Value ?? 0,
+            return new ClusterRef<TArch>(basePtr, transientPtr, _state.Layout, _meta, chunkId, _state, _occupancy, ref _handedOutPage, ref _stepCounter,
                 _owner);
         }
     }
@@ -2036,10 +2056,7 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     /// <summary>Release the ChunkAccessors.</summary>
     public void Dispose()
     {
-        if (CheckConfig.Enabled && _stepCounter != null)
-        {
-            _stepCounter.Value++;
-        }
+        _stepCounter++;
 
         if (_handedOutPage != 0)
         {
@@ -2061,11 +2078,3 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     public ClusterEnumerator<TArch> GetEnumerator() => this;
 }
 
-/// <summary>
-/// The step counter a <see cref="ClusterEnumerator{TArch}"/> shares with the <see cref="ClusterRef{TArch}"/> values it yields, under strict mode only
-/// (#1199). A class so every copy of the enumerator — <c>foreach</c> iterates a copy — bumps the same counter.
-/// </summary>
-internal sealed class ClusterStep
-{
-    public int Value;
-}

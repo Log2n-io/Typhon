@@ -3201,6 +3201,19 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ushort SetRefusedSlotMask;
 
     /// <summary>
+    /// The component slots <c>ClusterRef.GetSpan</c> and <c>Get</c> refuse, in every build (#1652), because a store through the memory they hand out would
+    /// skip what the slot needs: a fence-maintained indexed field (<see cref="FenceIndexedSlotMask"/>, IX-07), a text handle (TXT-02), a Versioned value
+    /// (its revision, ACCESS-01) or the realm key (its validation, RM-05). One load and one bit test per call.
+    /// </summary>
+    internal ushort HandOutRefusedSlotMask;
+
+    /// <summary>
+    /// The one slot <c>ClusterRef.WriteSpatial</c> accepts: the <c>[SpatialIndex]</c> component's, unless it is Versioned; -1 for none (CA-03, #1652). One
+    /// compare per write, in every build.
+    /// </summary>
+    internal int WriteSpatialSlot = -1;
+
+    /// <summary>
     /// Approximate count of index mutations since the last statistics rebuild, and the threshold <see cref="StatisticsWorker"/> trips on (#665). The only such
     /// counter now — its per-ComponentTable counterpart went with that index home (#629), never having been incremented by any write path.
     /// </summary>
@@ -10780,6 +10793,18 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         SetRefusedSlotMask = refused;
+
+        ushort handOut = FenceIndexedSlotMask;   // InitializeIndexes adds it too, whichever runs first
+        for (var slot = 0; slot < slotToTable.Length; slot++)
+        {
+            var table = slotToTable[slot];
+            if (table != null && (table.StorageMode == StorageMode.Versioned || table.HasText))
+            {
+                handOut |= (ushort)(1 << slot);
+            }
+        }
+
+        HandOutRefusedSlotMask = handOut;
     }
 
     /// <summary>
@@ -11021,6 +11046,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         SvFenceIndexedSlotMask = svIndexed;
         TransientFenceIndexedSlotMask = transientIndexed;
         FenceIndexedSlotMask = (ushort)(svIndexed | transientIndexed);
+        HandOutRefusedSlotMask |= FenceIndexedSlotMask;
         FenceIndexedFieldCount = fenceIndexedFields;
         SvShadowBitmap = svIndexed != 0 && transientIndexed != 0 ? new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64)) : null;
 

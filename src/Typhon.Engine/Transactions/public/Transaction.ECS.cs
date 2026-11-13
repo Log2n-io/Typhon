@@ -495,6 +495,11 @@ public unsafe partial class Transaction
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void RequireSpawnable<TArch>(ArchetypeMetadata meta) where TArch : Archetype<TArch>
     {
+        if (_isDisposed)
+        {
+            ThrowUsedAfterDispose("spawned into");   // TX-01 (#1653): the pooled object's engine is gone
+        }
+
         if (meta == null || _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
         {
             ThrowNotSpawnable<TArch>(meta == null ? null : _dbe.SkippedArchetypeReason(meta.ArchetypeId),
