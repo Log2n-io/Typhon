@@ -11291,19 +11291,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var mapAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
         var recordSize = meta._entityRecordSize;
         var recordBuf = stackalloc byte[recordSize];
-
-        // Pre-create accessors for each Versioned slot's tables (hoisted out of entity/slot loops)
-        var compRevAccessors = new ChunkAccessor<PersistentStore>[meta.ComponentCount];
-        var contentAccessors = new ChunkAccessor<PersistentStore>[meta.ComponentCount];
-        for (var slot = 0; slot < meta.ComponentCount; slot++)
-        {
-            if (slotToVi[slot] >= 0)
-            {
-                var table = engineState.SlotToComponentTable[slot];
-                compRevAccessors[slot] = table.CompRevTableSegment.CreateChunkAccessor();
-                contentAccessors[slot] = table.ComponentSegment.CreateChunkAccessor();
-            }
-        }
+        var copier = new VersionedHeadCopier(meta, Layout, engineState.SlotToComponentTable, enabledBitsTrusted, addedSlotMask);
 
         var sinceBatchPoint = 0;
         try
@@ -11330,18 +11318,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                     // Read entity key from cluster
                     var entityPK = *(long*)(clusterBase + Layout.EntityIdsOffset + slotIndex * 8);
-
-                    // C3 (#680's review, applied here per #688): a LIVE cluster slot always carries a non-zero entity id, so a zero at an occupied slot proves
-                    // the geometry being read through is wrong — whatever the cause. Elsewhere (ClusterMigration) a zero here is a legitimate race with a
-                    // concurrent clear and is skipped; that defence does not apply on this path, which runs single-threaded at OPEN before any transaction
-                    // exists. Loud, because the alternative is serving a zeroed component from a reopened database as if it were committed state.
-                    if (entityPK == 0)
-                    {
-                        throw new CorruptionException(meta.Name, chunkId,
-                            $"cluster slot {slotIndex} is marked occupied but carries entity id 0 while rebuilding Versioned HEADs at open — "
-                            + "the cluster geometry being read does not match the occupancy bitmap");
-                    }
-
+                    ThrowIfZeroEntityId(meta, chunkId, slotIndex, entityPK);
                     var entityKey = EntityId.FromRaw(entityPK).EntityKey;
 
                     // Read ClusterEntityRecord from EntityMap to get compRevFirstChunkId
@@ -11350,70 +11327,19 @@ internal sealed unsafe partial class ArchetypeClusterState
                         // The entity is in the cluster but not in the EntityMap. Its Versioned slots keep whatever they held — zero on a fresh reopen — and
                         // that value is then served as committed state. RB-01's ordering caveat is the known way to get here: on the crash path the loaded
                         // EntityMap is not yet trusted, and a mixed cluster archetype runs this pass before the map is rebuilt.
-                        skips.EntityNotInMap++;
+                        copier.Skips.EntityNotInMap++;
                         continue;
                     }
 
                     // For each Versioned slot: walk chain → find HEAD → copy to cluster slot
+                    var enabledBits = EntityRecordAccessor.GetHeader(recordBuf).EnabledBits;
                     for (var slot = 0; slot < meta.ComponentCount; slot++)
                     {
                         int vi = slotToVi[slot];
-                        if (vi < 0)
+                        if (vi >= 0)
                         {
-                            continue;
+                            copier.CopySlot(slot, ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi), clusterBase, slotIndex, enabledBits);
                         }
-
-                        var compRevFirstChunkId = ClusterEntityRecordAccessor.GetCompRevFirstChunkId(recordBuf, vi);
-                        if (compRevFirstChunkId == 0)
-                        {
-                            // No chain root for this Versioned slot. The enabled bit says which of the two states this is, and they are not the same event:
-                            // bit CLEAR is a component the spawn never supplied — absent by design since #845, routine on any partially-spawned entity — while
-                            // bit SET means the component has a value whose pointer is gone. Only the latter is counted toward the warned Total; counting both
-                            // would fire a Warning on every healthy database and train operators to ignore the log #688 exists to produce.
-                            if ((addedSlotMask & (1 << slot)) != 0)
-                            {
-                                // A slot this open's set migration added: absent on every entity it carried across, which is the design, not a lost root.
-                                skips.AbsentByDesign++;
-                            }
-                            else if (!enabledBitsTrusted)
-                            {
-                                skips.RootlessUnclassifiable++;
-                            }
-                            else if ((EntityRecordAccessor.GetHeader(recordBuf).EnabledBits & (1 << slot)) != 0)
-                            {
-                                skips.ChainRootLost++;
-                            }
-                            else
-                            {
-                                skips.AbsentByDesign++;
-                            }
-
-                            continue;
-                        }
-
-                        // Walk chain to find HEAD (latest committed entry)
-                        ref var compRevAccessor = ref compRevAccessors[slot];
-                        var chainResult = RevisionChainReader.WalkChain(ref compRevAccessor, compRevFirstChunkId, long.MaxValue, cards: null);
-                        if (chainResult.IsFailure)
-                        {
-                            // A chain root exists and the walk failed. Never benign: the slot keeps its stale or zero value with no other signal.
-                            skips.ChainWalkFailed++;
-                            continue;
-                        }
-
-                        // Read HEAD value from content chunk and copy to cluster slot
-                        var headChunkId = chainResult.Value.CurCompContentChunkId;
-                        if ((uint)headChunkId >= (uint)engineState.SlotToComponentTable[slot].ComponentSegment.ChunkCapacity)
-                        {
-                            skips.HeadPastSegment++;
-                            continue;
-                        }
-
-                        ref var contentAccessor = ref contentAccessors[slot];
-                        var srcAddr = contentAccessor.GetChunkAddress(headChunkId);
-                        var compSize = Layout.ComponentSize(slot);
-                        var dstSlot = clusterBase + Layout.ComponentOffset(slot) + slotIndex * compSize;
-                        Unsafe.CopyBlockUnaligned(dstSlot, srcAddr + engineState.SlotToComponentTable[slot].ComponentOverhead, (uint)compSize);
                     }
                 }
 
@@ -11424,18 +11350,26 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
         finally
         {
-            // Dispose all hoisted accessors
-            for (var slot = 0; slot < meta.ComponentCount; slot++)
-            {
-                if (slotToVi[slot] >= 0)
-                {
-                    compRevAccessors[slot].Dispose();
-                    contentAccessors[slot].Dispose();
-                }
-            }
-
+            skips = copier.Skips;
+            copier.Dispose();
             mapAccessor.Dispose();
             clusterAccessor.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// C3 (#680's review, applied here per #688): a LIVE cluster slot always carries a non-zero entity id, so a zero at an occupied slot proves the geometry
+    /// being read through is wrong — whatever the cause. Elsewhere (ClusterMigration) a zero here is a legitimate race with a concurrent clear and is
+    /// skipped; that defence does not apply to the open's HEAD rebuild, which runs single-threaded before any transaction exists. Loud, because the
+    /// alternative is serving a zeroed component from a reopened database as if it were committed state.
+    /// </summary>
+    internal static void ThrowIfZeroEntityId(ArchetypeMetadata meta, int clusterChunkId, int slotIndex, long entityPK)
+    {
+        if (entityPK == 0)
+        {
+            throw new CorruptionException(meta.Name, clusterChunkId,
+                $"cluster slot {slotIndex} is marked occupied but carries entity id 0 while rebuilding Versioned HEADs at open — "
+                + "the cluster geometry being read does not match the occupancy bitmap");
         }
     }
 }

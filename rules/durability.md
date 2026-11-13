@@ -518,6 +518,10 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
             revision before the replay, so the replay appends onto a chain it can walk (#1251, #1297). A compaction writes the root alone and
             allocates nothing (REAP-02, #1298): it used to move the newest revisions of a chain it compacted after the barrier into fresh chunks,
             unlogged, and a crash that wrote the root and not them had the collapse keep an older value
+  invariant before the replay, the live roots of an archetype whose EntityMap the crash open re-derived are those its rebuild wrote into the records
+            (DatabaseEngine.WalkClustersForEntityMapRebuild collects each root BuildEntityMapRange writes, both from the same chain-head scan;
+            DatabaseEngine.CompactCrashChainHeadsForReservation keeps them within the budget, else the archetype is walked): nothing rewrites a record
+            between the two. After the replay, which does, the scrub derives them from the records again (#1665)
   scope: RecoveryApplier.ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting / ApplyCollectionFolds
          VariableSizedBufferSegmentBase.SetElementsRaw (the "Set" the collections clause names)
          RecoveryApplier.ReapplySpawnedEntityToCluster, ComponentRevisionManager.ScrubChainToHead / FreeDroppedContent /
@@ -2885,8 +2889,10 @@ of the LSN value).
             CheckpointLSN. A forced open (repair, restore) rebuilds the HEADs: it trusted them, and a repair said it had rebuilt every derived
             structure (#1179)
   invariant trusted ⇒ skip RebuildVersionedHeadFromChain (persisted cluster-slot HEADs are current)
-  invariant ¬trusted ⇒ rebuild runs exactly as before (the crash-window repair path is preserved)
-  scope: DatabaseEngine.InitializeArchetypes, ArchetypeClusterState.RebuildVersionedHeadFromChain
+  invariant ¬trusted ⇒ rebuild runs exactly as before (the crash-window repair path is preserved) — on a crash open that re-derives the
+            archetype's EntityMap, inside that re-derivation's cluster walk (#1665)
+  scope: DatabaseEngine.InitializeArchetypes, ArchetypeClusterState.RebuildVersionedHeadFromChain, DatabaseEngine.RebuildClusterEntityMapEntries,
+         VersionedHeadCopier
   requires AP-04 — "the flag says clean, therefore the HEADs are current" holds only if every published HEAD owes its page a write;
     before #1159 a Versioned update on a page nothing else had dirtied was never written, and this rule trusted it
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
@@ -3253,9 +3259,10 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     cluster SoA in Phase 5, via SortedIndexRebuild.Run. Rebuilding from the SoA rather than from chain
     heads is what makes it storage-mode-agnostic: the cluster slot IS the head for SingleVersion and carries the published
     head for Versioned (D1). The EntityMap is
-    discarded (RawValuePagedHashMap.ClearForRebuild) and re-derived from authoritative data on the crash path
-    (DatabaseEngine.RebuildEntityMapsFromPersistedData crash branch: cluster occupancy walk → RebuildClusterEntityMapEntries,
-    or Versioned chain heads → BuildFlatEntityMapEntries via InsertDuringRebuild), BEFORE WAL apply. A CRC-failing derived
+    discarded and re-derived from authoritative data on the crash path (DatabaseEngine.RebuildEntityMapsFromPersistedData crash
+    branch), BEFORE WAL apply: a cluster archetype's emptied at its final bucket count (RawValuePagedHashMap.BeginBulkBuild) and
+    filled in bucket order from its cluster occupancy (RebuildClusterEntityMapEntries, #1665); a flat one's cleared
+    (RawValuePagedHashMap.ClearForRebuild) and refilled from its Versioned chain heads (BuildFlatEntityMapEntries via InsertDuringRebuild). A CRC-failing derived
     page in RecoverySuspect mode is accepted (it will be discarded+rebuilt), not repaired; a rebuilt EntityMap segment is
     skipped by ResolveSuspectPrimaryPages (its torn page is healed by the rebuild, keyed on RootPageIndex).
   on_violation: a repaired-but-stale index diverges from the data it indexes (the v1 index-divergence class) — queries
@@ -3286,7 +3293,9 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
     A THIRD ordering applies on a migrating open: RebuildClusterFromChains must place the entities BEFORE anything reads
     the cluster, and the cluster head rebuild (ArchetypeClusterState.RebuildVersionedHeadFromChain) must run AFTER the
     EntityMap it reads has been re-derived — DatabaseEngine.DrainDeferredVersionedHeadRebuilds exists precisely to defer
-    it past that point. Running it earlier dereferences a torn EntityMap's chunk-id pointers into a hard process crash,
+    it past that point. A crash open whose archetype's map is re-derived runs that archetype's HEAD rebuild inside the
+    re-derivation's own cluster walk instead (RebuildClusterEntityMapEntries, #1665), which takes each root from the chain-head
+    scan and reads no map. Running it earlier dereferences a torn EntityMap's chunk-id pointers into a hard process crash,
     which is RB-01's own rationale applied one level down.
   on_violation: an index built over pre-scrub MVCC history carries stale/duplicate keys; a suspect resolved before
     rebuild misclassifies a to-be-discarded derived page; a cluster index built at open covers only the checkpointed half of
