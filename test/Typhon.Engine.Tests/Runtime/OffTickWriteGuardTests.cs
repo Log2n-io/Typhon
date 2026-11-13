@@ -4,6 +4,7 @@ using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
@@ -391,6 +392,19 @@ class OffTickWriteGuardTests : TestBase<OffTickWriteGuardTests>
         var faulted = runtime.InTick<int>((_, _) => throw new ApplicationException("boom"), DurabilityMode.Deferred);
         Assert.That(faulted.IsFaulted, Is.True);
         Assert.That(faulted.Exception!.InnerException, Is.InstanceOf<ApplicationException>());
+    }
+
+    [Test]
+    public void InTick_WorkQueuedDuringTheDrain_RunsOnALaterTick()
+    {
+        // Staged, not raced: the first item queues the second from inside the drain, the way a caller that queues its next item as soon as the last
+        // completes does. Served on the same tick, the second would report the first's tick number.
+        using var runtime = StartRuntime();
+        Task<long> second = null;
+        var first = runtime.WriteInTick((_, _) => second = runtime.WriteInTick((_, _) => { }, DurabilityMode.Deferred), DurabilityMode.Deferred)
+            .GetAwaiter().GetResult();
+        var secondTick = second.GetAwaiter().GetResult();
+        Assert.That(secondTick, Is.GreaterThan(first), "work queued during a drain runs at the start of a later tick");
     }
 
     [Test]

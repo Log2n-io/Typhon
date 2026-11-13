@@ -83,17 +83,24 @@ internal sealed class InTickQueue
     }
 
     /// <summary>
-    /// Run up to <see cref="RuntimeOptions.InTickMaxItemsPerTick"/> items, each in its own runtime-owned transaction committed after the work returns. Never
-    /// throws: a fault goes to the item's task, never to the tick.
+    /// Run the items queued when the drain starts, at most <see cref="RuntimeOptions.InTickMaxItemsPerTick"/>, each in its own runtime-owned transaction
+    /// committed after the work returns. Never throws: a fault goes to the item's task, never to the tick.
     /// </summary>
+    /// <remarks>
+    /// The budget is the count at entry, not "while the queue has items": an item's task completes inside this loop, and a caller that queues its next item
+    /// as soon as the last completes would otherwise be served on the same tick, again and again — 26 sequential calls all reporting one tick number. Work
+    /// queued during the drain waits for the next tick, which is what "at the start of a later tick" promises. The queue is FIFO, so the budget dequeues
+    /// the items that were there first.
+    /// </remarks>
     public void Drain(DatabaseEngine dbe, long tick)
     {
-        if (Volatile.Read(ref _count) == 0)
+        var budget = Math.Min(_perTick, Volatile.Read(ref _count));
+        if (budget <= 0)
         {
             return;
         }
         using var serial = DagThread.Serial();
-        for (var n = 0; n < _perTick && _items.TryDequeue(out var item); n++)
+        for (var n = 0; n < budget && _items.TryDequeue(out var item); n++)
         {
             Interlocked.Decrement(ref _count);
             try
