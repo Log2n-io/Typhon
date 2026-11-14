@@ -55,7 +55,10 @@ catch (CorruptionException ex)
 
 - **Always rebuilt, never repaired** — secondary B+Tree indexes and every archetype's
   EntityMap are unconditionally
-  cleared and rebuilt after every crash recovery; a CRC-clean derived page on disk is not even consulted.
+  discarded and rebuilt after every crash recovery; a CRC-clean derived page on disk is not even consulted.
+  Cluster archetypes (the common case since #666) rebuild their map at its final bucket count in
+  bucket order via `RawValuePagedHashMap.BeginBulkBuild`/`EndBulkBuild`; flat (non-cluster)
+  archetypes use `ClearForRebuild` followed by `InsertDuringRebuild`.
   The **page-occupancy bitmap** follows the same rebuild path with one additional guard: if a persisted archetype
   or component segment pointer cannot be read during reconstruction, `RederiveOccupancyOnCrash` throws rather than
   adopting a partial bitmap (a partial bitmap would mark live pages free). That throw surfaces as a loud
@@ -79,7 +82,8 @@ catch (CorruptionException ex)
 
 - [DifferentialRecoveryOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/CrashRecovery/DifferentialRecoveryOracleTests.cs) — index axis (RB-01: secondary B+Tree rebuilt at recovery) and cluster axis (EntityMap/SV rebuild) proofs
 - [WalIntegrationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Durability/WalIntegrationTests.cs) — `WAL_Destroy_TombstonedEntitiesExcludedFromEntityMapRebuild`: EntityMap rebuild on reopen correctly excludes tombstoned entities
-- [RawValueHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/RawValueHashMapTests.cs) — `ClearForRebuild`/`InsertDuringRebuild` on the hash map backing the EntityMap, the primitive the rebuild phase drives
+- [RawValueHashMapTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/RawValueHashMapTests.cs) — `ClearForRebuild`/`InsertDuringRebuild`, the flat-archetype crash-open EntityMap rebuild primitive
+- [EntityMapBulkBuildTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/EntityMapBulkBuildTests.cs) — `BeginBulkBuild`/`BulkBuildAppend`/`EndBulkBuild`, the cluster-archetype crash-open EntityMap rebuild primitive (bucket-ordered, pre-sized)
 
 ## 🔗 Related
 
