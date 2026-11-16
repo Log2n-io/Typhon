@@ -71,7 +71,7 @@ Constants defined on `PagedMMF`:
 | `PageRawDataSize` | 8000 | What user code actually writes to |
 | `PageSizePow2` | 13 | `2^13 = 8192` (used for shift-instead-of-divide) |
 
-The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see [§7](#7-page-crc--seqlock-writes)). The header struct itself only occupies the first 24 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
+The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see [§7](#7-page-crc--seqlock-writes)). The header struct itself only occupies the first 16 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
 
 ### `PageInfo` and `PageState`
 
@@ -151,7 +151,7 @@ CRC verification is **lazy**. `EnsurePageVerified` runs only the first time a pa
 
 [`ManagedPagedMMF`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ManagedPagedMMF.cs) extends `PagedMMF` with what makes the file actually a *database*: a known root layout, an occupancy bitmap, and a bootstrap key/value store.
 
-### The first eight pages of an empty file (format v4)
+### The first eight pages of an empty file (format v8)
 
 ```
 Page 0: Meta slot A          — magic + format revision + bootstrap dictionary (CK-05 A/B meta pair)
@@ -175,7 +175,7 @@ On disk at page 0, offset `PageBaseHeaderSize` (64), there's a small identity he
 unsafe internal struct RootFileHeader
 {
     public fixed byte HeaderSignature[32];    // "TyphonDatabase"
-    public int        DatabaseFormatRevision; // currently 4 (CK-05 twins + directory-only root)
+    public int        DatabaseFormatRevision; // currently 8 (see PagedMMF.DatabaseFormatRevision)
     public ulong      DatabaseFilesChunkSize;
     public fixed byte DatabaseName[64];       // verified on load
 }

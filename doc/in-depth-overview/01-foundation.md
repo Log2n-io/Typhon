@@ -67,7 +67,7 @@ Compact 4-byte variant. Use this when the lock is small or numerous (per-row, pe
 | 15 | Contention flag |
 | 16–31 | Holder thread ID (16 bits) |
 
-No re-entrancy. No promoter logic. Same `WaitContext` integration.
+No re-entrancy. Promotion is supported (`TryPromoteToExclusiveAccess`/`DemoteFromExclusiveAccess`) but has no waiter-preference counter — continuous shared acquisitions can starve a pending promote. Same `WaitContext` integration.
 
 ### `ResourceAccessControl` — 3-mode lifecycle lock
 

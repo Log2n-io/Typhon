@@ -57,7 +57,7 @@ runtime.Shutdown();
 | Option | Default | Effect |
 |---|---|---|
 | `RuntimeOptions.BaseTickRate` | 60 | Tick metronome rate (Hz) — also the cadence of the per-tick WAL flush |
-| `RuntimeOptions.WorkerCount` | -1 (`ProcessorCount - 4`) | Worker threads executing per-system Transactions in parallel |
+| `RuntimeOptions.WorkerCount` | -1 (`Math.Max(1, ProcessorCount - 4)`) | Worker threads executing per-system Transactions in parallel |
 
 ## ⚠️ Guarantees & limits
 
