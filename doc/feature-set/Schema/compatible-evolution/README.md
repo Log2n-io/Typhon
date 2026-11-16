@@ -28,7 +28,7 @@ component segment at the new stride, then copies each entity's bytes into it fie
 fields and applying sign-extend/zero-extend/IEEE754-promotion for widened ones.
 
 > ⚠️ **Budget for a full index rebuild.** A migration re-clusters the
-> archetype into a **new** cluster segment and calls `RebuildIndexesFromData`, for **100 %** of migrations, not only
+> archetype into a **new** cluster segment and triggers a full cluster-index rebuild (`RebuildPendingClusterIndexes`, #1588), for **100 %** of migrations, not only
 > for a newly-`[Index]`-attributed field. Entities do **not** keep their original ChunkId. Every secondary index
 > lives on the archetype and is rebuilt from cluster data, which is deliberately the same scan crash recovery
 > runs — a second, bespoke backfill is exactly the thing that can disagree with the write path. Size a startup
