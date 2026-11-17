@@ -1122,13 +1122,14 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
         private readonly int _keysOffset;
         private readonly int _valuesOffset;
 
-        // Collect-then-yield buffer: allocated once, reused per bucket
-        private readonly byte* _buffer;     // keys then values, sized for MaxBufferEntries
+        // Collect-then-yield buffer: reused per bucket, grown when a bucket's chain does not fit
+        private byte* _buffer;              // keys then values, sized for _bufferCapacity
+        private int _bufferCapacity;
         private int _collectedCount;
         private int _yieldIndex;
 
-        // Buffer capacity: primary + up to 3 overflow chunks
-        private const int MaxBufferEntries = 128;
+        // Initial buffer capacity: primary + a few overflow chunks. A longer chain grows it (CollectBucketEntries).
+        private const int InitialBufferEntries = 128;
 
         public (TKey Key, TValue Value) Current { get; private set; }
 
@@ -1143,7 +1144,8 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             _yieldIndex = 0;
             Current = default;
 
-            int bufferSize = MaxBufferEntries * (sizeof(TKey) + sizeof(TValue));
+            _bufferCapacity = InitialBufferEntries;
+            int bufferSize = InitialBufferEntries * (sizeof(TKey) + sizeof(TValue));
             // native-alloc: per-enumerator buffer, freed with the enumerator; a tree node per enumeration would churn the resource tree
             _buffer = (byte*)NativeMemory.AllocZeroed((nuint)bufferSize);
         }
@@ -1156,7 +1158,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                 if (_yieldIndex < _collectedCount)
                 {
                     TKey* keys = (TKey*)_buffer;
-                    TValue* values = (TValue*)(_buffer + MaxBufferEntries * sizeof(TKey));
+                    TValue* values = (TValue*)(_buffer + _bufferCapacity * sizeof(TKey));
                     Current = (keys[_yieldIndex], values[_yieldIndex]);
                     _yieldIndex++;
                     return true;
@@ -1202,21 +1204,40 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                     continue;
                 }
 
-                // Walk chain collecting entries into buffer
+                // Walk chain collecting entries into buffer. The whole chain is collected: stopping at the buffer's capacity would drop the rest of
+                // the bucket while reporting it complete, since MoveNext then moves to the next bucket. A chain that does not fit grows the buffer
+                // and restarts the bucket, as RawValueHashMap's scan does.
                 TKey* bufKeys = (TKey*)_buffer;
-                TValue* bufValues = (TValue*)(_buffer + MaxBufferEntries * sizeof(TKey));
+                TValue* bufValues = (TValue*)(_buffer + _bufferCapacity * sizeof(TKey));
                 int count = 0;
+                bool restart = false;
 
+                // The walk is bounded by the segment's chunk count, as the fixed capacity used to bound it: an optimistic walk racing a writer can
+                // follow a link through a repurposed chunk back into the chain. Such a walk restarts; the version check would reject it anyway.
+                int maxWalk = _map.Segment.ChunkCapacity;
                 int walkId = chunkId;
-                while (walkId != -1 && count < MaxBufferEntries)
+                for (int walk = 0; walkId != -1; walk++)
                 {
+                    if (walk > maxWalk)
+                    {
+                        restart = true;
+                        break;
+                    }
+
                     byte* addr = _accessor.GetChunkAddress(walkId);
                     ref readonly var header = ref Unsafe.AsRef<PagedHashMapBucketHeader>(addr);
                     TKey* keys = (TKey*)(addr + _keysOffset);
                     TValue* values = (TValue*)(addr + _valuesOffset);
                     int entryCount = header.EntryCount;
 
-                    for (int i = 0; i < entryCount && count < MaxBufferEntries; i++)
+                    if (count + entryCount > _bufferCapacity)
+                    {
+                        GrowBuffer(Math.Max(_bufferCapacity * 2, count + entryCount));
+                        restart = true;
+                        break;
+                    }
+
+                    for (int i = 0; i < entryCount; i++)
                     {
                         bufKeys[count] = keys[i];
                         bufValues[count] = values[i];
@@ -1224,6 +1245,11 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
                     }
 
                     walkId = header.OverflowChunkId;
+                }
+
+                if (restart)
+                {
+                    continue;
                 }
 
                 // Validate OLC — if version changed, a concurrent writer modified this bucket
@@ -1241,11 +1267,23 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             }
         }
 
+        private void GrowBuffer(int capacity)
+        {
+            // Allocate before freeing: if the allocation throws, _buffer still holds a live block for Dispose. Nothing collected is kept: the caller
+            // restarts the bucket.
+            // native-alloc: per-enumerator buffer, freed with the enumerator; a tree node per enumeration would churn the resource tree
+            var grown = (byte*)NativeMemory.AllocZeroed((nuint)capacity * (nuint)(sizeof(TKey) + sizeof(TValue)));
+            NativeMemory.Free(_buffer);
+            _buffer = grown;
+            _bufferCapacity = capacity;
+        }
+
         public void Dispose()
         {
             if (_buffer != null)
             {
                 NativeMemory.Free(_buffer);
+                _buffer = null;
             }
         }
     }
