@@ -2176,8 +2176,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         LastTickMigrationExecuteMs + (Volatile.Read(ref LastTickMigrationApplyTicks) * 1000d / Stopwatch.Frequency);
 
     /// <summary>
-    /// Live accumulator for hysteresis-absorbed crossings on the <see cref="SpatialBarrierOnly"/> path, bumped by <c>ClusterRef.MaybeFlagMigration</c> as writes
-    /// happen and drained into <see cref="LastTickHysteresisAbsorbedCount"/> at the top of the next fence.
+    /// Live accumulator for hysteresis-absorbed crossings on the <see cref="SpatialBarrierOnly"/> path, bumped by
+    /// <c>ArchetypeClusterState.MaybeFlagMigration</c> as writes happen and drained into <see cref="LastTickHysteresisAbsorbedCount"/> at the top of the next
+    /// fence.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -7808,10 +7809,11 @@ internal sealed unsafe partial class ArchetypeClusterState
                     }
 
                     // The per-cell index is NOT a copy of ClusterAabbs, and deciding whether to write it by comparing ClusterAabbs against ITSELF was
-                    // an SQ-01 false negative. ClusterAabbs has TWO writers — the write-time CAS in ClusterRef.MaybeGrowAndFlagShrink, whose own summary says
-                    // a grow means "the cluster needs a fence-time PerCellIndex.UpdateAt with the fresh AABB" — while the index has ONE, this loop. When the
-                    // CAS has already applied the grow, `stored` and `fresh` agree and the old short-circuit skipped the index, leaving it holding the
-                    // previous tick's SMALLER box. A query whose edge fell in the gap pruned the cluster and lost every entity in it, with nothing raised.
+                    // an SQ-01 false negative. ClusterAabbs has TWO writers — the write-time CAS in ArchetypeClusterState.MaybeGrowAndFlagShrink, whose own
+                    // summary says a grow means "the cluster needs a fence-time PerCellIndex.UpdateAt with the fresh AABB" — while the index has ONE, this
+                    // loop. When the CAS has already applied the grow, `stored` and `fresh` agree and the old short-circuit skipped the index, leaving it
+                    // holding the previous tick's SMALLER box. A query whose edge fell in the gap pruned the cluster and lost every entity in it, with nothing
+                    // raised.
                     //
                     // On this branch it was not even a race: `fresh` is ASSIGNED from `stored` when no shrink is pending, so the comparison was a tautology
                     // and a grow-only tick could NEVER update the index at all. Both demos run barrier-only, so that was the shipped path.

@@ -656,7 +656,7 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             if (_inTickClosed)
             {
-                return Task.FromException<T>(new InvalidOperationException("The runtime stopped: it runs no more in-tick work."));
+                return Task.FromException<T>(new InvalidOperationException("The runtime stopped, or a tick aborted it: it runs no more in-tick work."));
             }
             if (_started)
             {
@@ -3851,6 +3851,9 @@ public sealed partial class TyphonRuntime : IDisposable
             // Fires once, on the TickDriver, after the tick has fully drained — so every worker's stores are ordered ahead of the handler reading the outcome.
             // Subsequent ticks never reach here: DagScheduler.ExecuteCallbacks returns early once the abort latch is set.
             _tickAbortedNotified = true;
+            // No later tick drains the in-tick queue: its callers are failed now, with the tick's exception, rather than left waiting for a host that may
+            // never stop the runtime (#1651).
+            CloseInTick(LastTickOutcome.FailedSystemException);
             OnTickAborted?.Invoke(this, LastTickOutcome);
         }
 

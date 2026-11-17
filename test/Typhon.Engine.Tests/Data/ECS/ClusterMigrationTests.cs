@@ -184,6 +184,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     /// entity stays in its old cluster, found by no query at either place.
     /// </summary>
     [Test]
+    [VerifiesRule("CC-02")]
     public void BarrierOnly_ASetOfThePosition_MigratesAtTheFence()
     {
         using var dbe = SetupEngineWithGrid();
@@ -209,6 +210,124 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That(dbe.Realm0Grid.GetCell(dstCell).EntityCount, Is.EqualTo(1), "in the destination cell");
         var (postChunk, _) = ReadLocation(dbe, id);
         Assert.That(dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
+    }
+
+    /// <summary>
+    /// A barrier-only <c>Set</c> inside the cell does the barrier's bookkeeping: the cluster bound grows at the write (CA-01), and the shrink it flags
+    /// tightens the bound at the fence, where the per-cell index takes the bound (CA-02) and a query finds the entity at its new place.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CA-01")]
+    public void BarrierOnly_ASetInsideTheCell_GrowsTheBoundAtOnce_AndShrinksItAtTheFence()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        EntityId moved;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            moved = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(10f, 10f, 1)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(20f, 20f, 2)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        var cs = dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
+        var (chunk, _) = ReadLocation(dbe, moved);
+        Assert.That(cs.ClusterAabbs[chunk].MinX, Is.EqualTo(10f), "precondition: the bound spans both entities");
+        Assert.That(cs.ClusterAabbs[chunk].MaxX, Is.EqualTo(20f), "precondition: the bound spans both entities");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(moved).Set(ClMigUnit.Pos, PointAt(60f, 60f, 1));
+            tx.Commit();
+        }
+        Assert.That(cs.ClusterAabbs[chunk].MaxX, Is.EqualTo(60f), "grown at the write");
+        Assert.That(cs.ClusterAabbs[chunk].MinX, Is.EqualTo(10f), "a shrink waits for the fence");
+
+        dbe.WriteTickFence(2);
+        Assert.That(cs.ClusterAabbs[chunk].MinX, Is.EqualTo(20f), "the shrink it flagged is applied at the fence");
+        Assert.That(CountAround(dbe, 60f, 60f), Is.EqualTo(1));
+        Assert.That(CountAround(dbe, 10f, 10f), Is.EqualTo(0));
+    }
+
+    /// <summary>
+    /// A barrier-only <c>Set</c> under the Commit discipline is staged: a fence before its commit finds nothing to move, and the commit's publish flags the
+    /// value that lands (CC-02).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CC-02")]
+    public void BarrierOnly_ACommitDisciplineSet_StraddlingAFence_MigratesAtTheNext()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
+        {
+            tx.OpenMut(id).Set(ClMigUnit.Pos, PointAt(550f, 650f));
+            dbe.WriteTickFence(2);
+            Assert.That(CountAround(dbe, 50f, 50f), Is.EqualTo(1), "staged: still where it was");
+            tx.Commit();
+        }
+        dbe.WriteTickFence(3);
+
+        Assert.That(CountAround(dbe, 550f, 650f), Is.EqualTo(1), "found at its new place");
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(550f, 650f, 0f)).EntityCount, Is.EqualTo(1), "in the destination cell");
+    }
+
+    /// <summary>Re-enabling the position with a value is a store of it: refused when not finite, and on a barrier-only archetype seen by the fence.</summary>
+    [Test]
+    [VerifiesRule("CC-02")]
+    public void BarrierOnly_EnableWithAPosition_MigratesAtTheFence_AndANonFiniteOneIsRefused()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Disable(ClMigUnit.Pos);
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Enable(ClMigUnit.Pos, PointAt(float.NaN, 5f)));
+        }
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Enable(ClMigUnit.Pos, PointAt(550f, 650f));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f)).EntityCount, Is.EqualTo(0), "gone from the source cell");
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(550f, 650f, 0f)).EntityCount, Is.EqualTo(1), "in the destination cell");
+    }
+
+    private static int CountAround(DatabaseEngine dbe, float x, float y)
+    {
+        var box = new AABB2F { MinX = x - 3, MinY = y - 3, MaxX = x + 3, MaxY = y + 3 };
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var e = dbe.ClusterSpatialQuery<ClMigUnit>().AABB(in box);
+        try
+        {
+            return e.Count();
+        }
+        finally
+        {
+            e.Dispose();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

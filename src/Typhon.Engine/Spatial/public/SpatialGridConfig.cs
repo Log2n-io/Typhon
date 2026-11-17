@@ -54,8 +54,8 @@ public readonly struct SpatialGridConfig
     /// <para><b>What it gates.</b> Intra-cell drift detection (#872 step 10) is two-level. A cluster whose largest axis extent is within this bound is
     /// <i>tight enough</i> and its entities are never examined; only inside a cluster that exceeds it does the per-entity test run. That is what makes
     /// "detect broadly" affordable — a healthy world pays three float compares per written cluster and nothing per entity.</para>
-    /// <para><b>Why it is not the cluster's own AABB.</b> The write-time CAS in <c>ClusterRef.MaybeGrowAndFlagShrink</c> grows that bound to contain every
-    /// entity it holds, so "outside my cluster's AABB" is never true of anything. The target region has to be an independent, tighter box or it detects
+    /// <para><b>Why it is not the cluster's own AABB.</b> The write-time CAS in <c>ArchetypeClusterState.MaybeGrowAndFlagShrink</c> grows that bound to contain
+    /// every entity it holds, so "outside my cluster's AABB" is never true of anything. The target region has to be an independent, tighter box or it detects
     /// nothing.</para>
     /// <para><b>This is the floor of the target, not the target (step 14).</b> The extent a full cluster can reach in a cell of <c>E</c> entities is bounded
     /// by geometry: <c>(slotsPerCluster / E)^(1/d)</c> of the cell edge, 1.0 in a cell that fits one cluster and 0.5 at 512 entities in 3D. A constant

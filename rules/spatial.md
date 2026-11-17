@@ -639,9 +639,9 @@
     can observe, because ClusterAabbs is correct in that failure.
   invariant 🔴 the fence may NOT decide whether to write the index by comparing ClusterAabbs against itself.
     CA-01 names two writer classes for ClusterAabbs; the index has ONE, the fence. When writer class (a) — the
-    CAS-grow in ClusterRef.MaybeGrowAndFlagShrink — has already applied the grow, the fence's `stored == fresh`
+    CAS-grow in ArchetypeClusterState.MaybeGrowAndFlagShrink — has already applied the grow, the fence's `stored == fresh`
     test answers "the fence learned nothing", which is TRUE and not the question. The index is still a tick behind.
-    ClusterRef.MaybeGrowAndFlagShrink says so in its own summary: it returns true "in which case the cluster needs
+    ArchetypeClusterState.MaybeGrowAndFlagShrink says so in its own summary: it returns true "in which case the cluster needs
     a fence-time PerCellIndex.UpdateAt with the fresh AABB".
     On the SpatialBarrierOnly branch the comparison was worse than wrong, it was a TAUTOLOGY: `fresh` is assigned
     from `stored` when no shrink is pending, so a grow-only tick could never update the index at all — and both
@@ -680,7 +680,7 @@
     ArchetypeClusterState.ApplyOrDeferClusterUpdate, ArchetypeClusterState.UpdateClusterInPerCellIndex,
     ArchetypeClusterState.IsClusterIndexed, ArchetypeClusterState.WidenClusterInPerCellIndex,
     ArchetypeClusterState.AddClusterToPerCellIndexLocked, ArchetypeClusterState.PromoteCellHalf,
-    ClusterRef.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet, CellSpatialIndex.WidenAt
+    ArchetypeClusterState.MaybeGrowAndFlagShrink, ClusterRef.WriteSpatialSet, CellSpatialIndex.WidenAt
   verified: CellTreeParallelFenceTests.CellIndexTracksClusterAabbs_AfterAWriteTimeGrow (both slicing branches,
     50 serial fence ticks of rotation, queries compared against entity positions read straight out of cluster
     storage). Pre-fix it failed on both branches with the index one to two ticks inside ClusterAabbs on every axis.
@@ -754,7 +754,7 @@
     ArchetypeClusterState.FlagShrinkAxes, ArchetypeClusterState.BeginWriteBookkeepingWrite,
     ArchetypeClusterState.WriteBookkeepingWriteLanded,
     ArchetypeClusterState.EnsureClusterWriteBookkeepingCapacityLocked, ArchetypeClusterState.FlagClusterShrinkAxesOnly,
-    ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, ClusterRef.MaybeFlagMigration, ClusterRef.MaybeGrowAndFlagShrink
+    ClusterRef.WriteSpatial, ClusterRef.WriteSpatialSet, ArchetypeClusterState.MaybeFlagMigration, ArchetypeClusterState.MaybeGrowAndFlagShrink
   note the re-check is an ACQUIRE load, which orders nothing before it, so a helper whose writes end in a plain store must
     put its interlocked write last. FlagMigration therefore stomps the destination hint BEFORE it ORs the slot bits: with
     the OR first the key could still be in the store buffer when the re-check passes, and land in the abandoned array —
@@ -1679,7 +1679,7 @@
     drained the tick's crossings:
     SpatialGrid.WorldToCellKey(E.position) == k
       ∨ E.position lies within MigrationHysteresisRatio × CellSize of cell k on every axis
-    The second disjunct is the write barrier's dead zone (ClusterRef.MaybeFlagMigration): a write that lands in the
+    The second disjunct is the write barrier's dead zone (ArchetypeClusterState.MaybeFlagMigration): a write that lands in the
     band is absorbed on purpose and never becomes a crossing, so the entity legitimately sits a margin outside k.
     A test wanting the exact form sets the ratio to 0
   invariant this is decision C13 of the VDB cell-grid design: a cluster belongs to exactly one cell. It is what
@@ -1693,7 +1693,7 @@
     cell could overwrite each other's PerCellSpatialSlot (every cluster published into the loser invisible to the
     index), and every allocation site published a fresh cluster into the cell's pool BEFORE writing its occupancy
     word, so a concurrent claim's CAS could be clobbered — an entity lost with every counter still balancing
-  invariant a write-time crossing flag (ClusterRef.MaybeFlagMigration) names the SLOT that moved; the cell it
+  invariant a write-time crossing flag (ArchetypeClusterState.MaybeFlagMigration) names the SLOT that moved; the cell it
     records is a hint. Nothing un-flags a slot, so an entity written out and back within a tick, two writes to
     two cells, or a write that reached a spawn's slot before its data landed (the in-flight window NoteClusterBorn
     documents as a known residual) all leave a flag whose destination is not where the entity is. The drain
@@ -1734,6 +1734,10 @@
     (Transaction.PublishStagedEntry): the flag Teleport raised when the write was staged may have been consumed by a fence
     in between, against the old value. Without both, a barrier-only archetype — whose fence runs no dirty scan — never sees
     the move: the realm key says the new realm, the cluster stays in the old one (the SWG demo's lost portal crossings)
+  invariant on a barrier-only archetype, an in-place EntityRefMut.Set (or Enable with a value) of the spatial component does
+    WriteSpatial's bookkeeping (EntityRefMut.StoreSpatial → ArchetypeClusterState.ApplySpatialWrite): grow, shrink flag,
+    crossing flag, process bit, dormancy note. A staged one is flagged by its publish (above); a Versioned one is flagged as
+    Teleport flags it. Without it the entity stayed in its old cluster and no query found it at either place (#1651)
   invariant CellClusterPool's per-cell (head, count) pair and its backing array are published and read in a fixed
     order (release: pool → head → entry → count; acquire: count → head → pool). A reader pairing a new count with
     an old head runs past its cell's segment into the next cell's, and a claim lands in a cluster of another cell
@@ -1885,7 +1889,8 @@
       the clean branch (FenceBranchPath 1) publishes NO change list for a SpatialBarrierOnly archetype,
         because on that path nothing reads one:
           detection skips step (b) by construction — crossings come from step (a)'s drain of
-            ClusterMigrationPendingSlots, which SetSpatialBarrierOnly guarantees is exhaustive
+            ClusterMigrationPendingSlots, which every spatial write on such an archetype feeds: WriteSpatial, Set, Teleport,
+            and the Commit publish
           the AABB refresh takes the BITMAP arm of RecomputeDirtyClusterAabbsSlice, which iterates
             ClusterProcessBitmap and never consults the change list at all. It is the non-barrier arm that
             gates on ClusterNeedsAabbRecompute, and that helper's own remark says so

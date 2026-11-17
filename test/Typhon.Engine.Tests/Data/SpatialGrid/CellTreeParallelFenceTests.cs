@@ -233,10 +233,10 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
     /// R-Tree, so this is about the ordinary cluster broadphase rather than anything #872 step 9 added.
     /// </summary>
     /// <remarks>
-    /// <para><b>What it caught.</b> <c>ClusterAabbs</c> has two writers — <c>ClusterRef.MaybeGrowAndFlagShrink</c> grows it by CAS at WRITE time, and its own
-    /// summary says a grow means "the cluster needs a fence-time <c>PerCellIndex.UpdateAt</c> with the fresh AABB" — while the per-cell index has one, the
-    /// fence. The fence decided whether to write the index by comparing <c>stored</c> against <c>fresh</c>, both of which are the <c>ClusterAabbs</c> value:
-    /// once the CAS had applied the grow they agreed, the fence took its <c>continue</c>, and the index kept the previous tick's smaller box. On the
+    /// <para><b>What it caught.</b> <c>ClusterAabbs</c> has two writers — <c>ArchetypeClusterState.MaybeGrowAndFlagShrink</c> grows it by CAS at WRITE time,
+    /// and its own summary says a grow means "the cluster needs a fence-time <c>PerCellIndex.UpdateAt</c> with the fresh AABB" — while the per-cell index has
+    /// one, the fence. The fence decided whether to write the index by comparing <c>stored</c> against <c>fresh</c>, both of which are the <c>ClusterAabbs</c>
+    /// value: once the CAS had applied the grow they agreed, the fence took its <c>continue</c>, and the index kept the previous tick's smaller box. On the
     /// barrier-only branch it was not even a race — <c>fresh</c> is ASSIGNED from <c>stored</c> when no shrink is pending, so the comparison was a tautology
     /// and a grow-only tick could never update the index at all. Both demos run barrier-only.</para>
     /// <para><b>Pre-fix numbers, from this test.</b> 8 192 rotating entities, 50 serial fence ticks, no promotion. One cluster's authoritative bound was

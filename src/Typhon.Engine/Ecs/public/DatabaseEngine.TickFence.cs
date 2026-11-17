@@ -1056,9 +1056,9 @@ public partial class DatabaseEngine
         // one, in the one counter that tunes MigrationHysteresisRatio. Detection is reached on a quiet tick only through the clean-bitmap branch below, which is
         // gated on ActiveClusterCount > 0, so an archetype that empties out stopped updating it entirely.
         //
-        // Drain rather than plain-zero: on the SpatialBarrierOnly path the count is accumulated live by ClusterRef.MaybeFlagMigration as writes happen, because
-        // that path never reaches the scan that would otherwise count it. Both producers now compose — this drains the live one, and DetectClusterMigrations
-        // adds its scan's tally with += rather than clobbering. Exactly one of the two is ever non-zero for a given archetype.
+        // Drain rather than plain-zero: on the SpatialBarrierOnly path the count is accumulated live by ArchetypeClusterState.MaybeFlagMigration as writes
+        // happen, because that path never reaches the scan that would otherwise count it. Both producers now compose — this drains the live one, and
+        // DetectClusterMigrations adds its scan's tally with += rather than clobbering. Exactly one of the two is ever non-zero for a given archetype.
         var absorbedLive = clusterState.HysteresisAbsorbedLive;
         clusterState.HysteresisAbsorbedLive = 0;
         clusterState.LastTickHysteresisAbsorbedCount = absorbedLive;

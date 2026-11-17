@@ -256,14 +256,15 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
     discarded by the next Reset, silently
 
 ### EQ-04: One consumer per queue `[fatal][silent]`
-  invariant ∀ Q: at most one system declares `ReadsEvents(Q)` / `Consumes(Q)`
+  invariant ∀ Q: at most one system declares `ReadsEvents(Q)` / `Consumes(Q)`, the two forms counted together
   enforce rejected at schedule build in `RuntimeSchedule.Build`.
   rationale: two consumers get no derived edge between them (ED-03 only relates producers to consumers), so both flip
     ready on the producer's completion and race inside `Drain` — overlapping `CopyTo` of the same prefix delivers the
     same events twice, both store `Count = 0`, and `Consumed +=` loses an update, which corrupts the derived
     `Produced` on the telemetry wire. Only the PARALLEL-consumer case was enforced before; cardinality was not.
   scope: RuntimeSchedule.Build
-  verified: EventQueueValidationTests.TwoConsumers_AreRejectedAtBuild [VerifiesRule]
+  verified: EventQueueValidationTests.TwoConsumers_AreRejectedAtBuild,
+            EventQueueValidationTests.AConsumesAndAReadsEvents_AreTwoConsumers_RejectedAtBuild [VerifiesRule]
 
 ### EQ-05: `Capacity` is a construction constant `[correctness]`
   invariant `EventQueue`1.Capacity` returns the value passed to the constructor, never a fold over live allocations
@@ -307,7 +308,8 @@ this is the only thing that sees it.
             T ∈ writable(S) ∨ (T ∈ side(S) ∧ via side transaction)
   invariant spawn of archetype A writes every component of A; destroy writes every component of A and of every archetype its
             cascade-delete reaches (and their sub-archetypes): each must satisfy the write invariant
-  invariant ctx.Writer(Q) requires Q ∈ S.WritesEvents; Q.Drain requires Q ∈ S.ReadsEvents
+  invariant ctx.Writer(Q) requires Q ∈ S.WritesEvents; Q.Drain requires Q ∈ S.ReadsEvents. The schedule-level Produces(S, Q) /
+            Consumes(S, Q) put Q in those sets too (RuntimeSchedule.Build, after the edge derivation: they derive no edge)
   invariant a class-form system with no declaration at all is checked like any other (every access undeclared); an engine track's
             systems are not checked (SystemDefinition.CheckedAccess = null: they reach storage through internals, and a throw there would
             latch the terminal fence verdict in every Debug host)
@@ -315,7 +317,7 @@ this is the only thing that sees it.
   note not checked: untyped reads (EntityRef.ReadRaw, ReadText), query field predicates, ClusterRef.MarkDirty, deferred ctx.Commands
        spawns/destroys (applied by the runtime at a serial point outside any system)
   scope: SystemAccessValidator.AssertRead, SystemAccessValidator.AssertWrite, SystemAccessValidator.AssertStructural,
-         SystemAccessValidator.AssertEventWrite, SystemAccessValidator.AssertEventRead
+         SystemAccessValidator.AssertEventWrite, SystemAccessValidator.AssertEventRead, RuntimeSchedule.Build
   on_violation: throws InvalidAccessException naming the system, the undeclared type or queue, and the declared set
   release_behavior: available in Release; when the gate is off the JIT folds every check away. On, a component check is a
     thread-static load, an array load and a bit test over the descriptor's bitsets (AccessTypeIds, compiled at Build)

@@ -190,11 +190,12 @@ public unsafe ref struct EntityRefMut
     /// would fail terminally (CA-01, #1652): refused at the call, nothing stored. A store that changes the realm key moves the entity to another realm at
     /// the next fence: it gets <see cref="EntityAccessor.Teleport{T}"/>'s checks before anything is stored — the fence must never throw, so before D-2's
     /// revert this is the only place the application hears of a bad key — and, once stored, the flag a barrier-only archetype's fence needs to see the
-    /// move. A position stored on a barrier-only archetype (<see cref="DatabaseEngine.SetSpatialBarrierOnly{TArch}"/>) gets the same flag: its fence runs
-    /// no dirty scan, and an unflagged move would leave the entity where no query finds it, neither at its old place nor at its new one.
+    /// move. A position stored on a barrier-only archetype (<see cref="DatabaseEngine.SetSpatialBarrierOnly{TArch}"/>) gets the barrier's bookkeeping
+    /// (<see cref="StoreSpatial{T}"/>): its fence runs no dirty scan, and an unrecorded move would leave the entity where no query finds it, neither at its
+    /// old place nor at its new one.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void SetChecked<T>(int componentTypeId, in T value) where T : unmanaged
+    private void SetChecked<T>(int componentTypeId, in T value, bool adoptIntoEmpty = false) where T : unmanaged
     {
         var comp = new Comp<T>(componentTypeId);
         byte slot = _ref._archetype.GetSlot(componentTypeId);
@@ -205,11 +206,7 @@ public unsafe ref struct EntityRefMut
         }
         if ((_ref._archetype.RealmKeySlotMask & (1 << slot)) == 0)
         {
-            Store(comp, in value);
-            if (isSpatial)
-            {
-                FlagBarrierOnlyMove();
-            }
+            StoreChecked(comp, slot, isSpatial, in value, adoptIntoEmpty);
             return;
         }
 
@@ -220,16 +217,12 @@ public unsafe ref struct EntityRefMut
             spatial.RealmKeyOffset));
         if (newRealm == oldRealm)
         {
-            Store(comp, in value);
-            if (isSpatial)
-            {
-                FlagBarrierOnlyMove();
-            }
+            StoreChecked(comp, slot, isSpatial, in value, adoptIntoEmpty);
             return;
         }
 
         state.ValidateRealmEntry(newRealm);   // a key riding in the spatial component: its position was checked above
-        Store(comp, in value);
+        Store(comp, in value, adoptIntoEmpty);
 
         // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit. Otherwise the slot is flagged as
         // Teleport flags it — a barrier-only archetype's fence runs no dirty scan and would never see the move.
@@ -239,18 +232,105 @@ public unsafe ref struct EntityRefMut
         }
     }
 
+    /// <summary>The store of a checked slot that changes no realm: <see cref="StoreSpatial{T}"/> for the spatial component, the plain store
+    /// otherwise.</summary>
+    private void StoreChecked<T>(Comp<T> comp, byte slot, bool isSpatial, in T value, bool adoptIntoEmpty) where T : unmanaged
+    {
+        if (isSpatial)
+        {
+            StoreSpatial(comp, slot, in value, adoptIntoEmpty);
+        }
+        else
+        {
+            Store(comp, in value, adoptIntoEmpty);
+        }
+    }
+
     /// <summary>
-    /// A position stored outside <c>ClusterRef.WriteSpatial</c> on a barrier-only archetype: flagged for the fence as the barrier would flag it, as
-    /// <see cref="EntityAccessor.Teleport{T}"/> does. The dirty scan finds the move on any other archetype, and an entity spawned in this transaction has
-    /// no cluster yet. A Static archetype's fence moves nothing; a Commit-discipline write is flagged again by the publish that lands it (CC-02).
+    /// The store of a position. On a barrier-only archetype it is followed by the bookkeeping <c>ClusterRef.WriteSpatial</c> does
+    /// (<see cref="ArchetypeClusterState.ApplySpatialWrite"/>, CA-01, CA-02): the cluster's bound grows at once, a shrink and a crossing past the hysteresis
+    /// margin are flagged for the fence, which hands the bound to the per-cell index, and the cluster is noted for dormancy. Nothing more
+    /// on another archetype, whose fence finds the move by its dirty scan; nor for an entity spawned in this transaction, which has no cluster yet; nor on a
+    /// Static archetype, whose fence moves nothing.
     /// </summary>
-    private void FlagBarrierOnlyMove()
+    /// <remarks>
+    /// The barrier compares the old value with the new one, and only an in-place store has both: a Commit-discipline store is staged, the cluster HEAD keeps
+    /// the old value, and the publish that lands it flags the slot (CC-02, <c>Transaction.PublishStagedEntry</c>). A Versioned spatial component lands at
+    /// commit too; it is flagged here as <see cref="EntityAccessor.Teleport{T}"/> flags it.
+    /// </remarks>
+    private void StoreSpatial<T>(Comp<T> comp, byte slot, in T value, bool adoptIntoEmpty) where T : unmanaged
     {
         var state = _ref._engineState.ClusterState;
-        if (state.SpatialBarrierOnly && !_ref._isOwnSpawn && state.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
+        if (!state.SpatialBarrierOnly || _ref._isOwnSpawn || state.SpatialSlot.FieldInfo.Mode != SpatialMode.Dynamic)
         {
-            state.FlagOutOfBarrierSpatialWrite(_ref._clusterChunkId, _ref._clusterSlotIndex);
+            Store(comp, in value, adoptIntoEmpty);
+            return;
         }
+
+        var chunkId = _ref._clusterChunkId;
+        if ((_ref._archetype.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            Store(comp, in value, adoptIntoEmpty);
+            state.FlagOutOfBarrierSpatialWrite(chunkId, _ref._clusterSlotIndex);
+            return;
+        }
+
+        var old = _ref.ReadSlotRef<T>(slot);   // a copy, on the stack: the value the store replaces, read before it
+        Store(comp, in value, adoptIntoEmpty);
+        if (_ref._accessor.Discipline == CommitDiscipline.Commit)
+        {
+            return;   // staged (possibly escalated by this very store): the publish flags it
+        }
+
+        switch (state.SpatialSlot.FieldInfo.FieldType)
+        {
+            case SpatialFieldType.AABB2F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb2FReader>(state, old, value);
+                break;
+            case SpatialFieldType.AABB3F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb3FReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere2F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere2FReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere3F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere3FReader>(state, old, value);
+                break;
+            case SpatialFieldType.AABB2D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb2DReader>(state, old, value);
+                break;
+            case SpatialFieldType.AABB3D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb3DReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere2D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere2DReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere3D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere3DReader>(state, old, value);
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"Set: spatial field type {state.SpatialSlot.FieldInfo.FieldType} has no specialization. Add one when a new SpatialFieldType variant is "
+                    + "introduced.");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="StoreSpatial{T}"/>'s bookkeeping, compiled once per field type: <typeparamref name="TReader"/> is the decode the slot-set
+    /// <c>ClusterRef.WriteSpatial</c> inlines, so <c>is3D</c> is a constant and a 2D tier's Z arms fold away as they do in <c>WriteSpatial</c>.
+    /// <paramref name="old"/> and <paramref name="current"/> are by value: on the stack, the only memory a pointer may address here.
+    /// </summary>
+    private void ApplyBarrierBookkeeping<T, TReader>(ArchetypeClusterState state, T old, T current)
+        where T : unmanaged where TReader : struct, AabbClusterEnumerator.IBoundsReader
+    {
+        var fieldOffset = state.SpatialSlot.FieldOffset;
+        TReader.Read((byte*)&old + fieldOffset, out var oMinX, out var oMinY, out var oMinZ, out var oMaxX, out var oMaxY, out var oMaxZ);
+        TReader.Read((byte*)&current + fieldOffset, out var nMinX, out var nMinY, out var nMinZ, out var nMaxX, out var nMaxY, out var nMaxZ);
+        var chunkId = _ref._clusterChunkId;
+        state.NoteSpatialWrite(chunkId);
+        var haveOrigin = state.TryResolveCellFrame(chunkId, out var cellKey, out var grid, out var originX, out var originY, out var originZ);
+        state.ApplySpatialWrite(chunkId, _ref._clusterSlotIndex, haveOrigin, cellKey, grid, originX, originY, originZ,
+            oMinX, oMinY, oMinZ, oMaxX, oMaxY, oMaxZ, nMinX, nMinY, nMinZ, nMaxX, nMaxY, nMaxZ, TReader.Is3D);
     }
 
     /// <summary>
@@ -617,6 +697,11 @@ public unsafe ref struct EntityRefMut
         }
 
         var needsContent = _ref.IsVersionedSlotAbsent(slot);
+        var isChecked = (_ref._archetype.CheckedSetSlotMask & (1 << slot)) != 0;
+        if (isChecked && (_ref._archetype.SpatialSlotMask & (1 << slot)) != 0)
+        {
+            RefuseNonFinitePosition(in value);   // before anything is created or staged, as Set refuses it (CA-01)
+        }
 
         // A never-supplied Versioned slot has no chain, so Write's copy-on-write has nothing to copy from — it must be CREATED, not written. Everything else
         // (a re-enable, or any non-Versioned slot) already has storage, so the ordinary enable-then-write path applies.
@@ -637,7 +722,15 @@ public unsafe ref struct EntityRefMut
         _ref._enabledBits |= (ushort)(1 << slot);
         if (!needsContent)
         {
-            Store(comp, in value, adoptIntoEmpty: true);
+            // The realm key and the position take Set's checked store: a realm change validated, a position given the barrier's bookkeeping.
+            if (isChecked)
+            {
+                SetChecked(comp._componentTypeId, in value, adoptIntoEmpty: true);
+            }
+            else
+            {
+                Store(comp, in value, adoptIntoEmpty: true);
+            }
         }
 
         _ref._accessor.StageEnableDisable(_ref._id, _ref._enabledBits);

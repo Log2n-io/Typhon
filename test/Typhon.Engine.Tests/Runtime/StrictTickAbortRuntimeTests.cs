@@ -140,6 +140,36 @@ class StrictTickAbortRuntimeTests : TestBase<StrictTickAbortRuntimeTests>
     }
 
     [Test]
+    public void AbortedTick_FailsTheInTickWork_EvenWhenTheHostDoesNotStop()
+    {
+        // No later tick drains the in-tick queue, so the abort fails what is pending and what comes after, with the tick's exception — a host that ignores
+        // OnTickAborted must not leave WriteInTick callers waiting forever (#1651). Staged: the item is queued while the failing tick is inside its system,
+        // past this tick's drain.
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var dbe = SetupEngine();
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Thrower", _ =>
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+                throw new InvalidOperationException("boom");
+            });
+        }, StrictSingleWorker());
+
+        runtime.Start();
+        Assert.That(entered.Wait(TimeSpan.FromSeconds(10)), Is.True, "precondition: the failing tick is running");
+        var pending = runtime.WriteInTick((_, _) => { }, DurabilityMode.Deferred);
+        release.Set();
+
+        var e = Assert.Throws<AggregateException>(() => pending.Wait(TimeSpan.FromSeconds(10)), "the pending work faults instead of waiting");
+        Assert.That(e.InnerException, Is.InstanceOf<InvalidOperationException>());
+        Assert.That(e.InnerException.InnerException?.Message, Is.EqualTo("boom"), "with the tick's exception inside");
+        Assert.That(runtime.WriteInTick((_, _) => { }, DurabilityMode.Deferred).IsFaulted, Is.True, "and later work faults at once");
+    }
+
+    [Test]
     public void SuccessfulTick_ReportsSuccess_AndDoesNotFireOnTickAborted()
     {
         // AC8b (success half) — LastTickOutcome is refreshed every tick, so a host can read it unconditionally.

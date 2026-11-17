@@ -589,8 +589,8 @@ internal sealed unsafe class SpatialGrid
     /// </summary>
     /// <remarks>
     /// <para>One helper rather than the expression, because the expression was already written out longhand in three places before step 9 —
-    /// <c>ClusterRef.MaybeFlagMigration</c>, <c>ArchetypeClusterState.FlagOutliersForMigration</c> and <c>DatabaseEngine.ClusterMigration</c> — and step 8's
-    /// review found the one of the three that had never been taught its Z term. Cell-relative bounds add a fourth and fifth caller, at which point a
+    /// <c>ArchetypeClusterState.MaybeFlagMigration</c>, <c>ArchetypeClusterState.FlagOutliersForMigration</c> and <c>DatabaseEngine.ClusterMigration</c> — and
+    /// step 8's review found the one of the three that had never been taught its Z term. Cell-relative bounds add a fourth and fifth caller, at which point a
     /// divergence between them stops being a latent defect and becomes a certainty.</para>
     /// <para><b>Deliberately not clamped and not validated.</b> A caller passing a key for a cell that no longer exists gets whatever coordinates that pool
     /// slot now holds, which is <c>VG-01</c>'s problem, not this method's — adding a bounds test here would hide a stale key rather than surface it.</para>

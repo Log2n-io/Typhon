@@ -17,6 +17,9 @@ internal sealed class InTickQueue
         public CausalId Cause;
         public DurabilityMode Durability;
 
+        /// <summary>The drain epoch when the item was queued: an item stamped with the running drain's epoch was queued during it.</summary>
+        public long Epoch;
+
         /// <summary>Run the work in <paramref name="tx"/>, commit it, and complete the item's task with the result or the failed commit.</summary>
         public abstract void Run(Transaction tx, long tick);
 
@@ -50,6 +53,7 @@ internal sealed class InTickQueue
     private readonly int _capacity;
     private readonly int _perTick;
     private int _count;
+    private long _drainEpoch;   // written by the drain alone (the scheduler thread), read by every Enqueue
     private Exception _closed;
 
     public InTickQueue(int capacity, int perTick)
@@ -73,7 +77,7 @@ internal sealed class InTickQueue
             Interlocked.Decrement(ref _count);
             return Task.FromException<T>(new TickQueueFullException(_capacity));
         }
-        var item = new Item<T> { Work = work, Durability = durability, Cause = CausalScope.Capture() };
+        var item = new Item<T> { Work = work, Durability = durability, Cause = CausalScope.Capture(), Epoch = Volatile.Read(ref _drainEpoch) };
         _items.Enqueue(item);
         if (Volatile.Read(ref _closed) is { } late)
         {
@@ -87,10 +91,11 @@ internal sealed class InTickQueue
     /// committed after the work returns. Never throws: a fault goes to the item's task, never to the tick.
     /// </summary>
     /// <remarks>
-    /// The budget is the count at entry, not "while the queue has items": an item's task completes inside this loop, and a caller that queues its next item
-    /// as soon as the last completes would otherwise be served on the same tick, again and again — 26 sequential calls all reporting one tick number. Work
-    /// queued during the drain waits for the next tick, which is what "at the start of a later tick" promises. The queue is FIFO, so the budget dequeues
-    /// the items that were there first.
+    /// Work queued during the drain waits for the next tick, which is what "at the start of a later tick" promises: an item's task completes inside this
+    /// loop, and a caller that queues its next item as soon as the last completes would otherwise be served on the same tick, again and again — 26
+    /// sequential calls all reporting one tick number. The drain opens an epoch, every item is stamped with the epoch current when it was queued, and the
+    /// drain stops at the first item of its own epoch. The budget alone could not say it: the count is raised before the item lands in the queue, so a
+    /// caller caught between the two lends its place to an item queued during the drain. The queue is FIFO, so the items run are the ones there first.
     /// </remarks>
     public void Drain(DatabaseEngine dbe, long tick)
     {
@@ -99,8 +104,11 @@ internal sealed class InTickQueue
         {
             return;
         }
+        var epoch = _drainEpoch + 1;
+        Interlocked.Exchange(ref _drainEpoch, epoch);   // full fence: published before any item of this drain runs and can queue another
         using var serial = DagThread.Serial();
-        for (var n = 0; n < budget && _items.TryDequeue(out var item); n++)
+        // Peek then dequeue: only Close's sweep dequeues concurrently, and an item it takes between the two is one this drain would have run or failed.
+        for (var n = 0; n < budget && _items.TryPeek(out var next) && next.Epoch != epoch && _items.TryDequeue(out var item); n++)
         {
             Interlocked.Decrement(ref _count);
             try
@@ -135,5 +143,5 @@ internal sealed class InTickQueue
     }
 
     private static InvalidOperationException Stopped(Exception reason) =>
-        new("The runtime stopped before it ran this in-tick work.", reason is OperationCanceledException ? null : reason);
+        new("The runtime stopped, or a tick aborted it, before it ran this in-tick work.", reason is OperationCanceledException ? null : reason);
 }

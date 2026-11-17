@@ -94,4 +94,43 @@ public class EventQueueValidationTests
         using var scheduler = dag.Build(_registry.Runtime);
         Assert.That(scheduler, Is.Not.Null);
     }
+
+    /// <summary>A class-form system with a declaration surface: <paramref name="declare"/> names it and declares its access.</summary>
+    private sealed class Declared(Action<SystemBuilder> declare) : CallbackSystem
+    {
+        protected override void Configure(SystemBuilder b) => declare(b);
+
+        protected override void Execute(TickContext ctx)
+        {
+        }
+    }
+
+    [Test]
+    [VerifiesRule("EQ-04")]
+    public void AConsumesAndAReadsEvents_AreTwoConsumers_RejectedAtBuild()
+    {
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        var queue = dag.CreateEventQueue<int>("Mixed");
+        dag.Add(new Declared(b => b.Name("Reader").ReadsEvents(queue)));
+        dag.CallbackSystem("Consumer", _ => { });
+        dag.Consumes("Consumer", queue);
+
+        // One consumer of each form is two consumers: the builder's ReadsEvents lets Reader drain the queue as Consumes lets Consumer.
+        var ex = Assert.Throws<InvalidOperationException>(() => dag.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("single-consumer").And.Contain("Mixed").And.Contain("Reader").And.Contain("Consumer"));
+    }
+
+    [Test]
+    public void ScheduleProducesAndConsumes_AddNoDerivedEdge()
+    {
+        // The schedule-level form counts as the DV-01 declaration and still derives no producer→consumer edge: a consumer ordered BEFORE its producer
+        // builds, where a derived edge would cycle against the explicit one.
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        var queue = dag.CreateEventQueue<int>("Backwards");
+        dag.Add(new Declared(b => b.Name("Producer")));
+        dag.Add(new Declared(b => b.Name("Consumer").Before("Producer")));
+        dag.Produces("Producer", queue).Consumes("Consumer", queue);
+
+        Assert.DoesNotThrow(() => dag.Build(_registry.Runtime));
+    }
 }

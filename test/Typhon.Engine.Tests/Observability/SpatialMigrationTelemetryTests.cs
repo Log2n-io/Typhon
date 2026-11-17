@@ -114,9 +114,8 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
     private static int ArchetypeId => Archetype<SpTelUnit>.Metadata.ArchetypeId;
 
     /// <summary>
-    /// Finds an entity's cluster slot, then moves it through <c>ClusterRef.WriteSpatial</c> — the barrier API. A test that
-    /// declares <c>SetSpatialBarrierOnly</c> and then writes through <c>OpenMut</c>/<c>Write</c> has broken the contract it
-    /// just declared: the fence skips its legacy scan on the promise that every spatial write goes through this path.
+    /// Finds an entity's cluster slot, then moves it through <c>ClusterRef.WriteSpatial</c> — the barrier API, whose counters
+    /// (absorbed crossings, migration hint) these tests read as a barrier write produces them.
     /// </summary>
     private static unsafe void WriteSpatialTo(DatabaseEngine dbe, EntityId id, float x, float y)
     {
@@ -393,7 +392,7 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
         // DetectClusterMigrations only increments inside step (b), its legacy dirty-bits scan, and the SpatialBarrierOnly
         // branch returns before reaching it. Both demos opt into barrier-only, so the one number that tunes
         // MigrationHysteresisRatio read 0/N on precisely the path it was needed for. Counting now happens where the
-        // decision is made — at write time, in ClusterRef.MaybeFlagMigration.
+        // decision is made — at write time, in ArchetypeClusterState.MaybeFlagMigration.
         using var dbe = SetupEngineWithGrid();
         dbe.SetSpatialBarrierOnly<SpTelUnit>();
 

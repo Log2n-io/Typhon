@@ -465,7 +465,12 @@ public sealed class RuntimeSchedule
         // Drain is single-consumer, and nothing enforced the CARDINALITY of that — only the parallel-consumer case. Two CallbackSystems each
         // declaring ReadsEvents(q) built fine and the derived DAG was Producer -> {A, B} with no A-B edge, so both flipped ready together and raced
         // inside Drain: overlapping CopyTo of the same prefix (events delivered twice), both storing Count = 0, and a lost update on `Consumed`.
-        foreach (var (queue, consumerNames) in _consumes.SelectMany(kv => kv.Value.Select(q => (Queue: q, kv.Key)))
+        //
+        // Both declaration forms consume (EQ-04): the schedule's Consumes and a class-form system's ReadsEvents, which DV-01 lets drain the queue. Counted
+        // together, so one consumer of each form is two consumers.
+        var consumers = _consumes.SelectMany(kv => kv.Value.Select(q => (Queue: q, kv.Key)))
+            .Concat(allRegs.Where(r => r.Reg.Access != null).SelectMany(r => r.Reg.Access.ReadsEvents.Select(q => (Queue: q, Key: r.Reg.Name))));
+        foreach (var (queue, consumerNames) in consumers
                      .GroupBy(x => x.Queue)
                      .Select(g => (g.Key, g.Select(x => x.Key).Distinct(StringComparer.Ordinal).ToList())))
         {
@@ -523,9 +528,10 @@ public sealed class RuntimeSchedule
             // bitsets are final.
             if (reg.Access != null)
             {
-                // The schedule-level Produces/Consumes declare the same thing as the builder's WritesEvents/ReadsEvents and are checked as such. Merged
-                // here, after Phase 2b's derivation, so they add no derived edge: they never did, and a producer→consumer edge appearing on an existing
-                // schedule could cycle against its explicit ones.
+                // DV-01: a queue the schedule says this system produces or consumes is one it may push to or drain, as one its builder named in
+                // WritesEvents/ReadsEvents is. The two forms are not the same declaration: Produces/Consumes also drive the reactive skip and the
+                // parallel-consumer refusal, and the builder's form drives the derived edges. Merged here, after Phase 2b's derivation, so the schedule's form
+                // adds no derived edge: it never did, and a producer→consumer edge appearing on an existing schedule could cycle against its explicit ones.
                 if (_produces.TryGetValue(reg.Name, out var produced))
                 {
                     reg.Access.WritesEvents.UnionWith(produced);
