@@ -295,13 +295,13 @@ internal struct BTreeDirectoryHeader {
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
 internal struct BTreeDirectoryEntry {
     public short StableId;      // -1 = PK, FieldId = secondary, 0 = standalone/test
-    public short Reserved;
+    public short Slot;          // component slot within archetype; 0 on per-CT segments
     public int   RootChunkId;
     public int   Count;
 }
 ```
 
-`StableId` is the lookup key: `-1` is the convention for the PK index, positive values are `FieldInfo.FieldId` for secondary indexes, `0` is for standalone/test trees. Each `BTree` instance caches its directory location in `_dirChunkId` + `_dirEntryOffset` at construction (`RegisterInDirectory` for create, `FindInDirectory` for load) so `SyncHeader` is an O(1) write — no scan.
+The lookup key is the pair `(StableId, Slot)` (see `BTreeStableKey`): `StableId` is `-1` for the PK index, `FieldInfo.FieldId` for secondary indexes, or `0` for standalone/test trees; `Slot` is the component's slot within the archetype. `StableId` alone is not unique on a per-archetype index segment — two components in the same archetype that each index their field #0 would both have `StableId 0`, causing `FindInDirectory` to return the wrong root for the second tree (#657). `Slot` disambiguates them. Per-`ComponentTable` segments host a single component and always use `Slot = 0`. Each `BTree` instance caches its directory location in `_dirChunkId` + `_dirEntryOffset` at construction (`RegisterInDirectory` for create, `FindInDirectory` for load) so `SyncHeader` is an O(1) write — no scan.
 
 Importantly: each BTree on a shared segment has its **own** root and count in the directory entry. Without this, multiple BTrees sharing a segment would corrupt each other's bookkeeping.
 
