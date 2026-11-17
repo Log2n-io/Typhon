@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
@@ -176,6 +177,157 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         var (postChunk, _) = ReadLocation(dbe, id);
         Assert.That(postChunk, Is.GreaterThanOrEqualTo(0));
         Assert.That(cs.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
+    }
+
+    /// <summary>
+    /// On a barrier-only archetype the fence runs no dirty scan: a <c>Set</c> of the spatial component flags its slot as <c>WriteSpatial</c> would, or the
+    /// entity stays in its old cluster, found by no query at either place.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CC-02")]
+    public void BarrierOnly_ASetOfThePosition_MigratesAtTheFence()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Set(ClMigUnit.Pos, PointAt(550f, 650f));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        var dstCell = dbe.Realm0Grid.WorldToCellKey(550f, 650f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f)).EntityCount, Is.EqualTo(0), "gone from the source cell");
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).EntityCount, Is.EqualTo(1), "in the destination cell");
+        var (postChunk, _) = ReadLocation(dbe, id);
+        Assert.That(dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
+    }
+
+    /// <summary>
+    /// A barrier-only <c>Set</c> inside the cell does the barrier's bookkeeping: the cluster bound grows at the write (CA-01), and the shrink it flags
+    /// tightens the bound at the fence, where the per-cell index takes the bound (CA-02) and a query finds the entity at its new place.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CA-01")]
+    public void BarrierOnly_ASetInsideTheCell_GrowsTheBoundAtOnce_AndShrinksItAtTheFence()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        EntityId moved;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            moved = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(10f, 10f, 1)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(20f, 20f, 2)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        var cs = dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
+        var (chunk, _) = ReadLocation(dbe, moved);
+        Assert.That(cs.ClusterAabbs[chunk].MinX, Is.EqualTo(10f), "precondition: the bound spans both entities");
+        Assert.That(cs.ClusterAabbs[chunk].MaxX, Is.EqualTo(20f), "precondition: the bound spans both entities");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(moved).Set(ClMigUnit.Pos, PointAt(60f, 60f, 1));
+            tx.Commit();
+        }
+        Assert.That(cs.ClusterAabbs[chunk].MaxX, Is.EqualTo(60f), "grown at the write");
+        Assert.That(cs.ClusterAabbs[chunk].MinX, Is.EqualTo(10f), "a shrink waits for the fence");
+
+        dbe.WriteTickFence(2);
+        Assert.That(cs.ClusterAabbs[chunk].MinX, Is.EqualTo(20f), "the shrink it flagged is applied at the fence");
+        Assert.That(CountAround(dbe, 60f, 60f), Is.EqualTo(1));
+        Assert.That(CountAround(dbe, 10f, 10f), Is.EqualTo(0));
+    }
+
+    /// <summary>
+    /// A barrier-only <c>Set</c> under the Commit discipline is staged: a fence before its commit finds nothing to move, and the commit's publish flags the
+    /// value that lands (CC-02).
+    /// </summary>
+    [Test]
+    [VerifiesRule("CC-02")]
+    public void BarrierOnly_ACommitDisciplineSet_StraddlingAFence_MigratesAtTheNext()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+
+        using (var tx = dbe.CreateQuickTransaction(DurabilityMode.Deferred, CommitDiscipline.Commit))
+        {
+            tx.OpenMut(id).Set(ClMigUnit.Pos, PointAt(550f, 650f));
+            dbe.WriteTickFence(2);
+            Assert.That(CountAround(dbe, 50f, 50f), Is.EqualTo(1), "staged: still where it was");
+            tx.Commit();
+        }
+        dbe.WriteTickFence(3);
+
+        Assert.That(CountAround(dbe, 550f, 650f), Is.EqualTo(1), "found at its new place");
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(550f, 650f, 0f)).EntityCount, Is.EqualTo(1), "in the destination cell");
+    }
+
+    /// <summary>Re-enabling the position with a value is a store of it: refused when not finite, and on a barrier-only archetype seen by the fence.</summary>
+    [Test]
+    [VerifiesRule("CC-02")]
+    public void BarrierOnly_EnableWithAPosition_MigratesAtTheFence_AndANonFiniteOneIsRefused()
+    {
+        using var dbe = SetupEngineWithGrid();
+        dbe.SetSpatialBarrierOnly<ClMigUnit>();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(50f, 50f)), ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(1);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Disable(ClMigUnit.Pos);
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Enable(ClMigUnit.Pos, PointAt(float.NaN, 5f)));
+        }
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.OpenMut(id).Enable(ClMigUnit.Pos, PointAt(550f, 650f));
+            tx.Commit();
+        }
+        dbe.WriteTickFence(2);
+
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f)).EntityCount, Is.EqualTo(0), "gone from the source cell");
+        Assert.That(dbe.Realm0Grid.GetCell(dbe.Realm0Grid.WorldToCellKey(550f, 650f, 0f)).EntityCount, Is.EqualTo(1), "in the destination cell");
+    }
+
+    private static int CountAround(DatabaseEngine dbe, float x, float y)
+    {
+        var box = new AABB2F { MinX = x - 3, MinY = y - 3, MaxX = x + 3, MaxY = y + 3 };
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var e = dbe.ClusterSpatialQuery<ClMigUnit>().AABB(in box);
+        try
+        {
+            return e.Count();
+        }
+        finally
+        {
+            e.Dispose();
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -556,8 +708,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
     // ═══════════════════════════════════════════════════════════════════════
 
     [Test]
-    public void NonFinitePosition_ThrowsDescriptive()
+    public void NonFinitePosition_ThroughSet_IsRefusedAtTheCall_AndTheFenceRuns()
     {
+        // CA-01 (#1652): found at the fence, a NaN position fails it for good; Set refuses it before storing anything.
         using var dbe = SetupEngineWithGrid();
 
         EntityId id;
@@ -569,13 +722,48 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        // Write a NaN position
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var eref = tx.OpenMut(id);
-            var pos = eref.Read(ClMigUnit.Pos);
+            var pos = tx.Open(id).Read(ClMigUnit.Pos);
             pos.Bounds = new AABB2F { MinX = float.NaN, MinY = 50f, MaxX = float.NaN, MaxY = 50f };
-            eref.Set(ClMigUnit.Pos, pos);
+            var ex = Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(ClMigUnit.Pos, pos));
+            Assert.That(ex.Message, Does.Contain("CA-01"));
+            pos.Bounds = new AABB2F { MinX = float.PositiveInfinity, MinY = 50f, MaxX = float.PositiveInfinity, MaxY = 50f };
+            Assert.Throws<InvalidOperationException>(() => tx.OpenMut(id).Set(pos));
+            Assert.That(tx.Commit(), Is.True);
+        }
+
+        Assert.DoesNotThrow(() => dbe.WriteTickFence(1));
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(tx.Open(id).Read(ClMigUnit.Pos).Bounds.MinX, Is.EqualTo(50f), "nothing was stored");
+        }
+    }
+
+    [Test]
+    public void NonFinitePosition_ThroughARawWrite_ThrowsDescriptiveAtTheFence()
+    {
+        // A raw write validates nothing (a span over an unindexed spatial column is one): the fence's descriptive throw is that path's backstop.
+        using var dbe = SetupEngineWithGrid();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<ClMigUnit>(
+                ClMigUnit.Pos.Set(PointAt(50f, 50f)),
+                ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
+            tx.Commit();
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            foreach (var cluster in tx.For<ClMigUnit>().GetClusterEnumerator())
+            {
+                var slot = BitOperations.TrailingZeroCount(cluster.OccupancyBits);
+                // Planted in the bytes (the component is indexed, so GetSpan refuses it): what a raw write leaves, and the fence's throw backs up.
+                Unsafe.AsRef(in cluster.GetReadOnlySpan(ClMigUnit.Pos)[slot]).Bounds =
+                    new AABB2F { MinX = float.NaN, MinY = 50f, MaxX = float.NaN, MaxY = 50f };
+                cluster.MarkDirty(ClMigUnit.Pos);
+            }
             tx.Commit();
         }
 

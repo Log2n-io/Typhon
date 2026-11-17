@@ -914,7 +914,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     public long NextWorldTick => WorldClock.Next;
 
     /// <summary>
-    /// Records that world tick <paramref name="worldTick"/> completed (#1495): the runtime calls it at every tick end, and <see cref="WriteTickFence"/> for a
+    /// Records that world tick <paramref name="worldTick"/> completed (#1495): the runtime calls it at every tick end, and <see cref="WriteTickFence(long, ChangeSet)"/> for a
     /// host that drives the fence itself. Never lowers the clock.
     /// </summary>
     internal void NoteTickCompleted(long worldTick) => WorldClock.Raise(worldTick + 1);
@@ -1674,9 +1674,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// legacy scan for this archetype — both <c>DetectClusterMigrations</c>'s dirtyBits sweep and <c>RecomputeDirtyClusterAabbs</c>'s <c>ActiveClusterIds</c>
     /// iteration are replaced with sparse iteration over <see cref="ArchetypeClusterState.ClusterProcessBitmap"/>.
     /// <para>
-    /// Only set when EVERY spatial-field write on this archetype goes through <c>WriteSpatial</c>. Mutations via raw <c>GetSpan</c> or <c>OpenMut + Write</c>
-    /// will be invisible to the engine's spatial maintenance after this is enabled. The <c>TYPHON009</c> analyzer flags non-WriteSpatial mutation sites — once
-    /// those are zero, it's safe to opt in.
+    /// Only set when every spatial-field write on this archetype goes through <c>WriteSpatial</c>, an <c>EntityRefMut.Set</c> (or <c>Enable</c> with a
+    /// value) of the spatial component, or <c>Teleport</c>: a <c>Set</c> does the barrier's bookkeeping itself, and <c>Teleport</c> flags its slot. A
+    /// mutation via a raw <c>GetSpan</c> is invisible to the engine's spatial maintenance after this is enabled. The <c>TYPHON009</c> analyzer flags
+    /// non-WriteSpatial mutation sites. <c>WriteSpatial</c> stays the writer for a system moving many entities: it resolves the cluster's cell frame once
+    /// per cluster, where a <c>Set</c> resolves it per write.
     /// </para>
     /// </summary>
     [PublicAPI]
@@ -5984,10 +5986,17 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
                         clusterState.InitializeSpatial(slotToTable, _realms, meta.ArchetypeId);
                         meta.RealmKeySlotMask = clusterState.SpatialSlot.HasRealmKey ? (ushort)(1 << clusterState.SpatialSlot.RealmKeySlot) : (ushort)0;
+                        meta.SpatialSlotMask = 0;   // the metadata is process-wide: another engine's spatial slot must not leak in
                         // ClusterRef.Set stores neither: a position goes through WriteSpatial, a realm key through OpenMut (#1187).
                         if (clusterState.SpatialSlot.HasSpatialIndex)
                         {
                             clusterState.SetRefusedSlotMask |= (ushort)((1 << clusterState.SpatialSlot.Slot) | meta.RealmKeySlotMask);
+                            clusterState.HandOutRefusedSlotMask |= meta.RealmKeySlotMask;
+                            meta.SpatialSlotMask = (ushort)(1 << clusterState.SpatialSlot.Slot);
+                            if ((meta.VersionedSlotMask & meta.SpatialSlotMask) == 0)
+                            {
+                                clusterState.WriteSpatialSlot = clusterState.SpatialSlot.Slot;
+                            }
                         }
 
                         // Register with the per-table spatial state, which the trigger system reads
@@ -8419,7 +8428,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// AP-03: whether a fence must log nothing — the engine stopped committing over a partial publish. Logged once. Both fence paths call it before they
-    /// append: the serial <see cref="WriteTickFence"/>, and the runtime's parallel fence, whose table and archetype appends never pass through it. A tick
+    /// append: the serial <see cref="WriteTickFence(long, ChangeSet)"/>, and the runtime's parallel fence, whose table and archetype appends never pass through it. A tick
     /// path must not throw, so the fence returns instead of meeting <see cref="DurabilityLog"/>'s refusal.
     /// </summary>
     private bool FenceMustNotAppend(long tickNumber)

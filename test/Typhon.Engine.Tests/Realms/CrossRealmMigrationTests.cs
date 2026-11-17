@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
@@ -85,9 +86,9 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
                 var slot = BitOperations.TrailingZeroCount(bits);
                 if (cluster.GetEntityId(slot) == id)
                 {
-#pragma warning disable TYPHON009 // Deliberately around the barrier: the raw write is what the fence's revert exists for.
-                    cluster.GetSpan(RealmUnit.Pos)[slot].Realm = realm;
-#pragma warning restore TYPHON009
+                    // GetSpan refuses the realm key's component (#1652), so the stray key is planted through the read-only span: the bytes a corrupted
+                    // or a since-closed realm leaves, which is what the fence's revert exists for.
+                    Unsafe.AsRef(in cluster.GetReadOnlySpan(RealmUnit.Pos)[slot]).Realm = realm;
                     cluster.MarkDirty(RealmUnit.Pos);
                     tx.Commit();
                     return;
@@ -229,7 +230,7 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
         using var dbe = TwoRealms();
         var id = SpawnOne(dbe, At(5, 5, 0));
         var cs = StateOf(dbe);
-        RawKeyWriteOf(dbe, id, 1);   // unregistered, through the raw span: nothing validates it; the fence reverts it
+        RawKeyWriteOf(dbe, id, 1);   // unregistered, planted in the bytes: nothing validates it; the fence reverts it
 
         Assert.DoesNotThrow(() => dbe.WriteTickFence(2));
         Assert.That(cs.LastTickRealmKeyReverts, Is.EqualTo(1));

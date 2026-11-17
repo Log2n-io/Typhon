@@ -75,6 +75,15 @@ public class RuntimeOptions
     public int WorkerCount { get; set; } = -1;
 
     /// <summary>
+    /// How many items <see cref="TyphonRuntime.WriteInTick"/> / <see cref="TyphonRuntime.InTick{T}"/> may hold waiting (#1651). A call beyond it faults at
+    /// once with <see cref="TickQueueFullException"/>. Bounds memory; <see cref="InTickMaxItemsPerTick"/> bounds the time a tick spends on them.
+    /// </summary>
+    public int InTickQueueCapacity { get; set; } = 4096;
+
+    /// <summary>How many in-tick items run at the start of one tick (#1651); the rest wait for the next. Their time is the tick's.</summary>
+    public int InTickMaxItemsPerTick { get; set; } = 256;
+
+    /// <summary>
     /// Capacity of the telemetry ring buffer (number of ticks retained). Must be a power of 2.
     /// Default: 1024 (~17 seconds at 60Hz, ~200KB).
     /// </summary>

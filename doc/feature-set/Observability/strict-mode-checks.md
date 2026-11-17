@@ -27,14 +27,20 @@ engine's `ThrowHelper`). The failure message is built through an interpolated-st
 and even the evaluation of its interpolation arguments — unless the check is actually firing, so a *passing* call in
 strict mode allocates nothing.
 
-A second gate, `DeclaredAccessActive`, is a **separate** opt-in for the one costly check
-(`SystemAccessValidator.AssertWrite<T>`, two `HashSet` lookups per component write that verify a system only writes
-components it declared) — so enabling strict mode does not tax every write unless you ask for it.
+Two more gates are independent of `Enabled` and default **on in a Debug build of your application** (its entry assembly
+compiled without optimization), off otherwise: `DeclaredAccessActive` validates every read, write, spawn, destroy and event of a
+system against its declaration (rule DV-01, a bitset test per access), and `PoisonDisposedTransactions` drops a disposed
+transaction instead of pooling it, so a use after its `Dispose` keeps throwing instead of reaching the next caller's transaction
+(rule TX-01, one allocation per transaction).
 
-Independently of the gates, a handful of **Tier-0 always-on guards** run in every build: checks whose predicate already
-executed in Release (only the reaction was stripped), promoted at zero added cost — duplicate segment-root and
-wrong-thread lock release/demote now throw a `CorruptionException` (fail-fast instead of silently corrupting), and the
-spatial R-Tree query DFS-stack overflow records a counter + one-shot warning so results are never silently truncated.
+Independently of the gates, **always-on guards** run in every build: checks whose failure is silent corruption and whose cost is
+a load and a compare per call. Duplicate segment-root and wrong-thread lock release/demote throw a `CorruptionException`; the
+spatial R-Tree query DFS-stack overflow records a counter + one-shot warning. The cluster fast path refuses writable memory
+(`GetSpan` / `Get`) over a `Versioned` component, a component with a `String1024` field or the realm key, and a `WriteSpatial` of
+anything but the non-Versioned spatial component; a `ClusterRef` used after its enumerator moved on throws; `EntityRefMut.Set` refuses a
+non-finite position. A `Transaction` is committed, rolled back and disposed only on the thread that created it, refuses every call
+after its `Dispose`, and a second transaction of a Deferred unit of work is refused on another thread while the first lives (#1652,
+#1653: all of these were strict-only or missing).
 
 ## 💻 Usage
 ```csharp
@@ -52,7 +58,8 @@ CheckConfig.Require(CheckConfig.Enabled, slot < archetype.ComponentCount,
   "Typhon": {
     "Checks": {
       "Enabled": true,
-      "DeclaredAccess": true
+      "DeclaredAccess": true,
+      "PoisonDisposedTransactions": true
     }
   }
 }
@@ -61,18 +68,19 @@ CheckConfig.Require(CheckConfig.Enabled, slot < archetype.ComponentCount,
 | Key | Effect | Default |
 |---|---|---|
 | `Typhon:Checks:Enabled` | Master switch — turns on the ~47 cheap user-facing misuse checks | `false` |
-| `Typhon:Checks:DeclaredAccess` | Also validate declared system access (`AssertWrite<T>`, `HashSet` per write). Effective value is `Enabled AND DeclaredAccess` | `false` |
+| `Typhon:Checks:DeclaredAccess` | Validate a system's accesses against its declaration (DV-01, a bitset test per access). Independent of `Enabled` | on in a Debug build of the application, else `false` |
+| `Typhon:Checks:PoisonDisposedTransactions` | Never pool a disposed transaction, so a use after `Dispose` keeps throwing (TX-01) | on in a Debug build of the application, else `false` |
 
 | Source | Precedence | Example |
 |---|---|---|
-| Environment variable (`__` hierarchy separator) | Highest | `TYPHON__CHECKS__ENABLED=true` · `TYPHON__CHECKS__DECLAREDACCESS=true` |
+| Environment variable (`__` hierarchy separator) | Highest | `TYPHON__CHECKS__ENABLED=true` · `TYPHON__CHECKS__DECLAREDACCESS=true` · `TYPHON__CHECKS__POISONDISPOSEDTRANSACTIONS=true` |
 | `typhon.telemetry.json` in the working directory | 2nd | shape above |
 | `typhon.telemetry.json` next to the assembly | 3rd | shape above |
-| Built-in defaults | Lowest | both flags `false` |
+| Built-in defaults | Lowest | `Enabled` `false`; the other two follow the application's build |
 
 ## ⚠️ Guarantees & limits
-- **Off by default, everywhere.** There is no build-configuration auto-detection — you enable strict mode deliberately,
-  and a fresh deployment checks nothing until opted in.
+- **`Enabled` is off by default, everywhere** — you enable strict mode deliberately. `DeclaredAccess` and
+  `PoisonDisposedTransactions` read the application's build instead, and an explicit key overrides either.
 - **Resolved once** per process (static constructor, forced early by a module initializer) and immutable thereafter — no
   runtime toggle; changing a flag means editing config/environment and restarting (a mutable field would defeat the JIT
   fold).
@@ -81,14 +89,13 @@ CheckConfig.Require(CheckConfig.Enabled, slot < archetype.ComponentCount,
   path. Checks whose *condition* itself costs something (a TLS read, a bounds-checked array load) use an inline
   `if (CheckConfig.Enabled && …)` guard so the gate short-circuits before that work.
 - **What it catches (Enabled):** write-through a read-only ref, disabled / unregistered / wrong-archetype component
-  access, EntityAccessor/Transaction thread-affinity violations, Versioned-slot bypass on clusters, spawn/destroy on an
-  unregistered or uninitialized archetype, component payload-size / entity-id overflow, on-reopen store-corruption /
-  schema-drift, and more (~47 sites). Failures throw `InvalidOperationException`.
-- **DeclaredAccess is separate** because it is the only non-trivial check; `AssertWrite<T>` throws
-  `InvalidAccessException` naming the undeclared component and the offending system.
-- **Tier-0 guards are always on**, in every build and independent of these flags — duplicate segment-root and
-  wrong-thread lock release/demote throw `CorruptionException`; the R-Tree DFS-overflow records a latch-safe counter +
-  one-shot log warning. These are fail-fast corruption signals, not user-misuse checks.
+  access, the per-operation EntityAccessor thread-affinity check, spawn/destroy on an unregistered or uninitialized
+  archetype, component payload-size / entity-id overflow, on-reopen store-corruption / schema-drift, and more. Failures throw
+  `InvalidOperationException`.
+- **DeclaredAccess is separate** from `Enabled`; an undeclared access throws `InvalidAccessException` naming the component and
+  the offending system.
+- **Always-on guards** hold in every build and independent of these flags: the corruption signals above, and the misuse checks
+  of #1652 / #1653 whose failure would be silent (listed under *How it works*).
 - **Developer-only tripwires stay `Debug.Assert`** — internal invariants a user can't cause or fix remain Debug-only
   (obtained via a local clone + Debug build), so strict mode's surface is exactly the checks a user can act on.
 

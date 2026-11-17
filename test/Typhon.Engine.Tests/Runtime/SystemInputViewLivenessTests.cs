@@ -25,11 +25,9 @@ namespace Typhon.Engine.Tests.Runtime;
 [NonParallelizable]
 class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
 {
-    // Quarantined against #893: the spawn below is committed from the TEST thread against a runtime ticking at 1 kHz, which is an EW-01 violation by
-    // construction — 5 runs in 40 in Release, green in Debug only because the timing rarely overlaps there. The guard is right and the fixture is the
-    // messenger: there is no handshake today for an outside committer to be admitted between ticks. Un-quarantine when #893 settles which way that goes.
+    // #893: the spawn below used to be committed from the TEST thread against the ticking runtime, an EW-02 violation by construction (5 runs in 40 in
+    // Release). It now goes through TyphonRuntime.WriteInTick, the handshake that did not exist then, and the off-tick guard refuses the old form (#1651).
     [Test]
-    [Category("Quarantine")]
     [VerifiesRule("BIND-04")]
     public void SystemInputView_SeesEntitiesSpawnedWhileTheRuntimeIsRunning()
     {
@@ -69,17 +67,15 @@ class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
             SpinWait.SpinUntil(() => ticksSeen >= 2, TimeSpan.FromSeconds(5));
             Assert.That(Volatile.Read(ref lastSeen), Is.EqualTo(10), "PREMISE: the system sees the entities that existed when its view was built");
 
-            // Spawn while the runtime is ticking — the ordering a simulation actually produces, and the one no fixture covers.
-            using (var tx = dbe.CreateQuickTransaction())
+            // Spawn while the runtime is ticking — the ordering a simulation actually produces — handed to the tick.
+            runtime.WriteInTick((tx, _) =>
             {
                 for (var i = 10; i < 20; i++)
                 {
                     var v = new TouchPos { X = i };
                     tx.Spawn<TouchArch>(TouchArch.Pos.Set(in v));
                 }
-
-                tx.Commit();
-            }
+            }, DurabilityMode.Deferred).GetAwaiter().GetResult();
 
             var target = ticksSeen + 5;
             SpinWait.SpinUntil(() => ticksSeen >= target, TimeSpan.FromSeconds(5));

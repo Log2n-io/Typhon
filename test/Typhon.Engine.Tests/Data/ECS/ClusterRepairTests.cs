@@ -310,10 +310,10 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
         SpawnDegradedCell(dbe);
 
         var cs = dbe._archetypeStates[ArchetypeId].ClusterState;
-        var tick = 1;
+        var tick = 2;   // SpawnDegradedCell fenced tick 1, and a tick number must increase (TICK-01)
         // Until the QUEUE is empty, not merely until no unit is admitted: the early return this guards is the one at the top of the planner, and a cell
         // that is still queued reaches every line below it. Without that distinction the test passes whether the clear runs early or late.
-        for (; tick <= 40 && (cs.RepairQueue == null || cs.RepairQueue.Count > 0 || tick < 3); tick++)
+        for (; tick <= 41 && (cs.RepairQueue == null || cs.RepairQueue.Count > 0 || tick < 4); tick++)
         {
             dbe.WriteTickFence(tick);
         }
@@ -370,7 +370,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
             tx.Commit();
         }
 
-        dbe.WriteTickFence(1);
+        dbe.WriteTickFence(2);   // SpawnDegradedCell fenced tick 1 (TICK-01: a tick number must increase)
 
         var cs = dbe._archetypeStates[ArchetypeId].ClusterState;
         var rejected = 0;
@@ -409,7 +409,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
                 tx.Commit();
             }
 
-            dbe.WriteTickFence(2 + t);
+            dbe.WriteTickFence(3 + t);
             var telemetry = dbe.GetSpatialTelemetry(ArchetypeId);
             repaired += telemetry.RepairUnitCount;
             rejected += cs.LastTickPinsRejected;

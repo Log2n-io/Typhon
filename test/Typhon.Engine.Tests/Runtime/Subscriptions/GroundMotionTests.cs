@@ -120,7 +120,7 @@ unsafe class GroundMotionTests : TestBase<GroundMotionTests>
         }
 
         tx.Commit();
-        harness.Engine.WriteTickFence(1);
+        harness.Engine.WriteTickFence(0);   // the harness's ticks start at 1 (TICK-01: a tick number must increase)
     }
 
     // A straight walk along y at 4 m/s (10 Hz) over bumps: grounded, z follows the terrain; airborne, it leaves it by two metres.

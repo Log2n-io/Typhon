@@ -87,6 +87,7 @@ internal sealed class EntityCommandDrain
         });
 
         using var tx = _engine.CreateQuickTransaction();
+        tx.MarkRuntimeOwned();   // the runtime applies the tick's deferred commands at a serial point (#1651)
 
         var start = 0;
         while (start < _commands.Count)

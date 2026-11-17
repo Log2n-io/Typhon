@@ -1,33 +1,41 @@
 ---
 uid: feature-errors-runtime-access-validation
 title: 'Runtime/Scheduler Declared-Access Validation'
-description: 'Opt-in InvalidAccessException when a system writes a component it never declared.'
+description: 'InvalidAccessException when a system reads, writes, spawns, destroys or exchanges events through something it never declared. On by default in Debug builds.'
 ---
 
 # Runtime/Scheduler Declared-Access Validation
-> Opt-in `InvalidAccessException` when a system writes a component it never declared.
+> `InvalidAccessException` when a system touches something it never declared. On by default in a Debug build of your application.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Errors](./README.md)
 
 ## 🎯 What it solves
 
-Typhon's scheduler derives its execution DAG from what each system *declares* it writes
-(`SystemBuilder.Writes<T>()` / `SideWrites<T>()`), not from what the system body actually does. If a
-system's code drifts from its declaration — someone adds a `entity.Set(Comp, …)` call and forgets the
-matching builder declaration — the scheduler keeps building a DAG from stale information. Nothing about
-that failure is loud: the write still succeeds, but the parallelism/ordering guarantees the scheduler
-computed around the declared set are now silently wrong. This validator turns that drift into an
-immediate, specific exception when the check is switched on, before it ships as a hard-to-reproduce race.
+Typhon's scheduler derives its execution DAG from what each system *declares* (`Reads<T>()`, `Writes<T>()`, `WritesEvents(q)`…), not
+from what the system body actually does. A read or write the system never declared gets no ordering edge, so it races with the systems
+that do declare it: a torn or stale read, a lost update, an event consumed before it was produced. Nothing about that is loud. This
+validator turns the drift into an immediate, specific exception naming the system and the type.
 
 ## ⚙️ How it works (in brief)
 
-With the check enabled, every `EntityRefMut.Set<T>()` call is checked against the declared `Writes`/`SideWrites`
-set of the currently-executing system. A mismatch throws `InvalidAccessException` naming the system, the
-undeclared component type, and everything the system *did* declare. Systems that haven't declared any
-access yet (migration window) are exempt — the check only activates once a system declares at least one
-`Writes`/`SideWrites`. It is a runtime strict-mode check, not a build flavour: enabled by `Typhon:Checks:Enabled`
-**and** `Typhon:Checks:DeclaredAccess` (both default `false`, in Debug and Release alike). Off, the gate is a
-`static readonly` bool the JIT folds away — zero cost on the `Write` path.
+Inside a system's body, every access is checked against the executing system's declarations:
+
+| Access | Entry points | Allowed when |
+|---|---|---|
+| Component read | `EntityRef.Read` / `TryRead`, `ClusterRef.GetReadOnly` / `GetReadOnlySpan` | `Reads`, `ReadsFresh`, `ReadsSnapshot`, `AdditionalReads` or `Writes` of the type |
+| Component write | `EntityRefMut.Set`, `ClusterRef.Set` / `Get` / `GetSpan` / `WriteSpatial` | `Writes` of the type |
+| Spawn | `Spawn`, `SpawnBatch` | `Writes` of every component of the archetype |
+| Destroy | `Destroy`, `DestroyBatch` | `Writes` of every component of the archetype and of everything its cascade-delete reaches |
+| Event write | `ctx.Writer(queue)` | `WritesEvents(queue)` |
+| Event drain | `queue.Drain` | `ReadsEvents(queue)` |
+
+`SideWrites<T>()` grants reads and writes of `T` through a side transaction (`ctx.CreateSideTransaction`) only: through the system's own
+transaction the write would escape the scheduler's write-write check. A class-form system with no declaration is checked like any other.
+
+A mismatch throws `InvalidAccessException` with the system name, the undeclared type (or queue) and everything the system did declare.
+The setting is `Typhon:Checks:DeclaredAccess` (env `TYPHON__CHECKS__DECLAREDACCESS`), independent of `Typhon:Checks:Enabled`. Unset, it
+is **on when your application's entry assembly is a Debug build** and off otherwise. Off, the gate is a `static readonly` bool the JIT
+folds away; on, a check is a bit test over the descriptor's bitsets.
 
 ## 💻 Usage
 
@@ -36,7 +44,7 @@ class ClampSystem : QuerySystem
 {
     protected override void Configure(SystemBuilder b) => b
         .Name("Clamp").Phase(Phase.Simulation).After("Movement")
-        .Writes<Position>();       // declares the only component this system may mutate
+        .Writes<Position>();       // a writer may also read what it writes
 
     protected override void Execute(TickContext ctx)
     {
@@ -47,39 +55,43 @@ class ClampSystem : QuerySystem
             pos.X = Math.Clamp(pos.X, 0, WorldWidth);
             entity.Set(Unit.Position, pos);
 
-            var vel = entity.Read(Unit.Velocity);
-            entity.Set(Unit.Velocity, vel);   // check on: throws InvalidAccessException
-        }                                                    // (Velocity was never declared)
+            var vel = entity.Read(Unit.Velocity);   // throws InvalidAccessException: Velocity was never declared
+        }
     }
 }
 
-// The throw happens inside Execute, on a runtime worker: the scheduler catches it and fails that system for the tick
-// (its transaction does not commit, its successors are skipped), never the whole tick.
-// The InvalidAccessException carries ex.SystemName == "Clamp", ex.UndeclaredType == typeof(Velocity).
-// Fix: add `.Writes<Velocity>()` (or `.SideWrites<Velocity>()`) to Configure — never catch-and-continue.
+// The throw happens inside Execute, on a runtime worker: the scheduler handles it per its SystemExceptionPolicy.
+// ex.SystemName == "Clamp", ex.UndeclaredType == typeof(Velocity).
+// Fix: add `.Reads<Velocity>()` (or ReadsFresh / ReadsSnapshot) to Configure — never catch-and-continue.
 ```
 
 ## ⚠️ Guarantees & limits
 
-- Opt-in (`Typhon:Checks:Enabled` + `Typhon:Checks:DeclaredAccess`, both off by default in every build): zero
-  runtime cost when off, but also zero protection. It costs two `HashSet` lookups per write when on, so enable it
-  in test runs (the engine test suite does) rather than in production.
-- Fires only on writes. Reads are not cross-checked at runtime — `Reads<T>()`/`ReadsFresh<T>()`/
-  `ReadsSnapshot<T>()` correctness is enforced at `Build()` time (see [Declarative Scheduling](../Runtime/declarative-scheduling/README.md)), not per-call.
-- Exempts systems with zero declarations entirely (not just the specific undeclared type) — a
-  not-yet-migrated system that declares nothing passes silently. Declaring even one `Writes<T>()`
-  switches the system into fully-enforced mode.
-- `IsTransient` is `false` (inherited default) — this is a code-declaration bug, not a condition that
-  clears on retry. Fix the `Configure()` declaration; don't catch-and-retry.
-- Thread-local by construction: each worker thread tracks its own executing-system descriptor, so
-  concurrent dispatch across workers cannot cross-contaminate which system a violation is attributed to.
-- Not a substitute for `Build()`-time conflict detection (W×W, ambiguous R×W) — this check only catches
-  divergence between a system's declared writes and its actual write calls; it says nothing about
-  whether two systems' declarations conflict with each other.
+- **Debug default.** On in a Debug build of the application, off in Release, explicit configuration wins either way. Under `dotnet test`
+  the entry assembly is the (optimized) test host, so a test project gets it only by setting the key, e.g. in its `typhon.telemetry.json`
+  (the engine's own suite does).
+- **Lambda-form systems are not checked.** `dag.CallbackSystem("name", ctx => …)` and its `QuerySystem` / `PipelineSystem` siblings have no
+  declaration surface: they are ordered by their explicit `after:` edges alone and the validator does not see them. Use the class form for
+  anything that shares data with other systems.
+- **Not checked:** untyped reads by slot (`ReadRaw`, `ReadText`), query predicates, `ClusterRef.MarkDirty`, code outside a system (host
+  threads, pre-start writes), deferred `ctx.Commands` spawns and destroys (applied by the runtime at a serial point), and the engine's own
+  systems (an engine track's systems reach storage through internals).
+- **A system that declares a component in both `Writes` and a read kind** is not a conflict with itself: `Writes<T>` grants the read.
+- **A destroy depends on the entity's actual archetype**: destroying through a base-archetype handle needs `Writes` for the components of
+  whatever sub-archetype the entity is, and of what its cascade-delete reaches.
+- `IsTransient` is `false`: this is a declaration bug, not a condition that clears on retry. Fix `Configure()`.
+- Thread-local by construction: each worker tracks its own executing system, so concurrent dispatch cannot misattribute a violation.
+- Not a substitute for `Build()`-time conflict detection (W×W, ambiguous R×W): this check catches divergence between a system's
+  declarations and its body, not conflicts between two systems' declarations.
 
 ## 🧪 Tests
 
-- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — an undeclared write throws `InvalidAccessException` (`SystemName`/`UndeclaredType`); a no-declarations system passes silently (migration-window exemption); a declared write passes.
+- [DeclaredAccessTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/DeclaredAccessTests.cs) — one
+  undeclared probe per access kind (each read and write entry point, spawn, destroy, event write, drain) and the declared complements;
+  `SideWrites` refused through the system transaction and accepted through a side transaction; a system with no declaration checked; a
+  lambda-form system not.
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) —
+  the descriptor stack (push/pop, per-thread isolation, cleared after dispatch).
 
 ## 🔗 Related
 

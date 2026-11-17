@@ -137,6 +137,65 @@ internal sealed class WorldTickTests : TestBase<WorldTickTests>
         });
     }
 
+    /// <summary>#1658: a host's tick number must increase; a repeated or decreasing one is a host counting wrong, and is refused.</summary>
+    [Test]
+    [VerifiesRule("TICK-01")]
+    public void AHostTickNumberThatDoesNotIncrease_IsRefused()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = Open(scope);
+        dbe.WriteTickFence(0);
+        dbe.WriteTickFence(1);
+        Assert.Throws<InvalidOperationException>(() => dbe.WriteTickFence(1));
+        Assert.Throws<InvalidOperationException>(() => dbe.WriteTickFence(0));
+        Assert.Throws<InvalidOperationException>(() => dbe.WriteTickFence(-1));
+        Assert.That(dbe.NextWorldTick, Is.EqualTo(2), "a refused fence moves nothing");
+        dbe.WriteTickFence();   // engine-numbered: tick 2
+        Assert.That(dbe.NextWorldTick, Is.EqualTo(3), "and the next fence carries on as if none was refused");
+    }
+
+    /// <summary>#1658: host fences after a runtime ran on the same session continue the clock from where the runtime left it.</summary>
+    [Test]
+    [VerifiesRule("TICK-01")]
+    public void HostFencesAfterARuntime_ContinueTheClock()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = Open(scope);
+        long afterRuntime;
+        using (var runtime = TyphonRuntime.Create(dbe, schedule => schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { }),
+                   new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 }))
+        {
+            runtime.Start();
+            while (runtime.InTick((_, tick) => tick, DurabilityMode.Deferred).GetAwaiter().GetResult() < 5)
+            {
+            }
+            runtime.Shutdown();
+            afterRuntime = dbe.NextWorldTick;
+        }
+        Assert.That(afterRuntime, Is.GreaterThanOrEqualTo(5), "precondition: the runtime moved the clock");
+        dbe.WriteTickFence();
+        dbe.WriteTickFence();
+        dbe.WriteTickFence();
+        Assert.That(dbe.NextWorldTick, Is.EqualTo(afterRuntime + 3));
+    }
+
+    /// <summary>
+    /// #1658: the engine counts the fences, so a host numbering its ticks from a persisted counter (here 5 000) moves the world clock by one per fence,
+    /// not to 5 000 — before, the clock jumped by the counter's value and, never lowered, stayed there.
+    /// </summary>
+    [Test]
+    [VerifiesRule("TICK-01")]
+    public void AHostNumberingFromAPersistedCounter_DoesNotInflateTheClock()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = Open(scope);
+        var start = dbe.NextWorldTick;
+        dbe.WriteTickFence(5_000);
+        dbe.WriteTickFence(5_001);
+        dbe.WriteTickFence(5_007);
+        Assert.That(dbe.NextWorldTick, Is.EqualTo(start + 3));
+    }
+
     /// <summary>A session that never ticks leaves the clock where it found it: the persisted value is never lowered.</summary>
     [Test]
     [VerifiesRule("TICK-01")]

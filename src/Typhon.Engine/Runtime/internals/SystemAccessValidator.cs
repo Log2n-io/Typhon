@@ -1,27 +1,31 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Runtime safety net for declared system access (RFC 07 — Unit 4). The scheduler tags each worker thread with the currently-executing
-/// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem"/>; <see cref="EntityRefMut.Set{T}(Comp{T}, in T)"/> calls
-/// <see cref="AssertWrite{T}"/> to verify the type was declared. All three methods are runtime-gated by
-/// <see cref="CheckConfig.DeclaredAccessActive"/> — strict mode's separate declared-access opt-in (#422), off by default. When off, each body is
-/// JIT dead-code-eliminated (the gate is a <c>static readonly bool</c>), so the dispatch path takes zero overhead in production and the descriptor
-/// stack is never populated (only <see cref="EnterSystem"/> writes it, and it early-returns).
+/// Runtime check of declared system access, rule DV-01 (RFC 07 Unit 4, widened by #1650). The scheduler tags each worker thread with the executing
+/// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem(SystemAccessDescriptor, string, long)"/>; every component read, write, spawn, destroy, event write and event drain
+/// then asks this class whether the system declared it, and throws <see cref="InvalidAccessException"/> when it did not. An undeclared access derives no
+/// DAG edge (ED-01..05), so it races silently: this is the only place that sees it.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Storage is per-thread (<see cref="ThreadStaticAttribute"/>). Each worker maintains its own descriptor — multi-worker dispatch is
-/// safe by construction. Push/pop semantics let inline successor execution restore the previous system's descriptor when a worker
-/// runs multiple systems back-to-back.
+/// Gated by <see cref="CheckConfig.DeclaredAccessActive"/>, a <c>static readonly bool</c>: when off every entry point is JIT dead-code-eliminated and the
+/// descriptor stack is never populated. When on, a component check is one thread-static load, one array load and a bit test over
+/// <see cref="CompiledAccess"/>.
 /// </para>
 /// <para>
-/// Migration policy: a system whose access descriptor has <see cref="SystemAccessDescriptor.HasAnyDeclaration"/> = false is treated as
-/// "undeclared" and the assertion silently passes — preserves backwards compatibility for systems that haven't migrated to declared access.
-/// Once a developer adds any declaration, the validator activates fully (a <see cref="SystemBuilder.Writes{T}"/> not in the declared set throws).
+/// Storage is per-thread (<see cref="ThreadStaticAttribute"/>), so multi-worker dispatch is safe by construction; push/pop lets inline successor execution
+/// restore the previous system's descriptor. Code outside any system (no <see cref="EnterSystem(SystemAccessDescriptor, string, long)"/> on this thread) is not checked. A class-form system
+/// with no declaration at all is checked like any other: every access it makes is undeclared. A lambda-form system (<see cref="Dag.CallbackSystem"/> and
+/// siblings) has no declaration surface and no descriptor, and is not checked: it is ordered by its explicit edges alone.
+/// </para>
+/// <para>
+/// <see cref="SystemBuilder.SideWrites{T}"/> grants reads and writes of <c>T</c> through a side transaction only (<see cref="Transaction.IsSideTransaction"/>):
+/// through the system's own transaction the write would escape AC-01.
 /// </para>
 /// </remarks>
 internal static class SystemAccessValidator
@@ -30,20 +34,22 @@ internal static class SystemAccessValidator
     private static SystemAccessDescriptor Current;
 
     [ThreadStatic]
+    private static CompiledAccess CurrentCompiled;
+
+    [ThreadStatic]
     private static string CurrentSystemName;
 
     [ThreadStatic]
-    private static Stack<(SystemAccessDescriptor Prev, string PrevName)> Frames;
+    private static Stack<(SystemAccessDescriptor Prev, CompiledAccess PrevCompiled, string PrevName)> Frames;
 
     /// <summary>
-    /// Push the given descriptor as the current thread's active system context.
-    /// No-op unless <see cref="CheckConfig.DeclaredAccessActive"/> (JIT-folded away when off).
-    /// Each call must be paired with a matching <see cref="LeaveSystem"/> in a finally block.
+    /// Push the given descriptor as the current thread's active system context. No-op unless <see cref="CheckConfig.DeclaredAccessActive"/>. Each call must
+    /// be paired with a matching <see cref="LeaveSystem"/> in a finally block.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void EnterSystem(SystemAccessDescriptor descriptor, string systemName)
+    public static void EnterSystem(SystemAccessDescriptor descriptor, string systemName, long runId)
     {
-        // Fast/slow split: the tiny gate inlines into the caller so the folded-false gate erases the call entirely when off.
+        DagThread.Enter(runId);   // always on (#1651): the off-tick guard's "this thread runs this system run"
         if (CheckConfig.DeclaredAccessActive)
         {
             EnterSystemCore(descriptor, systemName);
@@ -53,16 +59,22 @@ internal static class SystemAccessValidator
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void EnterSystemCore(SystemAccessDescriptor descriptor, string systemName)
     {
-        var stack = Frames ??= new Stack<(SystemAccessDescriptor, string)>(8);
-        stack.Push((Current, CurrentSystemName));
+        var stack = Frames ??= new Stack<(SystemAccessDescriptor, CompiledAccess, string)>(8);
+        stack.Push((Current, CurrentCompiled, CurrentSystemName));
         Current = descriptor;
+        CurrentCompiled = descriptor?.Compiled;   // null: a lambda-form system, which has no declarations to check against
         CurrentSystemName = systemName;
     }
+
+    /// <summary><see cref="EnterSystem(SystemAccessDescriptor, string, long)"/> outside any scheduler (direct tests): run 0 of system 0.</summary>
+    public static void EnterSystem(SystemAccessDescriptor descriptor, string systemName) =>
+        EnterSystem(descriptor, systemName, DagThread.SystemRun(0, 0));
 
     /// <summary>Restore the previous descriptor + name. No-op unless <see cref="CheckConfig.DeclaredAccessActive"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void LeaveSystem()
     {
+        DagThread.Leave();
         if (CheckConfig.DeclaredAccessActive)
         {
             LeaveSystemCore();
@@ -72,75 +84,184 @@ internal static class SystemAccessValidator
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void LeaveSystemCore()
     {
-        var (prev, prevName) = Frames.Pop();
+        var (prev, prevCompiled, prevName) = Frames.Pop();
         Current = prev;
+        CurrentCompiled = prevCompiled;
         CurrentSystemName = prevName;
     }
 
-    /// <summary>
-    /// Assert that the currently-executing system declared <see cref="SystemBuilder.Writes{T}"/> or <see cref="SystemBuilder.SideWrites{T}"/>.
-    /// No-op unless <see cref="CheckConfig.DeclaredAccessActive"/> (the one costly strict-mode check — 2 <c>HashSet</c> lookups per write — so it
-    /// has its own opt-in). Skips the check when no system context is active (e.g., direct test code outside scheduler dispatch), or when the
-    /// active descriptor has no declarations (transitional — system hasn't migrated yet).
-    /// </summary>
+    /// <summary>Assert the executing system may write <typeparamref name="T"/>; <paramref name="via"/> is the accessor the write goes through.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void AssertWrite<T>() where T : unmanaged
+    public static void AssertWrite<T>(EntityAccessor via) where T : unmanaged
     {
-        // Fast/slow split (#422): the gate is the ONLY thing on the per-Write<T> hot path. When DeclaredAccessActive is off
-        // (the default) this inlines into EntityRefMut.Write and the folded-false gate erases the call — zero cost. The core (2
-        // HashSet lookups + typeof) is too large to inline, hence NoInlining to keep the hot path small.
         if (CheckConfig.DeclaredAccessActive)
         {
-            AssertWriteCore<T>();
+            AssertWriteCore(AccessTypeId<T>.Value, via);
+        }
+    }
+
+    /// <summary>Assert the executing system may read <typeparamref name="T"/>; <paramref name="via"/> is the accessor the read goes through.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void AssertRead<T>(EntityAccessor via) where T : unmanaged
+    {
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            AssertReadCore(AccessTypeId<T>.Value, via);
+        }
+    }
+
+    /// <summary>
+    /// Assert the executing system may spawn or destroy an entity of <paramref name="meta"/>: it must be allowed to write every component of the archetype
+    /// and, for a destroy, of every archetype the delete cascades to.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void AssertStructural(ArchetypeMetadata meta, bool destroy, EntityAccessor via)
+    {
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            AssertStructuralCore(meta, destroy, via);
+        }
+    }
+
+    /// <summary>Assert the executing system declared <c>WritesEvents(queue)</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void AssertEventWrite(EventQueueBase queue)
+    {
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            AssertEventCore(queue, write: true);
+        }
+    }
+
+    /// <summary>Assert the executing system declared <c>ReadsEvents(queue)</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void AssertEventRead(EventQueueBase queue)
+    {
+        if (CheckConfig.DeclaredAccessActive)
+        {
+            AssertEventCore(queue, write: false);
         }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void AssertWriteCore<T>() where T : unmanaged
+    private static void AssertWriteCore(int id, EntityAccessor via)
     {
-        var current = Current;
-        if (current == null)
+        var c = CurrentCompiled;
+        if (c == null || AccessTypeIds.Has(c.Writable, id) || (AccessTypeIds.Has(c.SideWritable, id) && IsSide(via)))
         {
             return;
         }
-
-        if (!current.HasAnyDeclaration)
-        {
-            return;
-        }
-
-        var t = typeof(T);
-        if (current.Writes.Contains(t))
-        {
-            return;
-        }
-
-        if (current.SideWrites.Contains(t))
-        {
-            return;
-        }
-
-        throw new InvalidAccessException(CurrentSystemName ?? "<unknown>", t, SummarizeDeclared(current));
+        throw Undeclared(id, "wrote", via, c);
     }
 
-    private static string SummarizeDeclared(SystemAccessDescriptor d)
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertReadCore(int id, EntityAccessor via)
     {
-        if (d.Writes.Count == 0 && d.SideWrites.Count == 0)
+        var c = CurrentCompiled;
+        if (c == null || AccessTypeIds.Has(c.Readable, id) || (AccessTypeIds.Has(c.SideWritable, id) && IsSide(via)))
+        {
+            return;
+        }
+        throw Undeclared(id, "read", via, c);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertStructuralCore(ArchetypeMetadata meta, bool destroy, EntityAccessor via)
+    {
+        var c = CurrentCompiled;
+        if (c == null || meta == null)
+        {
+            return;
+        }
+        var footprint = destroy ? meta.DestroyAccessFootprint : meta.SpawnAccessFootprint;
+        var side = IsSide(via);
+        for (var w = 0; w < footprint.Length; w++)
+        {
+            var need = footprint[w];
+            var have = (w < c.Writable.Length ? c.Writable[w] : 0) | (side && w < c.SideWritable.Length ? c.SideWritable[w] : 0);
+            var missing = need & ~have;
+            if (missing != 0)
+            {
+                var id = (w << 6) | BitOperations.TrailingZeroCount(missing);
+                throw Undeclared(id, destroy ? $"destroyed an entity of '{meta.Name}', which writes" : $"spawned an entity of '{meta.Name}', which writes",
+                    via, c);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AssertEventCore(EventQueueBase queue, bool write)
+    {
+        var d = Current;
+        if (d == null || queue == null)
+        {
+            return;
+        }
+        if (write ? d.WritesEvents.Contains(queue) : d.ReadsEvents.Contains(queue))
+        {
+            return;
+        }
+        var name = CurrentSystemName ?? "<unknown>";
+        throw new InvalidAccessException(name, null,
+            $"System '{name}' {(write ? "wrote to" : "drained")} event queue '{queue.Name}' but did not declare it. Add " +
+            $"`b.{(write ? "WritesEvents" : "ReadsEvents")}(queue)` in Configure. Currently declared: {Summarize(d)}.", true);
+    }
+
+    private static bool IsSide(EntityAccessor via) => via is Transaction { IsSideTransaction: true };
+
+    private static InvalidAccessException Undeclared(int id, string verb, EntityAccessor via, CompiledAccess c)
+    {
+        var type = AccessTypeIds.TypeOf(id);
+        var name = CurrentSystemName ?? "<unknown>";
+        var typeName = type?.Name ?? $"#{id}";
+        string fix;
+        if (AccessTypeIds.Has(c.SideWritable, id))
+        {
+            fix = $"It declares `SideWrites<{typeName}>()`, which covers a side transaction (`ctx.CreateSideTransaction`) only: go through one, or declare " +
+                  $"`b.Writes<{typeName}>()`.";
+        }
+        else if (verb == "read")
+        {
+            fix = $"Add `b.Reads<{typeName}>()` (or ReadsFresh / ReadsSnapshot / AdditionalReads) in Configure.";
+        }
+        else
+        {
+            fix = $"Add `b.Writes<{typeName}>()` (or `b.SideWrites<{typeName}>()` for a side transaction) in Configure.";
+        }
+        return new InvalidAccessException(name, type,
+            $"System '{name}' {verb} component '{typeName}' but did not declare it. {fix} Currently declared: {Summarize(Current)}.", true);
+    }
+
+    private static string Summarize(SystemAccessDescriptor d)
+    {
+        if (d == null || !d.HasAnyDeclaration)
         {
             return "(none)";
         }
 
-        var parts = new List<string>(d.Writes.Count + d.SideWrites.Count);
-        foreach (var w in d.Writes)
+        var parts = new List<string>();
+        Add(parts, "Reads", d.Reads);
+        Add(parts, "ReadsFresh", d.ReadsFresh);
+        Add(parts, "ReadsSnapshot", d.ReadsSnapshot);
+        Add(parts, "AdditionalReads", d.AdditionalReads);
+        Add(parts, "Writes", d.Writes);
+        Add(parts, "SideWrites", d.SideWrites);
+        foreach (var q in d.WritesEvents)
         {
-            parts.Add($"Writes<{w.Name}>");
+            parts.Add($"WritesEvents({q.Name})");
         }
-
-        foreach (var w in d.SideWrites)
+        foreach (var q in d.ReadsEvents)
         {
-            parts.Add($"SideWrites<{w.Name}>");
+            parts.Add($"ReadsEvents({q.Name})");
         }
+        return parts.Count == 0 ? "(none)" : string.Join(", ", parts);
+    }
 
-        return string.Join(", ", parts);
+    private static void Add(List<string> parts, string kind, HashSet<Type> types)
+    {
+        foreach (var t in types)
+        {
+            parts.Add($"{kind}<{t.Name}>");
+        }
     }
 }

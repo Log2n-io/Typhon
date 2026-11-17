@@ -2176,8 +2176,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         LastTickMigrationExecuteMs + (Volatile.Read(ref LastTickMigrationApplyTicks) * 1000d / Stopwatch.Frequency);
 
     /// <summary>
-    /// Live accumulator for hysteresis-absorbed crossings on the <see cref="SpatialBarrierOnly"/> path, bumped by <c>ClusterRef.MaybeFlagMigration</c> as writes
-    /// happen and drained into <see cref="LastTickHysteresisAbsorbedCount"/> at the top of the next fence.
+    /// Live accumulator for hysteresis-absorbed crossings on the <see cref="SpatialBarrierOnly"/> path, bumped by
+    /// <c>ArchetypeClusterState.MaybeFlagMigration</c> as writes happen and drained into <see cref="LastTickHysteresisAbsorbedCount"/> at the top of the next
+    /// fence.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -3199,6 +3200,19 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// realm key (a realm change, RM-05).
     /// </summary>
     internal ushort SetRefusedSlotMask;
+
+    /// <summary>
+    /// The component slots <c>ClusterRef.GetSpan</c> and <c>Get</c> refuse, in every build (#1652), because a store through the memory they hand out would
+    /// skip what the slot needs: a fence-maintained indexed field (<see cref="FenceIndexedSlotMask"/>, IX-07), a text handle (TXT-02), a Versioned value
+    /// (its revision, ACCESS-01) or the realm key (its validation, RM-05). One load and one bit test per call.
+    /// </summary>
+    internal ushort HandOutRefusedSlotMask;
+
+    /// <summary>
+    /// The one slot <c>ClusterRef.WriteSpatial</c> accepts: the <c>[SpatialIndex]</c> component's, unless it is Versioned; -1 for none (CA-03, #1652). One
+    /// compare per write, in every build.
+    /// </summary>
+    internal int WriteSpatialSlot = -1;
 
     /// <summary>
     /// Approximate count of index mutations since the last statistics rebuild, and the threshold <see cref="StatisticsWorker"/> trips on (#665). The only such
@@ -7795,10 +7809,11 @@ internal sealed unsafe partial class ArchetypeClusterState
                     }
 
                     // The per-cell index is NOT a copy of ClusterAabbs, and deciding whether to write it by comparing ClusterAabbs against ITSELF was
-                    // an SQ-01 false negative. ClusterAabbs has TWO writers — the write-time CAS in ClusterRef.MaybeGrowAndFlagShrink, whose own summary says
-                    // a grow means "the cluster needs a fence-time PerCellIndex.UpdateAt with the fresh AABB" — while the index has ONE, this loop. When the
-                    // CAS has already applied the grow, `stored` and `fresh` agree and the old short-circuit skipped the index, leaving it holding the
-                    // previous tick's SMALLER box. A query whose edge fell in the gap pruned the cluster and lost every entity in it, with nothing raised.
+                    // an SQ-01 false negative. ClusterAabbs has TWO writers — the write-time CAS in ArchetypeClusterState.MaybeGrowAndFlagShrink, whose own
+                    // summary says a grow means "the cluster needs a fence-time PerCellIndex.UpdateAt with the fresh AABB" — while the index has ONE, this
+                    // loop. When the CAS has already applied the grow, `stored` and `fresh` agree and the old short-circuit skipped the index, leaving it
+                    // holding the previous tick's SMALLER box. A query whose edge fell in the gap pruned the cluster and lost every entity in it, with nothing
+                    // raised.
                     //
                     // On this branch it was not even a race: `fresh` is ASSIGNED from `stored` when no shrink is pending, so the comparison was a tautology
                     // and a grow-only tick could NEVER update the index at all. Both demos run barrier-only, so that was the shipped path.
@@ -10780,6 +10795,18 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         SetRefusedSlotMask = refused;
+
+        ushort handOut = FenceIndexedSlotMask;   // InitializeIndexes adds it too, whichever runs first
+        for (var slot = 0; slot < slotToTable.Length; slot++)
+        {
+            var table = slotToTable[slot];
+            if (table != null && (table.StorageMode == StorageMode.Versioned || table.HasText))
+            {
+                handOut |= (ushort)(1 << slot);
+            }
+        }
+
+        HandOutRefusedSlotMask = handOut;
     }
 
     /// <summary>
@@ -11021,6 +11048,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         SvFenceIndexedSlotMask = svIndexed;
         TransientFenceIndexedSlotMask = transientIndexed;
         FenceIndexedSlotMask = (ushort)(svIndexed | transientIndexed);
+        HandOutRefusedSlotMask |= FenceIndexedSlotMask;
         FenceIndexedFieldCount = fenceIndexedFields;
         SvShadowBitmap = svIndexed != 0 && transientIndexed != 0 ? new DirtyBitmap(Math.Max(64, PrimarySegmentCapacity * 64)) : null;
 

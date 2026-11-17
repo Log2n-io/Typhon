@@ -183,7 +183,7 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
             tx.Commit();
         }
 
-        dbe.WriteTickFence(0);
+        dbe.WriteTickFence();   // engine-numbered: a test that measures twice fences the same engine twice (TICK-01)
 
         // Distinct EntityMap buckets the burst's keys resolve to — against LiveBucketCount, this is what says whether a bulk insert has runs to partition by.
         // Read AFTER the burst, because a split moves the bucket a key resolves to; this is the partitioning a bulk applier would face on the NEXT burst.

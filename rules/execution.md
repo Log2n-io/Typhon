@@ -25,12 +25,19 @@ One that never wrote is empty, and goes `Created → Committed | Rollbacked` dir
             false, and every write entry point throws `InvalidOperationException` (`EnsureMutable`)
   invariant the empty fast path does no commit or rollback work: no chain lock, no deferred-cleanup pass (TXC-01), no commit or rollback body, no
             `CommitTotal` / `RollbackTotal` increment
+  invariant ∀ transaction t after t.Dispose(): Commit, Rollback and every operation throw ObjectDisposedException, in every build (#1653:
+            Transaction.CheckLifetime, EnsureMutable, RequireSpawnable, EntityAccessor.BeginOperation), and a second Dispose is a no-op. A disposed
+            transaction is pooled, so the refusal holds only until the pool hands the object out again; under
+            CheckConfig.PoisonDisposedTransactions (on by default in a Debug build of the application) it is never pooled
+            (TransactionChain.PoolDisposedTransactions) and the refusal holds for good
   never a Commit() that returns true on a transaction that still accepts writes: a write made after it lands only with
         a second Commit(), or is dropped without a word by Dispose's auto-rollback
   note: a read-only transaction's Commit() is a no-op that leaves it in `Created`; its Rollback() ends it like any other.
   scope: Transaction.Commit, Transaction.Rollback, Transaction.EnsureMutable, Transaction.EnsureCompleted,
          Transaction.Dispose, Transaction.PrepareOpenMut, Transaction.Spawn, Transaction.SpawnBatch,
-         Transaction.SpawnBatchAllocate, Transaction.Destroy, Transaction.DestroyBatch
+         Transaction.SpawnBatchAllocate, Transaction.Destroy, Transaction.DestroyBatch, Transaction.CheckLifetime,
+         Transaction.RequireSpawnable, EntityAccessor.BeginOperation, TransactionChain.PoolDisposedTransactions,
+         CheckConfig.PoisonDisposedTransactions
   on_violation: before #1056 both empty fast paths returned true and left the transaction in `Created`, so `OpenMut`,
                 `TryOpenMut`, `Spawn` and `Destroy` still succeeded after a successful Commit(). Those writes needed a
                 second Commit() to land, or were rolled back silently by Dispose.
@@ -38,3 +45,5 @@ One that never wrote is empty, and goes `Created → Committed | Rollbacked` dir
             Rollback false, counters unchanged), TransactionTests.Rollback_EmptyTransaction_IsTerminal [VerifiesRule]
             (the same for Rollback), TransactionTests.ReadOnly_RolledBack_CannotCommit [VerifiesRule] (the finished-state
             check runs before the read-only no-op). Each fails with the code it guards reverted, checked.
+            TransactionLifetimeTests.AUseAfterDispose_Throws_InsteadOfReachingTheNextTransaction [VerifiesRule] (strict mode off; pooled and
+            poisoned: before #1653 a use after Dispose was a NullReferenceException, or a write into the next caller's transaction).

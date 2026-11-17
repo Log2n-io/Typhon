@@ -135,6 +135,10 @@ jobs:
       - name: Consumer smoke test (engine package)
         run: bash scripts/consumer-smoke-test.sh artifacts
 
+      # The shipped analyzers reach a consumer build, engine-only rules stay out, and TYPHON015 reaches a Typhon.Client project (#1584).
+      - name: Analyzer packaging smoke test
+        run: bash scripts/analyzer-package-smoke-test.sh artifacts
+
       - name: CLI tool smoke test (Typhon.Cli)
         run: bash scripts/cli-tool-smoke-test.sh artifacts
 

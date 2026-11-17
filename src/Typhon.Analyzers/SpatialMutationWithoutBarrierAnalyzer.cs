@@ -57,7 +57,7 @@ public class SpatialMutationWithoutBarrierAnalyzer : DiagnosticAnalyzer
             "the engine's write-time spatial bookkeeping. Writing a spatial-indexed field through such a reference " +
             "leaves the per-cluster migration/shrink bitmaps untouched, forcing the fence-time spatial pass to fall " +
             "back to a full-scan over every active cluster. The WriteSpatial barrier replaces these write paths " +
-            "with an inline detector that costs ~5ns per call and feeds the sparse fence loop.");
+            "with an inline detector that costs ~5ns per call and feeds the sparse fence loop.", helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         ImmutableArray.Create(Rule);

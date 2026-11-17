@@ -63,6 +63,10 @@
              for the engine's own compilation). This guarantees the minimal consumer-generator assembly is built
              before the engine packs it under analyzers/ (see the None item below). -->
         <ProjectReference Include="..\Typhon.Generators.Consumer\Typhon.Generators.Consumer.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+        <!-- Build-order only, same reason (#1584): the consumer analyzers and their code fixes are packed under analyzers/ below; the engine's own
+             build already runs the full Typhon.Analyzers set above. -->
+        <ProjectReference Include="..\Typhon.Analyzers.Consumer\Typhon.Analyzers.Consumer.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+        <ProjectReference Include="..\Typhon.Analyzers.Consumer.CodeFixes\Typhon.Analyzers.Consumer.CodeFixes.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
         <!-- Bundled siblings (#427): all three are PUBLIC API and ship *inside* the one `Typhon` package
              (their DLLs are injected into lib/net10.0 by AddBundledSiblingAssembliesToPackage below).
              PrivateAssets="all" keeps them as compile references for the engine itself while excluding them from
@@ -109,6 +113,14 @@
              [TraceEvent] payload structs against the attribute surface declared in Profiler/public/TraceEventAttributes.cs,
              none of which a consumer can use. -->
         <None Include="..\Typhon.Generators.Consumer\bin\$(Configuration)\netstandard2.0\Typhon.Generators.Consumer.dll"
+              Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+        <!-- Consumer analyzers (#1584): the TYPHON0xx rules that apply to code written against the engine (layout, ownership/disposal, defensive
+             copies, spatial barrier), so a NuGet consumer gets them with no setup. NuGet hands analyzers/ to the compiler of every project with a DIRECT
+             PackageReference; they do not flow transitively (PrivateAssets defaults to contentfiles;analyzers;build). The .CodeFixes assembly needs
+             Workspaces, which only the IDE loads: a command-line build skips it and still runs every analyzer. -->
+        <None Include="..\Typhon.Analyzers.Consumer\bin\$(Configuration)\netstandard2.0\Typhon.Analyzers.Consumer.dll"
+              Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+        <None Include="..\Typhon.Analyzers.Consumer.CodeFixes\bin\$(Configuration)\netstandard2.0\Typhon.Analyzers.Consumer.CodeFixes.dll"
               Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     </ItemGroup>
 

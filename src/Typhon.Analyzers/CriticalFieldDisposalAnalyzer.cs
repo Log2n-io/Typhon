@@ -37,7 +37,7 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         isEnabledByDefault: true,
         description:
             "Types that contain fields of critical types ([MustDispose], or owning one by value) must have a Dispose() to release them: " +
-            "IDisposable, or for a ref struct the pattern method.");
+            "IDisposable, or for a ref struct the pattern method.", helpLinkUri: DiagnosticHelp.For(ContainerDiagnosticId));
 
     // === TYPHON006: Dispose() incomplete ===
 
@@ -51,7 +51,7 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description:
-            "Dispose() methods must dispose ALL fields of critical IDisposable types (ChunkAccessor, Transaction).");
+            "Dispose() methods must dispose ALL fields of critical IDisposable types (ChunkAccessor, Transaction).", helpLinkUri: DiagnosticHelp.For(CompletenessDiagnosticId));
 
     // === TYPHON007: Early return skips disposal ===
 
@@ -65,7 +65,7 @@ public class CriticalFieldDisposalAnalyzer : DiagnosticAnalyzer
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
         description:
-            "Early return statements in Dispose() methods must not skip disposal of critical fields.");
+            "Early return statements in Dispose() methods must not skip disposal of critical fields.", helpLinkUri: DiagnosticHelp.For(EarlyReturnDiagnosticId));
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         ImmutableArray.Create(ContainerRule, CompletenessRule, EarlyReturnRule);

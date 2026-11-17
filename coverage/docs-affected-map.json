@@ -188,7 +188,9 @@
     "doc/key-concepts/archetype.md",
     "doc/key-concepts/component.md",
     "doc/feature-set/Ecs/",
-    "doc/feature-set/Schema/"
+    "doc/feature-set/Schema/",
+    "doc/guide/diagnostics.md",
+    "doc/guide/02-modeling.md"
   ],
 
   "src/Typhon.Profiler/": [
@@ -215,5 +217,14 @@
     "doc/in-depth-overview/15-subscriptions.md",
     "doc/in-depth-overview/07-spatial.md",
     "doc/guide/07-subscriptions.md"
+  ],
+  "src/Typhon.Analyzers/": [
+    "doc/guide/diagnostics.md",
+    "doc/guide/using-with-ai-coding-agents.md",
+    "doc/llms-preamble.md",
+    "src/Typhon.Analyzers/README.md"
+  ],
+  "src/Typhon.Analyzers.Consumer/": [
+    "doc/guide/diagnostics.md"
   ]
 }

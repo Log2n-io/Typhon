@@ -90,7 +90,9 @@ Build()-time guarantees against silent races. All run in `AccessDagDeriver.Deriv
 
 ### AC-02: Same-phase R×W with plain Reads<T> is forbidden `[fatal][silent]`
   invariant ∀ phase P, ∀ component T:
-            ¬(∃ reader: Reads<T> ∈ reader.Access ∧ ∃ writer: Writes<T> ∈ writer.Access ∧ both in P)
+            ¬(∃ reader: T ∈ (reader.Reads ∪ reader.AdditionalReads) ∧ ∃ writer: Writes<T> ∈ writer.Access ∧ both in P)
+  note AdditionalReads<T> is a plain read here and in ED-05a/b (#1650); it used to be ignored by the deriver, so a declared
+       cross-entity read derived no edge and no error
   scope: AccessDagDeriver.DerivePhase
   on_violation: thrown at Build(); reader must upgrade to ReadsFresh<T> or ReadsSnapshot<T>
 
@@ -157,7 +159,7 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
 
 ### ED-05a: Cross-phase write→reader / write→writer (component) `[correctness]`
   ∀ (sys_a ∈ P_a, sys_b ∈ P_b, P_a < P_b), ∀ T:
-    T ∈ sys_a.Writes ∧ T ∈ (sys_b.Writes ∪ sys_b.Reads ∪ sys_b.ReadsFresh ∪ sys_b.ReadsSnapshot)
+    T ∈ sys_a.Writes ∧ T ∈ (sys_b.Writes ∪ sys_b.Reads ∪ sys_b.AdditionalReads ∪ sys_b.ReadsFresh ∪ sys_b.ReadsSnapshot)
     ⟹ derived.Add((sys_a, sys_b))
   semantic_meaning: sys_a's commit of T must happen-before any sys_b access that depends on T.
     For sys_b.ReadsSnapshot<T> with sys_a in an earlier phase: phase order forces "writer first",
@@ -167,7 +169,7 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
 
 ### ED-05b: Cross-phase reader→writer (component) `[correctness]`
   ∀ (sys_a ∈ P_a, sys_b ∈ P_b, P_a < P_b), ∀ T:
-    T ∈ (sys_a.Reads ∪ sys_a.ReadsFresh ∪ sys_a.ReadsSnapshot) ∧ T ∈ sys_b.Writes
+    T ∈ (sys_a.Reads ∪ sys_a.AdditionalReads ∪ sys_a.ReadsFresh ∪ sys_a.ReadsSnapshot) ∧ T ∈ sys_b.Writes
     ⟹ derived.Add((sys_a, sys_b))
   semantic_meaning: sys_a (earlier phase) reads T must complete before sys_b (later phase) writes
     T, so sys_a does not race against the in-progress write. Edge points "reader-first" exactly
@@ -254,14 +256,15 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
     discarded by the next Reset, silently
 
 ### EQ-04: One consumer per queue `[fatal][silent]`
-  invariant ∀ Q: at most one system declares `ReadsEvents(Q)` / `Consumes(Q)`
+  invariant ∀ Q: at most one system declares `ReadsEvents(Q)` / `Consumes(Q)`, the two forms counted together
   enforce rejected at schedule build in `RuntimeSchedule.Build`.
   rationale: two consumers get no derived edge between them (ED-03 only relates producers to consumers), so both flip
     ready on the producer's completion and race inside `Drain` — overlapping `CopyTo` of the same prefix delivers the
     same events twice, both store `Count = 0`, and `Consumed +=` loses an update, which corrupts the derived
     `Produced` on the telemetry wire. Only the PARALLEL-consumer case was enforced before; cardinality was not.
   scope: RuntimeSchedule.Build
-  verified: EventQueueValidationTests.TwoConsumers_AreRejectedAtBuild [VerifiesRule]
+  verified: EventQueueValidationTests.TwoConsumers_AreRejectedAtBuild,
+            EventQueueValidationTests.AConsumesAndAReadsEvents_AreTwoConsumers_RejectedAtBuild [VerifiesRule]
 
 ### EQ-05: `Capacity` is a construction constant `[correctness]`
   invariant `EventQueue`1.Capacity` returns the value passed to the constructor, never a fold over live allocations
@@ -283,23 +286,45 @@ Every same-phase access relationship that is *allowed* produces a derived edge.
   verified: EventQueueTests.Push_WhenAtCeiling_DropsAndCounts_NeverThrows [VerifiesRule],
     EventQueueTests.Drain_IntoAShortSpan_Throws [VerifiesRule]
 
-## Module: Debug-Runtime Write Validation
+## Module: Declared-Access Validation
 
-A runtime strict-mode check, opt-in in every build (see DV-01), that catches declaration drift.
+A runtime check of declaration drift (DV-01): an undeclared access derives no edge (ED-01..05), so it races silently, and
+this is the only thing that sees it.
 
-### DV-01: Set<T> requires declared Writes<T> or SideWrites<T> `[strict-mode][opt-in]`
-  pre  EntityRefMut.Set<T>() (WriteRef) called from inside dispatched system body
-  pre  the check is ENABLED — it is gated on CheckConfig.DeclaredAccessActive, a static readonly bool read from
-       configuration key `Typhon:Checks:DeclaredAccess`, which defaults to FALSE (including in Debug builds)
-  invariant when enabled: SystemAccessValidator.Current is set to the executing system's descriptor
-  invariant typeof(T) ∈ descriptor.Writes ∪ descriptor.SideWrites OR descriptor.HasAnyDeclaration == false
-  scope: SystemAccessValidator.AssertWrite, EntityRefMut.WriteRef
-  on_violation: throws InvalidAccessException with system name + undeclared type + declared set
-  release_behavior: available in Release; when the gate is off the JIT constant-folds the branch away — zero overhead
-  rationale: 🔴 CORRECTED 2026-07-27. This rule was tagged [debug-only] and claimed `[Conditional("DEBUG")] strips the
-    call site`. Neither is true: there is no Conditional attribute, the mechanism is runtime strict mode (#422), and it
-    is OFF by default — so the old text implied Debug test runs enforce this when they do not. Field name was `_current`;
-    the actual field is `Current`.
+### DV-01: Every access inside a system body must be declared `[strict-mode][debug-default]`
+  pre  inside the body of a dispatched CLASS-FORM system (SystemAccessValidator.EnterSystem set its descriptor). A lambda-form
+       registration (Dag.CallbackSystem / QuerySystem / PipelineSystem) has no declaration surface and no descriptor: not checked.
+       Code outside any system is not checked.
+  pre  the check is ENABLED: CheckConfig.DeclaredAccessActive, a static readonly bool from `Typhon:Checks:DeclaredAccess`,
+       independent of `Typhon:Checks:Enabled`. Unset, it defaults to TRUE when the entry assembly is a Debug build
+       (DebuggableAttribute.IsJITOptimizerDisabled) and FALSE otherwise; under `dotnet test` the entry assembly is the optimized
+       test host, so test runs need the key set
+  let  readable(S) = S.Reads ∪ S.ReadsFresh ∪ S.ReadsSnapshot ∪ S.AdditionalReads ∪ S.Writes
+       writable(S) = S.Writes
+       side(S)     = S.SideWrites, granted only through a transaction with IsSideTransaction (ctx.CreateSideTransaction)
+  invariant component read of T (EntityRef.Read / TryRead, ClusterRef.GetReadOnly / GetReadOnlySpan):
+            T ∈ readable(S) ∨ (T ∈ side(S) ∧ via side transaction)
+  invariant component write of T (EntityRefMut.Set / WriteRef, ClusterRef.Set / Get / GetSpan / WriteSpatial):
+            T ∈ writable(S) ∨ (T ∈ side(S) ∧ via side transaction)
+  invariant spawn of archetype A writes every component of A; destroy writes every component of A and of every archetype its
+            cascade-delete reaches (and their sub-archetypes): each must satisfy the write invariant
+  invariant ctx.Writer(Q) requires Q ∈ S.WritesEvents; Q.Drain requires Q ∈ S.ReadsEvents. The schedule-level Produces(S, Q) /
+            Consumes(S, Q) put Q in those sets too (RuntimeSchedule.Build, after the edge derivation: they derive no edge)
+  invariant a class-form system with no declaration at all is checked like any other (every access undeclared); an engine track's
+            systems are not checked (SystemDefinition.CheckedAccess = null: they reach storage through internals, and a throw there would
+            latch the terminal fence verdict in every Debug host)
+  note a system declaring T in both Writes and a read kind is no AC-02 pair with itself: Writes<T> grants the read
+  note not checked: untyped reads (EntityRef.ReadRaw, ReadText), query field predicates, ClusterRef.MarkDirty, deferred ctx.Commands
+       spawns/destroys (applied by the runtime at a serial point outside any system)
+  scope: SystemAccessValidator.AssertRead, SystemAccessValidator.AssertWrite, SystemAccessValidator.AssertStructural,
+         SystemAccessValidator.AssertEventWrite, SystemAccessValidator.AssertEventRead, RuntimeSchedule.Build
+  on_violation: throws InvalidAccessException naming the system, the undeclared type or queue, and the declared set
+  release_behavior: available in Release; when the gate is off the JIT folds every check away. On, a component check is a
+    thread-static load, an array load and a bit test over the descriptor's bitsets (AccessTypeIds, compiled at Build)
+  verified: DeclaredAccessTests [VerifiesRule]
+  rationale: rewritten 2026-11-12 (#1650). The rule used to cover EntityRefMut writes only, exempted systems that declared
+    nothing, accepted SideWrites through the system's own transaction (escaping AC-01), and required both
+    `Typhon:Checks:Enabled` and `DeclaredAccess`, so no default run ever executed it.
 
 ### DV-02: Per-thread descriptor isolation `[fatal]`
   invariant the [ThreadStatic] descriptor is set/cleared deterministically around each system invocation
@@ -363,6 +388,11 @@ A runtime strict-mode check, opt-in in every build (see DV-01), that catches dec
     together and only together. Engine-tagged systems are exempt from the scheduler's tick-abort guard, which is what
     makes the fence run on an aborted tick, so the replication track does NOT inherit the suppression: it opts out
     itself, in every stage's ShouldRun.
+  host_mode: a host that never calls WriteTickFence (doc/guide/embedding-without-the-runtime.md) violates this rule with nothing raised.
+    No detector, deliberately (#1658): the only observable is a checkpoint finding SV dirty bits with no fence since the write, and that is
+    ALSO the state of a compliant host whose tick is longer than the checkpoint interval (a write made, its fence not yet due). Any threshold
+    (N checkpoints, a wall-clock age) is timing, not context, so it would either miss the slow violator or refuse the slow compliant host.
+    The guide states the obligation and its phantom-data consequence instead.
   verified: SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes [VerifiesRule];
     ShutdownDrainTests.AShutdownDuringATick_LeavesThatTickFenced [VerifiesRule] (red when the drain does not wait)
 
@@ -388,14 +418,26 @@ descends from this one property.
 ### EW-02: What a thread outside the DAG may touch `[fatal]` `[silent]`
   invariant a thread that is not executing a system may, at any time and with no coordination:
               - READ anything (pinned: ExclusiveWindowTests.ForeignThreadREADINGInsideTheWindow_IsNotAViolation)
-              - read and write StorageMode.Versioned components of a NON-SPATIAL archetype, including spawning and
-                destroying such entities and writing their [Index]ed fields
+              - read and write StorageMode.Versioned components of an archetype that is neither spatial nor realm-keyed,
+                including their [Index]ed fields
+              - spawn, destroy, enable or disable entities of an archetype that is neither spatial nor realm-keyed, whatever
+                its storage modes (ADR-072 D1) — the commit passes the STRUCTURAL GATE below
             and must NOT, ever:
-              - write a StorageMode.SingleVersion or StorageMode.Transient component
-              - write any component of an archetype that has a [SpatialIndex] field
+              - write a StorageMode.SingleVersion or StorageMode.Transient component of an existing entity
+              - write any component of, spawn, destroy, enable or disable an entity of an archetype that has a [SpatialIndex]
+                field or a [RealmKey]: the fence moves its entities between clusters
               - call DatabaseEngine.WriteTickFence
-  never an off-DAG destroy (or spawn) of an entity of a non-spatial archetype holding an indexed SingleVersion or Transient
-        component: it removes (adds) a key in a tree the fence's index moves may be cutting (EW-01 (a), #1365)
+  invariant the structural gate: an off-DAG commit that claims, releases or re-enables cluster slots (a pending spawn, destroy or
+        enable/disable) never overlaps the fence window. Every archetype is cluster-backed (#666), and those commits write the
+        occupancy and enabled words, the active list, the free-cluster head and the drain list, which the fence writes plainly — its
+        eviction pass compacts ActiveClusterIds and stores the count with no lock, so an append racing it is lost and a live cluster
+        vanishes from every walk. Transaction.Commit of an unbound transaction with structural changes calls
+        ExclusiveWindow.EnterStructuralWriter (increment, then read the window depth; back off and wait while a fence runs) and
+        ExitStructuralWriter; ExclusiveWindow.Open increments the depth, then waits for the in-flight count to reach zero. Dekker on two
+        Interlocked RMWs, full fences on x64 and arm64: one side always sees the other. Gated with or without a runtime. A fence thread
+        is never gated (it would wait for itself). Cost: two Interlocked per off-DAG structural commit; a fence waits at most for the
+        commits already admitted, an admitted commit at most for one fence. Corrected 2026-11-12 (#1651): the review first refused every
+        off-DAG structural change, contradicting ADR-072 D1; the gate keeps D1 and removes the race
   rationale: Versioned is MVCC and the structures such a write touches are all concurrent by construction — the
             revision chain, the EntityMap under its bucket write latch, a B+Tree under OLC, the WAL ring under
             claim/publish, UowRegistry under Interlocked, NextEntityKey under Interlocked. This is the engine's
@@ -406,24 +448,41 @@ descends from this one property.
         fence is draining and Clear()ing those same bitmaps, and DirtyBitmap.Clear is documented "Not thread-safe —
         call only when no concurrent writers are active" (DirtyBitmap.cs:100). A lost bit means the index keeps the
         pre-mutation key, or the write never reaches the WAL. SILENT: no detector covers this.
-  never an off-tick write to ClusterAabbs, ClusterCellMap, the per-cell spatial index, the cluster occupancy word,
-        AddToActiveList, FreeClusterHead, EnabledBits, NoteClusterBorn or the ZoneMapArray widen. The fence writes
-        these plainly and ClusterRef.WriteSpatial CASes ClusterAabbs from a user thread under a growth stamp, so the
-        window is the only thing ordering them. SILENT: no detector covers these either (see #1139).
+  never an off-tick write to ClusterAabbs, ClusterCellMap, the per-cell spatial index or the ZoneMapArray widen outside the
+        structural gate. The fence writes these plainly and ClusterRef.WriteSpatial CASes ClusterAabbs from a user thread under a
+        growth stamp, so the window is the only thing ordering them. The cluster occupancy word, AddToActiveList, FreeClusterHead,
+        EnabledBits and NoteClusterBorn are written by a structural commit and are ordered against the fence by the gate.
   caveat a transaction's Dispose can drain the ECS cleanup queue and call EntityMap.Remove
         (DatabaseEngine.cs:1586), so even a READ-ONLY off-tick transaction mutates a guarded structure on the way
         out. Harmless under EW-01 as now scoped, but it is why "reads are always safe" is true of the reads and not
         of the transaction object.
   scope: DatabaseEngineExtensions.CreateQuickTransaction, Transaction.Commit, EntityRefMut.ShadowClusterIndexedFields,
          ClusterRef.WriteSpatial, DatabaseEngine.WriteTickFence
-  host_mode: unenforced for every clause. Transaction.AssertThreadAffinity exists but its body is
-        `if (CheckConfig.Enabled && ...)` and Enabled defaults FALSE with no runtime setter (CheckConfig.cs:62), so it
-        is dead code in Debug and Release alike unless TYPHON__CHECKS__ENABLED is set before start.
-  on_violation: silent data loss for the SV/Transient clause; silent structural corruption for the spatial clause.
-  verified: NOT COVERED — the Versioned-is-safe half is pinned by
-        ExclusiveWindowTests.ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine and by
-        ForeignThreadREADINGInsideTheWindow_IsNotAViolation. The two `never` clauses have no verifier and no detector;
-        that is what #1139 is for.
+  enforced: under TyphonRuntime, always on, by context rather than timing (#1651, implements #1139). Every transaction — and every
+        application PointInTimeAccessor worker — is stamped at creation: UNBOUND when the creating thread runs no system, BOUND to the
+        run when it does (DagThread: one run id per system run, the same for all its chunks, entered at every dispatch; serial points
+        OnFirstTick, OnShutdown and the in-tick drain get their own). The runtime's own transactions and workers are runtime-owned and
+        never checked (the system transactions, the deferred command drain's, the view refresh's, its parallel PointInTimeAccessors).
+        While a runtime ticks the engine (DatabaseEngine.RuntimeTicking: from just before the scheduler starts until Shutdown has drained
+        the tick in flight, or Dispose), each write entry of an unbound accessor — or of a bound one whose run has ended — calls
+        TickWriteGuard, which throws InvalidOperationException naming EW-02: EntityRefMut.Set / WriteRef and ClusterRef.Set / Get /
+        GetSpan / WriteSpatial for a non-Versioned component or a spatial / realm-keyed archetype; Enable, Disable, Spawn, SpawnBatch,
+        SpawnByArchetypeId, Destroy, DestroyBatch for a spatial / realm-keyed archetype. A transaction
+        opened before Start is unbound like any other and is checked once the runtime ticks. Public WriteTickFence throws while a
+        runtime ticks.
+  compliance: TyphonRuntime.WriteInTick / InTick — the supported way to make, from any thread, a write this rule refuses there. The
+        work is drained on the scheduler thread at tick start, before any system dispatches, each item in its own runtime-owned
+        transaction; bounded by RuntimeOptions.InTickQueueCapacity (TickQueueFullException beyond) and InTickMaxItemsPerTick.
+  host_mode: the write checks are unenforced (without a runtime nothing ticks); the structural gate still applies, so an unbound structural
+        commit on one thread and a host's WriteTickFence on another are kept apart. The rest of EW-01 is the host's to own.
+  on_violation: thrown at the write (enforced); silent data loss / structural corruption for a host that breaks it.
+  verified: OffTickWriteGuardTests [VerifiesRule] — one refused case per clause (SV, Transient, spatial Set and WriteSpatial, cluster
+        write, spatial spawn / SpawnByArchetypeId / Destroy / DestroyBatch / disable, a transaction opened before Start, WriteTickFence)
+        and the legal complements (Versioned non-spatial write; spawn, destroy, enable and disable of a Versioned and of a SingleVersion
+        archetype off-tick; a write after Shutdown through a transaction stamped while ticking; the same writes through WriteInTick, seen
+        by that tick's systems). The gate, both orders, staged: AnOffTickStructuralCommit_WaitsOutARunningFence and
+        AFence_WaitsForAnAdmittedStructuralCommit_AndAFenceThreadIsNeverGated (red with the fence-side wait removed). The Versioned-is-safe half is also pinned by
+        ExclusiveWindowTests.ForeignThreadMutatingATreeTheFenceIsNotRewriting_IsFine and ForeignThreadREADINGInsideTheWindow_IsNotAViolation.
 
 ### EW-01: The tick fence runs with no concurrent mutation of the structures it writes WITHOUT their protocol `[fatal]` `[silent]`
   invariant ∀ t ∈ fence_window: ¬∃ thread ≠ fence_thread mutating a structure the fence is, at t, writing
@@ -470,6 +529,9 @@ descends from this one property.
             so there was never a per-op guard to shed. The "roughly 15-20%" figure is an ESTIMATE, not a
             measurement: claude/design/Spatial/vdb-cell-grid-and-migration.md:474 says "Estimated ~15-20 %" and no
             benchmark, trx or issue backs it. Both claims were carried here as fact and were not.
+  enforced (#1651): a side transaction is bound to the system run that created it (Transaction.SideRun = DagThread.CurrentRun); once
+        that run has returned, its writes are judged as off-tick (EW-02) and its Commit throws InvalidOperationException naming EW-01.
+        verified: OffTickWriteGuardTests.ASideTransactionCommittedInsideItsSystem_Passes_AndOneCommittedOnALaterRun_IsRefused [VerifiesRule]
   never a side transaction that writes a structure under (a), (b) or (c) is committed while the window is open.
         TickContext.CreateSideTransaction returns an ORDINARY transaction (TyphonRuntime.CreateSideTransactionInternal
         -> DatabaseEngine.CreateQuickTransaction), so it CAN write an indexed field and therefore mutate a B+Tree, and
@@ -1127,7 +1189,10 @@ what earlier sessions completed.
             TickNumber — a second runtime on one session, or one started after a host drove the fence, continues the world ticks already issued
   invariant the world clock (DatabaseEngine.WorldClock, NextWorldTick) = one past the last completed world tick, raised by DatabaseEngine.NoteTickCompleted
             at every tick end (the runtime's OnTickEndInternal with CurrentWorldTick, both fence arms; an aborted tick too, its number is spent) and by
-            WriteTickFence(n) with WorldTickBase + n for a host driving the fence itself — whose n must therefore be the 0-based session tick. Never lowered
+            a host's WriteTickFence(n), each of which completes the world tick the clock stands at (#1658: the engine counts, so a host numbering
+            from a persisted value cannot inflate the clock, and host fences after a runtime ran continue from where it left the clock). n itself
+            must be non-negative and strictly increase within the session (gaps accepted; anything else throws); it labels the tick's WAL records
+            and paces cluster repair. Never lowered
   invariant every WAL append writes the clock as it stands on its records (DurabilityLog: the TxCommit trailer after the commit stamp, every fence record's
             own trailer, bulk-load records included — WAL format 3; a segment of another format fails the open, WalSegmentHeader.ThrowIfAnotherFormat). A
             commit made during tick T carries T; a fence, appended once its tick has ended, carries T + 1. The clock is read after the claim, so it is
@@ -1137,15 +1202,15 @@ what earlier sessions completed.
             fence, so a claim past the barrier (unpublished, or behind the CK-13 floor) persists nothing that cycle. So never a clock no durable record
             carried, and never below a crash-open's recovered clock, which lives in the WAL that open's seal recycles. The clean close persists the exact
             clock (idle ticks included); both only raise the persisted value. The runtime raises the clock from its scheduler and calls the fence through
-            WriteTickFenceNoClock; only a host's WriteTickFence raises WorldTickBase + n
+            WriteTickFenceNoClock; a host's WriteTickFence raises it by one per fence
   invariant hence after a clean close the next session's WorldTickBase is exactly one past the last tick completed; after a crash it is the clock of the
             last durable write — the tick it was written in, which the reopened session repeats — so every deadline the crash kept is judged against the
             clock that stamped it, never late and never early. What a crash loses is ticks that wrote nothing durable, in which nothing was stamped. A
             restore resumes at the clock of the last write it restores (the image's persisted value, or its WAL's replay)
   note TickNumber keeps its meaning: per session, from 0. Engine consumers that cast it to 32 bits or treat 0 as "none" (subscriptions' claim stamps,
        telemetry) keep reading it; WorldTick is for what is persisted
-  note "never lowered" has no operator path back: a clock a host inflated (a WriteTickFence numbering from a non-zero start) stays inflated. Pre-alpha,
-       accepted
+  note "never lowered" has no operator path back. Since #1658 a host cannot inflate the clock through WriteTickFence (it counts fences, not n);
+       a clock inflated before that stays inflated. Pre-alpha, accepted
   scope: DatabaseEngine.WorldTickBase, DatabaseEngine.NextWorldTick, DatabaseEngine.NoteTickCompleted, DatabaseEngine.WriteTickFence, DatabaseEngine.WorldClock,
          WorldClock.Raise, DurabilityLog.MaxAppendedWorldTick, DurabilityLog.Clock, RecordCodec.CommitTrailerSize, RecordCodec.FenceTrailerSize,
          CheckpointManager.WorldTickToPersist, DatabaseEngine.WriteTickFenceNoClock, WalSegmentHeader.ThrowIfAnotherFormat,

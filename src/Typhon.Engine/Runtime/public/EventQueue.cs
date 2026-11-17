@@ -295,6 +295,7 @@ public sealed class EventQueue<T> : EventQueueBase
     /// <remarks>Single-consumer, and events arrive grouped by worker slot — see the ordering note on <see cref="EventQueue{T}"/>.</remarks>
     public int Drain(Span<T> output)
     {
+        SystemAccessValidator.AssertEventRead(this);   // DV-01 (#1650): an undeclared consumer is not ordered after the producers
         AcquireSegments();
 
         var pending = Count;

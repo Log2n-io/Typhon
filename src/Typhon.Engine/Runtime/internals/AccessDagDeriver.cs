@@ -172,8 +172,8 @@ internal static class AccessDagDeriver
     ///
     /// Conflict triggers (any one is sufficient):
     /// <list type="bullet">
-    ///   <item><b>ED-05a</b>: a.Writes ∩ (b.Writes ∪ b.Reads ∪ b.ReadsFresh ∪ b.ReadsSnapshot) ≠ ∅</item>
-    ///   <item><b>ED-05b</b>: (a.Reads ∪ a.ReadsFresh ∪ a.ReadsSnapshot) ∩ b.Writes ≠ ∅</item>
+    ///   <item><b>ED-05a</b>: a.Writes ∩ (b.Writes ∪ b.Reads ∪ b.AdditionalReads ∪ b.ReadsFresh ∪ b.ReadsSnapshot) ≠ ∅</item>
+    ///   <item><b>ED-05b</b>: (a.Reads ∪ a.AdditionalReads ∪ a.ReadsFresh ∪ a.ReadsSnapshot) ∩ b.Writes ≠ ∅</item>
     ///   <item><b>ED-05c</b>: a.WritesEvents ∩ b.ReadsEvents ≠ ∅</item>
     ///   <item><b>ED-05d</b>: any resource access pair with at least one writer</item>
     /// </list>
@@ -189,7 +189,7 @@ internal static class AccessDagDeriver
         {
             foreach (var t in a.Writes)
             {
-                if (b.Writes.Contains(t) || b.Reads.Contains(t) ||
+                if (b.Writes.Contains(t) || b.Reads.Contains(t) || b.AdditionalReads.Contains(t) ||
                     b.ReadsFresh.Contains(t) || b.ReadsSnapshot.Contains(t))
                 {
                     return true;
@@ -202,7 +202,7 @@ internal static class AccessDagDeriver
         {
             foreach (var t in b.Writes)
             {
-                if (a.Reads.Contains(t) || a.ReadsFresh.Contains(t) || a.ReadsSnapshot.Contains(t))
+                if (a.Reads.Contains(t) || a.AdditionalReads.Contains(t) || a.ReadsFresh.Contains(t) || a.ReadsSnapshot.Contains(t))
                 {
                     return true;
                 }
@@ -294,6 +294,12 @@ internal static class AccessDagDeriver
                 Bucket(readsPlain, t, sys);
             }
 
+            // AdditionalReads<T> is a plain read for derivation (#1650): same AC-02 error against a same-phase writer, same cross-phase edges.
+            foreach (var t in access.AdditionalReads)
+            {
+                Bucket(readsPlain, t, sys);
+            }
+
             foreach (var t in access.ReadsFresh)
             {
                 Bucket(readsFresh, t, sys);
@@ -372,11 +378,35 @@ internal static class AccessDagDeriver
                 continue;
             }
 
-            var writerName = writerList[0].Name;
-            var reader = readers[0];
+            // A system that both reads and writes T conflicts with no one through that pair: Writes<T> already grants it the read (DV-01).
+            SystemInfo? conflictReader = null;
+            string writerName = null;
+            foreach (var r in readers)
+            {
+                foreach (var w in writerList)
+                {
+                    if (w.Name != r.Name)
+                    {
+                        conflictReader = r;
+                        writerName = w.Name;
+                        break;
+                    }
+                }
+                if (conflictReader.HasValue)
+                {
+                    break;
+                }
+            }
+            if (!conflictReader.HasValue)
+            {
+                continue;
+            }
+            var reader = conflictReader.Value;
+            var kind = reader.Access.Reads.Contains(compType) ? "Reads" : "AdditionalReads";
 
             throw new InvalidOperationException(
-                $"System '{reader.Name}' declares Reads<{compType.Name}> in phase index {phaseIdx}, but system '{writerName}' writes the same component in this phase. " +
+                $"System '{reader.Name}' declares {kind}<{compType.Name}> in phase index {phaseIdx}, but system '{writerName}' writes the same component in " +
+                "this phase. " +
                 $"Upgrade the read to `ReadsFresh<{compType.Name}>()` (run after writers, see this-tick value) or `ReadsSnapshot<{compType.Name}>()` (run before writers, see previous-tick value).");
         }
 

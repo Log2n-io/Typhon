@@ -6,6 +6,7 @@ using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Typhon.Analyzers;
 
 namespace Typhon.Generators;
 
@@ -52,12 +53,12 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
     internal static readonly DiagnosticDescriptor NotPartial = new(
         "TPH1101", "A replicated type must be partial",
         "'{0}' carries [{1}] but is not partial, and the generator implements {2} on it: add 'partial'",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1101"));
 
     internal static readonly DiagnosticDescriptor TwoPositions = new(
         "TPH1102", "More than one position",
         "Archetype '{0}' marks more than one Comp<T> field [Motion] or [Position]; an entity has one position",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1102"));
 
     // TPH1103 is retired: it refused a replicated field without [Field], but every instance field of a supported type is stored — [Field] only
     // renames it or pins its id — so it fired on ordinary components.
@@ -65,33 +66,33 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
     internal static readonly DiagnosticDescriptor NoDefaultCodec = new(
         "TPH1104", "No default codec",
         "'{0}.{1}' is a {2}, which has no default codec (13 § 2.1: only a type with an exact wire form has one): name one, e.g. [{3}(CodecKind.Quant, Min = …, Max = …, Bits = 24)].",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1104"));
 
     internal static readonly DiagnosticDescriptor BadFraction = new(
         "TPH1105", "Invalid [Fraction]",
         "[Fraction] on '{0}.{1}': {2}",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1105"));
 
     internal static readonly DiagnosticDescriptor Misplaced = new(
         "TPH1106", "Misplaced replication attribute",
         "[{0}] on '{1}' does nothing: {2}",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1106"));
 
     internal static readonly DiagnosticDescriptor KindOnWrongType = new(
         "TPH1107", "A codec the field cannot carry",
         "'{0}.{1}' is a {2}, which CodecKind.{3} cannot carry",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1107"));
 
     internal static readonly DiagnosticDescriptor PublicAndPrivate = new(
         "TPH1108", "Both public and owner-only",
         "'{0}.{1}' is both [Replicate] and [Owner]: [Replicate] sends it to every client, so [Owner] hides nothing. Drop one — a public "
         + "[Fraction] beside a private [Owner] is the way to show a coarse value to all and the exact one to its owner.",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1108"));
 
     internal static readonly DiagnosticDescriptor Unsupported = new(
         "TPH1109", "Unsupported replicated type",
         "'{0}' {1}",
-        Category, DiagnosticSeverity.Error, true);
+        Category, DiagnosticSeverity.Error, true, helpLinkUri: DiagnosticHelp.For("TPH1109"));
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {

@@ -26,3 +26,5 @@
   href: isolation-durability-cheatsheet.md
 - name: Using Typhon with an AI coding agent
   href: using-with-ai-coding-agents.md
+- name: Build diagnostics
+  href: diagnostics.md

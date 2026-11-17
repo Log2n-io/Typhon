@@ -53,6 +53,18 @@ internal sealed class ExclusiveWindow
     /// </remarks>
     private int _openings;
 
+    /// <summary>
+    /// Structural commits in flight from threads outside the DAG (<see cref="EnterStructuralWriter"/>, EW-02): the gate that keeps an off-tick spawn,
+    /// destroy or enable/disable out of the fence window.
+    /// </summary>
+    /// <remarks>
+    /// <b>Dekker, both sides on a full fence.</b> A writer increments this and then reads <see cref="_depth"/>; <see cref="Open"/> increments the depth and
+    /// then reads this. Each increment is an <see cref="Interlocked"/> RMW, a full fence on x64 and arm64, so at least one side sees the other: either the
+    /// writer finds the window open and backs off, or the fence finds the writer and waits for it. The fence writes the active list, the free-cluster head,
+    /// the occupancy and enabled words and the drain list plainly; this is what keeps a concurrent claim or release away from those stores.
+    /// </remarks>
+    private int _structuralWriters;
+
     private int _violations;
     private string _firstViolationSite;
     private int _firstViolationThreadId;
@@ -122,8 +134,59 @@ internal sealed class ExclusiveWindow
         Interlocked.Increment(ref _openings);
         OpeningProbeForTest?.Invoke();
         Interlocked.Increment(ref _depth);
+        if (Volatile.Read(ref _structuralWriters) != 0)
+        {
+            WaitForStructuralWriters();
+        }
         FenceThreadDepth++;
         return new Scope(this, true);
+    }
+
+    /// <summary>
+    /// Admits a structural commit from a thread outside the DAG (EW-02): waits while a fence runs on this engine, then holds the fence out until
+    /// <see cref="ExitStructuralWriter"/>. Two full fences per off-tick spawn / destroy / enable commit; a commit made inside the DAG never comes here.
+    /// </summary>
+    /// <returns>
+    /// <see langword="false"/> when the caller is part of a running fence (its thread or a worker): it is the fence, waiting for itself would never end, and
+    /// nothing is admitted — the caller must not call <see cref="ExitStructuralWriter"/>.
+    /// </returns>
+    internal bool EnterStructuralWriter()
+    {
+        if (FenceThreadDepth > 0)
+        {
+            return false;
+        }
+
+        while (true)
+        {
+            Interlocked.Increment(ref _structuralWriters);
+            if (Volatile.Read(ref _depth) == 0)
+            {
+                return true;
+            }
+
+            // A fence is running: back off so it cannot wait on us, and wait it out. Yields, never Sleep(1): a fence lasts about a millisecond.
+            Interlocked.Decrement(ref _structuralWriters);
+            var spinner = new SpinWait();
+            while (Volatile.Read(ref _depth) != 0)
+            {
+                spinner.SpinOnce(-1);
+            }
+        }
+    }
+
+    /// <summary>Releases what <see cref="EnterStructuralWriter"/> admitted.</summary>
+    internal void ExitStructuralWriter() => Interlocked.Decrement(ref _structuralWriters);
+
+    /// <summary>The fence's half of the gate: the window is open, so no new writer is admitted; wait for the ones in flight.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WaitForStructuralWriters()
+    {
+        var spinner = new SpinWait();
+        while (Volatile.Read(ref _structuralWriters) != 0)
+        {
+            spinner.SpinOnce(-1);
+        }
     }
 
     /// <summary>Test seam: runs inside <see cref="Open"/> between its two increments, where a reader sees the count bumped and the depth still 0. Null in production.</summary>

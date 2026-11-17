@@ -40,13 +40,27 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
   tick's writers), `ReadsSnapshot<T>()` (before them; Versioned only), `SideWrites<T>()` (side transactions). The scheduler
   orders and parallelizes from these declarations alone — it never inspects the body, so an **undeclared read is a silent race**.
   `Build()` throws on two same-phase writers of a component (add `.After("Other")`) and on a plain `Reads<T>()` beside a
-  same-phase writer. In development, set `Typhon:Checks:Enabled` and `Typhon:Checks:DeclaredAccess` to `true` (`typhon.telemetry.json` or
-  environment) to assert undeclared *writes* at runtime.
-- **SingleVersion, Transient and spatial-archetype writes belong inside a system.** From any other thread only Versioned
-  components of a non-spatial archetype may be written; anything else races the tick fence and corrupts silently.
+  same-phase writer. In a **Debug build** every read, write, spawn, destroy, `ctx.Writer(q)` and `q.Drain` inside a class-form system throws
+  `InvalidAccessException` unless declared (`Typhon:Checks:DeclaredAccess`; set it `true` in a test project's `typhon.telemetry.json`, since
+  under `dotnet test` the entry assembly is the optimized test host). Fix the declaration, never catch the exception. A spawn or destroy
+  needs `Writes<T>()` for every component of the archetype; events need `WritesEvents(q)` / `ReadsEvents(q)`.
+- **SingleVersion, Transient and spatial-archetype writes belong inside a system.** From any other thread (an HTTP handler, a
+  test) while the runtime ticks, only Versioned components of an archetype that is neither spatial nor realm-keyed may be written, and
+  only such an archetype's entities spawned, destroyed, enabled or disabled; anything else throws `InvalidOperationException` (EW-02). Hand such a write to the tick: `await runtime.WriteInTick((tx, tick) => …,
+  DurabilityMode.GroupCommit)` (or `InTick` to return a value) — it runs at the next tick start, before that tick's systems.
 - **Replication is explicit**: with the default `PushDetection.Explicit`, a system that changes a replicated entity must call
   `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`); otherwise no client is ever sent the change.
-- **Never write an `[Index]`ed SingleVersion/Transient component through a span** (`ClusterRef.GetSpan`/`Get`) — it throws;
-  write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
+- **Never write through a span** (`ClusterRef.GetSpan`/`Get`) an `[Index]`ed SingleVersion/Transient component, a Versioned one, one with a
+  `String1024` field or the realm key's — it throws; write with `cluster.Set(Foo.X, slot, value)` / `entity.Set(Foo.X, value)`, a text with
+  `entity.SetText(...)`.
+- **A transaction lives on one thread**: never `await` inside its `using` scope — Commit, Rollback and Dispose throw on another thread
+  (EP-04, analyzer TYPHON016), and any use after `Dispose` throws. A `[Index(Sparse = true)]` field never indexes the value `0` ("no data").
+
+**Build diagnostics are real defects — fix, don't suppress.** The `Typhon` package runs analyzers in your build (in the project that
+references the package directly): TYPHON004 = a `Transaction`/enumerator never disposed → `using var`; TYPHON001/003 = a no-copy type passed by value
+or copied → `ref`; TYPHON011 = `bool`/`char` in a component → `byte`/`ushort`; TYPHON010 = avoidable padding → `[StructLayout(LayoutKind.Sequential,
+Pack = 4)]`; TYPHON012 = `Set` on an `in`/readonly `EntityRefMut` → take it by `ref`; TYPHON009 = spatial component written through `GetSpan` →
+`WriteSpatial`; TYPHON013 = component over 112 bytes passed to `Spawn` → split it. All of them, with fixes:
+https://doc.typhondb.io/latest/guides/diagnostics.html.
 
 The whole conceptual core is also available as one file at https://doc.typhondb.io/llms-full.txt.

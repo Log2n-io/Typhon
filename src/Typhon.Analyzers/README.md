@@ -19,9 +19,26 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON012 | Error | Non-readonly member of `EntityRef` / `EntityRefMut` called on a read-only receiver — a hidden ~200-byte defensive copy |
 | TYPHON014 | Error | A type inferred to own a must-dispose resource, or to hold a no-copy struct, is not marked `[MustDispose]` / `[NoCopy]` |
 | TYPHON015 | Warning | A command sent by name (`TyphonClient.SendCommandAsync("MoveCmd", values)`) while its `[ReplicatedMessage]` struct is in reach — send it typed with `Enqueue(in cmd)` (#1614) |
+| TYPHON016 | Warning | An `await` between a `Transaction`'s creation and its disposal: the continuation may resume on another thread, where the transaction's `Commit`, `Rollback` and `Dispose` throw (EP-04, #1653) |
 
-TYPHON015 binds on `Typhon.Client.TyphonClient`, so it does nothing in the engine; a client or bot project gets it by referencing this project as an
-analyzer (`OutputItemType="Analyzer" ReferenceOutputAssembly="false"`). It fires only when the name — a literal or a `nameof` — is that of a
+## What ships to NuGet consumers (#1584)
+
+The engine's own build runs every rule above. The packages ship a subset, linked from these same source files (no copies):
+
+| Assembly | Package | Rules |
+|---|---|---|
+| `Typhon.Analyzers.Consumer` | `Typhon` (`analyzers/dotnet/cs`) | TYPHON001, 003, 004, 005, 006, 007, 009, 010, 011, 012, 013, 016 |
+| `Typhon.Analyzers.Consumer.CodeFixes` | `Typhon` | the TYPHON001 and TYPHON004 code fixes (IDE only: needs Workspaces) |
+| `Typhon.Generators.Protocol` | `Typhon.Protocol` | TYPHON015, plus the replication generator's TPH11xx |
+
+TYPHON008 (the engine's public/Internals split) and TYPHON014 (demands the engine-internal `[MustDispose]`/`[NoCopy]` markers) stay engine-only.
+Shipped IDs are public contract: each shipping assembly carries `AnalyzerReleases.Shipped.md` / `Unshipped.md`, enforced by RS2008, and every
+descriptor links to its entry on the public [Build diagnostics](../../doc/guide/diagnostics.md) page (`DiagnosticHelp.For`). Adding a rule to a
+shipping assembly means: link the file in its csproj, add the release-tracking row, document the ID on that page, and add a violation to
+`scripts/analyzer-package-smoke-test.sh`.
+
+TYPHON015 binds on `Typhon.Client.TyphonClient`, so it does nothing in the engine; a client or bot project gets it from the `Typhon.Protocol` package, or
+by referencing this project as an analyzer (`OutputItemType="Analyzer" ReferenceOutputAssembly="false"`). It fires only when the name — a literal or a `nameof` — is that of a
 `[ReplicatedMessage]` struct in the compilation or an assembly it references, so built-ins (`ClientRegion`) and commands with no contracts struct on
 the client's side stay on the name-keyed path silently.
 

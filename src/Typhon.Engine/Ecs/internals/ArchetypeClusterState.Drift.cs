@@ -448,7 +448,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var shrink = ClusterShrinkPendingAxes;
         if (shrink != null && (uint)chunkId < (uint)shrink.Length)
         {
-            // Every axis bit — the layout ClusterRef.MaybeGrowAndFlagShrink documents. Six since #914; see AllShrinkAxes.
+            // Every axis bit — the layout ArchetypeClusterState.MaybeGrowAndFlagShrink documents. Six since #914; see AllShrinkAxes.
             InterlockedOrShrinkAxes(shrink, chunkId, AllShrinkAxes);
         }
 

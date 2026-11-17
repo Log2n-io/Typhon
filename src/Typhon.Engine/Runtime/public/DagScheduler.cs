@@ -176,7 +176,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
     /// <summary>
     /// True once a fatal system exception has aborted a tick under <see cref="SystemExceptionPolicy.AbortTickAndStop"/>.
-    /// Terminal — never cleared. No further ticks execute.
+    /// Terminal — never cleared. No further ticks execute, and the timer thread idles instead of waiting for them.
     /// </summary>
     public bool IsTickAborted => Volatile.Read(ref _tickAborted.Value) != 0;
 
@@ -592,7 +592,10 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <inheritdoc />
     protected override long GetNextTick()
     {
-        if (Volatile.Read(ref _workerShutdown) != 0 || Volatile.Read(ref _ticksStopped) != 0)
+        // A terminal abort or fence failure parks the timer like a stop does: the loop's idle sleep, not its sleep-yield-spin wait for ticks that would
+        // only return at ExecuteEnteredTick's gate. A host that never reacts to OnTickAborted — a test that threw before disposing the runtime — kept a
+        // thread yield-spinning per dead runtime, which on an oversubscribed box is a core each.
+        if (Volatile.Read(ref _workerShutdown) != 0 || Volatile.Read(ref _ticksStopped) != 0 || IsTickAborted || IsFenceFailed)
         {
             return long.MaxValue;
         }
@@ -678,8 +681,8 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     private void ExecuteEnteredTick(long actualTick)
     {
         // Terminal tick-abort (#567). AbortTickAndStop leaves the simulation logically incomplete — some systems ran, some never did — so the runtime must
-        // not silently resume on top of it. The host is expected to have stopped us from its OnTickAborted handler; this is the backstop for the ticks that
-        // fire before it gets there.
+        // not silently resume on top of it. The host is expected to have stopped us from its OnTickAborted handler; GetNextTick stops scheduling ticks once
+        // the latch is set, and this is the backstop for a tick already past that gate.
         if (IsTickAborted)
         {
             return;
@@ -834,6 +837,12 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     members.Add(sysIdx);
                     _systemTrackIndex[sysIdx] = t;
                     _systemIsEngine[sysIdx] = track.IsEngine;
+                    if (track.IsEngine)
+                    {
+                        // DV-01 (#1650) checks application systems: an engine track's systems reach storage through internals, and a throw there latches
+                        // the terminal fence verdict in every Debug host.
+                        systems[sysIdx].CheckedAccess = null;
+                    }
                     if (systems[sysIdx].PredecessorCount == 0)
                     {
                         roots.Add(sysIdx);
@@ -1513,7 +1522,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                     for (var chunk = 0; chunk < totalChunks; chunk++)
                     {
                         var chunkStartTs = Stopwatch.GetTimestamp();
-                        SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                        SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
                         CorrelationContext.EnterSystem(sysIdx);
                         try
                         {
@@ -1551,7 +1560,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
             {
                 for (var chunk = 0; chunk < sys.TotalChunks; chunk++)
                 {
-                    SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                    SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
                     CorrelationContext.EnterSystem(sysIdx);
                     try
                     {
@@ -1585,7 +1594,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
                 else
                 {
                 ctx.DebugValidateWorkerId(WorkerSlotCount, sys.Name);
-                SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+                SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
                 CorrelationContext.EnterSystem(sysIdx);
                 try
                 {
@@ -2010,7 +2019,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         var success = true;
         ctx.DebugValidateWorkerId(WorkerSlotCount, Systems[sysIdx].Name);
-        SystemAccessValidator.EnterSystem(Systems[sysIdx].Access, Systems[sysIdx].Name);
+        SystemAccessValidator.EnterSystem(Systems[sysIdx].CheckedAccess, Systems[sysIdx].Name, DagThread.SystemRun(CurrentTickNumber, sysIdx));
         CorrelationContext.EnterSystem(sysIdx);
         try
         {
@@ -2093,7 +2102,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             var workStart = Stopwatch.GetTimestamp();
             InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
-            SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+            SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
             CorrelationContext.EnterSystem(sysIdx);
             try
             {
@@ -2247,7 +2256,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
             var workStart = Stopwatch.GetTimestamp();
             InspectorChunkStart(sysIdx, chunk, workStart, totalChunks);
-            SystemAccessValidator.EnterSystem(sys.Access, sys.Name);
+            SystemAccessValidator.EnterSystem(sys.CheckedAccess, sys.Name, DagThread.SystemRun(CurrentTickNumber, sys.Index));
             CorrelationContext.EnterSystem(sysIdx);
             try
             {
@@ -2675,7 +2684,7 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
 
         var success = true;
         ctx.DebugValidateWorkerId(WorkerSlotCount, Systems[sysIdx].Name);
-        SystemAccessValidator.EnterSystem(Systems[sysIdx].Access, Systems[sysIdx].Name);
+        SystemAccessValidator.EnterSystem(Systems[sysIdx].CheckedAccess, Systems[sysIdx].Name, DagThread.SystemRun(CurrentTickNumber, sysIdx));
         CorrelationContext.EnterSystem(sysIdx);
         try
         {

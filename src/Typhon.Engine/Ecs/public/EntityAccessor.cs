@@ -52,6 +52,25 @@ public partial class EntityAccessor : IDisposable
     private protected bool _isDisposed;
     private protected DatabaseEngine _dbe;
 
+    /// <summary>The engine this accessor reads and writes.</summary>
+    internal DatabaseEngine Engine => _dbe;
+
+    /// <summary>The off-tick write guard stamped at creation (<see cref="TickWriteGuard"/>, #1651): None, Unbound or Bound.</summary>
+    internal byte WriteGuard;
+
+    /// <summary>For a bound accessor, the run that created it (<see cref="DagThread.CurrentRun"/>).</summary>
+    internal long SideRun;
+
+    /// <summary>
+    /// The off-tick guard must look at this write: the accessor is stamped and a runtime ticks the engine. Inline: one byte and one volatile int on the
+    /// write path; everything else is out of line in <see cref="TickWriteGuard"/>.
+    /// </summary>
+    internal bool GuardActive
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => WriteGuard != TickWriteGuard.None && _dbe.RuntimeTicking;
+    }
+
     /// <summary>The engine's commit cards, through which a revision walk resolves flagged entries (VIS-01).</summary>
     internal CommitCardTable CommitCards => _dbe.CommitCards;
     internal DatabaseEngine DBE => _dbe;
@@ -256,6 +275,13 @@ public partial class EntityAccessor : IDisposable
     /// <summary>Whether a lease is open on this accessor — a reset or a dispose then would race the thread reading through it.</summary>
     internal bool IsLeased => _leaseDepth > 0;
 
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowAccessorDisposed() =>
+        throw new ObjectDisposedException(GetType().Name,
+            $"A {GetType().Name} was used after its Dispose (TX-01): a disposed transaction goes back to the engine's pool and may already be another "
+          + "caller's. Keep its use inside its 'using' scope.");
+
     /// <summary>Whether a lease is open on this accessor on another thread than the caller's: a flush then would race the thread reading through it.</summary>
     internal bool IsLeasedByAnotherThread => _leaseDepth > 0 && _owningThreadId != Environment.CurrentManagedThreadId;
 
@@ -274,6 +300,12 @@ public partial class EntityAccessor : IDisposable
             ThrowHelper.ThrowInvalidOp(
                 "EntityAccessor thread affinity violation: current thread differs from the creating thread. " +
                 "Each EntityAccessor instance must be used only from its creating thread.");
+        }
+
+        // TX-01 (#1653), every build: an accessor used after its Dispose — a transaction is pooled then, and may be another caller's next.
+        if (_isDisposed)
+        {
+            ThrowAccessorDisposed();
         }
 
         ResumeIfSuspended();

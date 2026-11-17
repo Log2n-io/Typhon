@@ -179,6 +179,44 @@ class StrictTickAbortTests
     }
 
     [Test]
+    public void AbortTickAndStop_TimerStopsWaitingForTicks()
+    {
+        // A runtime whose host never reacts to OnTickAborted must not keep its timer thread in the sleep-yield-spin wait for ticks that cannot run: it idles,
+        // and its tick count freezes at the aborting tick.
+        var dag = RuntimeSchedule.Create(Strict(1)).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Thrower", _ => throw new InvalidOperationException("boom"));
+
+        using var scheduler = dag.Build(_registry.Runtime);
+        scheduler.Start();
+        Assert.That(SpinWait.SpinUntil(() => scheduler.IsTickAborted, TimeSpan.FromSeconds(2)), Is.True);
+
+        var ticksAtAbort = scheduler.TickCount;
+        // BaseTickRate 1000 — a timer still waiting for ticks fires ~100 in this window.
+        SpinWait.SpinUntil(() => scheduler.TickCount > ticksAtAbort, TimeSpan.FromMilliseconds(100));
+
+        Assert.That(scheduler.TickCount, Is.EqualTo(ticksAtAbort), "the timer fires no tick after the abort");
+        Assert.That(scheduler.IsRunning, Is.True, "the timer thread idles until the host stops or disposes the runtime");
+    }
+
+    [Test]
+    public void FenceFailure_TimerStopsWaitingForTicks()
+    {
+        var schedule = RuntimeSchedule.Create(Strict(1));
+        schedule.EnginePreTrack.DeclareDag("Fence").CallbackSystem("FenceThrower", _ => throw new InvalidOperationException("fence boom"));
+        var dag = schedule.PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Noop", _ => { });
+
+        using var scheduler = dag.Build(_registry.Runtime);
+        scheduler.Start();
+        Assert.That(SpinWait.SpinUntil(() => scheduler.IsFenceFailed, TimeSpan.FromSeconds(2)), Is.True);
+
+        var ticksAtFailure = scheduler.TickCount;
+        SpinWait.SpinUntil(() => scheduler.TickCount > ticksAtFailure, TimeSpan.FromMilliseconds(100));
+
+        Assert.That(scheduler.TickCount, Is.EqualTo(ticksAtFailure), "the timer fires no tick after a fence failure");
+    }
+
+    [Test]
     public void AbortTickAndStop_ConcurrentThrows_RecordsExactlyOneFirstFailure()
     {
         // AC11 — several workers throwing in the same tick must elect exactly one first failure.

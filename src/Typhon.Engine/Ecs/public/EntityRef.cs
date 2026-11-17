@@ -281,6 +281,7 @@ public unsafe ref struct EntityRef
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly T Read<T>(Comp<T> comp) where T : unmanaged
     {
+        SystemAccessValidator.AssertRead<T>(_accessor);
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
         // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
@@ -339,6 +340,7 @@ public unsafe ref struct EntityRef
     /// <summary>Read a component by type: a copy, as <see cref="Read{T}(Comp{T})"/>. Resolves the slot via archetype metadata.</summary>
     public readonly T Read<T>() where T : unmanaged
     {
+        SystemAccessValidator.AssertRead<T>(_accessor);
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (CheckConfig.Enabled && typeId < 0)
         {
@@ -379,6 +381,7 @@ public unsafe ref struct EntityRef
     /// </summary>
     public readonly bool TryRead<T>(out T value) where T : unmanaged
     {
+        SystemAccessValidator.AssertRead<T>(_accessor);
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (typeId < 0 || !_archetype.TryGetSlot(typeId, out byte slot) || (_enabledBits & (1 << slot)) == 0)
         {
@@ -396,6 +399,7 @@ public unsafe ref struct EntityRef
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool TryRead<T>(Comp<T> comp, out T value) where T : unmanaged
     {
+        SystemAccessValidator.AssertRead<T>(_accessor);
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         if ((_enabledBits & (1 << slot)) == 0)
         {

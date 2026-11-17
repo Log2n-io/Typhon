@@ -150,6 +150,73 @@ public class AccessDagDerivationTests
     }
 
     [Test]
+    [VerifiesRule("AC-02")]
+    public void RW_AdditionalReadWithSamePhaseWriter_Throws()
+    {
+        // #1650: AdditionalReads<T> is a plain read for derivation. It used to be ignored, so a declared cross-entity read got neither an edge nor this error.
+        var schedule = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).AdditionalReads<CompA>() });
+
+        var ex = Assert.Throws<InvalidOperationException>(() => schedule.Build(_registry.Runtime));
+        Assert.That(ex.Message, Does.Contain("'Reader'"));
+        Assert.That(ex.Message, Does.Contain("AdditionalReads<CompA>"));
+        Assert.That(ex.Message, Does.Contain("ReadsFresh"));
+    }
+
+    [Test]
+    [VerifiesRule("AC-02")]
+    public void RW_ASystemThatReadsAndWritesTheSameComponent_IsNoConflictWithItself()
+    {
+        // #1650: Writes<T> grants the read; a system declaring both is no R x W pair. It used to fail to build, naming itself as the conflicting writer.
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new Sys { ConfigureAction = b => b.Name("Both").Phase(Phase.Simulation).Writes<CompA>().Reads<CompA>().AdditionalReads<CompA>() })
+            .Build(_registry.Runtime);
+
+        Assert.That(scheduler.UserSystems, Has.Length.EqualTo(1));
+    }
+
+    [Test]
+    [VerifiesRule("ED-05a")]
+    public void CrossPhase_WriterToAdditionalReader_DerivesEdge()
+    {
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Simulation).Writes<CompA>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Output).AdditionalReads<CompA>() })
+            .Build(_registry.Runtime);
+
+        var writer = scheduler.Systems.First(s => s.Name == "Writer");
+        var reader = scheduler.Systems.First(s => s.Name == "Reader");
+        Assert.That(writer.Successors, Does.Contain(reader.Index));
+    }
+
+    [Test]
+    [VerifiesRule("ED-05b")]
+    public void CrossPhase_AdditionalReaderToWriter_DerivesEdge()
+    {
+        using var scheduler = RuntimeSchedule.Create(Options())
+            .PublicTrack.DeclareDag("Test")
+            .Phases(Phase.Input, Phase.Simulation, Phase.Output, Phase.Cleanup)
+            .DefaultPhase(Phase.Simulation)
+            .Add(new Sys { ConfigureAction = b => b.Name("Reader").Phase(Phase.Simulation).AdditionalReads<CompA>() })
+            .Add(new Sys { ConfigureAction = b => b.Name("Writer").Phase(Phase.Output).Writes<CompA>() })
+            .Build(_registry.Runtime);
+
+        var reader = scheduler.Systems.First(s => s.Name == "Reader");
+        var writer = scheduler.Systems.First(s => s.Name == "Writer");
+        Assert.That(reader.Successors, Does.Contain(writer.Index));
+    }
+
+    [Test]
     public void RW_PlainReadInDifferentPhase_OK()
     {
         using var scheduler = RuntimeSchedule.Create(Options())

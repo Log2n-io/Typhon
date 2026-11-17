@@ -38,7 +38,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
-        description: DiscardedDescription);
+        description: DiscardedDescription, helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
     // Diagnostic for a critical value used once as a receiver and dropped (tx.For<T>().TryOpen(...))
     private static readonly DiagnosticDescriptor ReceiverRule = new DiagnosticDescriptor(
@@ -48,7 +48,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
-        description: "A critical value created only to call a member on it is never disposed. Take it into a 'using' local first.");
+        description: "A critical value created only to call a member on it is never disposed. Take it into a 'using' local first.", helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
     // Diagnostic for variables that are never disposed
     private static readonly LocalizableString UndisposedTitle =
@@ -68,7 +68,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
-        description: UndisposedDescription);
+        description: UndisposedDescription, helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
     // Diagnostic for reassignment without disposing first
     private static readonly LocalizableString ReassignmentTitle =
@@ -88,7 +88,7 @@ public class DisposableNotDisposedAnalyzer : DiagnosticAnalyzer
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
-        description: ReassignmentDescription);
+        description: ReassignmentDescription, helpLinkUri: DiagnosticHelp.For(DiagnosticId));
 
 
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>

@@ -740,7 +740,7 @@ internal sealed class PostAppendFailureTests
 
     /// <summary>
     /// The runtime's parallel fence — the default — appends nothing on a stopped engine (AP-03): its table and archetype appends do not pass through
-    /// <see cref="DatabaseEngine.WriteTickFence"/>. A tick-fence write is pending when the runtime starts; without the stop, its first fence logs it.
+    /// <see cref="DatabaseEngine.WriteTickFence(long, ChangeSet)"/>. A tick-fence write is pending when the runtime starts; without the stop, its first fence logs it.
     /// </summary>
     [Test]
     [VerifiesRule("AP-03")]

@@ -386,33 +386,39 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
         }
 
         // Capture pool decision under lock; transaction is fully unlinked, so Reset+Enqueue can safely happen outside the critical section to reduce hold time.
-        bool shouldPool = _pool.Count < PoolMaxSize;
+        bool shouldPool = PoolDisposedTransactions && _pool.Count < PoolMaxSize;
 
         _control.ExitExclusiveAccess();
 
+        // Reset whether pooled or dropped: it is where a failed commit's or a rollback's spawns are unplaced and their collections and texts freed (DC-01),
+        // and a transaction dropped without it — the pool full, or poisoned (TX-01, #1653) — leaked them. Reset loads pages and can throw: the transaction
+        // is then dropped, and its spawn arena's native block given back (#1382). A dropped one keeps _isDisposed set, so a stale reference keeps throwing.
+        try
+        {
+            transaction.Reset();
+        }
+        catch
+        {
+            transaction.DisposeSpawnArena();
+            throw;
+        }
+
         if (shouldPool)
         {
-            // Reset unplaces a failed commit's spawns, which loads pages and can throw: the transaction is then dropped, and its spawn arena's native
-            // block given back, as below (#1382).
-            try
-            {
-                transaction.Reset();
-            }
-            catch
-            {
-                transaction.DisposeSpawnArena();
-                throw;
-            }
-
             _pool.Enqueue(transaction);
         }
         else
         {
-            // Dropped rather than pooled, so nothing will ever reset or reuse it. Its spawn arena holds native memory that only Dispose returns — Reset now
-            // RETAINS a block by design, so a discarded transaction that ever spawned would leak that block for the process lifetime.
+            // Nothing will reuse it. Its spawn arena holds native memory that only Dispose returns — Reset RETAINS a block by design.
             transaction.DisposeSpawnArena();
         }
     }
+
+    /// <summary>
+    /// False under <see cref="CheckConfig.PoisonDisposedTransactions"/>: a disposed transaction is dropped, never reused, so a use after its Dispose keeps
+    /// throwing (TX-01, #1653). Settable for tests.
+    /// </summary>
+    internal bool PoolDisposedTransactions { get; set; } = !CheckConfig.PoisonDisposedTransactions;
 
     /// <summary>Test seam (TXC-01): invoked inside a creation's window, between the push and the TSN draw. A test holds a creator there.</summary>
     internal Action CreationWindowProbe { get; set; }

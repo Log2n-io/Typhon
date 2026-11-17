@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using JetBrains.Annotations;
 using Typhon.Schema.Definition;
 
@@ -117,12 +118,13 @@ public unsafe ref struct EntityRefMut
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Set<T>(Comp<T> comp, in T value) where T : unmanaged
     {
-        if (_ref._archetype.RealmKeySlotMask == 0)
+        // Only the realm key and the spatial component take the checked path: a spatial archetype's other components stay inline.
+        if ((_ref._archetype.CheckedSetSlotMask & (1 << _ref._archetype.GetSlot(comp._componentTypeId))) == 0)
         {
             Store(comp, in value);
             return;
         }
-        SetOnRealmKeyedArchetype(comp._componentTypeId, in value);
+        SetChecked(comp._componentTypeId, in value);
     }
 
     /// <summary>
@@ -169,7 +171,7 @@ public unsafe ref struct EntityRefMut
     /// <exception cref="InvalidOperationException">A realm change the entity cannot make.</exception>
     public void Set<T>(in T value) where T : unmanaged
     {
-        if (_ref._archetype.RealmKeySlotMask == 0)
+        if (_ref._archetype.CheckedSetSlotMask == 0)
         {
             var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
             if (CheckConfig.Enabled && typeId < 0)
@@ -180,23 +182,31 @@ public unsafe ref struct EntityRefMut
             Store(new Comp<T>(typeId), in value);
             return;
         }
-        SetOnRealmKeyedArchetype(ArchetypeRegistry.GetComponentTypeId<T>(), in value);
+        SetChecked(ArchetypeRegistry.GetComponentTypeId<T>(), in value);
     }
 
     /// <summary>
-    /// <see cref="Set{T}(Comp{T}, in T)"/> on an archetype with a <c>[RealmKey]</c>. A store that changes the key moves the entity to another realm at the
-    /// next fence: it gets <see cref="EntityAccessor.Teleport{T}"/>'s checks before anything is stored — the fence must never throw, so before D-2's
+    /// <see cref="Set{T}(Comp{T}, in T)"/> on a spatial or realm-keyed archetype. A position must be finite, or the fence could not place it in a cell and
+    /// would fail terminally (CA-01, #1652): refused at the call, nothing stored. A store that changes the realm key moves the entity to another realm at
+    /// the next fence: it gets <see cref="EntityAccessor.Teleport{T}"/>'s checks before anything is stored — the fence must never throw, so before D-2's
     /// revert this is the only place the application hears of a bad key — and, once stored, the flag a barrier-only archetype's fence needs to see the
-    /// move.
+    /// move. A position stored on a barrier-only archetype (<see cref="DatabaseEngine.SetSpatialBarrierOnly{TArch}"/>) gets the barrier's bookkeeping
+    /// (<see cref="StoreSpatial{T}"/>): its fence runs no dirty scan, and an unrecorded move would leave the entity where no query finds it, neither at its
+    /// old place nor at its new one.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void SetOnRealmKeyedArchetype<T>(int componentTypeId, in T value) where T : unmanaged
+    private void SetChecked<T>(int componentTypeId, in T value, bool adoptIntoEmpty = false) where T : unmanaged
     {
         var comp = new Comp<T>(componentTypeId);
         byte slot = _ref._archetype.GetSlot(componentTypeId);
+        var isSpatial = (_ref._archetype.SpatialSlotMask & (1 << slot)) != 0;
+        if (isSpatial)
+        {
+            RefuseNonFinitePosition(in value);
+        }
         if ((_ref._archetype.RealmKeySlotMask & (1 << slot)) == 0)
         {
-            Store(comp, in value);
+            StoreChecked(comp, slot, isSpatial, in value, adoptIntoEmpty);
             return;
         }
 
@@ -207,29 +217,134 @@ public unsafe ref struct EntityRefMut
             spatial.RealmKeyOffset));
         if (newRealm == oldRealm)
         {
-            Store(comp, in value);
+            StoreChecked(comp, slot, isSpatial, in value, adoptIntoEmpty);
             return;
         }
 
-        state.ValidateRealmEntry(newRealm);
-        if (slot == spatial.Slot)
-        {
-            // The key rides in the spatial component: the value carries the position too, and the fence must be able to place it in a cell.
-            var copy = value;   // on the stack: the centre is read through a pointer, which may never address managed memory
-            SpatialGrid.ReadSpatialCenter3D((byte*)&copy + spatial.FieldOffset, spatial.FieldInfo.FieldType, out var x, out var y, out var z);
-            if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
-            {
-                throw new InvalidOperationException($"A realm change to a non-finite position ({x}, {y}, {z}) cannot be placed in any grid.");
-            }
-        }
-
-        Store(comp, in value);
+        state.ValidateRealmEntry(newRealm);   // a key riding in the spatial component: its position was checked above
+        Store(comp, in value, adoptIntoEmpty);
 
         // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit. Otherwise the slot is flagged as
         // Teleport flags it — a barrier-only archetype's fence runs no dirty scan and would never see the move.
         if (!_ref._isOwnSpawn)
         {
             state.FlagOutOfBarrierSpatialWrite(_ref._clusterChunkId, _ref._clusterSlotIndex);
+        }
+    }
+
+    /// <summary>The store of a checked slot that changes no realm: <see cref="StoreSpatial{T}"/> for the spatial component, the plain store
+    /// otherwise.</summary>
+    private void StoreChecked<T>(Comp<T> comp, byte slot, bool isSpatial, in T value, bool adoptIntoEmpty) where T : unmanaged
+    {
+        if (isSpatial)
+        {
+            StoreSpatial(comp, slot, in value, adoptIntoEmpty);
+        }
+        else
+        {
+            Store(comp, in value, adoptIntoEmpty);
+        }
+    }
+
+    /// <summary>
+    /// The store of a position. On a barrier-only archetype it is followed by the bookkeeping <c>ClusterRef.WriteSpatial</c> does
+    /// (<see cref="ArchetypeClusterState.ApplySpatialWrite"/>, CA-01, CA-02): the cluster's bound grows at once, a shrink and a crossing past the hysteresis
+    /// margin are flagged for the fence, which hands the bound to the per-cell index, and the cluster is noted for dormancy. Nothing more
+    /// on another archetype, whose fence finds the move by its dirty scan; nor for an entity spawned in this transaction, which has no cluster yet; nor on a
+    /// Static archetype, whose fence moves nothing.
+    /// </summary>
+    /// <remarks>
+    /// The barrier compares the old value with the new one, and only an in-place store has both: a Commit-discipline store is staged, the cluster HEAD keeps
+    /// the old value, and the publish that lands it flags the slot (CC-02, <c>Transaction.PublishStagedEntry</c>). A Versioned spatial component lands at
+    /// commit too; it is flagged here as <see cref="EntityAccessor.Teleport{T}"/> flags it.
+    /// </remarks>
+    private void StoreSpatial<T>(Comp<T> comp, byte slot, in T value, bool adoptIntoEmpty) where T : unmanaged
+    {
+        var state = _ref._engineState.ClusterState;
+        if (!state.SpatialBarrierOnly || _ref._isOwnSpawn || state.SpatialSlot.FieldInfo.Mode != SpatialMode.Dynamic)
+        {
+            Store(comp, in value, adoptIntoEmpty);
+            return;
+        }
+
+        var chunkId = _ref._clusterChunkId;
+        if ((_ref._archetype.VersionedSlotMask & (1 << slot)) != 0)
+        {
+            Store(comp, in value, adoptIntoEmpty);
+            state.FlagOutOfBarrierSpatialWrite(chunkId, _ref._clusterSlotIndex);
+            return;
+        }
+
+        var old = _ref.ReadSlotRef<T>(slot);   // a copy, on the stack: the value the store replaces, read before it
+        Store(comp, in value, adoptIntoEmpty);
+        if (_ref._accessor.Discipline == CommitDiscipline.Commit)
+        {
+            return;   // staged (possibly escalated by this very store): the publish flags it
+        }
+
+        switch (state.SpatialSlot.FieldInfo.FieldType)
+        {
+            case SpatialFieldType.AABB2F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb2FReader>(state, old, value);
+                break;
+            case SpatialFieldType.AABB3F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb3FReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere2F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere2FReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere3F:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere3FReader>(state, old, value);
+                break;
+            case SpatialFieldType.AABB2D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb2DReader>(state, old, value);
+                break;
+            case SpatialFieldType.AABB3D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.Aabb3DReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere2D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere2DReader>(state, old, value);
+                break;
+            case SpatialFieldType.BSphere3D:
+                ApplyBarrierBookkeeping<T, AabbClusterEnumerator.BSphere3DReader>(state, old, value);
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"Set: spatial field type {state.SpatialSlot.FieldInfo.FieldType} has no specialization. Add one when a new SpatialFieldType variant is "
+                    + "introduced.");
+        }
+    }
+
+    /// <summary>
+    /// <see cref="StoreSpatial{T}"/>'s bookkeeping, compiled once per field type: <typeparamref name="TReader"/> is the decode the slot-set
+    /// <c>ClusterRef.WriteSpatial</c> inlines, so <c>is3D</c> is a constant and a 2D tier's Z arms fold away as they do in <c>WriteSpatial</c>.
+    /// <paramref name="old"/> and <paramref name="current"/> are by value: on the stack, the only memory a pointer may address here.
+    /// </summary>
+    private void ApplyBarrierBookkeeping<T, TReader>(ArchetypeClusterState state, T old, T current)
+        where T : unmanaged where TReader : struct, AabbClusterEnumerator.IBoundsReader
+    {
+        var fieldOffset = state.SpatialSlot.FieldOffset;
+        TReader.Read((byte*)&old + fieldOffset, out var oMinX, out var oMinY, out var oMinZ, out var oMaxX, out var oMaxY, out var oMaxZ);
+        TReader.Read((byte*)&current + fieldOffset, out var nMinX, out var nMinY, out var nMinZ, out var nMaxX, out var nMaxY, out var nMaxZ);
+        var chunkId = _ref._clusterChunkId;
+        state.NoteSpatialWrite(chunkId);
+        var haveOrigin = state.TryResolveCellFrame(chunkId, out var cellKey, out var grid, out var originX, out var originY, out var originZ);
+        state.ApplySpatialWrite(chunkId, _ref._clusterSlotIndex, haveOrigin, cellKey, grid, originX, originY, originZ,
+            oMinX, oMinY, oMinZ, oMaxX, oMaxY, oMaxZ, nMinX, nMinY, nMinZ, nMaxX, nMaxY, nMaxZ, TReader.Is3D);
+    }
+
+    /// <summary>
+    /// Refuses a value of the spatial component whose position is not finite (CA-01): the fence places a moved entity in a cell, and a NaN or infinite
+    /// centre has none — found there, it fails the fence for good. The same check as <see cref="EntityAccessor.Teleport{T}"/>'s.
+    /// </summary>
+    private void RefuseNonFinitePosition<T>(in T value) where T : unmanaged
+    {
+        ref readonly var spatial = ref _ref._engineState.ClusterState.SpatialSlot;
+        var copy = value;   // on the stack: the centre is read through a pointer, which may never address managed memory
+        SpatialGrid.ReadSpatialCenter3D((byte*)&copy + spatial.FieldOffset, spatial.FieldInfo.FieldType, out var x, out var y, out var z);
+        if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+        {
+            throw new InvalidOperationException($"A position ({x}, {y}, {z}) that is not finite cannot be placed in any cell (CA-01): nothing was stored.");
         }
     }
 
@@ -249,7 +364,11 @@ public unsafe ref struct EntityRefMut
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ref T WriteSlot<T>(byte slot, int componentTypeId, byte* newValue) where T : unmanaged
     {
-        SystemAccessValidator.AssertWrite<T>();
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckSlotWrite(guarded, _ref._archetype, _ref._engineState, slot);   // EW-01/EW-02 (#1651)
+        }
         // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
         // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
@@ -387,13 +506,17 @@ public unsafe ref struct EntityRefMut
     /// </summary>
     internal ref T WriteRef<T>() where T : unmanaged
     {
-        SystemAccessValidator.AssertWrite<T>();
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (CheckConfig.Enabled && typeId < 0)
         {
             ThrowHelper.ThrowInvalidOp($"Component type {typeof(T).Name} not registered");
         }
         byte slot = _ref._archetype.GetSlot(typeId);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckSlotWrite(guarded, _ref._archetype, _ref._engineState, slot);   // EW-01/EW-02 (#1651)
+        }
         if (CheckConfig.Enabled && (_ref._enabledBits & (1 << slot)) == 0)
         {
             ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
@@ -537,6 +660,12 @@ public unsafe ref struct EntityRefMut
     public void Disable<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        // An enable or disable writes the component's slot and, at commit, the cluster's enabled bits: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckStructural(guarded, _ref._archetype, "enabled or disabled a component of");
+        }
         _ref._enabledBits &= (ushort)~(1 << slot);
 
         // Staged only. The cluster's EnabledBits copy is written at commit by FlushPendingEnableDisable, never from here: a write at staging reached every
@@ -556,17 +685,34 @@ public unsafe ref struct EntityRefMut
     public void Enable<T>(Comp<T> comp, in T value) where T : unmanaged
     {
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        // An enable or disable writes the component's slot and, at commit, the cluster's enabled bits: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckStructural(guarded, _ref._archetype, "enabled or disabled a component of");
+        }
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
         {
             ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_ref._archetype.ArchetypeId}");
         }
 
         var needsContent = _ref.IsVersionedSlotAbsent(slot);
+        var isChecked = (_ref._archetype.CheckedSetSlotMask & (1 << slot)) != 0;
+        if (isChecked && (_ref._archetype.SpatialSlotMask & (1 << slot)) != 0)
+        {
+            RefuseNonFinitePosition(in value);   // before anything is created or staged, as Set refuses it (CA-01)
+        }
 
         // A never-supplied Versioned slot has no chain, so Write's copy-on-write has nothing to copy from — it must be CREATED, not written. Everything else
         // (a re-enable, or any non-Versioned slot) already has storage, so the ordinary enable-then-write path applies.
         if (needsContent)
         {
+            // A first supply, as a spawn's value: it may carry no text handle, which could only be another entity's (TXT-02, #1652).
+            var table = _ref._engineState.SlotToComponentTable[slot];
+            if (table.HasText)
+            {
+                CollectionHandles.RefuseSpawnedText(table, MemoryMarshal.AsBytes(new ReadOnlySpan<T>(in value)));
+            }
             _ref.SetLocation(slot, _ref._accessor.CreateVersionedContentAndWrite(_ref._id, slot, in value));
         }
 
@@ -576,7 +722,15 @@ public unsafe ref struct EntityRefMut
         _ref._enabledBits |= (ushort)(1 << slot);
         if (!needsContent)
         {
-            Store(comp, in value, adoptIntoEmpty: true);
+            // The realm key and the position take Set's checked store: a realm change validated, a position given the barrier's bookkeeping.
+            if (isChecked)
+            {
+                SetChecked(comp._componentTypeId, in value, adoptIntoEmpty: true);
+            }
+            else
+            {
+                Store(comp, in value, adoptIntoEmpty: true);
+            }
         }
 
         _ref._accessor.StageEnableDisable(_ref._id, _ref._enabledBits);
@@ -586,6 +740,12 @@ public unsafe ref struct EntityRefMut
     public void Enable<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _ref._archetype.GetSlot(comp._componentTypeId);
+        // An enable or disable writes the component's slot and, at commit, the cluster's enabled bits: DV-01 (#1650) and the off-tick guard (#1651)
+        SystemAccessValidator.AssertWrite<T>(_ref._accessor);
+        if (_ref._accessor is { GuardActive: true } guarded)
+        {
+            TickWriteGuard.CheckStructural(guarded, _ref._archetype, "enabled or disabled a component of");
+        }
         if (CheckConfig.Enabled && slot >= _ref._archetype.ComponentCount)
         {
             ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_ref._archetype.ArchetypeId}");

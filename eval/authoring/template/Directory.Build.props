@@ -1,0 +1,6 @@
+<!-- DO NOT MODIFY — pins the Typhon package version used by this workspace. -->
+<Project>
+  <PropertyGroup>
+    <TyphonEvalVersion>$VERSION$</TyphonEvalVersion>
+  </PropertyGroup>
+</Project>

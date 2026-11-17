@@ -57,12 +57,30 @@ Systems add four idioms whose failure **nothing reports** — get them right up 
 
 | # | Do | Don't |
 |---|----|-------|
-| 12 | Declare every component a system touches in `Configure`: `Writes<T>()`, `Reads<T>()`, `ReadsFresh<T>()`, `ReadsSnapshot<T>()` (Versioned only), `SideWrites<T>()`; order two same-phase writers with `.After("Other")` | Leave a read undeclared — the scheduler never inspects the body, so the system races the writer silently. `Build()` only catches declared conflicts; `Typhon:Checks:Enabled` + `Typhon:Checks:DeclaredAccess` assert undeclared *writes* in development |
-| 13 | Write `SingleVersion`, `Transient` and spatial-archetype components **inside a system** | Write them from another thread (a request handler, a timer) — only Versioned components of a non-spatial archetype are safe off-tick; the rest races the tick fence with no error |
+| 12 | Declare every component a system touches in `Configure`: `Writes<T>()`, `Reads<T>()`, `ReadsFresh<T>()`, `ReadsSnapshot<T>()` (Versioned only), `SideWrites<T>()`; order two same-phase writers with `.After("Other")` | Leave a read undeclared — the scheduler never inspects the body, so the system races the writer silently. `Build()` only catches declared conflicts; in a Debug build every undeclared read, write, spawn, destroy or event access throws `InvalidAccessException` — fix the declaration, never catch it |
+| 13 | Write `SingleVersion`, `Transient` and spatial-archetype components **inside a system**, or hand them to the tick with `runtime.WriteInTick` / `InTick` | Write them from another thread (a request handler, a timer) while the runtime ticks — off-tick, only Versioned components of a non-spatial, non-realm archetype may be written, and only such an archetype's entities spawned or destroyed; the rest throws `InvalidOperationException` (EW-02) |
 | 14 | Call `ctx.Subscriptions.Replicate(in cluster, slot)` (or `Replicate(in entityRefMut)`) after changing a replicated entity | Expect clients to see a plain write — under the default `PushDetection.Explicit` an unmarked change is never sent |
-| 15 | Write an `[Index]`ed `SingleVersion`/`Transient` component with `cluster.Set(…)` / `entity.Set(…)` | Write it through `GetSpan`/`Get` — that throws; and don't store `0` in a `[Index(Sparse = true)]` field expecting to find it — `0` means "no data" and is never indexed |
+| 15 | Write an `[Index]`ed `SingleVersion`/`Transient` component, a `Versioned` one, one with a `String1024` field or the realm key's with `cluster.Set(…)` / `entity.Set(…)` (a text with `entity.SetText(…)`) | Write those through `GetSpan`/`Get` — that throws in every build; and don't store `0` in a `[Index(Sparse = true)]` field expecting to find it — `0` means "no data" and is never indexed |
 
 Every idiom in this section is compiled in the guide's example project (`doc/guide/example/AgentIdioms.cs`), so it tracks the API.
+
+### Build diagnostics: act on them, don't suppress them
+
+The `Typhon` package runs analyzers in your build. An error from one of them is a real defect, not style: fix it the way the message says. The full list
+with fixes is [Build diagnostics](diagnostics.md); the ones agents hit most:
+
+| ID | Means | Fix |
+|---|---|---|
+| TYPHON004 | a `Transaction` / `UnitOfWork` / enumerator is never disposed (pins its epoch) | `using var tx = …` |
+| TYPHON001 / 003 | a no-copy type (`ClusterEnumerator<T>`, …) passed by value or copied | pass it by `ref` |
+| TYPHON011 | a component uses `bool` / `char` (layouts diverge, fields read wrong bytes) | `byte` / `ushort` |
+| TYPHON010 | a component stores avoidable padding | `[StructLayout(LayoutKind.Sequential, Pack = 4)]` |
+| TYPHON012 | `Set`/`Enable` on an `in` / readonly `EntityRefMut` (hidden copy, the write is lost) | take the handle by `ref` |
+| TYPHON009 | a `[SpatialIndex]` component written through `GetSpan` | `cluster.WriteSpatial(…)` |
+| TYPHON013 | a component over 112 bytes passed to `Spawn` | split it, or write it through `OpenMut` |
+| TYPHON015 | a command sent by name while its `[ReplicatedMessage]` struct exists | send it typed |
+
+Analyzers run in the project that references the `Typhon` package directly; they do not flow through project references.
 
 ## 4. A minimal program that compiles
 

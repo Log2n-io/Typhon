@@ -3,6 +3,7 @@ name: Pack Check
 # Cheap PR gate that catches "packaging silently broke" before merge: packs the .NET packages and the TypeScript SDK, then runs
 # - the consumer smoke test (a fresh project that adds the engine package, defines an [Archetype], and must compile + run — which only works if the
 #   bundled source generator shipped and fired);
+# - the analyzer packaging smoke test (one violation per shipped TYPHON0xx rule must be reported from the package; engine-only rules must not; #1584);
 # - the subscriptions smoke test (a Protocol-only contracts assembly, a server on Typhon + Typhon.Subscriptions.AspNetCore, the .NET client over TCP and
 #   the TypeScript tarball over WebSocket, all from the local feed);
 # - the CLI tool smoke test and the onboarding loop (`typhon new`, then `dotnet run` the scaffold against the packed engine). Until 1.0.0-alpha.1 only
@@ -68,6 +69,10 @@ jobs:
       # shipped inside the package AND ran in the consumer's compilation) and then open a DB + spawn/read.
       - name: Consumer smoke test (engine package)
         run: bash scripts/consumer-smoke-test.sh artifacts
+
+      # Every in-repo project references the analyzers by PROJECT, so only a package-fed build proves a NuGet consumer gets them (#1584).
+      - name: Analyzer packaging smoke test
+        run: bash scripts/analyzer-package-smoke-test.sh artifacts
 
       - name: CLI tool smoke test (Typhon.Cli)
         run: bash scripts/cli-tool-smoke-test.sh artifacts

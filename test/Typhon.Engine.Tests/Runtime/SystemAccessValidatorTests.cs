@@ -36,18 +36,19 @@ public class SystemAccessValidatorTests
     public void AssertWrite_NoContext_PassesSilently()
     {
         // No EnterSystem call has been made on this thread → _current is null → assertion no-ops.
-        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
+        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>(null));
     }
 
     [Test]
-    public void AssertWrite_ContextWithNoDeclarations_PassesSilently()
+    public void AssertWrite_ContextWithNoDeclarations_Throws()
     {
-        // Descriptor exists but is empty (system hasn't migrated to declared access yet).
+        // #1650: an empty descriptor is a system that declared nothing, not one exempt from the check.
+        Assume.That(CheckConfig.DeclaredAccessActive, Is.True, "Requires Typhon:Checks:DeclaredAccess (this suite's typhon.telemetry.json).");
         var d = new SystemAccessDescriptor();
         SystemAccessValidator.EnterSystem(d, "MigratingSys");
         try
         {
-            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
+            Assert.Throws<InvalidAccessException>(() => SystemAccessValidator.AssertWrite<CompA>(null));
         }
         finally
         {
@@ -63,7 +64,7 @@ public class SystemAccessValidatorTests
         SystemAccessValidator.EnterSystem(d, "WriterSys");
         try
         {
-            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
+            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>(null));
         }
         finally
         {
@@ -72,14 +73,16 @@ public class SystemAccessValidatorTests
     }
 
     [Test]
-    public void AssertWrite_DeclaredSideWrites_Passes()
+    public void AssertWrite_DeclaredSideWrites_OutsideASideTransaction_Throws()
     {
+        // #1650: SideWrites<T> covers a side transaction only (DeclaredAccessTests holds the side-transaction complement).
+        Assume.That(CheckConfig.DeclaredAccessActive, Is.True, "Requires Typhon:Checks:DeclaredAccess (this suite's typhon.telemetry.json).");
         var d = new SystemAccessDescriptor();
         d.SideWrites.Add(typeof(CompA));
         SystemAccessValidator.EnterSystem(d, "SideWriterSys");
         try
         {
-            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
+            Assert.Throws<InvalidAccessException>(() => SystemAccessValidator.AssertWrite<CompA>(null));
         }
         finally
         {
@@ -97,7 +100,7 @@ public class SystemAccessValidatorTests
         SystemAccessValidator.EnterSystem(d, "DriftySystem");
         try
         {
-            var ex = Assert.Throws<InvalidAccessException>(() => SystemAccessValidator.AssertWrite<CompB>());
+            var ex = Assert.Throws<InvalidAccessException>(() => SystemAccessValidator.AssertWrite<CompB>(null));
             Assert.That(ex.SystemName, Is.EqualTo("DriftySystem"));
             Assert.That(ex.UndeclaredType, Is.EqualTo(typeof(CompB)));
             Assert.That(ex.Message, Does.Contain("DriftySystem"));
@@ -126,13 +129,13 @@ public class SystemAccessValidatorTests
         try
         {
             // In outer scope: CompA OK, CompB would throw (in DEBUG)
-            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
+            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>(null));
 
             SystemAccessValidator.EnterSystem(innerD, "Inner");
             try
             {
                 // In inner scope: CompB OK
-                Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompB>());
+                Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompB>(null));
             }
             finally
             {
@@ -140,7 +143,7 @@ public class SystemAccessValidatorTests
             }
 
             // Back in outer scope: CompA OK again
-            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
+            Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>(null));
         }
         finally
         {
@@ -148,7 +151,7 @@ public class SystemAccessValidatorTests
         }
 
         // Outside any scope: anything passes (no context)
-        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompB>());
+        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompB>(null));
     }
 
     [Test]
@@ -175,7 +178,7 @@ public class SystemAccessValidatorTests
             try
             {
                 aSawCompA = true;
-                SystemAccessValidator.AssertWrite<CompA>();
+                SystemAccessValidator.AssertWrite<CompA>(null);
                 bothChecked.Wait();
             }
             finally
@@ -192,7 +195,7 @@ public class SystemAccessValidatorTests
             try
             {
                 bSawCompB = true;
-                SystemAccessValidator.AssertWrite<CompB>();
+                SystemAccessValidator.AssertWrite<CompB>(null);
                 bothChecked.Set();
             }
             finally
@@ -227,7 +230,7 @@ public class SystemAccessValidatorTests
             ConfigureAction = b => b.Name("ASys").Phase(Phase.Simulation).Writes<CompA>(),
             OnExecute = () =>
             {
-                SystemAccessValidator.AssertWrite<CompA>();
+                SystemAccessValidator.AssertWrite<CompA>(null);
                 observed = true;
             },
         };
@@ -258,7 +261,7 @@ public class SystemAccessValidatorTests
             {
                 try
                 {
-                    SystemAccessValidator.AssertWrite<CompB>();
+                    SystemAccessValidator.AssertWrite<CompB>(null);
                 }
                 catch (Exception e)
                 {
@@ -304,7 +307,7 @@ public class SystemAccessValidatorTests
         scheduler.Shutdown();
 
         // Back on the test thread, no descriptor should be set — assertion silent for any type.
-        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>());
-        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompB>());
+        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompA>(null));
+        Assert.DoesNotThrow(() => SystemAccessValidator.AssertWrite<CompB>(null));
     }
 }

@@ -443,14 +443,14 @@ public partial class DatabaseEngine
             }
 
             // ─── Step (b): legacy scan over dirtyBits for slots not covered by step (a) ───
-            // Skipped entirely when SpatialBarrierOnly — caller has guaranteed every spatial write
-            // goes through WriteSpatial, so step (a) is exhaustive.
+            // Skipped entirely when SpatialBarrierOnly — every spatial write on such an archetype raises the write-time flags step (a) drains (WriteSpatial,
+            // EntityRefMut.Set, Teleport, the Commit publish), so step (a) is exhaustive.
             //
             // A null change list means the same thing said the other way round (#939): the clean branch builds none for a barrier-only archetype, because
             // this is the guard it would have been built for. Asserted rather than merely tolerated — any OTHER archetype arriving without one would skip
             // step (b) silently, which is a crossing never detected rather than a crash.
             Debug.Assert(dirtyBits != null || clusterState.SpatialBarrierOnly,
-                "a null change list is only meaningful when the caller has guaranteed every spatial write goes through WriteSpatial");
+                "a null change list is only meaningful on a barrier-only archetype, whose spatial writes all raise write-time flags");
 
             // Deliberately NOT `|| dirtyBits == null`. In every state the assert above permits, null implies SpatialBarrierOnly and the test below has already
             // fired, so the extra disjunct is dead — it becomes live only in the state the assert FORBIDS, and there it would turn a Release
@@ -460,8 +460,8 @@ public partial class DatabaseEngine
             {
                 // This branch contributes NOTHING to the absorbed count, and must not pretend otherwise. The local's only ++ is in step (b) below, which this
                 // branch returns before reaching, so it is provably zero here — writing it to the field or the span would be arithmetic that reads as if it
-                // did something. On the barrier-only path the count is produced at write time by ClusterRef.MaybeFlagMigration and already drained into
-                // LastTickHysteresisAbsorbedCount by PrepareArchetypeFence, so THAT is the truthful value for the span to report (#872).
+                // did something. On the barrier-only path the count is produced at write time by ArchetypeClusterState.MaybeFlagMigration and already drained
+                // into LastTickHysteresisAbsorbedCount by PrepareArchetypeFence, so THAT is the truthful value for the span to report (#872).
                 Debug.Assert(hysteresisAbsorbedCount == 0,
                     "step (a) has started counting absorbed crossings — fold it into the drain in PrepareArchetypeFence instead of dropping it here");
                 detectScanSpan.MigrationsQueued = migrationsQueuedCount;

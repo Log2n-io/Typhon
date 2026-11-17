@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Typhon.Analyzers</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.3.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="5.3.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--
+    Code fixes for the consumer analyzers (#1584), shipped next to Typhon.Analyzers.Consumer.dll under analyzers/dotnet/cs. They need
+    Microsoft.CodeAnalysis.Workspaces, which only the IDE loads, so they live in their own assembly: a command-line build skips this one and still runs
+    every analyzer (the standard Roslyn analyzer + .CodeFixes packaging). Source lives in Typhon.Analyzers, linked here.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Typhon.Analyzers.Consumer\Typhon.Analyzers.Consumer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Typhon.Analyzers\NoCopyRefCodeFixProvider.cs" Link="NoCopyRefCodeFixProvider.cs" />
+    <Compile Include="..\Typhon.Analyzers\DisposableNotDisposedCodeFixProvider.cs" Link="DisposableNotDisposedCodeFixProvider.cs" />
+  </ItemGroup>
+
+</Project>

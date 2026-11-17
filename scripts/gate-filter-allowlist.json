@@ -9,5 +9,11 @@
     "reference client. Both went together, so the exemption has nothing left to exempt. v2's SDK suite arrives with",
     "the subscriptions-sdk job that gates it, not ahead of it."
   ],
-  "ungated": []
+  "ungated": [
+    {
+      "project": "eval/authoring/checker/Checker.csproj",
+      "reason": "The authoring eval's checker compiles one Checks/<task>.cs against an agent's workspace passed as -p:SolutionProject: it has no subject to test in the repository, and run.py drives it against agent output and the reference solutions (`run.py validate`).",
+      "issue": 1649
+    }
+  ]
 }

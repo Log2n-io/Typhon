@@ -36,6 +36,9 @@ public abstract class HighResolutionTimerServiceBase : ResourceNode, IMetricSour
     private volatile bool _shutdown;
     private readonly object _lifecycleLock = new();
 
+    // The idle wait's wake-up: set by StopTimerThread, so a stop does not wait out the idle period (an aborted runtime's timer idles until it is stopped).
+    private readonly ManualResetEventSlim _idleWake = new(false);
+
     // ═══════════════════════════════════════════════════════════════
     // Timing metrics
     // ═══════════════════════════════════════════════════════════════
@@ -182,6 +185,7 @@ public abstract class HighResolutionTimerServiceBase : ResourceNode, IMetricSour
             }
 
             _shutdown = false;
+            _idleWake.Reset();
             _thread = new Thread(TimerLoop)
             {
                 IsBackground = true,
@@ -204,6 +208,7 @@ public abstract class HighResolutionTimerServiceBase : ResourceNode, IMetricSour
     protected void StopTimerThread()
     {
         _shutdown = true;
+        _idleWake.Set();
         _thread?.Join(TimeSpan.FromSeconds(2));
     }
 
@@ -221,6 +226,7 @@ public abstract class HighResolutionTimerServiceBase : ResourceNode, IMetricSour
         if (disposing)
         {
             StopTimerThread();
+            // _idleWake is not disposed: a timer thread the 2 s join gave up on may still wait on it, and it holds no kernel handle until one is asked for.
         }
 
         base.Dispose(disposing);
@@ -300,7 +306,7 @@ public abstract class HighResolutionTimerServiceBase : ResourceNode, IMetricSour
             // long.MaxValue = idle signal (no registrations)
             if (nextTick == long.MaxValue)
             {
-                Thread.Sleep(100);
+                _idleWake.Wait(100);   // a stop wakes it at once
                 continue;
             }
 

@@ -183,6 +183,19 @@ internal sealed class RegenSystem : QuerySystem
 
 Beyond components, you can declare **resources** (`ReadsResource`/`WritesResource` — for shared non-component state like a spatial grid handle) and **events** (`WritesEvents`/`ReadsEvents` — typed queues that create a producer→consumer edge). All of it feeds the same one-time graph derivation.
 
+### Your declarations are checked — in a Debug build
+
+The schedule is only as right as the declarations it was built from, and the engine never inspects a system's body to build it: an access you forgot to declare gets no ordering edge, so it races with the systems that do declare it. In a **Debug build of your application**, every access inside a class-form system is checked as it happens, and anything undeclared throws `InvalidAccessException` naming the system and the type:
+
+| You do | You must have declared |
+|---|---|
+| `Read` / `TryRead`, `GetReadOnly` / `GetReadOnlySpan` | `Reads`, `ReadsFresh`, `ReadsSnapshot`, `AdditionalReads` or `Writes` of that component |
+| `Set`, `ClusterRef.Get` / `GetSpan` / `Set` / `WriteSpatial` | `Writes` of that component (`SideWrites` covers a side transaction only) |
+| `Spawn` / `Destroy` | `Writes` of every component of the archetype — and, for a destroy, of whatever its cascade-delete reaches |
+| `ctx.Writer(queue)` / `queue.Drain(…)` | `WritesEvents(queue)` / `ReadsEvents(queue)` |
+
+That is why `SpawnSystem` above declares all six components of `Character`. A Release build runs without the check (it costs ~2.5 ns per access when on, nothing when off); set `Typhon:Checks:DeclaredAccess` in `typhon.telemetry.json` to force it either way. Two cases to know: under `dotnet test` the entry assembly is the test host, which is optimized, so a test project turns it on with that key; and the terse lambda form (`dag.CallbackSystem("name", ctx => …)`) declares nothing and is not checked at all — another reason to prefer the class form. Full table: [Declared-access validation](../feature-set/Errors/runtime-access-validation.md).
+
 ---
 
 ## 4. Ordering: phases and explicit edges
@@ -276,6 +289,19 @@ runtime.Shutdown();      // fires OnShutdown, stops workers cleanly
 ```
 
 The runtime owns its threads — there is no "run one tick" call you drive in a loop. You `Start`, the world ticks itself, and you observe it (`runtime.CurrentTickNumber`, telemetry) or feed it (input queues, tool commands) from the outside.
+
+**Writing from outside the tick.** While the runtime ticks, a transaction opened on a thread that is not running a system — an HTTP handler, a test, a tool — may write `Versioned` components, and spawn, destroy, enable or disable entities, of an archetype that is neither spatial nor realm-keyed (a commit that spawns or destroys waits out a running end-of-tick fence, about a millisecond at most). Anything else — writing a `SingleVersion` or `Transient` component, or touching a spatial or realm-keyed archetype at all — would race the fence and corrupt silently, so it throws `InvalidOperationException` at the call. That holds for a transaction opened before `Start` too. Hand it to the tick instead:
+
+```csharp
+long tick = await runtime.WriteInTick((tx, tick) =>
+{
+    tx.OpenMut(id).Set(Character.Ham, ham);        // SingleVersion: legal here
+}, DurabilityMode.GroupCommit);
+
+int hp = await runtime.InTick((tx, _) => tx.Open(id).Read(Character.Ham).Health, DurabilityMode.Deferred);   // read as of the tick start
+```
+
+The work runs at the start of the next tick, on the scheduler thread, before any of that tick's systems — so it needs no access declaration, and **this tick's systems may overwrite it**. Each item gets its own transaction, committed for you; an exception or a failed commit faults your task, never the tick. Durability is a required argument. `DurabilityMode.Immediate` is refused (it would stall the tick on a WAL flush per item; use `GroupCommit`). The queue is bounded (`RuntimeOptions.InTickQueueCapacity`, 4096; a full queue faults the task at once with `TickQueueFullException`, which is transient — map it to 503), and at most `RuntimeOptions.InTickMaxItemsPerTick` (256) items run per tick: their time is the tick's, so keep each one short. Before `Start` the work simply runs at once on your thread.
 
 **Lifecycle hooks** for the two moments that need special handling:
 

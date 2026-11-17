@@ -1186,6 +1186,7 @@ internal static class ArchetypeRegistry
         {
             meta._cascadeTargets = targets.GetValueOrDefault(meta);
             meta._cascadeFks = fks.TryGetValue(meta, out var own) ? own.ToArray() : null;
+            meta.ResetAccessFootprints();   // DV-01 (#1650): the destroy footprint follows the cascade graph just rebuilt
         }
 
         IndexCascadeFkComponents();

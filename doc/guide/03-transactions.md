@@ -31,7 +31,7 @@ tx.Commit();
 
 `CreateQuickTransaction(mode)` from ch.1 is just the common case folded into one call — it makes a UoW, makes one transaction in it, and ties their lifetimes together. Use the explicit form when you want several transactions under one durability cycle, or finer control over flushing.
 
-> 💡 **Why two layers, and why is a `Transaction` single-thread-affine?** A transaction is owned by the thread that created it and must never be touched from another — so the engine puts **no locks on the transaction object itself**, which is what makes opening one essentially free. Durability, by contrast, is a batched, cross-cutting concern (one fsync can make many transactions durable at once), so it lives one level up in the UoW. In the runtime ([ch.5](05-systems.md)) this maps cleanly: one UoW per tick, one transaction per system.
+> 💡 **Why two layers, and why is a `Transaction` single-thread-affine?** A transaction is owned by the thread that created it and must never be touched from another — so the engine puts **no locks on the transaction object itself**, which is what makes opening one essentially free. Durability, by contrast, is a batched, cross-cutting concern (one fsync can make many transactions durable at once), so it lives one level up in the UoW. In the runtime ([ch.5](05-systems.md)) this maps cleanly: one UoW per tick, one transaction per system. The engine holds you to it: `Commit`, `Rollback` and `Dispose` on another thread throw, so never `await` inside a transaction's `using` scope (the continuation resumes elsewhere; build diagnostic [TYPHON016](diagnostics.md#typhon016)), and any use after `Dispose` throws.
 
 ---
 
