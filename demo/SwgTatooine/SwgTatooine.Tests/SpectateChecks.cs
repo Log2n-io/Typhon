@@ -542,11 +542,8 @@ internal sealed class SpectateChecks : ServedChecks
         var subject = TatooineReplication.SubjectOf(viewer.Link.Session);
         Assert.That(subject, Is.Not.EqualTo(EntityId.Null), "the session is riding nothing, so there is nothing to kill");
 
-        using (var tx = sim.Dbe.CreateQuickTransaction())
-        {
-            tx.Destroy(subject);
-            tx.Commit();
-        }
+        // In the tick, not from this thread: Player is spatial, and an off-tick destroy races the fence (EW-02).
+        sim.WriteInTick(tx => tx.Destroy(subject));
 
         SessionHarness.Until(
             () =>
