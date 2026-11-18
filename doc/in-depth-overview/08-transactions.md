@@ -32,7 +32,7 @@ Three tiers, top to bottom:
 
 A few invariants the rest of this doc assumes:
 
-- **Single-thread-affine.** A `Transaction` is created on a thread and only that thread may operate on it. There's no internal locking on the `Transaction` object itself — the type is `[NoCopy]` in spirit and asserts thread affinity in DEBUG builds.
+- **Single-thread-affine.** A `Transaction` is created on a thread and only that thread may operate on it. There's no internal locking on the `Transaction` object itself — `Commit`, `Rollback` and `Dispose` on the wrong thread throw in **every build** (not just Debug; the affinity field was promoted out of `#if DEBUG` in #1653).
 - **Scheduler-managed in production.** Inside the runtime ([10-runtime](10-runtime.md)), each tick creates *one* `UnitOfWork`, and each system that mutates gets *one* `Transaction` from that UoW. `PipelineSystem`s have no `Transaction` — they read at a snapshot via `PointInTimeAccessor` ([06-ecs §5](06-ecs.md#5-access-open--openmut)). Application code that uses the engine directly (Shell, tests) follows the same shape but builds the UoW itself.
 - **TSN is allocated at Transaction construction**, not at commit. `TransactionChain._nextFreeId` is `Interlocked.Increment`-ed every time a `Transaction` is created (or a `PointInTimeAccessor` reads). The TSN is the snapshot point for reads and gets stamped on every revision element this transaction writes.
 - **`UowId` is allocated at UoW construction** from the `UowRegistry`, persistent (survives crash), and stamps every revision element so recovery can void the writes of a UoW that didn't commit ([11-durability §4](11-durability.md#4-segment-management)).

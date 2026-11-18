@@ -70,9 +70,7 @@ catch (InvalidOperationException)
 
 ## ⚠️ Guarantees & limits
 
-- **Thread affinity is Debug-only** — `AssertThreadAffinity()` is `[Conditional("DEBUG")]`; it is compiled out
-  entirely in Release builds, so cross-thread use of one `Transaction` is caught during development but is undefined
-  behavior (not a runtime exception) in Release. One `Transaction` per thread per tick is the supported pattern.
+- **Thread affinity is enforced in every build** — the owning-thread-id check runs unconditionally (#422, #1653); `Commit`, `Rollback` and `Dispose` on the wrong thread throw `InvalidOperationException` in Release just as in Debug. Cross-thread use of one `Transaction` is never safe. One `Transaction` per thread per tick is the supported pattern.
 - **Fail-fast state machine, no silent sentinels** — `Created → InProgress → Committed`/`Rollbacked` are the only
   legal transitions; CRUD on an already-finished transaction throws `InvalidOperationException` rather than returning
   `-1`/`false` (ADR-038). `Commit()`/`Rollback()` themselves are exceptions to this: calling either on an

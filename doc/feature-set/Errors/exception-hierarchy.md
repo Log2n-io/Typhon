@@ -72,7 +72,7 @@ catch (TyphonException ex)
 | `DatabaseIntegrityException` | `Exception` (**not** a `TyphonException`) | — | `Report` (`IntegrityReport`; verify-on-open refused the file) |
 | `UniqueConstraintViolationException` | `TyphonException` | `false` | — |
 | `ForeignKeyViolationException` | `TyphonException` | `ParentDying` | `Child`, `Parent`, `ParentDying` |
-| `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (opt-in; `Typhon:Checks:DeclaredAccess`) |
+| `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (`Typhon:Checks:DeclaredAccess`; on by default in a Debug build) |
 
 ## ⚠️ Guarantees & limits
 
