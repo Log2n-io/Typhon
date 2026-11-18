@@ -188,7 +188,7 @@ A fifth, [`ArchetypeSchemaException`](https://github.com/Log2n-io/Typhon/blob/ma
 
 [`Errors/public/InvalidAccessException.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/InvalidAccessException.cs)
 
-`sealed class`. Thrown when a system tries to mutate a component it didn't declare via `SystemBuilder.Writes<T>()` / `SideWrites<T>()`. **Opt-in** — the `SystemAccessValidator` is compiled in all builds but gated by `Typhon:Checks:Enabled` **and** `Typhon:Checks:DeclaredAccess` (both default `false`); the JIT folds the gate away when disabled, so there is zero overhead on the `Set` path in production. Indicates declaration drift; fix by adding the missing `Writes<T>` call. See [10-runtime](10-runtime.md) for the access-declaration model.
+`sealed class`. Thrown when a system makes an access — read, write, spawn, destroy or event drain/write — that it did not declare in `Configure()`. `DeclaredAccess` is **on by default in a Debug build** of the application (entry assembly compiled without optimization), off in Release; set `Typhon:Checks:DeclaredAccess` explicitly to override either way. It is **independent** of `Typhon:Checks:Enabled` — the two gates are separate. The JIT folds the gate away when disabled, so there is zero overhead in production. Indicates declaration drift; fix by adding the missing `Reads<T>()` / `Writes<T>()` / `WritesEvents()` / etc. call in `Configure()`. See [10-runtime](10-runtime.md) for the access-declaration model and [runtime-access-validation](../feature-set/Errors/runtime-access-validation.md) for the full access table.
 
 ---
 

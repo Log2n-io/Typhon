@@ -77,12 +77,8 @@ protected override void Configure(SystemBuilder b) => b
 - Access tracking is component-level, not field-level — `Writes<T>()` means "touches any field of T."
 - `.After()` / `.Before()` remain as the escape hatch for non-access ordering constraints, and as the
   required disambiguation tool for an intentional same-phase `W×W`.
-- An opt-in runtime check (`Typhon:Checks:DeclaredAccess`, off by default in every build) asserts every
-  `EntityRefMut.Set<T>()` against the executing system's declared `Writes`/`SideWrites` set; off, the JIT
-  folds the gate away — zero overhead.
-- This is declaration, not inference — Typhon never inspects a system body to detect its actual
-  reads/writes. An undeclared access is simply invisible to the scheduler (and, with the check on, only the
-  write side is cross-checked at runtime).
+- A runtime check (`Typhon:Checks:DeclaredAccess`) validates every read, write, spawn, destroy and event access against the executing system's declarations; **on by default in a Debug build** of the application, off in Release (set the key to override). The JIT folds the gate away when off — zero overhead.
+- This is declaration, not inference — Typhon never inspects a system body to detect its actual reads/writes. An undeclared access is simply invisible to the scheduler; with the check on, all access kinds are cross-checked at runtime (not only writes).
 - `ReadsSnapshot<T>()` requires `T` to use Versioned storage; SingleVersion/Transient components have no
   prior-tick history to freeze to and are rejected at `Build()`.
 - Phases order systems within one DAG only. Cross-DAG ordering is structural (track sequence), not
@@ -96,7 +92,7 @@ protected override void Configure(SystemBuilder b) => b
 
 - [AccessDagDerivationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/AccessDagDerivationTests.cs) — W×W same-phase throws, `.After()`/`.Before()` disambiguation, `ReadsFresh`/`ReadsSnapshot` edge derivation, `ReadsSnapshot` on SingleVersion rejected
 - [SystemBuilderFluentTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemBuilderFluentTests.cs) — `Reads`/`Writes`/`ReadsFresh`/`ReadsSnapshot` declaration API, dedup, `Before`/`After` cycle detection
-- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — opt-in assert that `EntityRefMut.Set<T>()` matches the system's declared writes
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — runtime declared-access check: reads, writes, spawn, destroy and events validated against the system's declarations; push/pop scope; per-thread isolation
 
 ## 🔗 Related
 
