@@ -435,6 +435,26 @@ unsafe class IngressHardeningTests : TestBase<IngressHardeningTests>
         var ex = Assert.Catch(() => Harness(dbe, nameof(RailsThatWouldNotHoldAreRefusedAtStart), budget: 0).Dispose());
         Assert.That(ex?.ToString(), Does.Contain(nameof(SubscriptionsOptions.IngressBytesPerSecond)), "and Start is where it is checked");
     }
+
+    /// <summary>
+    /// Each command type's bucket starts full at its own depth: a shallow type sent first (4/s, burst 4) must not prime a deep one (10/s, burst 20) to its
+    /// 4 tokens. A game's weapon switch then 20 quick ability presses: all 20 admitted, the 21st refused, with no time passing.
+    /// </summary>
+    [Test]
+    public void EachBucketStartsFullAtItsOwnDepth()
+    {
+        var row = new SessionIngress(SessionId.FromValue(1), default, commandTypeCount: 2);
+        const long Now = 1_000;
+        Assert.That(row.TryTakeToken(0, perSecond: 4, burst: 4, Now), Is.True);
+        var admitted = 0;
+        while (admitted < 25 && row.TryTakeToken(1, perSecond: 10, burst: 20, Now))
+        {
+            admitted++;
+        }
+
+        Assert.That(admitted, Is.EqualTo(20));
+        Assert.That(Enumerable.Range(0, 3).Count(_ => row.TryTakeToken(0, 4, 4, Now)), Is.EqualTo(3), "the shallow type kept its own 3 tokens");
+    }
 }
 
 /// <summary>

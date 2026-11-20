@@ -61,6 +61,7 @@ internal sealed class SessionIngress
         Lease = lease;
         Tokens = new double[commandTypeCount];
         BucketStamp = new long[commandTypeCount];
+        BucketPrimed = new bool[commandTypeCount];
     }
 
     /// <summary>Whose row this is.</summary>
@@ -78,8 +79,8 @@ internal sealed class SessionIngress
     /// <summary>When each bucket was last refilled, as a <see cref="Stopwatch"/> timestamp. Transport-thread owned.</summary>
     public long[] BucketStamp { get; }
 
-    /// <summary>Whether the buckets have been primed. Transport-thread owned.</summary>
-    public bool BucketsPrimed { get; set; }
+    /// <summary>Whether each command type's bucket has been primed (filled to its own depth on that type's first command). Transport-thread owned.</summary>
+    public bool[] BucketPrimed { get; }
 
     /// <summary>Commands refused on the transport thread — past the rate, refused by role, or failing the pre-check. Transport-thread owned.</summary>
     public long RefusedCommands;
@@ -135,6 +136,8 @@ internal sealed class SessionIngress
     /// <remarks>
     /// On the transport thread, before the ring, so a client flooding one command type costs the tick nothing at all (01-model § 7). The bucket starts FULL:
     /// a client's first batch after connecting is within its burst by definition, and starting it empty would throttle the handshake's own first intent.
+    /// Each type's bucket is filled to its OWN depth on that type's first command: priming every bucket with the first command's depth gave a 20-deep
+    /// type the 4 tokens of a 4-deep one sent before it, and refused its 5th command of a quick burst.
     /// </remarks>
     public bool TryTakeToken(int typeIndex, int perSecond, int burst, long now)
     {
@@ -144,15 +147,11 @@ internal sealed class SessionIngress
         }
 
         var depth = Math.Max(burst, perSecond);
-        if (!BucketsPrimed)
+        if (!BucketPrimed[typeIndex])
         {
-            for (var i = 0; i < Tokens.Length; i++)
-            {
-                Tokens[i] = depth;
-                BucketStamp[i] = now;
-            }
-
-            BucketsPrimed = true;
+            Tokens[typeIndex] = depth;
+            BucketStamp[typeIndex] = now;
+            BucketPrimed[typeIndex] = true;
         }
 
         var elapsed = (now - BucketStamp[typeIndex]) / (double)Stopwatch.Frequency;
