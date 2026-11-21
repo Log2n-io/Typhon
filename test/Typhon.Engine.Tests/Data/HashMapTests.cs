@@ -2158,6 +2158,61 @@ unsafe class PagedHashMapTests
     }
 
     [Test]
+    public void ConcurrentEnumerator_L32_LongChain_AllEnumerated()
+    {
+        using var mpmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
+        using var epochManager = _serviceProvider.GetRequiredService<EpochManager>();
+
+        var segment = mpmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, 256);
+        var map = PagedHashMap<int, int, PersistentStore>.Create(segment, 8);
+
+        // 300 keys whose hashes agree on their low 12 bits: whatever the bucket count reaches, they share one bucket, so its chain (primary + overflow)
+        // holds all 300 — more than the enumerator's initial 128-entry collect buffer.
+        const int keyCount = 300;
+        const uint mask = 0xFFF;
+        uint target = PagedHashMap<int, int, PersistentStore>.ComputeHashForTest(0) & mask;
+        var keys = new List<int>(keyCount);
+        for (int k = 0; keys.Count < keyCount; k++)
+        {
+            if ((PagedHashMap<int, int, PersistentStore>.ComputeHashForTest(k) & mask) == target)
+            {
+                keys.Add(k);
+            }
+        }
+
+        var depth = epochManager.EnterScope();
+        try
+        {
+            var accessor = segment.CreateChunkAccessor();
+
+            foreach (var key in keys)
+            {
+                map.Insert(key, key * 10, ref accessor, null);
+            }
+
+            var found = new HashSet<int>();
+            using var enumerator = map.GetConcurrentEnumerator(ref accessor);
+            while (enumerator.MoveNext())
+            {
+                Assert.That(enumerator.Current.Value, Is.EqualTo(enumerator.Current.Key * 10));
+                found.Add(enumerator.Current.Key);
+            }
+
+            Assert.That(found.Count, Is.EqualTo(keyCount), "a bucket chain longer than the collect buffer must still be enumerated in full");
+            foreach (var key in keys)
+            {
+                Assert.That(found.Contains(key), Is.True, $"Key {key} missing from concurrent enumeration");
+            }
+
+            accessor.Dispose();
+        }
+        finally
+        {
+            epochManager.ExitScope(depth);
+        }
+    }
+
+    [Test]
     [CancelAfter(5000)]
     public void ConcurrentEnumerator_L32_ConcurrentWriters()
     {
