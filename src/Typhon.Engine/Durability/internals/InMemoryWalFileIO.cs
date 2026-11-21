@@ -89,7 +89,9 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
         var needed = (int)(offset + data.Length);
         if (needed > seg.Data.Length)
         {
-            var newData = new byte[Math.Max(needed, seg.Data.Length * 2)];
+            // Doubling, capped at the pre-allocated length a real file would have: past it the next write grows to exactly what it needs.
+            var doubled = seg.PreAllocatedSize > needed ? Math.Min(seg.Data.Length * 2, seg.PreAllocatedSize) : seg.Data.Length * 2;
+            var newData = new byte[Math.Max(needed, doubled)];
             Buffer.BlockCopy(seg.Data, 0, newData, 0, seg.Data.Length);
             seg.Data = newData;
         }
@@ -141,19 +143,18 @@ internal sealed class InMemoryWalFileIO : IWalFileIO
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Records the length only. A pre-allocated file reads as zeros past what was written, and <see cref="ReadAligned"/> already answers zeros past the
+    /// data, so the bytes need not exist: <see cref="WriteAligned"/> grows the array to what is actually written. Allocating the full size made every test
+    /// engine hold a 16 MiB segment (and four 64 MiB ones after a rotation) on the large-object heap, which only a gen-2 collection frees — the bulk of a
+    /// test host's committed memory.
+    /// </remarks>
     public void PreAllocate(SafeFileHandle handle, long size)
     {
         var seg = FindSegment(handle);
         if (seg == null)
         {
             return;
-        }
-
-        if (size > seg.Data.Length)
-        {
-            var newData = new byte[(int)size];
-            Buffer.BlockCopy(seg.Data, 0, newData, 0, seg.Data.Length);
-            seg.Data = newData;
         }
 
         seg.PreAllocatedSize = (int)size;

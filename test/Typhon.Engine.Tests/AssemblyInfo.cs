@@ -16,3 +16,6 @@ using NUnit.Framework;
 
 // A latch left held follows its worker thread into the next test, and fails that one for a reason it cannot show (#1510).
 [assembly: Typhon.Engine.Tests.NoLatchLeftHeld]
+
+// Per-test memory ledger, inert unless TYPHON_MEMPROBE names an output directory.
+[assembly: Typhon.Engine.Tests.MemoryProbe]

@@ -90,6 +90,25 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
         _keys = new long[maxRecords];
         _exporters = exporters ?? throw new ArgumentNullException(nameof(exporters));
         _nextTick = Stopwatch.GetTimestamp();
+
+        // Before the first drain can read a slot: from here on, retiring slots are this consumer's to free.
+        _attached = 1;
+        ThreadSlotRegistry.ConsumerAttached();
+    }
+
+    private int _attached;
+
+    /// <summary>
+    /// Hands retiring slots back to <see cref="ThreadSlotRegistry.MarkRetiring"/>. Idempotent. Called once nothing drains any more and every chain is
+    /// collapsed (the end of <c>TyphonProfiler.Stop</c>, or a failed <c>Start</c> after the timer stopped) — detaching earlier let the reaper collapse a
+    /// chain Stop was collapsing.
+    /// </summary>
+    internal void Detach()
+    {
+        if (Interlocked.Exchange(ref _attached, 0) == 1)
+        {
+            ThreadSlotRegistry.ConsumerDetached();
+        }
     }
 
     /// <inheritdoc />
@@ -218,6 +237,16 @@ internal sealed class ProfilerConsumerThread : HighResolutionTimerServiceBase
                 {
                     SpilloverRingPool.Release(spent);
                 }
+            }
+
+            // A dead producer's chain whose head is an empty spillover with no successor will never move again: return the spillover and re-anchor the
+            // chain on the primary, or the condition below never holds and the slot stays claimed for the life of the process.
+            if (state == (int)SlotState.Retiring && head != primary && head.IsEmpty && head.Next == null)
+            {
+                primary.SetNext(null);
+                slot.ChainHead = primary;
+                slot.ChainTail = primary;
+                SpilloverRingPool.Release(head);
             }
 
             // A retiring slot can only be freed once its entire chain has fully collapsed back to an empty primary

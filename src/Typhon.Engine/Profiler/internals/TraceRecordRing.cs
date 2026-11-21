@@ -93,7 +93,7 @@ internal sealed class TraceRecordRing
     internal TraceRecordRing Next => Volatile.Read(ref _next);
 
     /// <summary>Total bytes the buffer can hold (a power of 2, ≥ 64).</summary>
-    private int Capacity { get; }
+    internal int Capacity { get; }
 
     /// <summary>Total records dropped on this buffer due to overflow (single-writer, plain read OK).</summary>
     public long DroppedEvents => _droppedEvents;

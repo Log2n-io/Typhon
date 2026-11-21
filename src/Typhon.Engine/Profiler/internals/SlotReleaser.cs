@@ -24,14 +24,16 @@ namespace Typhon.Engine.Internals;
 internal sealed class SlotReleaser : CriticalFinalizerObject
 {
     private readonly int _slotIndex;
+    private readonly int _claimGeneration;
 
-    internal SlotReleaser(int slotIndex)
+    internal SlotReleaser(int slotIndex, int claimGeneration)
     {
         _slotIndex = slotIndex;
+        _claimGeneration = claimGeneration;
     }
 
     ~SlotReleaser()
     {
-        ThreadSlotRegistry.MarkRetiring(_slotIndex);
+        ThreadSlotRegistry.MarkRetiring(_slotIndex, _claimGeneration);
     }
 }

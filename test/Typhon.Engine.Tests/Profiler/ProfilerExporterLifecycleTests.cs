@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using Typhon.Engine.Internals;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -92,9 +93,15 @@ public sealed class ProfilerExporterLifecycleTests
     [CancelAfter(15_000)]
     public void StartThenImmediateStop_Repeated_DoesNotKillTheHost()
     {
-        for (var i = 0; i < 100; i++)
+        // Repeated to land a Stop inside the exporter threads' start-up window. Each session used to allocate a fresh 128 MiB spillover pool on the
+        // large-object heap: 100 of them drove this host to several GiB before the GC caught up. Only the first may allocate now.
+        Session(new InMemoryExporter("session-0"));
+        var allocated = SpilloverRingPool.RingsAllocated;
+        for (var i = 1; i < 100; i++)
         {
             Session(new InMemoryExporter($"session-{i}"));
         }
+
+        Assert.That(SpilloverRingPool.RingsAllocated, Is.EqualTo(allocated), "Stop keeps the spillover pool for the next Start");
     }
 }

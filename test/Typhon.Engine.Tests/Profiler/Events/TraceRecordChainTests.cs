@@ -23,10 +23,38 @@ namespace Typhon.Engine.Tests.Profiler.Events;
 [NonParallelizable] // shares static SpilloverRingPool + ThreadSlotRegistry state across tests; serialize.
 public sealed class TraceRecordChainTests
 {
+    // These tests drain the chains themselves: they are the consumer, and say so, so a producer may spill (ThreadSlotRegistry.SessionPossible). The
+    // suite's own configuration (profiler on, no output channel) expects no session and suppresses spilling otherwise.
+    [SetUp]
+    public void SetUp() => ThreadSlotRegistry.ConsumerAttached();
+
     [TearDown]
     public void TearDown()
     {
+        ThreadSlotRegistry.ConsumerDetached();
         SpilloverRingPool.Shutdown();
+    }
+
+    [Test]
+    public void NoSessionPossible_AFullPrimaryDropsInsteadOfSpilling()
+    {
+        ThreadSlotRegistry.ConsumerDetached();
+        try
+        {
+            Assume.That(ThreadSlotRegistry.SessionPossible, Is.False, "the suite's configuration names no output channel");
+            SpilloverRingPool.Initialize(2, 64 * 1024);
+            var slot = MakeSlot(128);
+            var kind = (byte)TraceEventKind.SchedulerChunk;
+            while (WriteRecord(slot.Buffer, 32, kind, 0x11)) { }
+
+            Assert.That(TyphonEvent.TryReserveOnChain(slot, 32, kind, out _, out _), Is.False, "no session can drain a spillover: drop instead");
+            Assert.That(slot.Buffer.Next, Is.Null);
+            Assert.That(SpilloverRingPool.AcquiredCount, Is.Zero);
+        }
+        finally
+        {
+            ThreadSlotRegistry.ConsumerAttached();
+        }
     }
 
     /// <summary>Build a fabricated ThreadSlot with a primary ring of the given capacity. Chain pointers wired to primary.</summary>
@@ -111,6 +139,42 @@ public sealed class TraceRecordChainTests
         Assert.That(slot.ChainTail, Is.SameAs(slot.Buffer));
         Assert.That(slot.Buffer.Next, Is.Null);
         Assert.That(SpilloverRingPool.AcquiredCount, Is.EqualTo(0));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Pool reuse across sessions
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    public void ReInitialize_SameSize_TakesTheRingsBack_AnotherSizeAllocates()
+    {
+        SpilloverRingPool.Initialize(2, 64 * 1024);
+        SpilloverRingPool.Shutdown();
+        var allocated = SpilloverRingPool.RingsAllocated;
+
+        SpilloverRingPool.Initialize(2, 64 * 1024);
+        Assert.That(SpilloverRingPool.RingsAllocated, Is.EqualTo(allocated), "a same-size session reuses the previous rings");
+
+        SpilloverRingPool.Shutdown();
+        SpilloverRingPool.Initialize(2, 128 * 1024);
+        Assert.That(SpilloverRingPool.RingsAllocated, Is.EqualTo(allocated + 2), "another size cannot reuse them");
+    }
+
+    [Test]
+    public void ARingReleasedAfterShutdown_IsReused_Clean()
+    {
+        SpilloverRingPool.Initialize(1, 64 * 1024);
+        var ring = SpilloverRingPool.TryAcquire();
+        Assert.That(WriteRecord(ring, 32, (byte)TraceEventKind.SchedulerChunk, 0x33), Is.True);
+        SpilloverRingPool.Shutdown();
+        SpilloverRingPool.Release(ring);
+        var allocated = SpilloverRingPool.RingsAllocated;
+
+        SpilloverRingPool.Initialize(1, 64 * 1024);
+        Assert.That(SpilloverRingPool.RingsAllocated, Is.EqualTo(allocated));
+        var again = SpilloverRingPool.TryAcquire();
+        Assert.That(again, Is.SameAs(ring));
+        Assert.That(again.IsEmpty, Is.True, "Release reset it before keeping it");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
