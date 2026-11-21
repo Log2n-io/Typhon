@@ -5,7 +5,7 @@
 # Every in-repo project references the analyzers by PROJECT, so a packaging regression (an analyzer assembly dropped from analyzers/dotnet/cs, an
 # engine-only rule leaking into the package) is invisible to the solution build. From a clean local feed this script:
 #   1. builds a fresh project that references the `Typhon` package and commits one violation per shipped rule (TYPHON001, 003, 004, 005, 006, 007,
-#      009, 010, 011, 012, 013) — the build must FAIL and report every one of them;
+#      009, 010, 011, 012, 013, 016, 017) — the build must FAIL and report every one of them;
 #   2. checks the engine-only rules stay out of the package: the same project declares a ref struct that holds a no-copy enumerator by value, which the
 #      engine's TYPHON014 would flag — it must not appear;
 #   3. builds a client project that references `Typhon.Client` (Typhon.Protocol flows its analyzers) and sends a command by the name of its
@@ -88,6 +88,15 @@ public sealed partial class Thing : Archetype<Thing>
     public static readonly Comp<Pos> Pos = Register<Pos>();
 }
 
+[Component("Smoke.Lvl", 1)]
+public struct Lvl { [Index(AllowMultiple = true)] public int Level; }
+
+[Archetype]
+public sealed partial class Ranked : Archetype<Ranked>
+{
+    public static readonly Comp<Lvl> Lvl = Register<Lvl>();
+}
+
 public static class Violations
 {
     // TYPHON004: a transaction that is never disposed.
@@ -109,6 +118,17 @@ public static class Violations
 
     // TYPHON012: a non-readonly member called on a read-only receiver.
     public static void DefensiveCopy(in EntityRefMut entity) => entity.Set(Thing.Pos, default(Pos));
+
+    // TYPHON017: an opaque Where over an [Index] field — a full scan where WhereField would seek.
+    public static int OpaqueWhere(Transaction tx) => tx.Query<Ranked>().Where<Lvl>(l => l.Level > 3).Count();
+
+    // TYPHON016: an await inside a transaction's scope.
+    public static async System.Threading.Tasks.Task AwaitInTransaction(DatabaseEngine db)
+    {
+        using var tx = db.CreateQuickTransaction();
+        await System.Threading.Tasks.Task.Yield();
+        tx.Commit();
+    }
 
     // TYPHON009: a spatial component written through a span instead of WriteSpatial.
     public static void SpatialSpan(ref ClusterRef<Thing> cluster)
@@ -165,7 +185,7 @@ if [ $RC -eq 0 ]; then
   echo "analyzers: FAIL — the violation project built cleanly: no analyzer error reached it"
   FAIL=1
 fi
-for id in TYPHON001 TYPHON003 TYPHON004 TYPHON005 TYPHON006 TYPHON007 TYPHON009 TYPHON010 TYPHON011 TYPHON012 TYPHON013; do
+for id in TYPHON001 TYPHON003 TYPHON004 TYPHON005 TYPHON006 TYPHON007 TYPHON009 TYPHON010 TYPHON011 TYPHON012 TYPHON013 TYPHON016 TYPHON017; do
   if grep -q "$id" "$OUT"; then
     echo "analyzers: ok   $id reported"
   else

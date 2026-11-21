@@ -81,6 +81,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     private EntityFilter _whereFilter;
     private EntityFilter _pendingSpawnFieldFilter;
 
+    // Set only on the copy Explain() runs; null on every ordinary run, so each hook below costs one null test per archetype, never per entity.
+    private QueryExplainRecorder _explain;
+
     // Spatial query predicate (at most one per query)
     private ComponentTable _spatialTable;
     private SpatialQueryType _spatialQueryType;
@@ -195,15 +198,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Include only archetypes that declare <typeparamref name="T"/>. Mask AND.</summary>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a registered component.</exception>
     public EcsQuery<TArchetype> With<T>() where T : unmanaged
     {
-        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        if (typeId < 0)
-        {
-            _mask256 = default;
-            _maskLarge = default;
-            return this;
-        }
+        var typeId = RequireRegistered<T>("With");
         if (_useLargeMask)
         {
             _maskLarge = _maskLarge.And(ArchetypeRegistry.GetComponentMaskLarge(typeId));
@@ -264,10 +262,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Include only entities where <typeparamref name="T"/> is enabled.</summary>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a registered component.</exception>
     public EcsQuery<TArchetype> Enabled<T>() where T : unmanaged
     {
-        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component {typeof(T).Name} not registered");
+        var typeId = RequireRegistered<T>("Enabled");
         // Phase 7: ECS:Query:Constraint:Enabled instant.
         TyphonEvent.EmitEcsQueryConstraintEnabled((ushort)Math.Min(typeId, ushort.MaxValue), 1);
         AddEnabledTypeId(typeId);
@@ -275,14 +273,56 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     }
 
     /// <summary>Include only entities where <typeparamref name="T"/> is disabled.</summary>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a registered component.</exception>
     public EcsQuery<TArchetype> Disabled<T>() where T : unmanaged
     {
-        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        CheckConfig.Require(CheckConfig.Enabled, typeId >= 0, $"Component {typeof(T).Name} not registered");
+        var typeId = RequireRegistered<T>("Disabled");
         // Phase 7: ECS:Query:Constraint:Enabled instant (enableBit=0 means Disabled).
         TyphonEvent.EmitEcsQueryConstraintEnabled((ushort)Math.Min(typeId, ushort.MaxValue), 0);
         AddDisabledTypeId(typeId);
         return this;
+    }
+
+    /// <summary>
+    /// The component type id of <typeparamref name="T"/>, or a throw naming the clause when it is not registered (#1654). Unconditional: the alternative
+    /// is not a slower query but a wrong one — <c>With</c> emptied the mask and <c>Enabled</c>/<c>Disabled</c> excluded every archetype, so the query
+    /// answered "nothing" for a type the caller forgot to register.
+    /// </summary>
+    private static int RequireRegistered<T>(string clause) where T : unmanaged
+    {
+        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        if (typeId < 0)
+        {
+            throw new InvalidOperationException(
+                $"{clause}<{typeof(T).Name}>(): component {typeof(T).Name} is not registered, so no archetype can carry it and the query would always be "
+                + "empty. Declare it on an archetype (Register<T>() in an Archetype<T> class) or remove the clause.");
+        }
+
+        return typeId;
+    }
+
+    /// <summary>
+    /// Throws when no archetype this query can select carries <typeparamref name="T"/> (#1654): a predicate on it would skip every archetype and the
+    /// query would be empty whatever the data. Tested against the whole mask, so a polymorphic query whose subtree carries <typeparamref name="T"/> on
+    /// only some archetypes stays legal (IX-03's note).
+    /// </summary>
+    private readonly void RequireCarriedBySelection<T>(int typeId, string clause) where T : unmanaged
+    {
+        // Walk the ids this query's mask can select and ask each archetype, as PlannerStats does: the registry's component mask is rebuilt from all its
+        // slots on every call (and allocates past 256 archetypes), which is the wrong cost for a clause method.
+        var carried = false;
+        var maxId = ArchetypeRegistry.MaxArchetypeId;
+        for (var id = 0; id <= maxId && !carried; id++)
+        {
+            carried = MaskTest((ushort)id) && ArchetypeRegistry.GetMetadata((ushort)id) is { } meta && meta.HasComponent(typeId);
+        }
+
+        if (!carried)
+        {
+            throw new InvalidOperationException(
+                $"{clause}<{typeof(T).Name}>(): no archetype selected by Query<{typeof(TArchetype).Name}>() (after its With/Without/Exclude clauses) "
+                + $"carries {typeof(T).Name}, so the predicate can never match. Query an archetype that declares the component, or drop the clause.");
+        }
     }
 
     private void AddEnabledTypeId(int typeId)
@@ -430,9 +470,13 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// <typeparamref name="T"/> is read when enabled at the snapshot, or disabled and present when the query names <c>Disabled&lt;T&gt;()</c> (QENABLE-01) —
     /// the contract of <see cref="WhereField{T}"/>.
     /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// <typeparamref name="T"/> is not registered, or no archetype the query selects carries it.
+    /// </exception>
     public EcsQuery<TArchetype> Where<T>(Func<T, bool> predicate) where T : unmanaged
     {
-        var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
+        var typeId = RequireRegistered<T>("Where");
+        RequireCarriedBySelection<T>(typeId, "Where");
         var prevFilter = _whereFilter;
         _whereFilter = prevFilter == null ? (id, tx, readDisabled) =>
             {
@@ -468,7 +512,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// guard below. To filter on a second component use <see cref="Where{T}"/>, which opens the entity and reads each component by its own type.
     /// </remarks>
     /// <exception cref="InvalidOperationException">
-    /// <typeparamref name="T"/> is not registered, or a previous <c>WhereField</c> on this query targeted a different component.
+    /// <typeparamref name="T"/> is not registered, no archetype the query selects carries it, the predicate names a field <typeparamref name="T"/> does
+    /// not have, or a previous <c>WhereField</c> on this query targeted a different component. A field that is not <c>[Index]</c>ed is refused by the
+    /// terminal (or <c>ToView</c>) unless a spatial clause drives the query.
     /// </exception>
     public EcsQuery<TArchetype> WhereField<T>(Expression<Func<T, bool>> predicate) where T : unmanaged
     {
@@ -493,20 +539,26 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 + "it evaluates per entity and composes correctly across components.");
         }
 
+        RequireCarriedBySelection<T>(ArchetypeRegistry.GetComponentTypeId<T>(), "WhereField");
+
+        // The parser names fields by C# member, which the pending filter compiles against; the index path resolves them against the schema, which keys a
+        // field by its [Field(Name = ...)] when it has one.
         var branches = ExpressionParser.ParseDnf(predicate);
+        var schemaBranches = SchemaFieldNames<T>.ToSchemaNames(branches);
+        RequireKnownFields(schemaBranches, ct.Definition);
 
         if (_fieldPredicateBranches != null)
         {
             // Multiple WhereField calls: cross-product (AND of ORs)
-            var combined = new FieldPredicate[_fieldPredicateBranches.Length * branches.Length][];
+            var combined = new FieldPredicate[_fieldPredicateBranches.Length * schemaBranches.Length][];
             var idx = 0;
             for (var l = 0; l < _fieldPredicateBranches.Length; l++)
             {
-                for (var r = 0; r < branches.Length; r++)
+                for (var r = 0; r < schemaBranches.Length; r++)
                 {
-                    var merged = new FieldPredicate[_fieldPredicateBranches[l].Length + branches[r].Length];
+                    var merged = new FieldPredicate[_fieldPredicateBranches[l].Length + schemaBranches[r].Length];
                     Array.Copy(_fieldPredicateBranches[l], merged, _fieldPredicateBranches[l].Length);
-                    Array.Copy(branches[r], 0, merged, _fieldPredicateBranches[l].Length, branches[r].Length);
+                    Array.Copy(schemaBranches[r], 0, merged, _fieldPredicateBranches[l].Length, schemaBranches[r].Length);
                     combined[idx++] = merged;
                 }
             }
@@ -514,7 +566,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
         else
         {
-            _fieldPredicateBranches = branches;
+            _fieldPredicateBranches = schemaBranches;
         }
 
         _whereComponentTable = ct;
@@ -527,15 +579,18 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         //
         // Deferred compilation: Expression.Compile() costs ~100+ µs. Since pending spawns are rare (only entities
         // spawned in the current, not-yet-committed transaction), defer compilation until the predicate is actually
-        // needed. We store the expression as an untyped object and compile only on first invocation of the filter.
-        // The compiled delegate is cached in a local captured by the closure.
-        object predicateExpr = predicate;
+        // needed. The compiled delegate is cached in a local captured by the closure.
+        //
+        // QCLAUSE-01: it is compiled from the PARSED branches, whose constants were read at this call — not from the caller's lambda, which would re-read a
+        // captured variable when the filter first runs. The index thresholds come from those same branches, so a variable changed between WhereField and
+        // the terminal moved the pending rows' threshold and not the committed rows'.
+        var pendingBranches = branches;
         Func<T, bool> compiledPredicate = null;
         var typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         var prevPendingFilter = _pendingSpawnFieldFilter;
         _pendingSpawnFieldFilter = prevPendingFilter == null ? (id, tx, readDisabled) =>
             {
-                compiledPredicate ??= ((Expression<Func<T, bool>>)predicateExpr).Compile();
+                compiledPredicate ??= CompileParsedPredicate<T>(pendingBranches);
                 if (!tx.TryOpen(id, out var entity))
                 {
                     return false;
@@ -548,7 +603,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 {
                     return false;
                 }
-                compiledPredicate ??= ((Expression<Func<T, bool>>)predicateExpr).Compile();
+                compiledPredicate ??= CompileParsedPredicate<T>(pendingBranches);
                 if (!tx.TryOpen(id, out var entity))
                 {
                     return false;
@@ -558,6 +613,76 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             };
 
         return this;
+    }
+
+    /// <summary>
+    /// The predicate the parsed <paramref name="branches"/> state, as a delegate: an OR of ANDs of <c>field op constant</c>, the field converted to the
+    /// constant's type as C# converted it in the original comparison (the parser hands back the value in the comparison's operand type).
+    /// </summary>
+    private static Func<T, bool> CompileParsedPredicate<T>(FieldPredicate[][] branches) where T : unmanaged
+    {
+        var p = Expression.Parameter(typeof(T), "c");
+        Expression body = null;
+        foreach (var branch in branches)
+        {
+            Expression and = null;
+            foreach (var pred in branch)
+            {
+                Expression field = Expression.PropertyOrField(p, pred.FieldName);
+                if (pred.Value == null)
+                {
+                    // An empty nullable: the lifted comparison is false for every operator but != (as NormalizeThreshold states it for the index).
+                    Expression always = Expression.Constant(pred.Operator == CompareOp.NotEqual);
+                    and = and == null ? always : Expression.AndAlso(and, always);
+                    continue;
+                }
+
+                var constant = Expression.Constant(pred.Value);
+                if (field.Type != constant.Type)
+                {
+                    field = Expression.Convert(field, constant.Type);
+                }
+
+                var kind = pred.Operator switch
+                {
+                    CompareOp.Equal => ExpressionType.Equal,
+                    CompareOp.NotEqual => ExpressionType.NotEqual,
+                    CompareOp.GreaterThan => ExpressionType.GreaterThan,
+                    CompareOp.GreaterThanOrEqual => ExpressionType.GreaterThanOrEqual,
+                    CompareOp.LessThan => ExpressionType.LessThan,
+                    _ => ExpressionType.LessThanOrEqual
+                };
+                Expression leaf = Expression.MakeBinary(kind, field, constant);
+                and = and == null ? leaf : Expression.AndAlso(and, leaf);
+            }
+
+            and ??= Expression.Constant(true);
+            body = body == null ? and : Expression.OrElse(body, and);
+        }
+
+        return Expression.Lambda<Func<T, bool>>(body ?? Expression.Constant(true), p).Compile();
+    }
+
+    /// <summary>
+    /// Throws at the <c>WhereField</c> call when a predicate names a field the component's schema does not have (#1654).
+    /// </summary>
+    /// <remarks>
+    /// Whether the field must be <c>[Index]</c>ed is not known here: a spatial clause (<c>WhereInAABB</c>, before or after this call) evaluates the field
+    /// predicate per candidate through the compiled delegate, so a plain field is legal there. Every index-driven terminal and <c>ToView</c> refuses a
+    /// non-indexed field when it resolves the evaluators (<see cref="QueryResolverHelper.ResolveEvaluators"/>).
+    /// </remarks>
+    private static void RequireKnownFields(FieldPredicate[][] branches, DBComponentDefinition definition)
+    {
+        foreach (var branch in branches)
+        {
+            foreach (var pred in branch)
+            {
+                if (!definition.FieldsByName.ContainsKey(pred.FieldName))
+                {
+                    throw new InvalidOperationException($"WhereField: field '{pred.FieldName}' not found on component '{definition.Name}'.");
+                }
+            }
+        }
     }
 
     /// <summary>True if this query has Expression-based field predicates (enabling incremental views).</summary>
@@ -1150,10 +1275,15 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         try
         {
             var result = new HashSet<EntityId>(_take > 0 ? _take : Math.Max(64, ResultSizeHint));
+            if (_explain != null)
+            {
+                _explain.ResultSet = result;
+            }
             if (MaskIsEmpty)
             {
                 scope.ScanMode = EcsQueryScanMode.Empty;
                 scope.ResultCount = 0;
+                _explain?.QueryPath = QueryAccessPath.Empty;
                 return result;
             }
 
@@ -1162,6 +1292,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             // applies BOTH predicates instead of silently dropping the spatial one.
             if (_spatialQueryType != SpatialQueryType.None)
             {
+                _explain?.QueryPath = QueryAccessPath.Spatial;
                 var spatial = ExecuteSpatial();
                 scope.ScanMode = EcsQueryScanMode.Spatial;
                 scope.ResultCount = spatial.Count;
@@ -1185,7 +1316,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             var readDisabled = DisabledNames;
             if (filter != null)
             {
-                result.RemoveWhere(id => !filter(id, tx, readDisabled));
+                var removed = result.RemoveWhere(id => !filter(id, tx, readDisabled));
+                _explain?.WhereFilterRemoved = removed;
             }
 
             scope.ScanMode = EcsQueryScanMode.Broad;
@@ -2473,6 +2605,10 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         // Scan for matching entities across all matching archetypes.
         var result = new HashSet<EntityId>(_take > 0 ? _take : Math.Max(64, ResultSizeHint));
+        if (_explain != null)
+        {
+            _explain.ResultSet = result;
+        }
         var sink = new EntityIdSetSink(result);
         ScanAllArchetypes(plan, evaluators, ct, ref sink);
 
@@ -2484,7 +2620,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         // Read-your-own-writes: pending spawns have no secondary index entries, so the targeted scan above can't find them. Evaluate them via compiled
         // predicate fallback.
+        var beforePending = result.Count;
         CollectPendingSpawnsWithFieldFilter(result);
+        _explain?.PendingSpawnRows = result.Count - beforePending;
 
         // Opaque WHERE post-filter (from .Where<T>(Func), separate from WhereField)
         var filter = _whereFilter;
@@ -2492,7 +2630,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             var tx = _tx;
             var readDisabled = DisabledNames;
-            result.RemoveWhere(id => !filter(id, tx, readDisabled));
+            var removed = result.RemoveWhere(id => !filter(id, tx, readDisabled));
+            _explain?.WhereFilterRemoved = removed;
         }
 
         return result;
@@ -2541,6 +2680,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // or several — put an archetype with no such component in front of the guard and turned a legitimate polymorphic query into a hard throw.
                 if (!ArchetypeCarries(engineState, ct))
                 {
+                    _explain?.Add(meta.Name, QueryAccessPath.Skipped, 0, $"does not carry {ct.Definition.Name}");
                     continue;
                 }
 
@@ -2571,15 +2711,23 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 // A Transient home always takes Path B. Path A range-scans the tree, and the collector is typed to BTreeBase<PersistentStore>; Path B never
                 // touches a tree at all, so it is correct for either home. Selecting it here costs a full SoA scan instead of a selective one — a performance
                 // gap, not a correctness one, and one that #665 revisits when it unfreezes cluster selectivity statistics (#655).
-                if (ChooseSelectivePath(plan, clusterState, engineState, ixSlotIdx, transientHome))
+                var rowsBefore = _explain?.ResultCountNow ?? 0;
+                var selective = ChooseSelectivePath(plan, clusterState, engineState, ixSlotIdx, transientHome);
+                var outcome = SelectiveScanOutcome.NotRun;
+                if (selective)
                 {
                     QueryPathProbe.SelectiveScans++;
-                    ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, ref sink);
+                    outcome = ScanPerArchetypeBTreeSelective(plan, evaluators, clusterState, meta, ref sink);
                 }
                 else
                 {
                     QueryPathProbe.FullScans++;
                     ScanPerArchetypeBTree(evaluators, clusterState, meta, ref sink);
+                }
+
+                if (_explain != null)
+                {
+                    ExplainClusterScan(_explain, meta, ct, plan, evaluators, selective, outcome, transientHome, _explain.ResultCountNow - rowsBefore);
                 }
             }
         }
@@ -2619,6 +2767,117 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
 
         return false;
     }
+
+    /// <summary>
+    /// Records the path <see cref="ScanAllArchetypes{TSink}"/> took for one archetype — the branch it actually ran, passed in by the caller.
+    /// </summary>
+    private void ExplainClusterScan(QueryExplainRecorder rec, ArchetypeMetadata meta, ComponentTable ct, ExecutionPlan plan,
+        FieldEvaluator[] evaluators, bool selective, SelectiveScanOutcome outcome, bool transientHome, int rows)
+    {
+        var def = ct.Definition;
+        var evaluated = new List<string>(evaluators.Length + 1);
+        foreach (var e in evaluators)
+        {
+            evaluated.Add(DescribeEvaluator(e, def));
+        }
+        if (_whereFilter != null)
+        {
+            evaluated.Add("Where(Func) post-filter");
+        }
+
+        // Several matching archetypes give the planner no statistics (PlannerStats returns null) and every estimate reads 0: report "no estimate".
+        var estimated = PlannerStats(ct) != null && plan.EstimatedCounts is { Length: > 0 } est ? est[0] : -1;
+        if (!selective || outcome == SelectiveScanOutcome.FellBackToClusterScan)
+        {
+            var note = transientHome ? "Transient index home: zone maps only"
+                : selective ? "planned an index scan; the primary field is not indexed in this slot, so the cluster scan ran" : null;
+            rec.Add(meta.Name, QueryAccessPath.ClusterScan, rows, note, null, null, evaluated, estimated);
+            return;
+        }
+
+        if (outcome == SelectiveScanOutcome.NotRun)
+        {
+            rec.Add(meta.Name, QueryAccessPath.Skipped, rows, "no row can pass the Enabled/Disabled gate", null, null, null, estimated);
+            return;
+        }
+
+        // The selective scan skips the primary field's evaluators when the range alone enforces them (PrimaryRangeAdmitsOnlyMatches): they are pushed
+        // down, not evaluated per entity — except on entities written since the last tick fence (QFENCE-01), which the note says.
+        var enforced = plan.PrimaryRangeAdmitsOnlyMatches;
+        if (enforced)
+        {
+            evaluated.Clear();
+            foreach (var e in evaluators)
+            {
+                if (e.FieldIndex != plan.PrimaryFieldIndex)
+                {
+                    evaluated.Add(DescribeEvaluator(e, def));
+                }
+            }
+            if (_whereFilter != null)
+            {
+                evaluated.Add("Where(Func) post-filter");
+            }
+        }
+
+        var field = IndexedFieldName(def, plan.PrimaryFieldIndex);
+        var seek = plan.PrimaryScanMin == plan.PrimaryScanMax;
+        var range = seek
+            ? $"{field} == {DecodeKey(plan.PrimaryScanMin, plan.PrimaryKeyType)}"
+            : $"{field} in [{DecodeKey(plan.PrimaryScanMin, plan.PrimaryKeyType)}..{DecodeKey(plan.PrimaryScanMax, plan.PrimaryKeyType)}]";
+        var wholeNote = outcome == SelectiveScanOutcome.TreeAndWholeClusters
+            ? "also read whole the clusters a destroy or update newer than this snapshot touched"
+            : null;
+        if (enforced)
+        {
+            const string fenceNote = "the range's own predicates are re-checked only on entities written since the last tick fence";
+            wholeNote = wholeNote == null ? fenceNote : wholeNote + "; " + fenceNote;
+        }
+        rec.Add(meta.Name, seek ? QueryAccessPath.IndexSeek : QueryAccessPath.IndexRange, rows, wholeNote, $"{def.Name}.{field}", [range], evaluated,
+            estimated);
+    }
+
+    private static string DescribeEvaluator(in FieldEvaluator e, DBComponentDefinition def)
+    {
+        var op = e.CompareOp switch
+        {
+            CompareOp.Equal => "==",
+            CompareOp.NotEqual => "!=",
+            CompareOp.GreaterThan => ">",
+            CompareOp.LessThan => "<",
+            CompareOp.GreaterThanOrEqual => ">=",
+            _ => "<="
+        };
+        return $"{IndexedFieldName(def, e.FieldIndex)} {op} {DecodeKey(e.Threshold, e.KeyType)}";
+    }
+
+    /// <summary>The name of the <paramref name="indexedFieldIndex"/>-th indexed field, in <see cref="QueryResolverHelper.FindFieldIndex"/>'s order.</summary>
+    private static string IndexedFieldName(DBComponentDefinition def, int indexedFieldIndex)
+    {
+        var n = 0;
+        for (var i = 0; i < def.MaxFieldId; i++)
+        {
+            var f = def[i];
+            if (f == null || !f.HasIndex)
+            {
+                continue;
+            }
+            if (n++ == indexedFieldIndex)
+            {
+                return f.Name;
+            }
+        }
+        return $"field#{indexedFieldIndex}";
+    }
+
+    private static string DecodeKey(long key, KeyType keyType) => keyType switch
+    {
+        KeyType.Float => BitConverter.Int32BitsToSingle((int)key).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        KeyType.Double => BitConverter.Int64BitsToDouble(key).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        KeyType.ULong => ((ulong)key).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        KeyType.Bool => key != 0 ? "true" : "false",
+        _ => key.ToString(System.Globalization.CultureInfo.InvariantCulture)
+    };
 
     /// <summary>
     /// <see cref="ScanAllArchetypes{TSink}"/> for callers whose result container is a view's raw-PK entity set. Replaces the bare
@@ -3213,7 +3472,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// Path A selective query: scan per-archetype B+Tree for the primary predicate range, collect ClusterLocations,
     /// then verify remaining predicates only on matched entities. Optimal for highly selective queries (&lt;5% match).
     /// </summary>
-    private void ScanPerArchetypeBTreeSelective<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState,
+    private SelectiveScanOutcome ScanPerArchetypeBTreeSelective<TSink>(ExecutionPlan plan, FieldEvaluator[] evaluators, ArchetypeClusterState clusterState,
         ArchetypeMetadata meta, ref TSink result) where TSink : struct, IEntityIdSink
     {
         // Persistent home only: the range scan below is typed to BTreeBase<PersistentStore>. ScanAllArchetypes never routes a Transient home here, so this is
@@ -3221,7 +3480,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         var ixSlotIdx = FindClusterIndexSlot(clusterState, meta, out var transientHome);
         if (ixSlotIdx < 0 || transientHome)
         {
-            return;
+            return SelectiveScanOutcome.NotRun;
         }
 
         var ixSlots = clusterState.IndexSlots;
@@ -3235,7 +3494,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // QENABLE-01, as Path B: the tree holds a disabled component's entry, and an absent Versioned one's under the slot's bytes.
         if (!TryCreateEnabledGate(meta, layout, compSlot, out var gate))
         {
-            return;
+            return SelectiveScanOutcome.NotRun;
         }
 
         // Find the primary field's B+Tree matching the plan's PrimaryFieldIndex
@@ -3243,7 +3502,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             // Fall back to Path B (full scan) if primary field not found
             ScanPerArchetypeBTree(evaluators, clusterState, meta, ref result);
-            return;
+            return SelectiveScanOutcome.FellBackToClusterScan;
         }
 
         ref var primaryField = ref matchSlot.Fields[plan.PrimaryFieldIndex];
@@ -3288,7 +3547,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             updatedClusters = snapshotReads ? ClustersUpdatedAfterSnapshot(clusterState) : default;
             if (!hasAny && !walkDeaths && updatedClusters.IsEmpty)
             {
-                return;
+                return SelectiveScanOutcome.Tree;
             }
 
             // Predicates the RANGE has already enforced. The tree scan above yielded exactly the rows satisfying every predicate on the primary field, so
@@ -3465,12 +3724,29 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     visAccessor.Dispose();
                 }
             }
+
+            return walkDeaths || !updatedClusters.IsEmpty ? SelectiveScanOutcome.TreeAndWholeClusters : SelectiveScanOutcome.Tree;
         }
         finally
         {
             updatedClusters.Return();
             ArrayPool<ulong>.Shared.Return(matchBitsArr);
         }
+    }
+
+    /// <summary>
+    /// What <see cref="ScanPerArchetypeBTreeSelective{TSink}"/> actually did, so <see cref="Explain"/> reports it rather than the plan's intent.
+    /// </summary>
+    private enum SelectiveScanOutcome : byte
+    {
+        /// <summary>Returned before reading anything: no index slot, a Transient home, or no row can pass the Enabled/Disabled gate.</summary>
+        NotRun,
+        /// <summary>The plan's primary field is not among the slot's indexed fields: ran the zone-map cluster scan instead.</summary>
+        FellBackToClusterScan,
+        /// <summary>Read the tree range and only the clusters it reached.</summary>
+        Tree,
+        /// <summary>Read the tree range, plus whole clusters a destroy or update newer than the snapshot touched (VIS-09 / VIS-12).</summary>
+        TreeAndWholeClusters
     }
 
     /// <summary>
@@ -4214,6 +4490,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 scope.ScanMode = EcsQueryScanMode.Empty;
                 scope.ResultCount = 0;
+                _explain?.QueryPath = QueryAccessPath.Empty;
                 return 0;
             }
 
@@ -4221,6 +4498,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             // the field-only path so spatial + WhereField composes.
             if (_spatialQueryType != SpatialQueryType.None)
             {
+                _explain?.QueryPath = QueryAccessPath.Spatial;
                 var spatialCount = ExecuteSpatial().Count;
                 scope.ScanMode = EcsQueryScanMode.Spatial;
                 scope.ResultCount = spatialCount;
@@ -4257,6 +4535,42 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         {
             scope.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="terminal"/> and reports what it did: per archetype the access path taken (index seek or range, cluster scan, broad scan,
+    /// occupancy count), the index read, the predicates the index range enforced and those evaluated per entity, the planner's estimate and the rows produced.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The paths are recorded by the executing code as it branches, not re-derived from the plan, so the report cannot disagree with the run it describes.
+    /// Paths are chosen at execution time from the data (fan-out, cluster visibility, the transaction's pending writes), so a second run can differ.
+    /// </para>
+    /// <para>
+    /// A diagnostic surface: the record's fields and the <see cref="QueryAccessPath"/> vocabulary may change before 1.0. The query runs in full, at the
+    /// cost of the terminal plus one entry per archetype.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="NotSupportedException">The query has an <c>OrderBy</c>: it runs through <c>ExecuteOrdered</c>, which this does not record.</exception>
+    public QueryExplanation Explain(ExplainTerminal terminal = ExplainTerminal.Execute,
+        [CallerFilePath]   string callerFile = null,
+        [CallerLineNumber] int    callerLine = 0,
+        [CallerMemberName] string callerMethod = null)
+    {
+        if (_orderBy != null)
+        {
+            throw new NotSupportedException(
+                "Explain() records Execute() and Count(); an ordered query runs through ExecuteOrdered(), whose merge it does not record. Explain the query "
+                + "without its OrderBy to see the scan each archetype takes.");
+        }
+
+        var run = this;
+        var rec = new QueryExplainRecorder();
+        run._explain = rec;
+        var count = terminal == ExplainTerminal.Count
+            ? run.Count(callerFile, callerLine, callerMethod)
+            : run.Execute(callerFile, callerLine, callerMethod).Count;
+        return new QueryExplanation(terminal, rec.QueryPath, rec.Archetypes, rec.PendingSpawnRows, rec.WhereFilterRemoved, count);
     }
 
     /// <summary>Test if any entity matches. Short-circuits on first match.</summary>
@@ -4914,12 +5228,16 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         if (_useLargeMask)
         {
             CollectMatchingCore(_maskLarge, onMatch, stopOnFirst);
+            var before = _explain?.ResultCountNow ?? 0;
             CollectPendingSpawns(_maskLarge, onMatch, stopOnFirst);
+            _explain?.PendingSpawnRows = _explain.ResultCountNow - before;
         }
         else
         {
             CollectMatchingCore(_mask256, onMatch, stopOnFirst);
+            var before = _explain?.ResultCountNow ?? 0;
             CollectPendingSpawns(_mask256, onMatch, stopOnFirst);
+            _explain?.PendingSpawnRows = _explain.ResultCountNow - before;
         }
     }
 
@@ -4945,6 +5263,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 CollectPendingSpawns(_mask256, (_, _) => pendingCount++, false);
             }
             total += pendingCount;
+            _explain?.PendingSpawnRows = pendingCount;
         }
 
         return total;
@@ -5076,9 +5395,11 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             ushort reqEnabled = 0, reqDisabled = 0;
             if (hasT2 && !ResolveT2Masks(meta, out reqEnabled, out reqDisabled))
             {
+                _explain?.Add(meta.Name, QueryAccessPath.Skipped, 0, "lacks a component an Enabled/Disabled clause names");
                 continue;
             }
 
+            var rowsBefore = _explain?.ResultCountNow ?? 0;
             var accessor = engineState.EntityMap.Segment.CreateScanAccessor();
             var action = new BroadScanAction
             {
@@ -5105,6 +5426,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             {
                 accessor.Dispose();
             }
+
+            _explain?.Add(meta.Name, QueryAccessPath.BroadScan, _explain.ResultCountNow - rowsBefore, null, null, null,
+                _whereFilter != null ? ["Where(Func) post-filter"] : null);
 
             if (stopOnFirst && action.Found)
             {
@@ -5145,12 +5469,14 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             ushort reqEnabled = 0, reqDisabled = 0;
             if (hasT2 && !ResolveT2Masks(meta, out reqEnabled, out reqDisabled))
             {
+                _explain?.Add(meta.Name, QueryAccessPath.Skipped, 0, "lacks a component an Enabled/Disabled clause names");
                 continue;
             }
 
             if (TryCountViaOccupancy(engineState, hasT2, txTsn, out var occupancyCount))
             {
                 total += occupancyCount;
+                _explain?.Add(meta.Name, QueryAccessPath.OccupancyCount, occupancyCount);
                 continue;
             }
 
@@ -5173,7 +5499,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
             };
             try
             {
-                total += engineState.EntityMap.CountEntries(ref accessor, ref pred, _tx.BeginScanYield());
+                var counted = engineState.EntityMap.CountEntries(ref accessor, ref pred, _tx.BeginScanYield());
+                total += counted;
+                _explain?.Add(meta.Name, QueryAccessPath.BroadScan, counted);
             }
             finally
             {

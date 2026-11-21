@@ -163,9 +163,13 @@ internal static class ExpressionParser
 
     private static (string fieldName, int paramIndex) TryExtractFieldWithParam(Expression expr, ParameterExpression[] parameters)
     {
-        // Strip Convert wrappers (implicit numeric promotions)
-        while (expr is UnaryExpression { NodeType: ExpressionType.Convert } unary)
+        // Peel the conversions C# inserts to compare the field with a wider operand. They are what the normalisation models (QCLAUSE-01: `(double)p.I`
+        // against a double constant). An explicit narrowing cast on the field is not: `(int)p.F > 3` truncates F first, which neither the index nor the
+        // evaluator can express — it is refused below instead of silently compared as `F > 3`.
+        var hasNarrowingCast = false;
+        while (expr is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } unary)
         {
+            hasNarrowingCast |= unary.Method != null || !IsImplicitConversion(unary.Operand.Type, unary.Type);
             expr = unary.Operand;
         }
 
@@ -175,12 +179,57 @@ internal static class ExpressionParser
             {
                 if (member.Expression == parameters[i])
                 {
+                    if (hasNarrowingCast)
+                    {
+                        throw new NotSupportedException(
+                            $"A cast on the field '{member.Member.Name}' changes what the comparison selects, and a field predicate compares the field itself. "
+                            + "Compare the field against a value of its own type, or use Where<T>(Func<T, bool>) for the cast.");
+                    }
                     return (member.Member.Name, i);
                 }
             }
         }
 
         return (null, -1);
+    }
+
+    /// <summary>
+    /// Whether C# converts <paramref name="from"/> to <paramref name="to"/> implicitly: a numeric widening, an enum to its underlying type, a lift to
+    /// nullable.
+    /// </summary>
+    private static bool IsImplicitConversion(Type from, Type to)
+    {
+        if (from == to)
+        {
+            return true;
+        }
+
+        var toUnderlying = Nullable.GetUnderlyingType(to);
+        if (toUnderlying != null)
+        {
+            return IsImplicitConversion(from, toUnderlying);
+        }
+
+        if (from.IsEnum)
+        {
+            return IsImplicitConversion(Enum.GetUnderlyingType(from), to);
+        }
+
+        return Type.GetTypeCode(from) switch
+        {
+            TypeCode.SByte => Type.GetTypeCode(to) is TypeCode.Int16 or TypeCode.Int32 or TypeCode.Int64 or TypeCode.Single or TypeCode.Double
+                or TypeCode.Decimal,
+            TypeCode.Byte => Type.GetTypeCode(to) is TypeCode.Int16 or TypeCode.UInt16 or TypeCode.Int32 or TypeCode.UInt32 or TypeCode.Int64 or TypeCode.UInt64
+                or TypeCode.Single or TypeCode.Double or TypeCode.Decimal,
+            TypeCode.Int16 => Type.GetTypeCode(to) is TypeCode.Int32 or TypeCode.Int64 or TypeCode.Single or TypeCode.Double or TypeCode.Decimal,
+            TypeCode.UInt16 or TypeCode.Char => Type.GetTypeCode(to) is TypeCode.Int32 or TypeCode.UInt32 or TypeCode.Int64 or TypeCode.UInt64
+                or TypeCode.Single or TypeCode.Double or TypeCode.Decimal or TypeCode.UInt16,
+            TypeCode.Int32 => Type.GetTypeCode(to) is TypeCode.Int64 or TypeCode.Single or TypeCode.Double or TypeCode.Decimal,
+            TypeCode.UInt32 => Type.GetTypeCode(to) is TypeCode.Int64 or TypeCode.UInt64 or TypeCode.Single or TypeCode.Double or TypeCode.Decimal,
+            TypeCode.Int64 or TypeCode.UInt64 => Type.GetTypeCode(to) is TypeCode.Single or TypeCode.Double or TypeCode.Decimal,
+            TypeCode.Single => Type.GetTypeCode(to) is TypeCode.Double,
+            _ => false
+        };
     }
 
     private static object EvaluateConstant(Expression expr)
@@ -194,25 +243,29 @@ internal static class ExpressionParser
         // Fast path for closure-captured variables: field access on a display class instance.
         // Pattern: MemberAccess(ConstantExpression) — e.g., closure.threshold where threshold is a local variable.
         // This avoids Expression.Lambda().Compile().DynamicInvoke() which costs ~100+ µs per call.
+        // The Convert nodes are peeled to reach the captured field, then re-applied to its value with C# semantics: the comparison runs on the converted
+        // value, and dropping a narrowing cast changes what it selects (`l.I == (int)d` with d = 3.7 compares against 3; `l.F == (float)d` against the
+        // float nearest d, not d). A conversion this cannot replay — user-defined, checked, nullable — takes the compiling fallback.
         var target = expr;
-        // Strip Convert wrappers (e.g., int promoted to long in expression tree)
-        while (target is UnaryExpression { NodeType: ExpressionType.Convert } conv)
+        while (target is UnaryExpression { NodeType: ExpressionType.Convert, Method: null } conv)
         {
             target = conv.Operand;
         }
-        if (target is MemberExpression memberExpr && memberExpr.Expression is ConstantExpression closureConst)
+        // A captured local (a field of the closure's display class) or a static member (`Limits.Max`, Expression == null).
+        if (target is MemberExpression memberExpr && memberExpr.Expression is null or ConstantExpression)
         {
+            var instance = (memberExpr.Expression as ConstantExpression)?.Value;
             var member = memberExpr.Member;
             object value = null;
             if (member is System.Reflection.FieldInfo fieldInfo)
             {
-                value = fieldInfo.GetValue(closureConst.Value);
+                value = fieldInfo.GetValue(instance);
             }
             else if (member is System.Reflection.PropertyInfo propInfo)
             {
-                value = propInfo.GetValue(closureConst.Value);
+                value = propInfo.GetValue(instance);
             }
-            if (value != null)
+            if (value != null && TryReplayConversions(expr, target, ref value))
             {
                 return value;
             }
@@ -220,6 +273,117 @@ internal static class ExpressionParser
 
         // Fallback: compile and invoke (handles complex nested expressions)
         return Expression.Lambda(expr).Compile().DynamicInvoke();
+    }
+
+    /// <summary>Applies the Convert chain between <paramref name="node"/> and <paramref name="leaf"/> to <paramref name="value"/>, innermost first.</summary>
+    private static bool TryReplayConversions(Expression node, Expression leaf, ref object value)
+    {
+        if (node == leaf)
+        {
+            return true;
+        }
+
+        var conv = (UnaryExpression)node;
+        return TryReplayConversions(conv.Operand, leaf, ref value) && TryConvertNumeric(value, conv.Type, out value);
+    }
+
+    /// <summary>
+    /// The unchecked C# conversion of a boxed primitive to <paramref name="target"/> — what a compiled <c>Convert</c> node computes. False for anything
+    /// that is not a primitive numeric conversion.
+    /// </summary>
+    internal static bool TryConvertNumeric(object value, Type target, out object result)
+    {
+        result = value;
+        if (value.GetType() == target)
+        {
+            return true;
+        }
+
+        // An enum converts through its underlying type, as the IL does.
+        if (value.GetType().IsEnum)
+        {
+            value = Convert.ChangeType(value, Enum.GetUnderlyingType(value.GetType()), System.Globalization.CultureInfo.InvariantCulture);
+            if (value.GetType() == target)
+            {
+                result = value;
+                return true;
+            }
+        }
+        if (target.IsEnum)
+        {
+            if (!TryConvertNumeric(value, Enum.GetUnderlyingType(target), out var underlying))
+            {
+                return false;
+            }
+            result = Enum.ToObject(target, underlying);
+            return true;
+        }
+
+        var tc = Type.GetTypeCode(target);
+        switch (value)
+        {
+            case double or float:
+            {
+                var d = value is double dv ? dv : (float)value;
+                result = tc switch
+                {
+                    TypeCode.SByte => (sbyte)d,
+                    TypeCode.Byte => (byte)d,
+                    TypeCode.Int16 => (short)d,
+                    TypeCode.UInt16 => (ushort)d,
+                    TypeCode.Char => (char)d,
+                    TypeCode.Int32 => (int)d,
+                    TypeCode.UInt32 => (uint)d,
+                    TypeCode.Int64 => (long)d,
+                    TypeCode.UInt64 => (ulong)d,
+                    TypeCode.Single => (float)d,
+                    TypeCode.Double => d,
+                    _ => null
+                };
+                break;
+            }
+            case ulong u:
+                result = tc switch
+                {
+                    TypeCode.SByte => unchecked((sbyte)u),
+                    TypeCode.Byte => unchecked((byte)u),
+                    TypeCode.Int16 => unchecked((short)u),
+                    TypeCode.UInt16 => unchecked((ushort)u),
+                    TypeCode.Char => unchecked((char)u),
+                    TypeCode.Int32 => unchecked((int)u),
+                    TypeCode.UInt32 => unchecked((uint)u),
+                    TypeCode.Int64 => unchecked((long)u),
+                    TypeCode.Single => (float)u,
+                    TypeCode.Double => (double)u,
+                    _ => null
+                };
+                break;
+            case sbyte or byte or short or ushort or char or int or uint or long:
+            {
+                var l = value is char c ? c : Convert.ToInt64(value);
+                result = tc switch
+                {
+                    TypeCode.SByte => unchecked((sbyte)l),
+                    TypeCode.Byte => unchecked((byte)l),
+                    TypeCode.Int16 => unchecked((short)l),
+                    TypeCode.UInt16 => unchecked((ushort)l),
+                    TypeCode.Char => unchecked((char)l),
+                    TypeCode.Int32 => unchecked((int)l),
+                    TypeCode.UInt32 => unchecked((uint)l),
+                    TypeCode.Int64 => l,
+                    TypeCode.UInt64 => unchecked((ulong)l),
+                    TypeCode.Single => (float)l,
+                    TypeCode.Double => (double)l,
+                    _ => null
+                };
+                break;
+            }
+            default:
+                result = null;
+                break;
+        }
+
+        return result != null;
     }
 
     private static CompareOp? MapCompareOp(ExpressionType type) =>
