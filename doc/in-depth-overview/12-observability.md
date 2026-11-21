@@ -331,7 +331,7 @@ Output: off-CPU gaps visible in the Workbench timeline overlaid on the affected 
 
 `[ModuleInitializer]` in `ProfilerBootstrap.Initialize` runs at assembly load, before any hot path JITs. It:
 1. Forces `TelemetryConfig.EnsureInitialized()` so the gates resolve before any IL bakes them.
-2. Eagerly allocates `SpilloverRingPool` when `ProfilerActive` is true — early host emissions (engine bridge construction, bulk spawn) extend the chain instead of dropping.
+2. Allocates `SpilloverRingPool` when `ProfilerActive` is true: eagerly when the configuration will start a session (an output channel, or a capture not suppressed), so early host emissions (engine bridge construction, bulk spawn) extend the chain instead of dropping; lazily when it never will (`Trace: "none"` and no live port), where a thread also gets a 64 KiB primary ring and drops on overflow instead of spilling — nothing would ever drain it. `Stop` keeps the pool's rings for the next session of the same size.
 
 `ProfilerBootstrap.TryStart(runtime, sp)` runs at the end of `TyphonRuntime.Create`. When `ProfilerActive` is on AND a launch config declares an output channel:
 1. Resolves `ProfilerLaunchConfig` (file + env + optional host DI override via `AddTyphonProfiler` + `ProfilerLaunchOverride`).

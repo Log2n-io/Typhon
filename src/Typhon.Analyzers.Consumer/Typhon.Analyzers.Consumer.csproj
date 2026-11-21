@@ -36,6 +36,7 @@
     <Compile Include="..\Typhon.Analyzers\DisposableAnalyzerHelpers.cs" Link="DisposableAnalyzerHelpers.cs" />
     <Compile Include="..\Typhon.Analyzers\DisposableNotDisposedAnalyzer.cs" Link="DisposableNotDisposedAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\EntityHandleDefensiveCopyAnalyzer.cs" Link="EntityHandleDefensiveCopyAnalyzer.cs" />
+    <Compile Include="..\Typhon.Analyzers\IndexedFieldInOpaqueWhereAnalyzer.cs" Link="IndexedFieldInOpaqueWhereAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\NoCopyAnalyzer.cs" Link="NoCopyAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\SpatialMutationWithoutBarrierAnalyzer.cs" Link="SpatialMutationWithoutBarrierAnalyzer.cs" />
     <Compile Include="..\Typhon.Analyzers\TransactionAcrossAwaitAnalyzer.cs" Link="TransactionAcrossAwaitAnalyzer.cs" />

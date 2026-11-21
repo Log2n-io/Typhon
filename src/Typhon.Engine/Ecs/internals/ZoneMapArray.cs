@@ -445,15 +445,16 @@ internal sealed unsafe class ZoneMapArray
 
         if (_isUnsigned)
         {
-            // Unsigned types: XOR with sign bit to preserve ordering in signed comparison.
-            // Maps unsigned 0 → signed MIN, unsigned MAX → signed MAX.
+            // Unsigned types up to 32 bits zero-extend into a long and already sort as signed longs. Only ulong, whose top half encodes negative, flips
+            // its sign bit (0 → long.MinValue, MAX → long.MaxValue). Flipping bit 15 / 31 of a zero-extended value broke the order — 65535 sorted below
+            // 0 — so a cluster holding 0..9 and 65535 was recorded as [9, 32768]-ish and pruned for `>= 10`, dropping the 65535 row.
             return _fieldSize switch
             {
-                1 => *ptr,                                             // byte: 0..255 fits, no XOR needed
-                2 => *(ushort*)ptr ^ (1L << 15),                       // ushort: XOR bit 15
-                4 => *(uint*)ptr ^ (1L << 31),                         // uint: XOR bit 31
-                8 => *(long*)ptr ^ long.MinValue,                      // ulong: XOR bit 63
-                _ => *(uint*)ptr ^ (1L << 31),
+                1 => *ptr,
+                2 => *(ushort*)ptr,
+                4 => *(uint*)ptr,
+                8 => *(long*)ptr ^ long.MinValue,
+                _ => *(uint*)ptr,
             };
         }
 
@@ -564,13 +565,11 @@ internal sealed unsafe class ZoneMapArray
                 double value = Unsafe.As<long, double>(ref threshold);
                 return DoubleToOrderedLong(value);
             }
-            // Unsigned types: XOR with sign bit (must match ReadFieldAsOrderedLong encoding)
+            // Unsigned types: must match ReadFieldAsOrderedLong. Byte / UShort / UInt thresholds are their non-negative value; only ULong flips.
             case KeyType.Byte:
-                return threshold; // 0..255 fits in signed long, no XOR needed
             case KeyType.UShort:
-                return threshold ^ (1L << 15);
             case KeyType.UInt:
-                return threshold ^ (1L << 31);
+                return threshold;
             case KeyType.ULong:
                 return threshold ^ long.MinValue;
             default:

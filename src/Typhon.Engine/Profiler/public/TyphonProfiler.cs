@@ -148,10 +148,15 @@ public static class TyphonProfiler
             // Allocate the spillover ring pool if a host helper (ProfilerLauncher.EnableTelemetryGateIfActive)
             // didn't already do so. Idempotent on the IsInitialized check — if the pool is already up (because the
             // host opened it earlier so events emitted during bridge construction could chain into it), keep it.
-            // The pool is freed at Stop. Default config: 8 × 16 MiB = 128 MiB while the profiler is running.
+            // Stop keeps the pool's rings for the next Start of the same size (SpilloverRingPool's remarks). Default config: 8 × 16 MiB = 128 MiB.
             if (!SpilloverRingPool.IsInitialized)
             {
                 SpilloverRingPool.Initialize(options.SpilloverBufferCount, options.SpilloverBufferSizeBytes);
+            }
+            else
+            {
+                // The module initialiser's pool is lazy; a running session pre-allocates it so no producer allocates on its overflow path.
+                SpilloverRingPool.EnsureAllocated();
             }
 
             // Snapshot the exporter list so the consumer iterates a stable instance even if a future API ever allows live mutation.
@@ -180,7 +185,18 @@ public static class TyphonProfiler
 
             // Build and start the consumer drain thread. HighResolutionTimerServiceBase.Start spawns the timer thread.
             Consumer = new ProfilerConsumerThread(parent, options, exporterSnapshot);
-            Consumer.Start();
+            try
+            {
+                Consumer.Start();
+            }
+            catch
+            {
+                // Its constructor attached it; a consumer that never ran must not keep the reaper off for the life of the process.
+                Consumer.StopTimer();
+                Consumer.Detach();
+                Consumer = null;
+                throw;
+            }
 
             // Opt-in .NET runtime GC tracing. The host is only constructed when configuration explicitly enabled it — no cost otherwise.
             if (TelemetryConfig.ProfilerGcTracingActive)
@@ -420,6 +436,9 @@ public static class TyphonProfiler
         // belong to any pool, and a subsequent Start() would allocate a fresh pool while the orphans linger.
         ThreadSlotRegistry.CollapseAllChainsToPrimary();
         SpilloverRingPool.Shutdown();
+
+        // 7. Only now may a dead thread's slot be freed without a consumer: nothing drains and no chain is being collapsed.
+        consumerToTearDown.Detach();
     }
 
     /// <summary>

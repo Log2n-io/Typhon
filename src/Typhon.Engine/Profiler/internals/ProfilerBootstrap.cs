@@ -49,7 +49,8 @@ internal static class ProfilerBootstrap
 
     /// <summary>
     /// Runs at <c>Typhon.Engine</c> assembly load. Forces the <see cref="TelemetryConfig"/> static constructor so the JIT producer-gate is baked before any
-    /// hot path is compiled, and eagerly allocates the spillover ring pool when profiling is active so events emitted before <see cref="TryStart"/> (a host's
+    /// hot path is compiled, and allocates the spillover ring pool when profiling is active — eagerly when a session is expected — so events emitted
+    /// before <see cref="TryStart"/> (a host's
     /// bulk-spawn burst) chain instead of dropping.
     /// </summary>
     // CA2255: a module initializer in a library is intentional here — it is the only way to run engine-side early-init (JIT gate + spillover pool) with zero
@@ -65,8 +66,17 @@ internal static class ProfilerBootstrap
 
         if (TelemetryConfig.ProfilerActive && !SpilloverRingPool.IsInitialized)
         {
+            // Eager when the configuration will start a session, so a pre-Start burst chains without allocating on the producer's overflow path. Lazy
+            // otherwise (an enabled profiler told to write nothing): no ring exists unless a session attaches and something spills.
             var options = new ProfilerOptions();
-            SpilloverRingPool.Initialize(options.SpilloverBufferCount, options.SpilloverBufferSizeBytes);
+            if (ThreadSlotRegistry.SessionExpected)
+            {
+                SpilloverRingPool.Initialize(options.SpilloverBufferCount, options.SpilloverBufferSizeBytes);
+            }
+            else
+            {
+                SpilloverRingPool.InitializeLazy(options.SpilloverBufferCount, options.SpilloverBufferSizeBytes);
+            }
         }
     }
 #pragma warning restore CA2255

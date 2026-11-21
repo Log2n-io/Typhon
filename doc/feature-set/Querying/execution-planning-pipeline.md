@@ -47,6 +47,12 @@ using var view = tx.Query<PlayerArch>()
 
 Console.WriteLine(view.ExecutionPlan);
 // "Index scan Field[1] [10001..2147483647] → Filters: Field[0] GreaterThan 50 (est: 1200)"
+
+// Run a one-shot query and report what it did, per archetype
+Console.WriteLine(tx.Query<PlayerArch>()
+    .WhereField<Player>(p => p.Level > 50 && p.Gold > 10000)
+    .Explain());
+// One line per archetype: "<archetype>: <path> [on <index>] | pushed down: … | per entity: … | est N | rows N"
 ```
 
 ## ⚠️ Guarantees & limits
@@ -57,14 +63,18 @@ Console.WriteLine(view.ExecutionPlan);
 - Multiple predicates on the *same* indexed field (e.g., `Gold >= 100 && Gold < 5000`) intersect into one tighter scan range rather than being treated as separate filters.
 - `!=` predicates can never become the primary scan — they cannot bound a range. An all-`!=` predicate (no `==`/`<`/`<=`/`>`/`>=` to narrow on) falls back to a full scan over any available secondary index, with all evaluators applied as filters — results are correct but the scan is unselective. Pair it with a narrowing condition for best performance.
 - `OrderByField`/`OrderByFieldDescending` pins the primary scan to that field — overriding pure selectivity-driven choice — so ordered results come out pre-sorted with no separate sort pass; predicates on the ordered field still narrow the scan range.
-- `Count()` uses a dedicated fused path when an indexed predicate is present: results are counted in place during the index scan, no `HashSet`/`List` is materialized.
+- `Count()` with an indexed predicate runs the same scan as `Execute()` and counts its result set. Without one it counts in place: from the clusters' occupancy words, or through the entity map, with no result set built.
 - OR predicates (multi-branch `WhereField`) are planned only by `ToView()`, one plan per DNF branch; `view.ExecutionPlan` exposes only the first branch. The one-shot terminals throw on them.
 - Diagnostics are read-only — `ExecutionPlan`/`ToString()` describe the chosen plan; there is no public API to force a different index or override the planner's choice.
+- `Explain()` / `Explain(ExplainTerminal.Count)` run the terminal and record, as the executing code branches, the path each archetype took: `IndexSeek` / `IndexRange` (the tree scanned for the primary range; the other predicates evaluated on the clusters reached, and the range's own field only when the range cannot enforce it alone), `ClusterScan` (every cluster, pruned by zone maps), `BroadScan` (the entity map walked; how a `Where(Func)` query runs), `OccupancyCount` (`Count()` from occupancy words) or `Skipped`. The path is chosen per archetype at run time from the data (index fan-out, cluster visibility, pending writes), so the same query can take a different path later. The record's shape is a diagnostic surface and may change before 1.0.
+- A constant with no exact image in the field's type compares as C# compares it: on an `int` field `> 3.7` runs as `>= 4`, `== 3.5` matches nothing, and an out-of-range constant matches all rows or none. Casts on captured values apply, and a captured variable is read once, at the `WhereField` call, for committed and pending rows alike. An `==`/`!=` that holds for several values because C# widens the field lossily (`l.I == 16777216f`) throws `NotSupportedException`.
 
 ## 🧪 Tests
 
 - [PlanBuilderAndExecutorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PlanBuilderAndExecutorTests.cs) — selectivity-ascending predicate ordering, tie-breaking, `OrderBy`-pins-primary-scan, `ExecutionPlan.ToString()` diagnostics
 - [PipelineExecutorCombinedPathTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PipelineExecutorCombinedPathTests.cs) — fused `Count()` path, dual-bound range scans, and MVCC-snapshot-isolated plan execution on Versioned/SV storage
+- [QueryExplainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/QueryExplainTests.cs) — `Explain()` cross-checked against the branch the engine ran: seek, range, cluster scan, `Where(Func)` broad scan, occupancy count, skipped archetypes
+- [QueryClauseValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/QueryClauseValidationTests.cs) — clauses that can never match throw at the call; non-integral and out-of-range constants select what the C# predicate selects
 - [FieldEvaluatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/FieldEvaluatorTests.cs) — the compiled `FieldEvaluator` struct's per-`CompareOp`/`KeyType` correctness that the hot-path filter chain runs
 
 ## 🔗 Related

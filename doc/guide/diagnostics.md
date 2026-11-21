@@ -30,6 +30,7 @@ Each ID below is the target of the help link your IDE shows next to the diagnost
 | [TYPHON012](#typhon012) | Error | Typhon | a non-readonly `EntityRef`/`EntityRefMut` member called on a read-only receiver |
 | [TYPHON013](#typhon013) | Warning | Typhon | a component too large to pass to `Spawn` |
 | [TYPHON016](#typhon016) | Warning | Typhon | an `await` inside a transaction's scope |
+| [TYPHON017](#typhon017) | Warning | Typhon | `Where(Func)` over an `[Index]` field, which scans every entity |
 | [TYPHON015](#typhon015) | Warning | Typhon.Protocol | a command sent by name while its typed struct is in reach |
 | [TPH1001](#tph1001)–[TPH1004](#tph1004) | Error | Typhon | invalid cascade graphs and archetype declarations |
 | [TPH1101](#tph1101)–[TPH1109](#tph1109) | Error | Typhon.Protocol | invalid replication declarations |
@@ -116,6 +117,17 @@ reason.
 An `await` between a `Transaction`'s creation and its disposal, in the same method. A transaction belongs to the thread that created it — it holds
 that thread's epoch scope — and the continuation of an `await` resumes on another thread in an ASP.NET host, where its `Commit`, `Rollback` and
 `Dispose` throw (rule EP-04). **Fix:** finish the transaction before awaiting, or create it after; do the slow I/O outside its scope.
+
+## Queries
+
+<a id="typhon017"></a>
+### TYPHON017 — `Where(Func)` over an indexed field
+
+`tx.Query<PlayerArch>().Where<Player>(p => p.Level > 10)` where `Level` carries `[Index]`. `Where` takes an opaque delegate: the query opens every
+entity it admits and calls the predicate on each, so the index is never used. **Fix:** `WhereField<Player>(p => p.Level > 10)` — same lambda, parsed into
+an index seek or range. The code fix rewrites the call when the whole predicate is comparisons on `[Index]` fields joined by `&&`; for anything else
+(two fields compared, a computed value, a non-indexed field, `||`) narrow with `WhereField` on the indexed part and keep `Where` for the rest. A delegate
+passed as a variable or method group is not analyzed.
 
 ## Subscriptions clients
 

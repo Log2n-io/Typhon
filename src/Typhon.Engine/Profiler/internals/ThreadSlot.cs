@@ -21,6 +21,12 @@ namespace Typhon.Engine.Internals;
 internal sealed class ThreadSlot
 {
     /// <summary>
+    /// Bumped by every claim and by <c>ThreadSlotRegistry.ResetForTests</c>. A <see cref="SlotReleaser"/> carries the value of the claim it belongs to,
+    /// so the finalizer of a releaser whose claim was wiped by a reset cannot retire — or free — the slot a live thread has claimed since.
+    /// </summary>
+    public int ClaimGeneration;
+
+    /// <summary>
     /// <b>Primary</b> variable-size SPSC ring buffer owned by this slot. <c>null</c> until the first claim assigns one; reused across re-claims
     /// of the same slot. Always the head of the per-slot chain — see <see cref="ChainHead"/> / <see cref="ChainTail"/> for the spillover model.
     /// Never recycled to <see cref="SpilloverRingPool"/>; only spillover rings cycle through there.

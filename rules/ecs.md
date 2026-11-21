@@ -1507,6 +1507,52 @@ both fast and exact inside the window; this rule fixes what it does promise.
             older reader on the fallback; a string order refused. Mutants: the key type borrowed again (seven cases red), the not-equal let through
             (both not-equal cases), the HEAD's keys read (the older reader), the refusal removed (the string case)
 
+## Module: QCLAUSE — What a query clause may answer
+
+### QCLAUSE-01: A field predicate selects exactly the rows its C# comparison selects, whatever the constant `[correctness]` `[silent]`
+  invariant ∀ WhereField predicate (field f) op c: the rows the index and the per-entity evaluator return are exactly the rows for which the C# expression
+            `(widened f) op c` is true — the comparison C# itself evaluates, which widens an integral field to a double or float constant's type and a float
+            field to double. A constant with no exact image in f's key type (non-integral, out of range, NaN, a double between two floats) rewrites the
+            operator, never rounds the constant: `> 3.7` is `>= 4`; a comparison no row satisfies is `> MaxValue`, one every row satisfies is `>= MinValue`.
+            Where the widening itself rounds (|c| ≥ 2^53 for double, 2^24 for float) the bounds follow it: `(double)long.MaxValue` is 2^63, so
+            `l.L < 9.2233720368547758E18` does not select long.MaxValue
+  invariant c is the value C# compares: a cast or promotion on a captured value is applied (`(int)d`, `(float)d`, a char promoted for a ushort field),
+            and it is read once, at the WhereField call — the transaction's own pending spawns are filtered by a delegate compiled from the parsed
+            constants, so they and the committed rows (filtered through the index) agree even when the captured variable changes before the terminal
+  invariant a null constant (an empty nullable) selects nothing for every operator but !=, which selects every row — C#'s lifted comparison; a NaN
+            constant on a double field is stated as that range too. A cast on the FIELD that is not an implicit conversion (`(int)l.F > 3`) is refused
+            with NotSupportedException at WhereField: it truncates before comparing, which no threshold can express
+  invariant an == or != that the widening makes true for several field values at once (`l.I == 16777216f` holds for 16777216 and 16777217) raises
+            NotSupportedException at the terminal rather than answer for one of them: one evaluator holds one threshold
+  scope: QueryResolverHelper.NormalizeThreshold, QueryResolverHelper.ResolveEvaluators, ExpressionParser.TryConvertNumeric, EcsQuery.CompileParsedPredicate,
+         ZoneMapArray.ThresholdToOrdered, OrderedKeyEncoding.Encode
+  on_violation: `Convert.ToInt32(3.7)` ran `> 3.7` as `> 4` and dropped `Level == 4`; `== 3.5` matched 4; an out-of-range constant threw an
+                OverflowException from Convert; `!= NaN` on a float field answered nothing; the parser dropped `(float)d` and compared F against d itself,
+                and the pending filter re-read a captured variable at the terminal. Committed and pending rows disagreed inside one result (#1654)
+  note: ushort/uint keys are compared as their zero-extended value by the zone maps and the ordered merge; flipping bit 15/31 of the widened value
+        (as both did) sorted 65535 below 0, pruned a cluster holding 0..9 and 65535 for `>= 10`, and put an ordered query out of order
+  note: a float field that itself holds NaN is outside the contract — neither saturated range admits it. A negated comparison (`!(f > c)`) is parsed as
+        its inverse (`f <= c`), which differs from C# only when c is NaN; committed and pending rows still agree on it
+  verified: QueryClauseValidationTests [VerifiesRule] — all six operators on sbyte/byte/short/ushort/int/uint/long/ulong/float/double fields against
+            non-integral, out-of-range, ±0, ±infinity, NaN, one-ulp-off and float-inexact constants, as double and as float, over rows that include each
+            type's Min and Max, on the planner's path, the forced selective path and the forced cluster scan; large constants under a lossy widening and
+            the refused equality; casts on captured values; a field-side cast refused; null constants; a captured variable changed before the terminal;
+            unsigned keys across their midpoint, pruned and ordered. Committed and pending rows in one result. Mutants: the constant encoded unnormalised;
+            the closed form used past 2^53; the cast replay dropped; the pending filter compiled from the caller's lambda; the field-side cast let
+            through; null as 0; the double NaN left as a threshold; the zone-map and the ordered-key bit flips restored — each red
+
+### QCLAUSE-02: A clause that can never match raises at the call `[correctness]`
+  invariant With<T>/Enabled<T>/Disabled<T>/Where<T> on an unregistered T throws; Where<T>/WhereField<T> throws when no archetype the query's mask selects
+            carries T; WhereField throws on a field T does not have — each at the clause, not at the terminal. A field that is not [Index]ed is refused when
+            the terminal or ToView resolves the evaluators, not at the clause: under a spatial clause (before or after WhereField) the predicate is
+            evaluated per candidate and a plain field is legal
+  invariant the carried test is against the WHOLE mask: a polymorphic query whose subtree carries T on only some archetypes stays legal (IX-03's note)
+  scope: EcsQuery.RequireRegistered, EcsQuery.RequireCarriedBySelection, EcsQuery.RequireKnownFields
+  on_violation: an empty result for a query the caller wrote wrong — With emptied the mask, Enabled excluded every archetype (strict mode only raised), a
+                predicate on a component the selection lacks skipped every archetype (#1654)
+  note: Without<T> on an unregistered T stays a no-op: no archetype carries T, so excluding it is exactly right
+  verified: QueryClauseValidationTests [VerifiesRule] — one test per clause, plus the polymorphic subtree that must stay legal
+
 ## Module: QENABLE — Which entities a field predicate can match
 
 ### QENABLE-01: A field predicate matches only a component that is there, in the enabled state the query asks for `[fatal]` `[silent]`

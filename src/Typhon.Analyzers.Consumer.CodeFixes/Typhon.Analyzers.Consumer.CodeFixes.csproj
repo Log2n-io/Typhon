@@ -25,6 +25,7 @@
   <ItemGroup>
     <Compile Include="..\Typhon.Analyzers\NoCopyRefCodeFixProvider.cs" Link="NoCopyRefCodeFixProvider.cs" />
     <Compile Include="..\Typhon.Analyzers\DisposableNotDisposedCodeFixProvider.cs" Link="DisposableNotDisposedCodeFixProvider.cs" />
+    <Compile Include="..\Typhon.Analyzers\IndexedFieldInOpaqueWhereCodeFixProvider.cs" Link="IndexedFieldInOpaqueWhereCodeFixProvider.cs" />
   </ItemGroup>
 
 </Project>

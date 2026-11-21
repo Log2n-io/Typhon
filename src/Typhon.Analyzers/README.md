@@ -20,6 +20,7 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON014 | Error | A type inferred to own a must-dispose resource, or to hold a no-copy struct, is not marked `[MustDispose]` / `[NoCopy]` |
 | TYPHON015 | Warning | A command sent by name (`TyphonClient.SendCommandAsync("MoveCmd", values)`) while its `[ReplicatedMessage]` struct is in reach — send it typed with `Enqueue(in cmd)` (#1614) |
 | TYPHON016 | Warning | An `await` between a `Transaction`'s creation and its disposal: the continuation may resume on another thread, where the transaction's `Commit`, `Rollback` and `Dispose` throw (EP-04, #1653) |
+| TYPHON017 | Warning | `EcsQuery.Where<T>(lambda)` reads an `[Index]` field through an opaque delegate, so the query scans every entity; the fix renames it to `WhereField` when the lambda is a shape `WhereField` accepts (#1586) |
 
 ## What ships to NuGet consumers (#1584)
 
@@ -27,8 +28,8 @@ The engine's own build runs every rule above. The packages ship a subset, linked
 
 | Assembly | Package | Rules |
 |---|---|---|
-| `Typhon.Analyzers.Consumer` | `Typhon` (`analyzers/dotnet/cs`) | TYPHON001, 003, 004, 005, 006, 007, 009, 010, 011, 012, 013, 016 |
-| `Typhon.Analyzers.Consumer.CodeFixes` | `Typhon` | the TYPHON001 and TYPHON004 code fixes (IDE only: needs Workspaces) |
+| `Typhon.Analyzers.Consumer` | `Typhon` (`analyzers/dotnet/cs`) | TYPHON001, 003, 004, 005, 006, 007, 009, 010, 011, 012, 013, 016, 017 |
+| `Typhon.Analyzers.Consumer.CodeFixes` | `Typhon` | the TYPHON001, TYPHON004 and TYPHON017 code fixes (IDE only: needs Workspaces) |
 | `Typhon.Generators.Protocol` | `Typhon.Protocol` | TYPHON015, plus the replication generator's TPH11xx |
 
 TYPHON008 (the engine's public/Internals split) and TYPHON014 (demands the engine-internal `[MustDispose]`/`[NoCopy]` markers) stay engine-only.

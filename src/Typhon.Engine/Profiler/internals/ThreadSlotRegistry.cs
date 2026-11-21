@@ -55,6 +55,54 @@ internal static class ThreadSlotRegistry
 
     private static readonly PaddedSlot[] SSlots = new PaddedSlot[MaxSlots];
     private static int SHighWaterMark;
+
+    /// <summary>
+    /// Consumers that may drain slots right now: one from <see cref="ProfilerConsumerThread"/>'s construction until its final drain. While it is zero a
+    /// retiring slot has no one to free it, so <see cref="MarkRetiring"/> frees it itself when no session is possible (see
+    /// <see cref="TryFreeWithoutConsumer"/>).
+    /// </summary>
+    private static int SConsumersAttached;
+
+    /// <summary>A consumer is about to drain: from now until <see cref="ConsumerDetached"/>, retiring slots are its to free.</summary>
+    internal static void ConsumerAttached() => Interlocked.Increment(ref SConsumersAttached);
+
+    /// <summary>
+    /// The consumer is gone for good (its last drain done, every chain collapsed). The slots that retired while it was attached and that it did not
+    /// free are freed now, when no session remains possible.
+    /// </summary>
+    internal static void ConsumerDetached()
+    {
+        if (Interlocked.Decrement(ref SConsumersAttached) != 0 || SessionPossible)
+        {
+            return;
+        }
+
+        var hwm = Math.Min(Volatile.Read(ref SHighWaterMark), MaxSlots);
+        for (var i = 0; i < hwm; i++)
+        {
+            TryFreeWithoutConsumer(i);
+        }
+    }
+
+    /// <summary>Whether the configuration will start a session: see <see cref="SSessionExpected"/>.</summary>
+    internal static bool SessionExpected => SSessionExpected;
+
+    /// <summary>
+    /// Whether the launch configuration lets the bootstrap start a session: an output channel is named (a trace file, a live port), or the capture is
+    /// not suppressed (an absent trace path means a capture beside the database). False for an enabled profiler told to write nothing
+    /// (<c>Trace: "none"</c> and no live port) — the engine test suite's configuration — where nothing will ever drain a ring.
+    /// </summary>
+    private static readonly bool SSessionExpected = TelemetryConfig.ProfilerLaunch is { } launch && (launch.IsActive || !launch.SuppressCapture);
+
+    /// <summary>
+    /// Whether a session can drain what producers write: a consumer is attached, or the configuration will start one. When neither holds, a thread
+    /// claims a small primary ring and does not spill: with nothing to drain them, the 1 MiB rings filled and chained the whole spillover pool to live
+    /// threads, about 230 MiB per test process held for nothing.
+    /// </summary>
+    internal static bool SessionPossible => SSessionExpected || Volatile.Read(ref SConsumersAttached) != 0;
+
+    /// <summary>The primary ring of a thread claimed while no session is possible: enough for a test to read back what it just emitted.</summary>
+    private const int NoSessionBufferCapacity = 64 * 1024;
     private static int SActiveSlotCount;
     private static bool SGlobalCaptureActivityContext = true;
 
@@ -256,9 +304,12 @@ internal static class ThreadSlotRegistry
 
         var slot = SSlots[index].Slot;
         // Lazy-allocate the buffer on first claim of this slot. Reused across re-claims of the same index (no realloc).
-        if (slot.Buffer == null)
+        var wanted = SessionPossible ? DefaultBufferCapacity : NoSessionBufferCapacity;
+        if (slot.Buffer == null || slot.Buffer.Capacity < wanted)
         {
-            slot.Buffer = new TraceRecordRing(DefaultBufferCapacity);
+            // A slot first claimed while no session was possible got a small primary; once one is, give it the full size. Free slot: no reader.
+            CollapseChainToPrimary(slot);
+            slot.Buffer = new TraceRecordRing(wanted);
         }
         else
         {
@@ -287,7 +338,7 @@ internal static class ThreadSlotRegistry
         slot.OwnerOsThreadId = TryGetOsThreadId();
         slot.OwnerManagedThreadId = threadId;
         SlotIndex = index;
-        Releaser = new SlotReleaser(index);
+        Releaser = new SlotReleaser(index, Interlocked.Increment(ref slot.ClaimGeneration));
         Interlocked.Increment(ref SActiveSlotCount);
 
         // Release: the slot becomes drainable only now, with its ring reset and its chain re-anchored. Publishing Active at the CAS instead let a consumer
@@ -327,15 +378,60 @@ internal static class ThreadSlotRegistry
     /// Called by <see cref="SlotReleaser"/>'s finalizer to transition an expiring slot from <see cref="SlotState.Active"/> to
     /// <see cref="SlotState.Retiring"/>. The profiler consumer thread will drain trailing events and release the slot on its next pass.
     /// </summary>
-    internal static void MarkRetiring(int slotIndex)
+    internal static void MarkRetiring(int slotIndex, int claimGeneration)
     {
-        if ((uint)slotIndex >= MaxSlots)
+        if ((uint)slotIndex >= MaxSlots || Volatile.Read(ref SSlots[slotIndex].Slot.ClaimGeneration) != claimGeneration)
         {
+            // A reset wiped this claim and the slot may belong to a live thread now: not ours to retire.
             return;
         }
 
         // Only transition Active → Retiring. If the slot was already freed (e.g., by ResetForTests), leave it alone.
-        Interlocked.CompareExchange(ref SSlots[slotIndex].State, (int)SlotState.Retiring, (int)SlotState.Active);
+        if (Interlocked.CompareExchange(ref SSlots[slotIndex].State, (int)SlotState.Retiring, (int)SlotState.Active) == (int)SlotState.Active)
+        {
+            TryFreeWithoutConsumer(slotIndex);
+        }
+    }
+
+    /// <summary>
+    /// Frees a retiring slot when no consumer is attached to drain and free it — a process with the producer gate open but no profiler session (an
+    /// enabled profiler with no output channel, or one not started yet). Without this, every thread that ever emitted kept its slot and its 1 MiB ring,
+    /// with any spillovers chained to it, for the life of the process: slots of dead threads are reused only once a consumer frees them.
+    /// </summary>
+    /// <remarks>
+    /// The slot is won first (Retiring → <see cref="SlotState.Claiming"/>, a state a consumer skips), and only then is the attached count read: a consumer
+    /// increments it before it reads any slot's state, so if one read this slot as Retiring before the win, its increment is visible here and the slot is
+    /// handed back to it. The trailing events of a thread that died with no consumer attached are dropped — no session existed to export them to.
+    /// </remarks>
+    private static void TryFreeWithoutConsumer(int slotIndex)
+    {
+        // A host whose configuration will start a session keeps a dead thread's events for that session's first drain.
+        if (SessionPossible)
+        {
+            return;
+        }
+
+        ref var state = ref SSlots[slotIndex].State;
+        if (Interlocked.CompareExchange(ref state, (int)SlotState.Claiming, (int)SlotState.Retiring) != (int)SlotState.Retiring)
+        {
+            return;
+        }
+
+        if (SessionPossible)
+        {
+            Volatile.Write(ref state, (int)SlotState.Retiring);
+            return;
+        }
+
+        var slot = SSlots[slotIndex].Slot;
+        CollapseChainToPrimary(slot);
+        slot.Buffer?.Reset();
+        slot.OwnerManagedThreadId = 0;
+        slot.OwnerOsThreadId = 0;
+        slot.OwnerThreadName = null;
+        slot.OwnerThreadKind = ThreadKind.Other;
+        Interlocked.Decrement(ref SActiveSlotCount);
+        Volatile.Write(ref state, (int)SlotState.Free);
     }
 
     /// <summary>
@@ -371,6 +467,7 @@ internal static class ThreadSlotRegistry
         {
             SSlots[i].State = (int)SlotState.Free;
             var slot = SSlots[i].Slot;
+            Interlocked.Increment(ref slot.ClaimGeneration);
             slot.OwnerManagedThreadId = 0;
             slot.OwnerOsThreadId = 0;
             slot.OwnerThreadName = null;
@@ -412,9 +509,12 @@ internal static class ThreadSlotRegistry
         {
             return;
         }
-        var ring = primary.Next;
+        // Walk the live chain from its head. Once the consumer advances the head past the primary, primary.Next still names the first spillover, which the
+        // consumer has since returned to the pool: walking from it released that ring twice (two producers later shared it) and orphaned the live tail.
+        var head = slot.ChainHead;
+        var ring = head == null || head == primary ? primary.Next : head;
         primary.SetNext(null);
-        while (ring != null)
+        while (ring != null && ring != primary)
         {
             var next = ring.Next;
             SpilloverRingPool.Release(ring);

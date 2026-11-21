@@ -56,6 +56,8 @@ tx.Query<Character>().Where<Ham>(h => h.Health < h.MaxHealth)
 
 > 💡 **`Where` vs `WhereField` — pick deliberately.** `Where<T>(lambda)` takes any C# predicate and runs it against *every* entity the rest of the query admits — total freedom, linear cost. `WhereField<T>(expression)` is restricted to an **indexed** field and a comparable expression, which lets the engine narrow the candidates *through the index* instead of scanning, and is the form that backs an **incremental** live view ([§3](#3-live-views--results-that-stay-current)) — a free `Where` can still back a *pull* view that recomputes on refresh. Rule of thumb: filter on an indexed field with `WhereField`; use `Where` for computed or non-indexed conditions (like `Health < MaxHealth`, which compares two fields and can't be a simple index lookup). You can chain both — `WhereField` to narrow, `Where` to refine.
 
+> ⚠️ **A clause that can never match throws where you wrote it.** `With`/`Enabled`/`Disabled`/`Where` on a component you did not register, and a `Where`/`WhereField` on a component no archetype of the query carries throw `InvalidOperationException` at that call (a `WhereField` on a field without `[Index]` throws when the query runs), instead of returning an empty result you would have no reason to doubt. A constant compares the way C# compares it: `WhereField<Player>(p => p.Level > 3.7)` on an `int` field returns the levels from 4 up, and `p.Level == 3.5` returns nothing. A captured variable is read once, when `WhereField` is called: change it afterwards and the query keeps the old value (a `Where` delegate reads it at every run).
+
 ### Which entities — by geometry
 
 If a component has `[SpatialIndex]` (our `Bounds`, from [ch.2](02-modeling.md)), query it spatially — these run off the spatial index (`Execute` / `Count` / `Any` all apply the predicate):
@@ -120,6 +122,8 @@ foreach (var batch in tx.Walk<Character>())     // one cluster of entities per b
 The walk is the fastest way to read every entity of an archetype, holds a bounded set of pages at any size, and between batches holds nothing that would keep other threads' pages in the cache, so a slow consumer costs no one else. It shows the committed state at the snapshot minus your own destroys; your own uncommitted updates and spawns are not in it.
 
 > 💡 **Know which scan you triggered.** `Execute` picks one of three paths automatically: a **targeted** scan when you used `WhereField` (index-driven), a **spatial** scan when you used a spatial predicate (spatial-index-driven), or a **broad** scan otherwise (walk the archetype, apply any `Where` predicate per entity). The takeaway for cost: a `WhereField`/spatial query stays cheap as the archetype grows; a pure-`Where` query is linear in archetype size. Both are correct — choose with your data sizes in mind.
+>
+> To see what a query actually did, call `q.Explain()` (or `q.Explain(ExplainTerminal.Count)`) instead of the terminal: it runs it and reports, per archetype, the path taken (`IndexSeek`, `IndexRange`, `ClusterScan`, `BroadScan`, `OccupancyCount`), the index read, the predicates the index range enforced and those evaluated per entity, and the rows each archetype produced. `Console.WriteLine(q.Explain())` prints it. The engine picks the path at run time from the data, so read it on realistic data; the report's shape may change before 1.0.
 
 The running example's headline query — *Imperials who are hurt* — combines the tools:
 

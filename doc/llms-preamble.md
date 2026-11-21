@@ -28,7 +28,10 @@ The idioms that trip up first attempts:
   `TryOpen` return `false` instead of throwing, and `IsAlive(id)` tests existence.
 - **Query with the fluent view API**, not LINQ: `tx.Query<Foo>().WhereField<T>(x => x.Field == v)` uses an `[Index]`;
   `Where<T>(x => …)` is a per-entity predicate over a **full scan** — use it to refine, not to find. The loop variable of
-  `foreach (var e in query)` is a read-only `EntityRef`: read it directly, write through `tx.OpenMut(e.Id)`.
+  `foreach (var e in query)` is a read-only `EntityRef`: read it directly, write through `tx.OpenMut(e.Id)`. A clause that can never
+  match (unregistered component, a component the queried archetypes lack, `WhereField` naming a field the component lacks) throws
+  at the call; `WhereField` on a field without `[Index]` throws at the terminal.
+  `q.Explain()` runs the query and reports the access path each archetype took — check it before guessing why a query is slow.
 - **Bootstrap** with `DatabaseEngine.Open(path, …)`, or via DI with `services.AddTyphon(…)` (it self-registers a no-op logger, so `AddLogging()` is optional).
 - **Storage mode sets the ACID scope** (Versioned / SingleVersion / Transient) — chosen per component, fixed per revision.
 - **Schema changes bump a revision**: change a struct's fields or its storage mode → bump its `[Component]` revision; change an
@@ -60,7 +63,7 @@ In a `TyphonRuntime` tick (systems), the idioms agents miss — none of these fa
 references the package directly): TYPHON004 = a `Transaction`/enumerator never disposed → `using var`; TYPHON001/003 = a no-copy type passed by value
 or copied → `ref`; TYPHON011 = `bool`/`char` in a component → `byte`/`ushort`; TYPHON010 = avoidable padding → `[StructLayout(LayoutKind.Sequential,
 Pack = 4)]`; TYPHON012 = `Set` on an `in`/readonly `EntityRefMut` → take it by `ref`; TYPHON009 = spatial component written through `GetSpan` →
-`WriteSpatial`; TYPHON013 = component over 112 bytes passed to `Spawn` → split it. All of them, with fixes:
+`WriteSpatial`; TYPHON013 = component over 112 bytes passed to `Spawn` → split it; TYPHON017 = `Where(Func)` on an `[Index]` field → `WhereField`. All of them, with fixes:
 https://doc.typhondb.io/latest/guides/diagnostics.html.
 
 The whole conceptual core is also available as one file at https://doc.typhondb.io/llms-full.txt.

@@ -230,8 +230,9 @@ internal static partial class TyphonEvent
             reservedOn = tail;
             return true;
         }
-        // Overflow on the current tail. Try to extend the chain with a fresh spillover from the pool.
-        var spill = SpilloverRingPool.TryAcquire();
+        // Overflow on the current tail. Try to extend the chain with a fresh spillover from the pool — unless no session can ever drain it, in which case
+        // a spillover is only a second ring that fills and stays chained to this thread (ThreadSlotRegistry.SessionPossible).
+        var spill = ThreadSlotRegistry.SessionPossible ? SpilloverRingPool.TryAcquire() : null;
         if (spill == null)
         {
             // Pool exhausted (or not initialised) — drop. The TryReserve above already bumped the per-kind drop

@@ -30,10 +30,12 @@ internal static class OrderedKeyEncoding
                 return ZoneMapArray.FloatToOrderedLong(Unsafe.As<TKey, float>(ref key));
             case KeyType.Double:
                 return ZoneMapArray.DoubleToOrderedLong(Unsafe.As<TKey, double>(ref key));
+            // Zero-extended, a ushort or uint already sorts as a long. Flipping bit 15 / 31 of the widened value broke the order (65535 sorted below 0):
+            // an ordered query over values on both sides of the midpoint came out of order.
             case KeyType.UShort:
-                return Unsafe.As<TKey, ushort>(ref key) ^ (1L << 15);
+                return Unsafe.As<TKey, ushort>(ref key);
             case KeyType.UInt:
-                return Unsafe.As<TKey, uint>(ref key) ^ (1L << 31);
+                return Unsafe.As<TKey, uint>(ref key);
             case KeyType.ULong:
                 return Unsafe.As<TKey, long>(ref key) ^ long.MinValue;
             case KeyType.Byte:

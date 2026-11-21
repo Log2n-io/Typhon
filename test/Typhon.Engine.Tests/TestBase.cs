@@ -498,6 +498,11 @@ abstract class TestBase<T> : TestBase
             DeleteNamedDatabase(dbName);
         }
         _namedDatabases.Clear();
+        // NUnit keeps every fixture instance for the whole run, so these fields kept each fixture's last provider — the disposed engine's managed graph —
+        // reachable to the end of the shard.
+        ServiceProvider = null;
+        ServiceCollection = null;
+        Logger = null;
     }
 
     private void CleanupDatabaseFile()

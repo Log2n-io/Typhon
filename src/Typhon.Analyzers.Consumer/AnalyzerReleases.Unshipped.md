@@ -18,3 +18,4 @@ TYPHON011 | Correctness | Error | ComponentLayoutAnalyzer
 TYPHON012 | Performance | Error | EntityHandleDefensiveCopyAnalyzer
 TYPHON013 | Correctness | Warning | ComponentLayoutAnalyzer
 TYPHON016 | Reliability | Warning | TransactionAcrossAwaitAnalyzer
+TYPHON017 | Performance | Warning | IndexedFieldInOpaqueWhereAnalyzer
