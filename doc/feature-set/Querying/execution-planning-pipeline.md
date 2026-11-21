@@ -72,7 +72,7 @@ Console.WriteLine(tx.Query<PlayerArch>()
 ## 🧪 Tests
 
 - [PlanBuilderAndExecutorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PlanBuilderAndExecutorTests.cs) — selectivity-ascending predicate ordering, tie-breaking, `OrderBy`-pins-primary-scan, `ExecutionPlan.ToString()` diagnostics
-- [PipelineExecutorCombinedPathTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PipelineExecutorCombinedPathTests.cs) — fused `Count()` path, dual-bound range scans, and MVCC-snapshot-isolated plan execution on Versioned/SV storage
+- [PipelineExecutorCombinedPathTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/PipelineExecutorCombinedPathTests.cs) — `Count()` same-scan path, dual-bound range scans, and MVCC-snapshot-isolated plan execution on Versioned/SV storage
 - [QueryExplainTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/QueryExplainTests.cs) — `Explain()` cross-checked against the branch the engine ran: seek, range, cluster scan, `Where(Func)` broad scan, occupancy count, skipped archetypes
 - [QueryClauseValidationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/QueryClauseValidationTests.cs) — clauses that can never match throw at the call; non-integral and out-of-range constants select what the C# predicate selects
 - [FieldEvaluatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/Query/FieldEvaluatorTests.cs) — the compiled `FieldEvaluator` struct's per-`CompareOp`/`KeyType` correctness that the hot-path filter chain runs

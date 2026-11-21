@@ -42,7 +42,7 @@ var rarePlayers = tx.Query<PlayerArch>()
     .WhereField<Player>(p => p.Level >= 50)
     .Execute();                                  // → HashSet<EntityId>
 
-// Zero-allocation aggregation — fused index streaming, no collection built
+// Count matching entities — same scan as Execute(), no result set stored
 int count = tx.Query<PlayerArch>()
     .WhereField<Player>(p => p.Level >= 50)
     .Count();
