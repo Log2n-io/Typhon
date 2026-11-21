@@ -53,9 +53,12 @@ jobs:
             exit 0
           fi
 
-          # First token = command, second = optional benchmark profile.
-          CMD=$(printf '%s' "$BODY" | awk '{print $1}')
-          ARG=$(printf '%s' "$BODY" | awk '{print $2}')
+          # First token = command, second = optional benchmark profile — both from the comment's FIRST line only. `awk '{print $1}'` over the
+          # whole body printed one token per line, so a comment with a second line ("/benchmark btree-full" + a note) never matched a case
+          # arm. Comment bodies arrive CRLF, so the first line's trailing CR is stripped too.
+          FIRST=${BODY%%$'\n'*}
+          FIRST=${FIRST%$'\r'}
+          read -r CMD ARG _ <<<"$FIRST"
           ACTIONS="https://github.com/$REPO/actions/workflows"
 
           case "$CMD" in
@@ -76,5 +79,10 @@ jobs:
               gh workflow run benchmark.yml --repo "$REPO" --ref "$REF" -f profile="$PROFILE"
               gh pr comment "$PR" --repo "$REPO" \
                 --body "🏎️ **Benchmark** (\`$PROFILE\`) triggered on \`$REF\` → [watch it]($ACTIONS/benchmark.yml)"
+              ;;
+            *)
+              # The job's `if:` matched a prefix (e.g. `/coverage-please`), and the comment already has its 👍: say why nothing ran.
+              gh pr comment "$PR" --repo "$REPO" \
+                --body "⚠️ Unrecognised command \`$CMD\`. Put \`/coverage\` or \`/benchmark [profile]\` on the first line of the comment."
               ;;
           esac
