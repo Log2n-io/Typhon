@@ -8,7 +8,7 @@ description: 'A query asks a question of your data — by component shape, field
 
 > **In one line:** a question you ask of your data — by component shape, field value, or geometry — evaluated against a [transaction](xref:concept-transaction)'s [snapshot](xref:concept-snapshot-isolation).
 
-A query starts from `tx.Query<Unit>()`, which returns a builder you refine with chainable filters: `With`/`Without`/`Enabled` (component shape), `Where` (any predicate, broad scan) vs `WhereField` (an [indexed](xref:concept-index) field, targeted scan), and spatial predicates ([`WhereNearby`/`WhereInAABB`/`WhereRay`](xref:concept-spatial-index)). Nothing runs until a **terminal**: `Execute` (materialise ids), `Count`, `Any`, or `foreach`.
+A query starts from `tx.Query<Unit>()`, which returns a builder you refine with chainable filters: `With`/`Without`/`Enabled` (component shape), `Where` (any predicate, broad scan) vs `WhereField` (an [indexed](xref:concept-index) field, targeted scan), and spatial predicates ([`WhereNearby`/`WhereInAABB`/`WhereRay`/`WhereFrustum`](xref:concept-spatial-index)). Nothing runs until a **terminal**: `Execute` (materialise ids), `Count`, `Any`, or `foreach`.
 
 The engine picks the scan for you — *targeted* (index-driven, cheap as the archetype grows), *spatial*, or *broad* (linear) — guided by lightweight statistics it maintains. Keep a query result current over time by turning it into a [view](xref:concept-view).
 
