@@ -112,7 +112,7 @@ A single archetype freely mixes modes — `Character` has all three — because 
 
 ### Fields
 
-Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
+Component fields are blittable value types: the numeric primitives, `bool`, fixed-width strings (`String64`), `String1024` (a 4-byte handle to up to 1 023 bytes of out-of-line UTF-8 text; set via `EntityRefMut.SetText`, read via `String1024.ToString()`), spatial types (`Point2F`/`Point3F`, AABBs), and `EntityLink<T>`. That "blittable" constraint is what lets Typhon copy components to and from its storage pages without serialization.
 
 > **Two component rules that catch newcomers:**
 >
@@ -278,11 +278,12 @@ var nearby = tx.Query<Character>()
 
 The index is maintained at the **tick fence**: inside the runtime ([ch.5](05-systems.md)) it refreshes every tick automatically; from a bare transaction you run `dbe.WriteTickFence(n)` once after spawning before a spatial query.
 
-Three spatial predicates cover the common needs:
+Four spatial predicates cover the common needs:
 
 - `WhereNearby<T>(x, y, z, radius)` — everything within a radius (area of interest, aggro range).
 - `WhereInAABB<T>(minX,…, maxX,…)` — everything inside a box (selection rectangle, region trigger).
 - `WhereRay<T>(origin…, dir…, maxDist)` — first hits along a ray (line of sight, scans).
+- `WhereFrustum<T>(planes, planeCount, boundsMinX,…, boundsMaxZ)` — entities whose bounds intersect a view frustum (culling, LOD selection).
 
 That's the user-facing surface, and it is where the *free* part ends. Keeping the index live as thousands of characters move every tick costs real per-tick work — the fence recomputes cluster bounds, migrates entities across cells, and re-packs cells whose layout has decayed — and the size you gave `cellSize` above is the single number that most changes that bill. Read [What Spatial Costs You](../feature-set/Spatial/spatial-cost-model.md) before you declare a second spatial archetype; it covers the four cost centres and the rule for choosing a cell size. [07-spatial](../in-depth-overview/07-spatial.md) is the mechanism underneath, if you want it.
 
@@ -314,4 +315,4 @@ You can now design a data model: archetypes and their hierarchy, the storage mod
 
 **Concepts:** [Component](../key-concepts/component.md) · [Archetype](../key-concepts/archetype.md) · [Storage mode](../key-concepts/storage-mode.md) · [Index](../key-concepts/secondary-index.md) · [Spatial index](../key-concepts/spatial-index.md) · [Schema evolution](../key-concepts/schema-evolution.md) · [EntityLink](../key-concepts/entity-link.md).
 
-**Exact calls:** `[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]` · `[SpatialIndex(Mode = …, Category = …)]` on an `AABB2F` field · `[ComponentFamily]` · `Point2F` / `Point3F` · `EntityLink<T>` · `ComponentCollection<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `WriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay` · `cluster.WriteSpatial`.
+**Exact calls:** `[Component(StorageMode = …)]` · `[Index]` / `[Index(AllowMultiple = true, OnParentDelete = CascadeAction.Delete)]` · `[SpatialIndex(Mode = …, Category = …)]` on an `AABB2F` field · `[ComponentFamily]` · `Point2F` / `Point3F` · `EntityLink<T>` · `ComponentCollection<T>` · `Archetype<TSelf, TParent>` (inheritance) · generated `ReadAll` / `WriteAll` · `ConfigureSpatialGrid` (in the `Open`/`AddTyphon` options) · `dbe.WriteTickFence` · `tx.Query<T>().WhereNearby/WhereInAABB/WhereRay/WhereFrustum` · `cluster.WriteSpatial`.

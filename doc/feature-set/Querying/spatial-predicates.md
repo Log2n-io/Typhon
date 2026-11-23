@@ -1,11 +1,11 @@
 ---
 uid: feature-querying-spatial-predicates
 title: 'Spatial Query Predicates'
-description: 'R-Tree-backed AABB, radius, and ray filters attached directly to a fluent ECS query.'
+description: 'R-Tree-backed AABB, radius, ray, and frustum filters attached directly to a fluent ECS query.'
 ---
 
 # Spatial Query Predicates
-> R-Tree-backed AABB, radius, and ray filters attached directly to a fluent ECS query.
+> R-Tree-backed AABB, radius, ray, and frustum filters attached directly to a fluent ECS query.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Querying](./README.md)
 

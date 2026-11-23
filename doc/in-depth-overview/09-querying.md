@@ -72,9 +72,10 @@ Constructed via `tx.Query<TArchetype>()` (polymorphic — includes descendant ar
 query.WhereInAABB<Position>(minX, minY, minZ, maxX, maxY, maxZ);
 query.WhereNearby<Position>(centerX, centerY, centerZ, radius);
 query.WhereRay<Position>(originX, originY, originZ, dirX, dirY, dirZ, maxDist);
+query.WhereFrustum<Position>(planes, planeCount, boundsMinX, boundsMinY, boundsMinZ, boundsMaxX, boundsMaxY, boundsMaxZ);
 ```
 
-The component type `T` must be tagged `[SpatialIndex]` (see [07-spatial](07-spatial.md)). Only one spatial predicate per query (the inline 7-`double` parameter array is overwritten on repeated calls). At execution, the spatial index produces candidate entity IDs and the rest of the query (archetype mask + visibility + remaining predicates) filters them.
+The component type `T` must be tagged `[SpatialIndex]` (see [07-spatial](07-spatial.md)). Only one spatial predicate per query. At execution, the spatial index produces candidate entity IDs and the rest of the query (archetype mask + visibility + remaining predicates) filters them.
 
 ### `OrderBy` / `Skip` / `Take`
 
@@ -409,5 +410,5 @@ declared projections and answered from geometry, so the view machinery in [§5](
 - [01-foundation](01-foundation.md) — `HashMap<T>` (POH allocation, used as `ViewBase._entityIds`), `EpochManager` / `EpochGuard` (pinning during scans)
 - [03-indexing](03-indexing.md) — B+Tree iterators (`EnumerateRange`, `EnumerateRangeMultiple`) that the executor streams from
 - [06-ecs](06-ecs.md) — where `EcsQuery` and `EcsView` live, `EntityRef` enumeration, archetype masks, `Transaction.Open` / `TryRead`
-- [07-spatial](07-spatial.md) — how `WhereInAABB` / `WhereNearby` / `WhereRay` translate to R-Tree queries
+- [07-spatial](07-spatial.md) — how `WhereInAABB` / `WhereNearby` / `WhereRay` / `WhereFrustum` translate to R-Tree queries
 - [12-observability](12-observability.md) — the `Query*` trace event kinds (`QueryParse`, `QueryPlan`, `QueryEstimate`, `QueryExecuteIndexScan` / `QueryExecuteIterate` / `QueryExecuteFilter` / `QueryExecutePagination`, …); `QueryDefinitionDescribe` for caller attribution
